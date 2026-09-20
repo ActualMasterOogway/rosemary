@@ -65,6 +65,9 @@ pub mod signal;
 pub mod stack;
 pub mod startup;
 pub mod stats;
+/// The Steam bridge, which puts a guest's Steamworks calls on the host's own
+/// Steam client instead of a macOS one that does not exist here.
+pub mod steam;
 pub mod thread;
 pub mod thunk;
 pub mod tls;

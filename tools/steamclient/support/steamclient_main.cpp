@@ -57,8 +57,14 @@ struct PoolEntry
 PoolEntry pool[STEAM_IFACE_POOL];
 unsigned int pool_used;
 
-void *wrap_interface(const char *version, void *u_iface)
+} // namespace
+
+void *steam_wrap_interface(const void *name, void *u_iface)
 {
+    const char *version = static_cast<const char *>(name);
+    if (!version || !u_iface)
+        return nullptr;
+
     Lock guard;
 
     for (unsigned int i = 0; i < pool_used; ++i)
@@ -85,8 +91,6 @@ void *wrap_interface(const char *version, void *u_iface)
     return nullptr;
 }
 
-} // namespace
-
 EXPORT void *CreateInterface(const char *name, int32_t *return_code)
 {
     steam_params_create_interface params = {};
@@ -97,7 +101,7 @@ EXPORT void *CreateInterface(const char *name, int32_t *return_code)
         return nullptr;
     if (!params._ret)
         return nullptr;
-    return wrap_interface(name, params._ret);
+    return steam_wrap_interface(name, params._ret);
 }
 
 EXPORT int8_t Steam_IsKnownInterface(const char *version)

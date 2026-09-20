@@ -933,6 +933,12 @@ fn search_path(var: &str, name: &str) -> Vec<String> {
 }
 
 fn resolve_path(path: &str) -> Option<String> {
+    // Ahead of everything: the Steam client a game asks for is at whatever
+    // absolute path its install would have had, and what has to open is the
+    // bridge's own. See [`crate::steam::redirect`].
+    if let Some(bridged) = crate::steam::redirect(path) {
+        return Some(bridged);
+    }
     let executable = EXECUTABLE
         .lock()
         .unwrap_or_else(|e| e.into_inner())

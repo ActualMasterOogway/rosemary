@@ -91,6 +91,40 @@ BY_VALUE_ALIASES = {
 
 POINTER_SIZE = 8
 
+# How a value reaches the host's x86-64 SysV callee. The guest side never needs
+# this - the compiler classifies for it - but the host side calls through a
+# pointer it only learns at runtime, so the classification has to be recorded
+# rather than recomputed from a type it no longer has.
+#
+#   INTEGER  one general-purpose register, `size` bytes wide
+#   SSE      one vector register, 4 or 8 bytes
+#   INTEGER2 two general-purpose registers, for a 16-byte aggregate
+#   MEMORY   passed as a stack copy, returned through a hidden pointer
+CLASS_VOID = 0
+CLASS_INTEGER = 1
+CLASS_SSE = 2
+CLASS_INTEGER2 = 3
+CLASS_MEMORY = 4
+
+# The by-value types, classified. SysV decides this from the field types of
+# each eightbyte, and for these eight the answer is fixed: an eightbyte holding
+# any integer field is INTEGER, and anything over 16 bytes is MEMORY.
+BY_VALUE_CLASSES = {
+    "CSteamID": CLASS_INTEGER,
+    "CGameID": CLASS_INTEGER,
+    # 24 bytes.
+    "SteamIPAddress_t": CLASS_MEMORY,
+    # {int32, float, float, bool}: both eightbytes hold an integer field.
+    "InputAnalogActionData_t": CLASS_INTEGER2,
+    "InputDigitalActionData_t": CLASS_INTEGER,
+    # 40 bytes.
+    "InputMotionData_t": CLASS_MEMORY,
+    "SteamPartyBeaconLocation_t": CLASS_INTEGER2,
+    # 64 bytes.
+    "RemoteStorageUpdatePublishedFileRequest_t": CLASS_MEMORY,
+}
+
+
 # Non-method dispatch points, in the order the generated enum assigns them.
 BUILTIN_DISPATCH = [
     "init",
@@ -123,9 +157,19 @@ class Type:
         """A declaration of `name` with this type, spaced like C++."""
         return f"{self.spelling}{'' if self.spelling.endswith('*') else ' '}{name}"
 
+    @property
+    def abi_class(self):
+        if self.kind == "void":
+            return CLASS_VOID
+        if self.kind == "byvalue":
+            return BY_VALUE_CLASSES[self.spelling]
+        if self.spelling in ("float", "double"):
+            return CLASS_SSE
+        return CLASS_INTEGER
+
     def as_json(self):
-        return {"kind": self.kind, "type": self.spelling,
-                "size": self.size, "sdk_type": self.source}
+        return {"kind": self.kind, "type": self.spelling, "size": self.size,
+                "abi_class": self.abi_class, "sdk_type": self.source}
 
 
 VOID = Type("void", "void", 0, "void")
@@ -183,6 +227,7 @@ class BoundMethod:
         self.is_destructor = method.is_destructor
         if self.is_destructor:
             self.ret, self.args, self.params_size = VOID, [], 0
+            self.iface_version = None
             return
 
         self.ret = resolve_type(sdk, method.ret)
@@ -199,6 +244,31 @@ class BoundMethod:
             self.args.append(Arg(param.name or f"_arg{i}", type, offset))
             offset += type.size
         self.params_size = offset
+        self.iface_version = self.returned_interface_version(iface)
+
+    def returned_interface_version(self, iface):
+        """The version string a returned interface pointer must be wrapped as.
+
+        A method handing back another interface hands back a pointer into the
+        *host's* client. Returning it unchanged would leave the guest making
+        vtable calls on host code, which is the one thing this bridge exists to
+        prevent - so the pointer is wrapped in a guest object of the version the
+        caller asked for, the way Proton's `create_win_interface` wraps it.
+        """
+        if self.ret.kind != "pointer":
+            return None
+        if not (self.ret.source.startswith("ISteam") or "GetISteam" in self.name):
+            return None
+        # The one interface returned by a method that names no version: there
+        # has only ever been one, and Proton hardcodes it here too.
+        if self.name.startswith("CreateFakeUDPPort"):
+            return '"SteamNetworkingFakeUDPPort001"'
+        for arg in self.args:
+            if arg.name == "pchVersion":
+                return arg.name
+        raise ParseError(
+            f"{iface.full_name}.{self.name} returns {self.ret.source} but names "
+            f"no interface version, so the pointer cannot be wrapped")
 
     def signature(self, class_name=None):
         args = ', '.join(a.type.declare(a.name) for a in self.args)
@@ -215,6 +285,7 @@ class BoundMethod:
             "params_struct": f"steam_params_{self.unique_name}",
             "params_size": self.params_size,
             "iface_offset": 0,
+            "returns_interface": self.iface_version is not None,
             "ret": None if self.ret.kind == "void" else
                    dict(self.ret.as_json(), offset=self.ret_offset),
             "params": [dict(a.type.as_json(), name=a.name, offset=a.offset)
@@ -332,7 +403,10 @@ def write_interface_source(out, name, interfaces, ids):
                     f.write(f"        p.{arg.name} = {arg.name};\n")
                 f.write(f"        rosetta3_steamclient_dispatch("
                         f"STEAM_METHOD_{method.unique_name}, &p);\n")
-                if method.ret.kind != "void":
+                if method.iface_version:
+                    f.write(f"        return steam_wrap_interface("
+                            f"{method.iface_version}, p._ret);\n")
+                elif method.ret.kind != "void":
                     f.write("        return p._ret;\n")
                 f.write("    }\n")
             f.write("};\n\n")
@@ -360,10 +434,66 @@ def write_registry(out, interfaces):
                 "    sizeof(steam_iface_table) / sizeof(steam_iface_table[0]);\n")
 
 
+# The compact table the host half reads at run time, so that the two sides
+# cannot disagree about a vtable index or a parameter offset: both come out of
+# this one generation.
+#
+# JSON would do the same job, but it is five megabytes of it and the runtime has
+# no JSON reader; this is one sequential walk with no allocation per method.
+#
+#   magic "R3SC", u32 version, u32 method_count
+#   then one record per dispatch id, in id order:
+#     u16 vtable_index   0xffff for an id that is not an interface method
+#     u16 iface_offset
+#     u16 ret_offset
+#     u8  ret_class      0 for void
+#     u8  ret_size
+#     u8  param_count
+#     u8  reserved
+#     param_count * { u8 class, u8 size, u16 offset }
+DISPATCH_TABLE_VERSION = 1
+NOT_A_METHOD = 0xffff
+
+
+def write_dispatch_table(out, interfaces, ids):
+    import struct
+
+    by_id = {}
+    for iface in interfaces:
+        for method in iface.methods:
+            if not method.is_destructor:
+                by_id[ids[method.unique_name]] = method
+
+    count = len(BUILTIN_DISPATCH) + len(by_id)
+    if sorted(by_id) != list(range(len(BUILTIN_DISPATCH), count)):
+        raise ParseError("dispatch ids are not the contiguous range after the builtins")
+
+    body = bytearray()
+    for id in range(count):
+        method = by_id.get(id)
+        if method is None:
+            body += struct.pack("<HHHBBBB", NOT_A_METHOD, 0, 0, CLASS_VOID, 0, 0, 0)
+            continue
+        ret = method.ret
+        void = ret.kind == "void"
+        body += struct.pack(
+            "<HHHBBBB",
+            method.index, 0, 0 if void else method.ret_offset,
+            ret.abi_class, ret.size, len(method.args), 0)
+        for arg in method.args:
+            body += struct.pack("<BBH", arg.type.abi_class, arg.type.size, arg.offset)
+
+    with open(os.path.join(out, "steamclient_dispatch.bin"), "wb") as f:
+        f.write(b"R3SC")
+        f.write(struct.pack("<II", DISPATCH_TABLE_VERSION, count))
+        f.write(body)
+
+
 def write_manifest(out, interfaces, ids, sdk_versions, sources):
     manifest = {
         "generator": "tools/steamclient/gen_steamclient.py",
         "abi": "itanium-lp64",
+        "dispatch_table_version": DISPATCH_TABLE_VERSION,
         "sdk_versions": sdk_versions,
         "builtin_dispatch": {name: i for i, name in enumerate(BUILTIN_DISPATCH)},
         "by_value_types": BY_VALUE_TYPES,
@@ -503,6 +633,7 @@ def main():
     sources = ["steamclient_main.cpp", "steamclient_registry.cpp"]
     sources += [f"iface_{name}.cpp" for name in sorted(by_class)]
     write_manifest(args.out, interfaces, ids, sdk_versions, sources)
+    write_dispatch_table(args.out, interfaces, ids)
     write_build_script(args.out, sources, args.archs or ["x86_64", "arm64"])
 
     methods = sum(len(i.methods) for i in interfaces)

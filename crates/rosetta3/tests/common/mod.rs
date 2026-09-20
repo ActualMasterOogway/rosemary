@@ -2741,3 +2741,72 @@ macro_rules! skip {
         return;
     }};
 }
+
+/// What the Steam bridge's two test binaries both need.
+///
+/// They are two binaries rather than two tests because the bridge loads its
+/// client once per process, from the environment as it stands at the first
+/// dispatch: one process can only be pointed at one client.
+pub mod steam {
+    use std::path::{Path, PathBuf};
+
+    /// The generator's output, or `None` when this checkout has not generated
+    /// it - it is derived from headers Valve ships and is not checked in.
+    pub fn generated() -> Option<PathBuf> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/steamclient/generated")
+            .canonicalize()
+            .ok()?;
+        (dir.join("steamclient_dispatch.bin").exists()
+            && dir.join("steamclient.dylib").exists()
+            && dir.join("steamclient_methods.h").exists())
+        .then_some(dir)
+    }
+
+    /// The dispatch id the generator gave `name`, read from the header the
+    /// guest half compiles against rather than assumed.
+    pub fn method_id(header: &str, name: &str) -> u32 {
+        let needle = format!("STEAM_METHOD_{name} = ");
+        let line = header
+            .lines()
+            .find(|l| l.trim_start().starts_with(&needle))
+            .unwrap_or_else(|| panic!("no dispatch id for {name}"));
+        line.trim_start()[needle.len()..]
+            .trim_end_matches(',')
+            .parse()
+            .expect("dispatch id")
+    }
+
+    /// One call, as the generated dylib makes it.
+    pub fn call(id: u32, params: &mut [u8]) -> i32 {
+        // SAFETY: each caller builds the packed struct `id` names, laid out as
+        // the manifest records it.
+        unsafe { rosetta3::steam::dispatch(id, params.as_mut_ptr().cast()) }
+    }
+
+    /// The interface pointer every params struct starts with, and the rest of
+    /// the struct after it.
+    pub fn params_with(iface: *mut std::ffi::c_void, rest: &[u8]) -> Vec<u8> {
+        let mut buf = (iface as usize as u64).to_le_bytes().to_vec();
+        buf.extend_from_slice(rest);
+        buf
+    }
+
+    /// `CreateInterface(version)`, through the bridge.
+    pub fn create_interface(version: &str) -> (*mut std::ffi::c_void, i32) {
+        let name = std::ffi::CString::new(version).unwrap();
+        let mut code: i32 = -1;
+        let mut params = Vec::new();
+        params.extend((name.as_ptr() as usize as u64).to_le_bytes());
+        params.extend((&mut code as *mut i32 as usize as u64).to_le_bytes());
+        params.extend(0u64.to_le_bytes());
+        // 2 is `create_interface` in the generator's `BUILTIN_DISPATCH`.
+        assert_eq!(
+            call(2, &mut params),
+            0,
+            "CreateInterface({version}) was refused"
+        );
+        let found = u64::from_le_bytes(params[16..24].try_into().unwrap());
+        (found as *mut std::ffi::c_void, code)
+    }
+}

@@ -174,4 +174,16 @@ struct steam_iface_entry
 extern const struct steam_iface_entry steam_iface_table[];
 extern const unsigned int steam_iface_table_size;
 
+/* Wrap a host interface pointer in the guest object of `version`.
+ *
+ * Shared with the generated sources because a method that hands back another
+ * interface - ISteamClient::GetISteamUser and its thirty relatives - hands back
+ * a pointer into the host's client, and the guest must never call a vtable on
+ * that. Null for a version this build does not know, and for a null pointer.
+ *
+ * `version` is `const void *` so the generated call needs no cast: every SDK
+ * pointer crosses this bridge as `void *`.
+ */
+void *steam_wrap_interface(const void *version, void *u_iface);
+
 #endif /* ROSETTA3_STEAM_H */

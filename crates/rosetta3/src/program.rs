@@ -524,6 +524,10 @@ pub(crate) struct HostProviders {
     /// The `dl` family, which the host exports and cannot usefully answer for an
     /// x86-64 file. See [`crate::dyld`].
     dyld: machish::resolve::SyntheticDylib,
+    /// The Steam bridge's one dispatch symbol, which the generated
+    /// `steamclient.dylib` leaves undefined. Empty when this install has no
+    /// generated dylib. See [`crate::steam`].
+    steam: machish::resolve::SyntheticDylib,
     /// OpenGL, on the GL library SDL made the context against rather than on
     /// whichever one the host loader has. See [`crate::opengl`].
     opengl: machish::resolve::LazyDylib,
@@ -567,6 +571,7 @@ impl HostProviders {
             objc: crate::objc::dispatch::provider(),
             frameworks: crate::frameworks::provider(),
             dyld: crate::dyld::provider(),
+            steam: crate::steam::provider(),
             opengl: crate::opengl::provider(),
             eager: eager_binding_shims(),
             native,
@@ -585,6 +590,7 @@ impl HostProviders {
         providers.push(&self.objc);
         providers.push(&self.frameworks);
         providers.push(&self.dyld);
+        providers.push(&self.steam);
         providers.push(&self.opengl);
         providers.push(&self.eager);
         // Last, and only when the host's own libraries are allowed to answer at

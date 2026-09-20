@@ -32,6 +32,9 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     // an answer about this binary rather than the program's. See [`crate::compat`].
     #[cfg(target_os = "macos")]
     crate::compat::install();
+    // Before the program's own code, because `SteamAPI_Init` asks the name
+    // server for Steam and a service published after the question is not there.
+    crate::steam::install();
     say_image_map(exec);
     // Whatever this backend must do before any of the program's own code runs.
     exec.prepare()?;

@@ -169,6 +169,10 @@ impl Native {
         let objc = crate::objc::dispatch::provider();
         let frameworks = crate::frameworks::provider();
         let dyld = crate::dyld::provider();
+        // The Steam bridge's dispatch symbol, in both arms: a program linked
+        // directly against the generated `steamclient.dylib` - rather than
+        // `dlopen`ing it, which is what `libsteam_api` does - binds it here.
+        let steam = crate::steam::provider();
         let opengl = crate::opengl::provider();
         // Under `native` the image is host code calling the libraries it was
         // linked against, and the shortest chain that works is the honest one.
@@ -184,9 +188,10 @@ impl Native {
                 &objc,
                 &frameworks,
                 &dyld,
+                &steam,
                 &opengl,
             ],
-            false => vec![&eager, &tlv, &runtime, &platform],
+            false => vec![&eager, &tlv, &runtime, &platform, &steam],
         };
         // Last, and only when the host's own libraries are allowed to answer at
         // all. This backend is the one an x86-64 guest gets on an x86-64 host, so
