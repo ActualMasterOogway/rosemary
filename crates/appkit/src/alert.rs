@@ -25,6 +25,10 @@ pub struct Alert {
     /// The button titles, in the order `-addButtonWithTitle:` was sent them.
     /// Owned by the alert, and null until the first one is added.
     buttons: *mut Vec<String>,
+    /// The view a program adds to the dialog to put its own controls in,
+    /// retained. Kept so that `-accessoryView` answers what was set; nothing
+    /// draws it - see [`set_accessory_view`].
+    accessory: Id,
     style: usize,
 }
 
@@ -101,6 +105,34 @@ unsafe extern "C" fn informative_text(receiver: Id, _sel: Sel) -> Id {
     alert_of(receiver).informative
 }
 
+/// `-setAccessoryView:`, which is how a program puts its own controls - a
+/// checkbox, a pop-up of resolutions - into an alert.
+///
+/// Kept and not drawn, for the reason the module note gives: there is no
+/// dialog. What that costs is worth writing down, because it is more than the
+/// text: a program that reads a *choice* back out of its accessory view after
+/// `-runModal` reads whatever the view was left holding, which is its own
+/// default. So the program gets its defaults rather than the person's answer.
+unsafe extern "C" fn set_accessory_view(receiver: Id, _sel: Sel, view: Id) {
+    set(&mut alert_of(receiver).accessory, view);
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        eprintln!(
+            "rosetta3: appkit: an alert has controls of the guest's own in it, and nothing \
+             here displays a dialog - so the program will read its own defaults back out of \
+             them rather than an answer"
+        );
+    });
+}
+
+unsafe extern "C" fn accessory_view(receiver: Id, _sel: Sel) -> Id {
+    alert_of(receiver).accessory
+}
+
+/// `-layout`, which asks AppKit to size the dialog around its accessory view.
+/// There is no dialog to size.
+unsafe extern "C" fn layout(_receiver: Id, _sel: Sel) {}
+
 unsafe extern "C" fn set_alert_style(receiver: Id, _sel: Sel, style: usize) {
     alert_of(receiver).style = style;
 }
@@ -128,6 +160,7 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     let alert = alert_of(receiver);
     objc::arc::release(alert.message);
     objc::arc::release(alert.informative);
+    objc::arc::release(alert.accessory);
     if !alert.buttons.is_null() {
         // SAFETY: `-dealloc` is reached with the last reference gone, and the
         // pointer came from `Box::into_raw`.
@@ -192,6 +225,9 @@ pub(crate) fn install() {
         "setAlertStyle:" => set_alert_style, c"v24@0:8Q16";
         "alertStyle" => alert_style, c"Q16@0:8";
         "addButtonWithTitle:" => add_button_with_title, c"@24@0:8@16";
+        "setAccessoryView:" => set_accessory_view, c"v24@0:8@16";
+        "accessoryView" => accessory_view, c"@16@0:8";
+        "layout" => layout, c"v16@0:8";
         "runModal" => run_modal, c"q16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
     });

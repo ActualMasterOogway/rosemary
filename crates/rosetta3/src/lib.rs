@@ -93,6 +93,7 @@ pub mod objcexc;
 
 /// `OpenGL.framework`, bound to the GL library SDL is using.
 pub mod glsl;
+pub mod openal;
 pub mod opengl;
 
 /// Subsystems that exist because macOS does.

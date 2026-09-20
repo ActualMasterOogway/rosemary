@@ -531,6 +531,9 @@ pub(crate) struct HostProviders {
     /// OpenGL, on the GL library SDL made the context against rather than on
     /// whichever one the host loader has. See [`crate::opengl`].
     opengl: machish::resolve::LazyDylib,
+    /// OpenAL, on this host's own implementation of the specification. See
+    /// [`crate::openal`].
+    openal: machish::resolve::LazyDylib,
     eager: machish::resolve::SyntheticDylib,
     native: NativeDylibProvider,
 }
@@ -572,6 +575,7 @@ impl HostProviders {
             frameworks: crate::frameworks::provider(),
             dyld: crate::dyld::provider(),
             steam: crate::steam::provider(),
+            openal: crate::openal::provider(),
             opengl: crate::opengl::provider(),
             eager: eager_binding_shims(),
             native,
@@ -592,6 +596,7 @@ impl HostProviders {
         providers.push(&self.dyld);
         providers.push(&self.steam);
         providers.push(&self.opengl);
+        providers.push(&self.openal);
         providers.push(&self.eager);
         // Last, and only when the host's own libraries are allowed to answer at
         // all: under `darwin::strict` an import this tree does not implement goes

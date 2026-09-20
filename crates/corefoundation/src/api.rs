@@ -1697,30 +1697,44 @@ pub unsafe extern "C" fn CFURLCreateFromFSRef(
     if fs_ref.is_null() {
         return std::ptr::null();
     }
-    #[cfg(target_os = "macos")]
-    {
-        let Some(entry) = crate::foreign::entry(c"FSRefMakePath") else {
-            return std::ptr::null();
-        };
-        // SAFETY: the Carbon entry point has the documented
-        // `OSStatus(const FSRef *, UInt8 *, UInt32)` signature.
-        let make_path: unsafe extern "C" fn(*const c_void, *mut u8, u32) -> i32 =
-            unsafe { std::mem::transmute(entry) };
-        let mut bytes = [0_u8; libc::PATH_MAX as usize];
-        // SAFETY: `fs_ref` is the caller's live reference and `bytes` is a
-        // writable buffer whose exact capacity accompanies it.
-        if unsafe { make_path(fs_ref, bytes.as_mut_ptr(), bytes.len() as u32) } != 0 {
-            return std::ptr::null();
-        }
-        let Some(end) = bytes.iter().position(|byte| *byte == 0) else {
-            return std::ptr::null();
-        };
-        let path = String::from_utf8_lossy(&bytes[..end]);
-        let directory = std::fs::metadata(path.as_ref()).is_ok_and(|metadata| metadata.is_dir());
-        return crate::url::new_file_url(&path, directory);
+    let Some(entry) = carbon(c"FSRefMakePath") else {
+        return std::ptr::null();
+    };
+    // SAFETY: the Carbon entry point has the documented
+    // `OSStatus(const FSRef *, UInt8 *, UInt32)` signature.
+    let make_path: unsafe extern "C" fn(*const c_void, *mut u8, u32) -> i32 =
+        unsafe { std::mem::transmute(entry) };
+    let mut bytes = [0_u8; libc::PATH_MAX as usize];
+    // SAFETY: `fs_ref` is the caller's live reference and `bytes` is a
+    // writable buffer whose exact capacity accompanies it.
+    if unsafe { make_path(fs_ref, bytes.as_mut_ptr(), bytes.len() as u32) } != 0 {
+        return std::ptr::null();
     }
-    #[cfg(not(target_os = "macos"))]
-    std::ptr::null()
+    let Some(end) = bytes.iter().position(|byte| *byte == 0) else {
+        return std::ptr::null();
+    };
+    let path = String::from_utf8_lossy(&bytes[..end]);
+    let directory = std::fs::metadata(path.as_ref()).is_ok_and(|metadata| metadata.is_dir());
+    crate::url::new_file_url(&path, directory)
+}
+
+/// A Carbon File Manager entry point, wherever this process has one.
+///
+/// An `FSRef` is opaque and only the File Manager that made it can read it, so
+/// these two calls are the seam between a URL and a reference. On a Mac that
+/// File Manager is Apple's and a `dlsym` finds it. Off one it is
+/// `coreservices::files`, which is published to the guest through a synthetic
+/// library and is therefore *not* in this binary's exports - so the runtime's
+/// own lookup is asked, which is the same one the loader answers a guest's
+/// import with. Without that the two would disagree: the guest would get a
+/// working `FSRefMakePath` and a `CFURLCreateFromFSRef` that answered null.
+fn carbon(name: &std::ffi::CStr) -> Option<*mut c_void> {
+    #[cfg(target_os = "macos")]
+    if let Some(found) = crate::foreign::entry(name) {
+        return Some(found);
+    }
+    let address = darwin::symbol(name.to_str().ok()?)?;
+    Some(address as usize as *mut c_void)
 }
 
 pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> Boolean {
@@ -1734,28 +1748,64 @@ pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> B
     let Ok(path) = std::ffi::CString::new(path) else {
         return 0;
     };
-    #[cfg(not(target_os = "macos"))]
-    let _ = path;
-    #[cfg(target_os = "macos")]
-    {
-        let Some(entry) = crate::foreign::entry(c"FSPathMakeRef") else {
-            return 0;
-        };
-        // SAFETY: the host entry has the documented Carbon signature; the
-        // guest supplied storage for an `FSRef`, whose layout is architecture
-        // independent opaque bytes.
-        let make_ref: unsafe extern "C" fn(*const u8, *mut c_void, *mut u8) -> i32 =
-            unsafe { std::mem::transmute(entry) };
-        return u8::from(
-            unsafe { make_ref(path.as_ptr().cast(), fs_ref, std::ptr::null_mut()) } == 0,
-        );
-    }
-    #[cfg(not(target_os = "macos"))]
-    0
+    let Some(entry) = carbon(c"FSPathMakeRef") else {
+        return 0;
+    };
+    // SAFETY: the entry has the documented Carbon signature; the guest supplied
+    // storage for an `FSRef`, whose layout is architecture independent opaque
+    // bytes.
+    let make_ref: unsafe extern "C" fn(*const u8, *mut c_void, *mut u8) -> i32 =
+        unsafe { std::mem::transmute(entry) };
+    u8::from(unsafe { make_ref(path.as_ptr().cast(), fs_ref, std::ptr::null_mut()) } == 0)
 }
 
-/// `kCFURLPOSIXPathStyle`, the only one a path in this tree is written in.
+/// `kCFURLPOSIXPathStyle`, which is how a path on this host is written.
 const POSIX_PATH_STYLE: CFIndex = 0;
+/// `kCFURLHFSPathStyle`: `Volume:folder:file`, colon-separated, deprecated
+/// since Mac OS X shipped and still asked for by code of that vintage.
+const HFS_PATH_STYLE: CFIndex = 1;
+
+/// A POSIX path in the old Mac notation.
+///
+/// There are no HFS volumes here, so the leading name is the root directory's:
+/// a path under `/` becomes `/:home:velo:game`. That keeps the two directions
+/// exact inverses of each other - see [`posix_from_hfs`] - which is the only
+/// thing a caller that converts a path and converts it back depends on. It is
+/// *not* a path this host can open, but neither is an HFS path on a Mac: a
+/// caller asking for this notation knows it has left the POSIX one.
+fn hfs_from_posix(path: &str) -> String {
+    let mut out = String::new();
+    for (at, component) in path.trim_start_matches('/').split('/').enumerate() {
+        if at == 0 {
+            out.push('/');
+        }
+        out.push(':');
+        // A colon is the separator there and a legal byte here, and the Finder
+        // shows such a name with a slash - which is the same swap, the other
+        // way round.
+        out.push_str(&component.replace(':', "/"));
+    }
+    match out.is_empty() {
+        true => "/".to_string(),
+        false => out,
+    }
+}
+
+/// The inverse of [`hfs_from_posix`].
+fn posix_from_hfs(path: &str) -> String {
+    let mut components = path.split(':');
+    // The volume, which is the root directory here.
+    let _ = components.next();
+    let mut out = String::new();
+    for component in components {
+        out.push('/');
+        out.push_str(&component.replace('/', ":"));
+    }
+    match out.is_empty() {
+        true => "/".to_string(),
+        false => out,
+    }
+}
 
 pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
     _allocator: CFAllocatorRef,
@@ -1763,11 +1813,11 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
     style: CFIndex,
     directory: Boolean,
 ) -> CFTypeRef {
-    if style != POSIX_PATH_STYLE {
-        // HFS and Windows path styles describe a separator and a volume this
-        // runtime has no notion of, so a path in one read as POSIX would name a
+    if style != POSIX_PATH_STYLE && style != HFS_PATH_STYLE {
+        // The Windows path style describes a drive letter and a separator this
+        // runtime has no notion of, so a path in it read as POSIX would name a
         // different file rather than fail.
-        objc::fail!("CFURLCreateWithFileSystemPath: path style {style} is not POSIX");
+        objc::fail!("CFURLCreateWithFileSystemPath: path style {style} is neither POSIX nor HFS");
     }
     // SAFETY: the caller's obligation - a `CFString` or null.
     let Some(path) = (unsafe { string::as_string(path) }) else {
@@ -1776,6 +1826,14 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
     let bytes = path.utf8();
     let Ok(path) = std::str::from_utf8(&bytes) else {
         return std::ptr::null();
+    };
+    let converted;
+    let path = match style {
+        HFS_PATH_STYLE => {
+            converted = posix_from_hfs(path);
+            converted.as_str()
+        }
+        _ => path,
     };
     crate::url::new_file_url(path, directory != 0)
 }
@@ -2117,12 +2175,16 @@ pub unsafe extern "C" fn CFURLCreateStringByReplacingPercentEscapesUsingEncoding
 }
 
 pub unsafe extern "C" fn CFURLCopyFileSystemPath(url: CFTypeRef, style: CFIndex) -> CFTypeRef {
-    if style != POSIX_PATH_STYLE {
-        objc::fail!("CFURLCopyFileSystemPath: path style {style} is not POSIX");
+    if style != POSIX_PATH_STYLE && style != HFS_PATH_STYLE {
+        objc::fail!("CFURLCopyFileSystemPath: path style {style} is neither POSIX nor HFS");
     }
     // SAFETY: the caller's obligation - a URL or null.
     let Some(path) = (unsafe { crate::url::as_url(url) }).and_then(|url| url.file_path()) else {
         return std::ptr::null();
+    };
+    let path = match style {
+        HFS_PATH_STYLE => hfs_from_posix(&path),
+        _ => path,
     };
     string::from_bytes(path.as_bytes(), false)
 }
@@ -2633,6 +2695,488 @@ pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {
 pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
     // SAFETY: the caller's obligation.
     unsafe { borrow::<Timer>(timer) }.is_some_and(|t| t.is_valid()) as Boolean
+}
+
+/// `void CFStringReplace(CFMutableStringRef, CFRange, CFStringRef)`, with the
+/// range flattened into the two words it is passed in.
+///
+/// Delete then insert, rather than a splice of its own: the two already agree
+/// on what a mutable string's storage is and on the narrow/wide question, and a
+/// third copy of that decision is a third place for them to disagree.
+pub unsafe extern "C" fn CFStringReplace(
+    target: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    replacement: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation - a live mutable string, and a live
+    // string or null.
+    unsafe {
+        CFStringDelete(target, range_location, range_length);
+        CFStringInsert(target, range_location, replacement);
+    }
+}
+
+/// `void CFStringReplaceAll(CFMutableStringRef, CFStringRef)`
+pub unsafe extern "C" fn CFStringReplaceAll(target: CFTypeRef, replacement: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let Some(length) = (unsafe { string::as_string(target) }).map(|s| s.length()) else {
+        return;
+    };
+    // SAFETY: as above; the range is the whole string.
+    unsafe { CFStringReplace(target, 0, length, replacement) };
+}
+
+/// `CFIndex CFStringFindAndReplace(CFMutableStringRef, CFStringRef target,
+/// CFStringRef replacement, CFRange rangeToSearch, CFStringCompareFlags)`, with
+/// the range flattened.
+///
+/// Answers how many replacements were made, which is what the caller branches
+/// on. Only the literal, case-sensitive search is performed: the comparison
+/// flags describe a Unicode collation this tree does not implement, and a
+/// case-insensitive search done case-sensitively would silently replace
+/// nothing rather than say so.
+pub unsafe extern "C" fn CFStringFindAndReplace(
+    target: CFTypeRef,
+    find: CFTypeRef,
+    replacement: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    options: u32,
+) -> CFIndex {
+    // `kCFCompareCaseInsensitive` is the one flag this does honour. The rest -
+    // backwards, anchored, non-literal, localized, numeric - each describe a
+    // different search, and one done literally instead would replace the wrong
+    // text rather than fail.
+    const CASE_INSENSITIVE: u32 = 1;
+    if options & !CASE_INSENSITIVE != 0 {
+        objc::fail!(
+            "CFStringFindAndReplace: comparison flags {options:#x} describe a search this \
+             runtime does not implement"
+        );
+    }
+    let fold = options & CASE_INSENSITIVE != 0;
+    // SAFETY: the caller's obligation - live strings or null.
+    let (Some(haystack), Some(needle)) = (unsafe { string::as_string(target) }, unsafe {
+        string::as_string(find)
+    }) else {
+        return 0;
+    };
+    // SAFETY: as above; null is a valid replacement and means "delete".
+    let with = (unsafe { string::as_string(replacement) }).map_or_else(Vec::new, |s| s.utf16());
+    let needle = needle.utf16();
+    if needle.is_empty() {
+        return 0;
+    }
+    let units = haystack.utf16();
+    // Compared against folded copies and spliced out of the originals, so that
+    // a case-insensitive search keeps the text it did not replace exactly as it
+    // was. Simple case folding, one unit at a time, which keeps the two the
+    // same length and so keeps the indices the same in both.
+    let folded_units = folded(&units, fold);
+    let folded_needle = folded(&needle, fold);
+    let (Ok(start), Ok(length)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return 0;
+    };
+    let Some(end) = start.checked_add(length).filter(|end| *end <= units.len()) else {
+        return 0;
+    };
+    // Built rather than spliced in place, so that a replacement containing the
+    // text being searched for is not searched again.
+    let mut out: Vec<u16> = units[..start].to_vec();
+    let mut at = start;
+    let mut replaced = 0;
+    while at < end {
+        if at + needle.len() <= end && folded_units[at..at + needle.len()] == folded_needle[..] {
+            out.extend_from_slice(&with);
+            at += needle.len();
+            replaced += 1;
+            continue;
+        }
+        out.push(units[at]);
+        at += 1;
+    }
+    out.extend_from_slice(&units[end..]);
+    if replaced != 0 {
+        // SAFETY: the caller's target is a mutable string.
+        unsafe { string::set_utf16(target, &out) };
+    }
+    replaced
+}
+
+/// Every unit lowercased, when `fold` asks for it.
+///
+/// Per unit rather than per character, which is what keeps the result the same
+/// length as its input: a full Unicode lowercasing can add units, and the match
+/// offsets here are offsets into the original.
+fn folded(units: &[u16], fold: bool) -> Vec<u16> {
+    if !fold {
+        return units.to_vec();
+    }
+    units
+        .iter()
+        .map(|unit| {
+            let Some(c) = char::from_u32(u32::from(*unit)) else {
+                return *unit;
+            };
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(one), None) => u16::try_from(u32::from(one)).unwrap_or(*unit),
+                _ => *unit,
+            }
+        })
+        .collect()
+}
+
+/// `CFIndex CFStringGetMaximumSizeOfFileSystemRepresentation(CFStringRef)`
+///
+/// A bound rather than a measurement, which is what the name says and what a
+/// caller sizing a buffer needs: every UTF-16 unit is at most three UTF-8
+/// bytes, plus the terminator.
+pub unsafe extern "C" fn CFStringGetMaximumSizeOfFileSystemRepresentation(
+    string: CFTypeRef,
+) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    let Some(value) = (unsafe { string::as_string(string) }) else {
+        return 0;
+    };
+    value.length().saturating_mul(3).saturating_add(1)
+}
+
+/// `Boolean CFStringGetFileSystemRepresentation(CFStringRef, char *buffer,
+/// CFIndex maxBufLen)`
+///
+/// False when the path does not fit, with nothing written: a truncated path
+/// names a different file, and the caller checks the answer.
+///
+/// # Safety
+///
+/// `buffer` is null or writable for `max` bytes.
+pub unsafe extern "C" fn CFStringGetFileSystemRepresentation(
+    string: CFTypeRef,
+    buffer: *mut c_char,
+    max: CFIndex,
+) -> Boolean {
+    // SAFETY: the caller's obligation.
+    let Some(value) = (unsafe { string::as_string(string) }) else {
+        return 0;
+    };
+    let Ok(max) = usize::try_from(max) else {
+        return 0;
+    };
+    if buffer.is_null() {
+        return 0;
+    }
+    let bytes = value.utf8();
+    if bytes.len() + 1 > max {
+        return 0;
+    }
+    // SAFETY: the caller states `buffer` holds `max` bytes, and the length was
+    // just checked against it.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), bytes.len());
+        *buffer.add(bytes.len()) = 0;
+    }
+    1
+}
+
+/// `CFStringRef CFStringCreateWithBytesNoCopy(CFAllocatorRef, const UInt8 *,
+/// CFIndex, CFStringEncoding, Boolean, CFAllocatorRef)`, which copies here for
+/// [`CFStringCreateWithCStringNoCopy`]'s reason.
+pub unsafe extern "C" fn CFStringCreateWithBytesNoCopy(
+    allocator: CFAllocatorRef,
+    bytes: *const u8,
+    length: CFIndex,
+    encoding: u32,
+    external: Boolean,
+    _contents_deallocator: CFAllocatorRef,
+) -> CFTypeRef {
+    // SAFETY: the validity requirement is identical to `CFStringCreateWithBytes`'.
+    unsafe { CFStringCreateWithBytes(allocator, bytes, length, encoding, external) }
+}
+
+/// `CFArrayRef CFArrayCreateCopy(CFAllocatorRef, CFArrayRef)`
+///
+/// Immutable, and the values are retained under the original's own callbacks -
+/// a copy that used the type callbacks would retain values the original had
+/// promised not to.
+pub unsafe extern "C" fn CFArrayCreateCopy(
+    _allocator: CFAllocatorRef,
+    array: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return std::ptr::null();
+    };
+    collections::new_array(&a.values.clone(), a.policy, false)
+}
+
+pub unsafe extern "C" fn CFArrayInsertValueAtIndex(
+    array: CFTypeRef,
+    index: CFIndex,
+    value: CFTypeRef,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    // The one place `collections::at` does not apply: inserting at the count is
+    // an append and is legal, where reading at the count is not.
+    let Ok(at) = usize::try_from(index).map(|at| at.min(a.values.len())) else {
+        return;
+    };
+    if !a.mutable {
+        return;
+    }
+    let value = a.policy.retain(value);
+    a.values.insert(at, value);
+}
+
+pub unsafe extern "C" fn CFArrayRemoveValueAtIndex(array: CFTypeRef, index: CFIndex) {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    if !a.mutable {
+        return;
+    }
+    let Some(at) = collections::at(index, a.values.len()) else {
+        return;
+    };
+    let value = a.values.remove(at);
+    a.policy.release(value);
+}
+
+pub unsafe extern "C" fn CFArrayRemoveAllValues(array: CFTypeRef) {
+    // SAFETY: the caller's obligation.
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    if !a.mutable {
+        return;
+    }
+    for value in a.values.drain(..) {
+        a.policy.release(value);
+    }
+}
+
+/// `CFDictionaryRef CFDictionaryCreateCopy(CFAllocatorRef, CFDictionaryRef)`
+pub unsafe extern "C" fn CFDictionaryCreateCopy(
+    _allocator: CFAllocatorRef,
+    dictionary: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return std::ptr::null();
+    };
+    collections::new_dictionary(&d.entries.clone(), d.keys, d.values, false)
+}
+
+/// `CFMutableDictionaryRef CFDictionaryCreateMutableCopy(CFAllocatorRef,
+/// CFIndex capacity, CFDictionaryRef)`, whose capacity is a hint the same way
+/// [`CFDictionaryCreateMutable`]'s is.
+pub unsafe extern "C" fn CFDictionaryCreateMutableCopy(
+    _allocator: CFAllocatorRef,
+    _capacity: CFIndex,
+    dictionary: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return std::ptr::null();
+    };
+    collections::new_dictionary(&d.entries.clone(), d.keys, d.values, true)
+}
+
+/// `CFIndex CFDictionaryGetCountOfKey(CFDictionaryRef, const void *key)`
+///
+/// One or zero: a dictionary holds a key once.
+pub unsafe extern "C" fn CFDictionaryGetCountOfKey(
+    dictionary: CFTypeRef,
+    key: CFTypeRef,
+) -> CFIndex {
+    // SAFETY: the caller's obligation.
+    let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
+        return 0;
+    };
+    CFIndex::from(d.position(key).is_some())
+}
+
+/// `UInt8 *CFDataGetMutableBytePtr(CFMutableDataRef)`
+///
+/// The writable counterpart of [`CFDataGetBytePtr`], and empty data answers
+/// null rather than [`CFDataGetBytePtr`]'s readable byte: a caller that means
+/// to write through this has asked for length first, and a shared static byte
+/// is the one address that must not be handed out to be written.
+pub unsafe extern "C" fn CFDataGetMutableBytePtr(data: CFTypeRef) -> *mut u8 {
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return std::ptr::null_mut();
+    };
+    match bytes.is_empty() {
+        true => std::ptr::null_mut(),
+        false => bytes.as_mut_ptr(),
+    }
+}
+
+/// `void CFDataSetLength(CFMutableDataRef, CFIndex)`
+///
+/// Growth is zero-filled, which is what CoreFoundation promises and what a
+/// caller that writes only part of the new tail depends on.
+pub unsafe extern "C" fn CFDataSetLength(data: CFTypeRef, length: CFIndex) {
+    let Ok(length) = usize::try_from(length) else {
+        return;
+    };
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    bytes.resize(length, 0);
+}
+
+/// `void CFDataIncreaseLength(CFMutableDataRef, CFIndex)`
+pub unsafe extern "C" fn CFDataIncreaseLength(data: CFTypeRef, extra: CFIndex) {
+    let Ok(extra) = usize::try_from(extra) else {
+        return;
+    };
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    let length = bytes.len() + extra;
+    bytes.resize(length, 0);
+}
+
+/// `void CFDataAppendBytes(CFMutableDataRef, const UInt8 *, CFIndex)`
+///
+/// # Safety
+///
+/// `added` is readable for `length` bytes.
+pub unsafe extern "C" fn CFDataAppendBytes(data: CFTypeRef, added: *const u8, length: CFIndex) {
+    let Ok(length) = usize::try_from(length) else {
+        return;
+    };
+    if added.is_null() && length > 0 {
+        return;
+    }
+    // SAFETY: the caller states `added` covers `length` bytes.
+    let slice = match length {
+        0 => &[][..],
+        _ => unsafe { std::slice::from_raw_parts(added, length) },
+    };
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    bytes.extend_from_slice(slice);
+}
+
+/// `void CFDataDeleteBytes(CFMutableDataRef, CFRange)`, with the range
+/// flattened.
+pub unsafe extern "C" fn CFDataDeleteBytes(
+    data: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+) {
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    let (Ok(start), Ok(length)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return;
+    };
+    let Some(end) = start.checked_add(length).filter(|end| *end <= bytes.len()) else {
+        return;
+    };
+    bytes.drain(start..end);
+}
+
+/// `void CFDataReplaceBytes(CFMutableDataRef, CFRange, const UInt8 *, CFIndex)`,
+/// with the range flattened.
+///
+/// # Safety
+///
+/// `added` is null or readable for `added_length` bytes.
+pub unsafe extern "C" fn CFDataReplaceBytes(
+    data: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    added: *const u8,
+    added_length: CFIndex,
+) {
+    let (Ok(start), Ok(length), Ok(added_length)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+        usize::try_from(added_length),
+    ) else {
+        return;
+    };
+    if added.is_null() && added_length > 0 {
+        return;
+    }
+    // SAFETY: the caller states `added` covers `added_length` bytes. Copied
+    // before the data is touched, because the two are allowed to be the same
+    // buffer.
+    let addition = match added_length {
+        0 => Vec::new(),
+        _ => unsafe { std::slice::from_raw_parts(added, added_length) }.to_vec(),
+    };
+    // SAFETY: the caller's obligation.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return;
+    };
+    let Some(end) = start.checked_add(length).filter(|end| *end <= bytes.len()) else {
+        return;
+    };
+    bytes.splice(start..end, addition);
+}
+
+/// `CFUUIDBytes`, which Apple declares as sixteen named `UInt8` fields. One
+/// array of the same size and alignment, so that the two 64-bit ABIs classify
+/// it the same way: two integer eightbytes, returned in two registers.
+#[repr(C)]
+pub struct CFUUIDBytes(pub crate::uuid::Bytes);
+
+/// `CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef)`
+pub unsafe extern "C" fn CFUUIDGetUUIDBytes(uuid: CFTypeRef) -> CFUUIDBytes {
+    // SAFETY: the caller's obligation - a UUID this runtime made, or null.
+    CFUUIDBytes(unsafe { crate::uuid::bytes_of(uuid) }.unwrap_or([0; 16]))
+}
+
+#[cfg(test)]
+mod path_style_tests {
+    use super::*;
+
+    /// The two directions are exact inverses, which is what a caller that
+    /// converts a path and converts it back depends on - and the colon and the
+    /// slash swap places, which is the part that is easy to get wrong in only
+    /// one of them.
+    #[test]
+    fn an_hfs_path_round_trips() {
+        for path in [
+            "/",
+            "/Users/velo",
+            "/Applications/Life Is Strange.app/Contents/MacOS",
+            "/a directory: with a colon/file",
+        ] {
+            let hfs = hfs_from_posix(path);
+            assert!(hfs.starts_with('/'), "{hfs} does not name the root volume");
+            assert_eq!(posix_from_hfs(&hfs), path, "via {hfs}");
+        }
+    }
+
+    /// The notation itself, spelled out, so that a change to either direction
+    /// has to be a deliberate one.
+    #[test]
+    fn the_root_volume_leads_and_colons_separate() {
+        assert_eq!(hfs_from_posix("/Users/velo"), "/:Users:velo");
+        assert_eq!(posix_from_hfs("/:Users:velo"), "/Users/velo");
+    }
 }
 
 #[cfg(test)]

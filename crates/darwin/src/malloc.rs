@@ -1,5 +1,5 @@
-//! `malloc_zone_statistics`, which is a question about an allocator this host
-//! does not have.
+//! The parts of Darwin's `malloc.h` that ask about an allocator this host does
+//! not have.
 //!
 //! Darwin's malloc is zoned and its statistics are per zone; glibc's is not
 //! zoned at all. A program calls this to report how much memory it is using -
@@ -79,8 +79,29 @@ pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut 
     }
 }
 
+/// `size_t malloc_size(const void *ptr)`
+///
+/// Darwin answers the usable size of a block, and zero for a pointer its
+/// allocator does not own. glibc and musl answer the first question as
+/// `malloc_usable_size` and do not answer the second at all, so a pointer that
+/// is not a live block is undefined here where Darwin would have said zero. A
+/// guest asks this about its own blocks, which one allocator owns - see
+/// [`crate::heap`].
+///
+/// # Safety
+///
+/// `ptr` is null or a live block from this host's allocator.
+pub unsafe extern "C" fn malloc_size(ptr: *const c_void) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller states `ptr` is a live block of this allocator.
+    unsafe { libc::malloc_usable_size(ptr.cast_mut()) }
+}
+
 exports::exports! {
     functions {
+        "malloc_size" => malloc_size,
         "malloc_zone_statistics" => malloc_zone_statistics,
     }
 }
@@ -88,6 +109,21 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block's reported size covers what was asked for, and a null pointer
+    /// owns nothing.
+    #[test]
+    fn reports_the_size_of_a_block() {
+        // SAFETY: a block from this host's allocator, freed below.
+        let block = unsafe { libc::malloc(4096) };
+        assert!(!block.is_null());
+        // SAFETY: `block` is live.
+        assert!(unsafe { malloc_size(block) } >= 4096);
+        // SAFETY: `block` came from `malloc` and is not used again.
+        unsafe { libc::free(block) };
+        // SAFETY: null is the documented no-block case.
+        assert_eq!(unsafe { malloc_size(std::ptr::null()) }, 0);
+    }
 
     /// The total is a real number and the fields nothing can answer are zero,
     /// which is the difference between "not reported" and "nothing allocated".

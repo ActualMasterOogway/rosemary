@@ -271,10 +271,14 @@ mod tests {
         assert!(open >= 3, "at least the three standard descriptors");
         assert!(fds[..open].iter().all(|entry| entry.kind != 0));
 
-        // And a null buffer is the size enquiry rather than a failure.
+        // And a null buffer is the size enquiry rather than a failure. Only
+        // that: the two calls are separate samples of a table other threads are
+        // opening and closing descriptors in, so an enquiry that came back
+        // *smaller* than the listing above is a descriptor that was closed
+        // between them and not a bug in either.
         // SAFETY: a null buffer is what this checks.
         let wanted = unsafe { proc_pidinfo(0, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
-        assert!(wanted >= bytes);
+        assert!(wanted > 0 && wanted % size_of::<ProcFdInfo>() as c_int == 0);
     }
 
     /// A buffer that holds fewer entries than are open is filled to its own

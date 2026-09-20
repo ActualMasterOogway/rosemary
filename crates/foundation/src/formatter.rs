@@ -376,6 +376,18 @@ fn civil(when: f64) -> libc::tm {
 struct Calendar {
     /// Which weekday a week starts on, 1 being Sunday - see [`first_weekday`].
     first_weekday: CFIndex,
+    /// The identifier it was made with, retained. Null for the current
+    /// calendar, which was not made with one.
+    identifier: CFTypeRef,
+    /// The zone its dates are placed in, retained.
+    timezone: CFTypeRef,
+}
+
+impl Drop for Calendar {
+    fn drop(&mut self) {
+        objc::arc::release(self.identifier as Id);
+        objc::arc::release(self.timezone as Id);
+    }
 }
 
 /// The day a week starts on in the country this tree reports.
@@ -688,8 +700,90 @@ pub mod cf {
             super::calendar_class(),
             Calendar {
                 first_weekday: super::first_weekday(&crate::locale::country_code()),
+                identifier: corefoundation::string::from_bytes(b"gregorian", false),
+                // SAFETY: takes nothing and hands back a zone it owns.
+                timezone: unsafe { corefoundation::timezone::copy_system() },
             },
         )
+    }
+
+    /// `CFCalendarRef CFCalendarCreateWithIdentifier(CFAllocatorRef,
+    /// CFCalendarIdentifier)`
+    ///
+    /// Only the Gregorian calendar, and ISO 8601 which is the same arithmetic
+    /// with a different week rule. The rest are refused by name rather than
+    /// served with Gregorian dates, which would be wrong dates.
+    ///
+    /// # Safety
+    ///
+    /// `identifier` is null or a string.
+    unsafe extern "C" fn CFCalendarCreateWithIdentifier(
+        _allocator: CFTypeRef,
+        identifier: CFTypeRef,
+    ) -> CFTypeRef {
+        // SAFETY: the caller's obligation.
+        let Some(text) = (unsafe { corefoundation::string::as_string(identifier) }) else {
+            return std::ptr::null();
+        };
+        let text = String::from_utf8_lossy(&text.utf8()).into_owned();
+        if text != "gregorian" && text != "iso8601" {
+            objc::fail!(
+                "CFCalendarCreateWithIdentifier: {text} is a calendar this runtime does not \
+                 implement, and Gregorian dates would be the wrong dates"
+            );
+        }
+        super::make(
+            super::calendar_class(),
+            Calendar {
+                first_weekday: super::first_weekday(&crate::locale::country_code()),
+                identifier: objc::arc::retain(identifier as Id) as CFTypeRef,
+                // SAFETY: takes nothing and hands back a zone it owns.
+                timezone: unsafe { corefoundation::timezone::copy_system() },
+            },
+        )
+    }
+
+    /// `CFCalendarIdentifier CFCalendarGetIdentifier(CFCalendarRef)`
+    ///
+    /// # Safety
+    ///
+    /// `calendar` is null or an object this runtime allocated.
+    unsafe extern "C" fn CFCalendarGetIdentifier(calendar: CFTypeRef) -> CFTypeRef {
+        // SAFETY: the caller's obligation.
+        match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
+            Some(calendar) => calendar.identifier,
+            None => std::ptr::null(),
+        }
+    }
+
+    /// `CFTimeZoneRef CFCalendarCopyTimeZone(CFCalendarRef)`
+    ///
+    /// # Safety
+    ///
+    /// As [`CFCalendarGetIdentifier`].
+    unsafe extern "C" fn CFCalendarCopyTimeZone(calendar: CFTypeRef) -> CFTypeRef {
+        // SAFETY: the caller's obligation.
+        match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
+            Some(calendar) => objc::arc::retain(calendar.timezone as Id) as CFTypeRef,
+            None => std::ptr::null(),
+        }
+    }
+
+    /// `void CFCalendarSetTimeZone(CFCalendarRef, CFTimeZoneRef)`
+    ///
+    /// # Safety
+    ///
+    /// As [`CFCalendarGetIdentifier`]; `timezone` is null or a time zone.
+    unsafe extern "C" fn CFCalendarSetTimeZone(calendar: CFTypeRef, timezone: CFTypeRef) {
+        // SAFETY: the caller's obligation.
+        let Some(calendar) =
+            (unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) })
+        else {
+            return;
+        };
+        let held = objc::arc::retain(timezone as Id) as CFTypeRef;
+        objc::arc::release(calendar.timezone as Id);
+        calendar.timezone = held;
     }
 
     /// `CFIndex CFCalendarGetFirstWeekday(CFCalendarRef)`
@@ -707,6 +801,221 @@ pub mod cf {
             Some(calendar) => calendar.first_weekday,
             None => 1,
         }
+    }
+
+    /// How many components either of the two below will carry.
+    ///
+    /// The variadic half of these calls is *not* written as a C variadic
+    /// function: Rust has no stable way to declare one, and the trampolines
+    /// `darwin::printf_l` needs for `snprintf_l` are one architecture's
+    /// assembly each. What is used instead is that a variadic call and a call
+    /// to a function of the same fixed arity place their integer arguments in
+    /// exactly the same places on every ABI this tree runs on that puts
+    /// variadic arguments in the ordinary argument registers - so the
+    /// declaration below simply names eight of them, and only the ones the
+    /// component description asks for are ever read.
+    ///
+    /// Apple's arm64 is the ABI where that is not true: it passes every
+    /// variadic argument on the stack, whatever the registers hold. These two
+    /// entry points are therefore not published there, where the host's own
+    /// CoreFoundation is the one a guest is using anyway.
+    ///
+    /// A description asking for more than this many components is refused by
+    /// name rather than served from arguments the declaration did not cover.
+    #[cfg(not(target_vendor = "apple"))]
+    const MAX_COMPONENTS: usize = 8;
+
+    /// The component a `CFCalendar` description character names, as a value
+    /// read out of a date - or `None` for one this tree does not compute.
+    ///
+    /// The numbering is CoreFoundation's: a weekday is one-based with Sunday
+    /// as one, which is `CFCalendarGetFirstWeekday`'s numbering and *not*
+    /// `CFAbsoluteTimeGetDayOfWeek`'s.
+    #[cfg(not(target_vendor = "apple"))]
+    fn component(
+        which: u8,
+        date: &corefoundation::calendar::GregorianDate,
+        at: f64,
+        timezone: CFTypeRef,
+    ) -> Option<i32> {
+        Some(match which {
+            b'G' => 1,
+            b'y' => date.year,
+            b'M' => i32::from(date.month),
+            b'd' => i32::from(date.day),
+            b'H' => i32::from(date.hour),
+            b'm' => i32::from(date.minute),
+            b's' => date.second as i32,
+            // SAFETY: the caller's obligation - null or a time zone.
+            b'E' => unsafe {
+                corefoundation::calendar::absolute_time_get_day_of_week(at, timezone) % 7 + 1
+            },
+            // SAFETY: as above.
+            b'D' => unsafe {
+                corefoundation::calendar::absolute_time_get_day_of_year(at, timezone)
+            },
+            _ => return None,
+        })
+    }
+
+    /// The zone a calendar places its dates in.
+    #[cfg(not(target_vendor = "apple"))]
+    unsafe fn zone_of(calendar: CFTypeRef) -> CFTypeRef {
+        // SAFETY: the caller's obligation.
+        match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
+            Some(calendar) => calendar.timezone,
+            None => std::ptr::null(),
+        }
+    }
+
+    /// The description, as the bytes this walk understands.
+    ///
+    /// A `?` marks the component that follows as optional, which only matters
+    /// to `CFCalendarComposeAbsoluteTime`; both walks skip it here and the
+    /// compose treats a missing value as zero, which is what optional means.
+    #[cfg(not(target_vendor = "apple"))]
+    unsafe fn components(description: *const std::ffi::c_char) -> Option<Vec<u8>> {
+        if description.is_null() {
+            return None;
+        }
+        // SAFETY: the caller states it is a C string.
+        let text = unsafe { std::ffi::CStr::from_ptr(description) };
+        Some(
+            text.to_bytes()
+                .iter()
+                .copied()
+                .filter(|byte| *byte != b'?')
+                .collect(),
+        )
+    }
+
+    /// `Boolean CFCalendarDecomposeAbsoluteTime(CFCalendarRef, CFAbsoluteTime,
+    /// const char *componentDesc, ...)`
+    ///
+    /// # Safety
+    ///
+    /// `description` is a C string, and the caller passed one writable `int *`
+    /// for each component it names.
+    #[cfg(not(target_vendor = "apple"))]
+    #[allow(clippy::too_many_arguments)]
+    unsafe extern "C" fn CFCalendarDecomposeAbsoluteTime(
+        calendar: CFTypeRef,
+        at: f64,
+        description: *const std::ffi::c_char,
+        out0: *mut i32,
+        out1: *mut i32,
+        out2: *mut i32,
+        out3: *mut i32,
+        out4: *mut i32,
+        out5: *mut i32,
+        out6: *mut i32,
+        out7: *mut i32,
+    ) -> u8 {
+        // SAFETY: the caller's obligation.
+        let Some(wanted) = (unsafe { components(description) }) else {
+            return 0;
+        };
+        if wanted.len() > MAX_COMPONENTS {
+            objc::fail!(
+                "CFCalendarDecomposeAbsoluteTime: {} components is more than the {MAX_COMPONENTS} \
+                 this runtime reads out of a variadic call",
+                wanted.len()
+            );
+        }
+        // SAFETY: the caller's obligation - a calendar this runtime made.
+        let timezone = unsafe { zone_of(calendar) };
+        // SAFETY: null or a time zone this tree made.
+        let date =
+            unsafe { corefoundation::calendar::absolute_time_get_gregorian_date(at, timezone) };
+        let outs = [out0, out1, out2, out3, out4, out5, out6, out7];
+        for (which, out) in wanted.iter().zip(outs) {
+            let Some(value) = component(*which, &date, at, timezone) else {
+                objc::fail!(
+                    "CFCalendarDecomposeAbsoluteTime: component '{}' is not one this runtime \
+                     computes",
+                    *which as char
+                );
+            };
+            if out.is_null() {
+                continue;
+            }
+            // SAFETY: the caller passed one writable `int *` per component.
+            unsafe { *out = value };
+        }
+        1
+    }
+
+    /// `Boolean CFCalendarComposeAbsoluteTime(CFCalendarRef, CFAbsoluteTime *,
+    /// const char *componentDesc, ...)`
+    ///
+    /// # Safety
+    ///
+    /// `at` is writable, `description` is a C string, and the caller passed one
+    /// `int` for each component it names.
+    #[cfg(not(target_vendor = "apple"))]
+    #[allow(clippy::too_many_arguments)]
+    unsafe extern "C" fn CFCalendarComposeAbsoluteTime(
+        calendar: CFTypeRef,
+        at: *mut f64,
+        description: *const std::ffi::c_char,
+        in0: i32,
+        in1: i32,
+        in2: i32,
+        in3: i32,
+        in4: i32,
+        in5: i32,
+        in6: i32,
+        in7: i32,
+    ) -> u8 {
+        // SAFETY: the caller's obligation.
+        let Some(wanted) = (unsafe { components(description) }) else {
+            return 0;
+        };
+        if at.is_null() {
+            return 0;
+        }
+        if wanted.len() > MAX_COMPONENTS {
+            objc::fail!(
+                "CFCalendarComposeAbsoluteTime: {} components is more than the {MAX_COMPONENTS} \
+                 this runtime reads out of a variadic call",
+                wanted.len()
+            );
+        }
+        let ins = [in0, in1, in2, in3, in4, in5, in6, in7];
+        // The day and the month start at one, so a description that names
+        // neither composes the first of January rather than a zeroth day.
+        let mut date = corefoundation::calendar::GregorianDate {
+            year: 2001,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0.0,
+        };
+        for (which, value) in wanted.iter().zip(ins) {
+            match which {
+                b'y' => date.year = value,
+                b'M' => date.month = value as i8,
+                b'd' => date.day = value as i8,
+                b'H' => date.hour = value as i8,
+                b'm' => date.minute = value as i8,
+                b's' => date.second = f64::from(value),
+                // The era, which is one for every date this tree places.
+                b'G' => {}
+                other => objc::fail!(
+                    "CFCalendarComposeAbsoluteTime: component '{}' is not one this runtime \
+                     composes from",
+                    *other as char
+                ),
+            }
+        }
+        // SAFETY: the caller's obligation - a calendar this runtime made.
+        let timezone = unsafe { zone_of(calendar) };
+        // SAFETY: null or a time zone this tree made; `at` is writable.
+        unsafe {
+            *at = corefoundation::calendar::gregorian_date_get_absolute_time(date, timezone);
+        }
+        1
     }
 
     /// `CFStringRef CFLocaleCopyDisplayNameForPropertyValue(CFLocaleRef,
@@ -785,6 +1094,14 @@ pub mod cf {
             "CFDateFormatterCreateStringWithDate" => CFDateFormatterCreateStringWithDate,
             "CFDateFormatterCopyProperty" => CFDateFormatterCopyProperty,
             "CFCalendarCopyCurrent" => CFCalendarCopyCurrent,
+            "CFCalendarCreateWithIdentifier" => CFCalendarCreateWithIdentifier,
+            "CFCalendarGetIdentifier" => CFCalendarGetIdentifier,
+            "CFCalendarCopyTimeZone" => CFCalendarCopyTimeZone,
+            "CFCalendarSetTimeZone" => CFCalendarSetTimeZone,
+            #[cfg(not(target_vendor = "apple"))]
+            "CFCalendarDecomposeAbsoluteTime" => CFCalendarDecomposeAbsoluteTime,
+            #[cfg(not(target_vendor = "apple"))]
+            "CFCalendarComposeAbsoluteTime" => CFCalendarComposeAbsoluteTime,
             "CFCalendarGetFirstWeekday" => CFCalendarGetFirstWeekday,
             "CFLocaleCopyDisplayNameForPropertyValue" => CFLocaleCopyDisplayNameForPropertyValue,
         }

@@ -50,7 +50,8 @@ fn new(name: &str) -> CFTypeRef {
     body as CFTypeRef
 }
 
-fn system_name() -> String {
+/// The zone this host is set to, as an IANA name.
+pub fn system_name() -> String {
     std::fs::read_link("/etc/localtime")
         .ok()
         .and_then(|path| {
@@ -79,6 +80,24 @@ pub unsafe extern "C" fn create_with_name(
         return std::ptr::null();
     };
     new(&String::from_utf8_lossy(&name.utf8()))
+}
+
+/// The zone's name as Rust text, or `None` for anything that is not one of
+/// this tree's time zones - a null included, which the calendar reads as UTC.
+///
+/// # Safety
+///
+/// `timezone` is null or an object.
+pub unsafe fn name_of(timezone: CFTypeRef) -> Option<String> {
+    // SAFETY: the caller's obligation.
+    if !unsafe { crate::base::is_kind_of(timezone, class()) } {
+        return None;
+    }
+    // SAFETY: an instance of `class()` has this layout.
+    let name = unsafe { (*(timezone as *const Body)).name };
+    // SAFETY: the name is a string this module made.
+    let text = unsafe { crate::string::as_string(name) }?;
+    Some(String::from_utf8_lossy(&text.utf8()).into_owned())
 }
 
 pub unsafe extern "C" fn get_name(timezone: CFTypeRef) -> CFTypeRef {

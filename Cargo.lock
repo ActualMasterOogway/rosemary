@@ -247,11 +247,21 @@ dependencies = [
 name = "corefoundation"
 version = "0.1.0"
 dependencies = [
+ "darwin",
  "exports",
  "getrandom 0.3.4",
  "libc",
  "objc",
  "static_init",
+]
+
+[[package]]
+name = "coreservices"
+version = "0.1.0"
+dependencies = [
+ "darwin",
+ "exports",
+ "foundation",
 ]
 
 [[package]]
@@ -1228,6 +1238,7 @@ dependencies = [
  "contacts",
  "coreaudio",
  "corefoundation",
+ "coreservices",
  "corevideo",
  "darwin",
  "exports",

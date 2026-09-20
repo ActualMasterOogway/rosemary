@@ -496,6 +496,24 @@ fn stage(which: usize) {
     STAGE.store(which, Ordering::SeqCst);
 }
 
+/// This thread, as the kernel numbers it.
+///
+/// `gettid` rather than anything in `std`: the answer is needed inside a signal
+/// handler, where the only calls allowed are the async-signal-safe ones.
+fn thread_id() -> i32 {
+    #[cfg(target_os = "linux")]
+    // SAFETY: `gettid` takes nothing, allocates nothing, and cannot fail.
+    unsafe {
+        libc::gettid()
+    }
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: as above; Darwin spells it `pthread_mach_thread_np(self)`, and
+    // the port number is as good an identity as the kernel's own tid.
+    unsafe {
+        libc::pthread_mach_thread_np(libc::pthread_self()) as i32
+    }
+}
+
 /// Print a report the handler faulted part-way through building.
 fn salvage() {
     if !BUILDING.swap(false, Ordering::SeqCst) {
@@ -520,11 +538,41 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     // A fault *inside* this handler would recurse until the alternate stack ran
     // out, which would replace one unexplained crash with another.
     static REPORTING: AtomicBool = AtomicBool::new(false);
+    /// Which thread holds [`REPORTING`], so that a second entry can tell the
+    /// two reasons for one apart.
+    static REPORTER: AtomicI32 = AtomicI32::new(0);
+    let me = thread_id();
     if REPORTING.swap(true, Ordering::SeqCst) {
-        salvage();
+        // A *nested* fault: this thread was already building a report and the
+        // handler itself faulted. What it had is worth printing.
+        if REPORTER.load(Ordering::SeqCst) == me {
+            salvage();
+            restore(signal);
+            return;
+        }
+        // A *second* thread. It has its own fault to report and must not touch
+        // the buffer the first one is still writing: a whole process coming
+        // down takes several threads with it, and salvaging here used to print
+        // the first thread's half-built report and call it a handler crash.
+        // One line, from the kernel's own words, and out of the way.
+        let mut line = Buffer::empty();
+        line.str("rosetta3: fault: ");
+        line.str(match signal {
+            libc::SIGBUS => "SIGBUS",
+            libc::SIGSEGV => "SIGSEGV",
+            libc::SIGABRT => "SIGABRT",
+            _ => "signal",
+        });
+        line.str(" on thread ");
+        line.hex(me as u32 as u64);
+        line.str(" at host pc ");
+        line.hex(host_pc(context).unwrap_or(0));
+        line.str(" - another thread is reporting its own fault first\n");
+        line.flush();
         restore(signal);
         return;
     }
+    REPORTER.store(me, Ordering::SeqCst);
 
     // SAFETY: the swap above is what makes this the only writer - every other
     // entry to the handler takes the branch that only reads it, and does so on
@@ -595,6 +643,10 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     BUILDING.store(false, Ordering::SeqCst);
     out.flush();
 
+    // Handed back, so that a later fault - a different one, on any thread -
+    // gets a report of its own rather than the line above.
+    REPORTER.store(0, Ordering::SeqCst);
+    REPORTING.store(false, Ordering::SeqCst);
     restore(signal);
 }
 
@@ -1084,7 +1136,15 @@ fn say_host_mapping(out: &mut Buffer, pc: u64) {
     if fd < 0 {
         return;
     }
-    let mut buf = [0u8; 8192];
+    // Small on purpose. This is a frame on the *signal* stack, and the one a
+    // thread has is not always this runtime's 512 KiB: a guest with a crash
+    // reporter installs its own - Breakpad's is `MINSIGSTKSZ` - and every
+    // `SA_ONSTACK` handler then runs in it. An eight-kilobyte buffer here is
+    // what overflowed such a stack, and the fault that followed was reported as
+    // the handler crashing while naming the pc's region, with the real crash
+    // lost. A `/proc/self/maps` line is well under this, and a line longer than
+    // the whole buffer is already handled below.
+    let mut buf = [0u8; 512];
     let mut held = 0usize;
     'reading: loop {
         // SAFETY: writing into the unused tail of a live local array.

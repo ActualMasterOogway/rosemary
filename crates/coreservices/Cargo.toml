@@ -1,0 +1,11 @@
+[package]
+name = "coreservices"
+description = "Minimal reimplementation of the CoreServices framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+exports.workspace = true
+darwin.workspace = true
+foundation.workspace = true

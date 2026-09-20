@@ -18,6 +18,7 @@ sdl3 = { path = "crates/sdl3" }
 iokit = { path = "crates/iokit" }
 appkit = { path = "crates/appkit" }
 applicationservices = { path = "crates/applicationservices" }
+coreservices = { path = "crates/coreservices" }
 audiotoolbox = { path = "crates/audiotoolbox" }
 corevideo = { path = "crates/corevideo" }
 coreaudio = { path = "crates/coreaudio" }

@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 //! `NSOpenGLPixelFormat` and `NSOpenGLContext`, over SDL's GL.
 
 use std::ffi::c_void;
@@ -249,6 +251,78 @@ unsafe extern "C" fn init_with_attributes(receiver: Id, _sel: Sel, attributes: *
     receiver
 }
 
+/// `-getValues:forAttribute:forVirtualScreen:`
+///
+/// Apple answers what the pixel format it *chose* actually provides. SDL has no
+/// way to ask that - there is no `SDL_GL_GetAttribute` in these bindings - so
+/// this answers what the format was asked for, and zero for an attribute the
+/// list does not mention. That is the truth about the request rather than about
+/// the visual, and the two differ only where the driver could not give the
+/// program what it asked for.
+///
+/// # Safety
+///
+/// `values` is null or writable for one `GLint`.
+unsafe extern "C" fn get_values(
+    receiver: Id,
+    _sel: Sel,
+    values: *mut i32,
+    attribute: u32,
+    screen: i32,
+) {
+    if values.is_null() {
+        return;
+    }
+    if screen != 0 {
+        objc::fail!(
+            "-[NSOpenGLPixelFormat getValues:forAttribute:forVirtualScreen:]: this format has \
+             one virtual screen, so {screen} names no renderer"
+        );
+    }
+    // One renderer, so one virtual screen - see `crate::cgl`. Answered here
+    // rather than from the list because it is a property of the machine and not
+    // of what the program asked for.
+    if attribute == attribute::VIRTUAL_SCREEN_COUNT {
+        // SAFETY: the caller states it is writable.
+        unsafe { *values = 1 };
+        return;
+    }
+    let Some(takes_value) = attribute::takes_value(attribute) else {
+        objc::fail!(
+            "-[NSOpenGLPixelFormat getValues:forAttribute:forVirtualScreen:]: attribute \
+             {attribute} is not one this runtime knows"
+        );
+    };
+    let list = match receiver.is_null() {
+        true => None,
+        // SAFETY: a pixel format this crate made; the pointer is its own.
+        false => unsafe { format_of(receiver).attributes.as_ref() },
+    };
+    let mut answer = 0;
+    if let Some(list) = list {
+        let mut i = 0;
+        while i < list.len() {
+            let name = list[i];
+            // A name the walk cannot classify would make every step after it
+            // read a value as an attribute, so the walk stops rather than
+            // answering from a list it has lost its place in.
+            let Some(valued) = attribute::takes_value(name) else {
+                break;
+            };
+            if name == attribute {
+                answer = match takes_value {
+                    true => *list.get(i + 1).unwrap_or(&0) as i32,
+                    false => 1,
+                };
+                break;
+            }
+            i += 1 + valued as usize;
+        }
+    }
+    // SAFETY: the caller states it is writable.
+    unsafe { *values = answer };
+}
+
 /// Apply the format's attributes to SDL, for the context about to be created.
 ///
 /// Every attribute the list holds is either mapped or **refused by number**.
@@ -427,29 +501,63 @@ fn drawable(context: &Context) -> sdl3::Window {
     unsafe { crate::window::sdl_window(drawable_window(context)) }
 }
 
+/// A hidden window that exists only to hold a context with no view.
+///
+/// An `NSOpenGLContext` needs no window at all: `-makeCurrentContext` before
+/// `-setView:` is legal, and is what a runner does to ask GL what it can do
+/// before it opens anything. SDL has no such thing - `SDL_GL_CreateContext` and
+/// `SDL_GL_MakeCurrent` both take a window - so one pixel of hidden window
+/// stands in until the guest gives the context a view.
+///
+/// Never presented to: `-flushBuffer` swaps the context's *drawable*, which is
+/// null for as long as this is all there is. Made once and kept, because a
+/// context made against it may still be current when the real window arrives -
+/// a context can be made current against a different window later, which is
+/// what `drawable_window` relies on.
+fn holding_window() -> sdl3::Window {
+    static WINDOW: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        let flags = sdl3::video::flags::OPENGL | sdl3::video::flags::HIDDEN;
+        sdl3::video::create_window(c"rosetta3 offscreen GL", 1, 1, flags)
+            .map_or(0, |window| window as usize)
+    }) as sdl3::Window
+}
+
 /// Make the SDL context, if it is not there yet.
 fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
     let context = context_of(receiver);
     let object = drawable_window(context);
     // SAFETY: null or a window this crate made.
-    if unsafe { crate::window::sdl_window(object) }.is_null() {
-        objc::fail!(
-            "-[NSOpenGLContext {sent}]: there is no window to create a GL context against - the \
-             program has not made one yet"
-        );
-    }
-    // A window is not made for OpenGL until a guest asks for a GL context,
-    // because a window made for OpenGL cannot afterwards be presented to
-    // with Vulkan. This is the asking, so the window is rebuilt now.
-    if !crate::window::rebuild_for_opengl(object) {
-        objc::fail!(
-            "-[NSOpenGLContext {sent}]: SDL could not make this window an OpenGL window: {}",
-            sdl3::error()
-        );
-    }
-    // The rebuild replaces it, so it is read back rather than remembered.
-    // SAFETY: a window this crate made, checked above.
-    let window = unsafe { crate::window::sdl_window(object) };
+    let window = match unsafe { crate::window::sdl_window(object) }.is_null() {
+        true => {
+            let holding = holding_window();
+            if holding.is_null() {
+                objc::fail!(
+                    "-[NSOpenGLContext {sent}]: this context has no view yet, and SDL could \
+                     not make a window to hold it until it has one: {}",
+                    sdl3::error()
+                );
+            }
+            holding
+        }
+        false => {
+            // A window is not made for OpenGL until a guest asks for a GL
+            // context, because a window made for OpenGL cannot afterwards be
+            // presented to with Vulkan. This is the asking, so the window is
+            // rebuilt now.
+            if !crate::window::rebuild_for_opengl(object) {
+                objc::fail!(
+                    "-[NSOpenGLContext {sent}]: SDL could not make this window an OpenGL \
+                     window: {}",
+                    sdl3::error()
+                );
+            }
+            // The rebuild replaces it, so it is read back rather than
+            // remembered.
+            // SAFETY: a window this crate made, checked above.
+            unsafe { crate::window::sdl_window(object) }
+        }
+    };
     if context.sdl.is_null() {
         apply(context.format);
         let Some(sdl) = sdl3::video::gl_create_context(window) else {
@@ -744,7 +852,240 @@ unsafe extern "C" fn cgl_context(receiver: Id, sel: Sel) -> *mut c_void {
         // SAFETY: the receiver is a context of this crate's.
         unsafe { make_current_context(receiver, sel) };
     }
-    context_of(receiver).cgl
+    let host = context_of(receiver).cgl;
+    if !host.is_null() {
+        return host;
+    }
+    // No CGL under this SDL - it is EGL or GLX - and null is the one answer
+    // that cannot be given: a program stores this handle and then *calls*
+    // through it, and `CGLSetCurrentContext(NULL)` means "make nothing
+    // current" rather than "this context". So the handle is the
+    // `NSOpenGLContext` itself, and the CGL entry points below take it back
+    // apart again.
+    handle_out(receiver)
+}
+
+/// Every `NSOpenGLContext` handed out as a `CGLContextObj`.
+///
+/// A registry rather than a class check, because the CGL calls are also given
+/// handles that are *not* this crate's - on macOS, where the SDL context really
+/// does have a CGL one behind it - and those have to be told apart so they can
+/// go to the framework that made them.
+static HANDLES: std::sync::Mutex<Option<std::collections::HashSet<usize>>> =
+    std::sync::Mutex::new(None);
+
+fn handle_out(receiver: Id) -> *mut c_void {
+    HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(std::collections::HashSet::new)
+        .insert(receiver as usize);
+    receiver.cast()
+}
+
+/// The `NSOpenGLContext` a `CGLContextObj` stands for, or `None` for a handle
+/// this crate did not hand out.
+fn handle_in(handle: *mut c_void) -> Option<Id> {
+    let held = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    held.as_ref()
+        .is_some_and(|live| live.contains(&(handle as usize)))
+        .then(|| handle.cast())
+}
+
+/// The host's own CGL entry point of that name, for a handle this crate did not
+/// hand out.
+///
+/// Through SDL's loader for the reason [`current_cgl_context`] gives: CGL is in
+/// `OpenGL.framework`, which this process does not link, and on the host where
+/// there is one SDL has it open already.
+fn host_cgl(name: &std::ffi::CStr) -> Option<*mut c_void> {
+    sdl3::video::gl_proc_address(name)
+}
+
+/// The shape every CGL call below shares: a handle in, a `CGLError` out.
+type CglCall = unsafe extern "C" fn(*mut c_void) -> i32;
+
+/// [`host_cgl`], as a call of that shape.
+fn host_cgl_call(name: &std::ffi::CStr) -> Option<CglCall> {
+    let entry = host_cgl(name)?;
+    // SAFETY: each name this is asked for is declared `CGLError
+    // (CGLContextObj)` in `<OpenGL/CGLCurrent.h>`.
+    Some(unsafe { std::mem::transmute::<*mut c_void, CglCall>(entry) })
+}
+
+/// `CGLError CGLSetCurrentContext(CGLContextObj ctx)`
+///
+/// A render thread's way of taking the context, and the CGL spelling of
+/// `-makeCurrentContext` / `+clearCurrentContext`.
+///
+/// # Safety
+///
+/// `ctx` is null, a handle `-CGLContextObj` returned, or a host `CGLContextObj`.
+pub unsafe extern "C" fn CGLSetCurrentContext(ctx: *mut c_void) -> i32 {
+    if ctx.is_null() {
+        // SAFETY: the class method reads neither argument.
+        unsafe {
+            clear_current_context(
+                std::ptr::null_mut(),
+                objc::sel::register(c"clearCurrentContext"),
+            )
+        };
+        return 0;
+    }
+    if let Some(receiver) = handle_in(ctx) {
+        // SAFETY: a context of this crate's, which is what the registry says.
+        unsafe { make_current_context(receiver, objc::sel::register(c"makeCurrentContext")) };
+        return 0;
+    }
+    let Some(f) = host_cgl_call(c"CGLSetCurrentContext") else {
+        // `kCGLBadContext`.
+        return 10004;
+    };
+    // SAFETY: a handle the framework that exports the call made, and that call
+    // is what `host_cgl_call` returned.
+    unsafe { f(ctx) }
+}
+
+/// `CGLError CGLFlushDrawable(CGLContextObj ctx)`
+///
+/// # Safety
+///
+/// As [`CGLSetCurrentContext`].
+pub unsafe extern "C" fn CGLFlushDrawable(ctx: *mut c_void) -> i32 {
+    if let Some(receiver) = handle_in(ctx) {
+        // SAFETY: a context of this crate's.
+        unsafe { flush_buffer(receiver, objc::sel::register(c"flushBuffer")) };
+        return 0;
+    }
+    let Some(f) = host_cgl_call(c"CGLFlushDrawable") else {
+        return 10004;
+    };
+    // SAFETY: a handle the framework that exports the call made, and that call
+    // is what `host_cgl_call` returned.
+    unsafe { f(ctx) }
+}
+
+/// `CGLError CGLClearDrawable(CGLContextObj ctx)`
+///
+/// # Safety
+///
+/// As [`CGLSetCurrentContext`].
+pub unsafe extern "C" fn CGLClearDrawable(ctx: *mut c_void) -> i32 {
+    if let Some(receiver) = handle_in(ctx) {
+        // SAFETY: a context of this crate's.
+        unsafe { clear_drawable(receiver, objc::sel::register(c"clearDrawable")) };
+        return 0;
+    }
+    let Some(f) = host_cgl_call(c"CGLClearDrawable") else {
+        return 10004;
+    };
+    // SAFETY: a handle the framework that exports the call made, and that call
+    // is what `host_cgl_call` returned.
+    unsafe { f(ctx) }
+}
+
+/// The lock `CGLLockContext` takes, one per context.
+///
+/// CGL's is recursive and is the program's own serialisation: a game locks
+/// around the GL calls its render thread makes so that its other threads do not
+/// interleave with them. Rust has no recursive mutex, so this is the two
+/// pieces of one - who holds it and how deep - under a lock of its own.
+#[derive(Default)]
+struct ContextLock {
+    owner: Option<std::thread::ThreadId>,
+    depth: usize,
+}
+
+static LOCKS: std::sync::Mutex<Option<std::collections::HashMap<usize, ContextLock>>> =
+    std::sync::Mutex::new(None);
+
+static UNLOCKED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// `CGLError CGLLockContext(CGLContextObj ctx)`
+///
+/// # Safety
+///
+/// As [`CGLSetCurrentContext`].
+pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
+    if handle_in(ctx).is_none() {
+        let Some(f) = host_cgl_call(c"CGLLockContext") else {
+            return 10004;
+        };
+        // SAFETY: a handle the framework that exports the call made.
+        return unsafe { f(ctx) };
+    }
+    let me = std::thread::current().id();
+    let mut held = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let entry = held
+            .get_or_insert_with(std::collections::HashMap::new)
+            .entry(ctx as usize)
+            .or_default();
+        if entry.depth == 0 || entry.owner == Some(me) {
+            entry.owner = Some(me);
+            entry.depth += 1;
+            return 0;
+        }
+        held = UNLOCKED.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+/// `CGLError CGLUnlockContext(CGLContextObj ctx)`
+///
+/// # Safety
+///
+/// As [`CGLSetCurrentContext`].
+pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
+    if handle_in(ctx).is_none() {
+        let Some(f) = host_cgl_call(c"CGLUnlockContext") else {
+            return 10004;
+        };
+        // SAFETY: a handle the framework that exports the call made.
+        return unsafe { f(ctx) };
+    }
+    let mut held = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(entry) = held.as_mut().and_then(|all| all.get_mut(&(ctx as usize))) else {
+        // `kCGLBadContext`: nothing ever locked it.
+        return 10004;
+    };
+    if entry.owner != Some(std::thread::current().id()) || entry.depth == 0 {
+        return 10004;
+    }
+    entry.depth -= 1;
+    if entry.depth == 0 {
+        entry.owner = None;
+        UNLOCKED.notify_all();
+    }
+    0
+}
+
+/// `CGLShareGroupObj CGLGetShareGroup(CGLContextObj ctx)`
+///
+/// The group of contexts whose textures, buffers and programs are the same
+/// objects. Every context this crate hands out is its own group: a
+/// `-initWithFormat:shareContext:` here makes a context SDL did not share with
+/// anything, and the siblings [`Shared`] makes are the same `NSOpenGLContext`
+/// seen from another thread rather than a second one. So the group is the
+/// context, which is the answer a caller comparing two of them needs.
+///
+/// # Safety
+///
+/// As [`CGLSetCurrentContext`].
+pub unsafe extern "C" fn CGLGetShareGroup(ctx: *mut c_void) -> *mut c_void {
+    if handle_in(ctx).is_some() {
+        return ctx;
+    }
+    let Some(entry) = host_cgl(c"CGLGetShareGroup") else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `CGLShareGroupObj CGLGetShareGroup(CGLContextObj)`, and a handle
+    // the framework that exports it made.
+    unsafe {
+        let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut c_void) -> *mut c_void>(
+            entry,
+        );
+        f(ctx)
+    }
 }
 
 unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
@@ -822,6 +1163,27 @@ unsafe extern "C" fn set_values(receiver: Id, _sel: Sel, values: *const i32, par
 
 unsafe extern "C" fn update(_receiver: Id, _sel: Sel) {}
 
+/// `-currentVirtualScreen`, which is always the first.
+///
+/// A virtual screen is one renderer of the context's pixel format, and a
+/// program reads this to find out which GPU it ended up on after the window
+/// moved between displays. There is one renderer here - see
+/// `crate::cgl::CGLQueryRendererInfo` - so there is one virtual screen, and it
+/// is the one in use.
+unsafe extern "C" fn current_virtual_screen(_receiver: Id, _sel: Sel) -> isize {
+    0
+}
+
+/// `-setCurrentVirtualScreen:`, which can only be told what it already is.
+unsafe extern "C" fn set_current_virtual_screen(_receiver: Id, _sel: Sel, screen: isize) {
+    if screen != 0 {
+        objc::fail!(
+            "-[NSOpenGLContext setCurrentVirtualScreen:]: this context has one virtual screen, \
+             so {screen} names no renderer"
+        );
+    }
+}
+
 unsafe extern "C" fn pixel_format(receiver: Id, _sel: Sel) -> Id {
     context_of(receiver).format
 }
@@ -830,6 +1192,7 @@ pub(crate) fn install() {
     let format = objc::class::lookup(c"NSOpenGLPixelFormat").expect("declared before its methods");
     methods!(format, {
         "initWithAttributes:" => init_with_attributes, c"@24@0:8^I16";
+        "getValues:forAttribute:forVirtualScreen:" => get_values, c"v32@0:8^i16I24i28";
     });
 
     let context = objc::class::lookup(c"NSOpenGLContext").expect("declared before its methods");
@@ -844,6 +1207,8 @@ pub(crate) fn install() {
         "clearDrawable" => clear_drawable, c"v16@0:8";
         "CGLContextObj" => cgl_context, c"^v16@0:8";
         "pixelFormat" => pixel_format, c"@16@0:8";
+        "currentVirtualScreen" => current_virtual_screen, c"q16@0:8";
+        "setCurrentVirtualScreen:" => set_current_virtual_screen, c"v24@0:8q16";
         "makeCurrentContext" => make_current_context, c"v16@0:8";
         "flushBuffer" => flush_buffer, c"v16@0:8";
         "update" => update, c"v16@0:8";

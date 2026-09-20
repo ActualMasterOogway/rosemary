@@ -15,6 +15,7 @@ iokit.workspace = true
 foundation.workspace = true
 appkit.workspace = true
 applicationservices.workspace = true
+coreservices.workspace = true
 audiotoolbox.workspace = true
 sdl3.workspace = true
 corevideo.workspace = true

@@ -337,6 +337,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // direction that does not fault.
     sig!("CFArrayCreate", P, P, P, I64, P),
     sig!("CFArrayCreateMutable", P, P, I64, P),
+    sig!("CFArrayCreateCopy", P, P, P),
+    sig!("CFArrayInsertValueAtIndex", V, P, I64, P),
+    sig!("CFArrayRemoveValueAtIndex", V, P, I64),
+    sig!("CFArrayRemoveAllValues", V, P),
     sig!("CFArrayExchangeValuesAtIndices", V, P, I64, I64),
     sig!("CFArrayGetCount", I64, P),
     sig!("CFArrayGetTypeID", U64),
@@ -394,6 +398,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFDataCreateWithBytesNoCopy", P, P, P, I64, P),
     sig!("CFDataCreateCopy", P, P, P),
     sig!("CFDataGetBytePtr", P, P),
+    sig!("CFDataGetMutableBytePtr", P, P),
+    sig!("CFDataSetLength", V, P, I64),
+    sig!("CFDataIncreaseLength", V, P, I64),
+    sig!("CFDataAppendBytes", V, P, P, I64),
+    // `CFRange` by value again, flattened to its two `CFIndex` fields.
+    sig!("CFDataDeleteBytes", V, P, I64, I64),
+    sig!("CFDataReplaceBytes", V, P, I64, I64, P, I64),
     sig!("CFDataGetLength", I64, P),
     sig!("CFDataGetTypeID", U64),
     sig!("CFDictionaryAddValue", V, P, P, P),
@@ -402,6 +413,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFDictionaryGetCount", I64, P),
     sig!("CFDictionaryCreate", P, P, P, P, I64, P, P),
     sig!("CFDictionaryCreateMutable", P, P, I64, P, P),
+    sig!("CFDictionaryCreateCopy", P, P, P),
+    sig!("CFDictionaryCreateMutableCopy", P, P, I64, P),
+    sig!("CFDictionaryGetCountOfKey", I64, P, P),
     sig!("CFDictionaryGetTypeID", U64),
     sig!("CFDictionaryGetValue", P, P, P),
     sig!("CFDictionaryGetValueIfPresent", BOOL, P, P, P),
@@ -515,6 +529,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CFAbsoluteTime` is a `double`, and this is where a timer's fire date
     // comes from.
     sig!("CFAbsoluteTimeGetCurrent", F64),
+    // ### The calendar
+    //
+    // `CFAbsoluteTime` is a `double` of seconds, and the two that take or
+    // return a `CFGregorianDate` by value are refused below rather than
+    // described here.
+    sig!("CFCalendarCreateWithIdentifier", P, P, P),
+    sig!("CFCalendarGetIdentifier", P, P),
+    sig!("CFCalendarCopyTimeZone", P, P),
+    sig!("CFCalendarSetTimeZone", V, P, P),
+    // `Boolean CFCalendarDecomposeAbsoluteTime(CFCalendarRef, CFAbsoluteTime,
+    // const char *, ...)` and its inverse, whose variadic half is one `int *`
+    // or one `int` per component the description names.
+    vsig!("CFCalendarDecomposeAbsoluteTime", BOOL, P, F64, P),
+    vsig!("CFCalendarComposeAbsoluteTime", BOOL, P, P, P),
+    sig!("CFAbsoluteTimeGetDayOfWeek", I32, F64, P),
+    sig!("CFAbsoluteTimeGetDayOfYear", I32, F64, P),
     // `CFSetApplierFunction(const void *value, void *context)`, called once
     // per member before the call returns - so unlike most callbacks here it is
     // reached on the guest's own thread, and unlike most it must still go out
@@ -573,6 +603,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringAppend", V, P, P),
     sig!("CFStringInsert", V, P, I64, P),
     sig!("CFStringDelete", V, P, I64, I64),
+    // `CFRange` by value, flattened, as `CFStringGetBytes` settled.
+    sig!("CFStringReplace", V, P, I64, I64, P),
+    sig!("CFStringReplaceAll", V, P, P),
+    // `CFIndex CFStringFindAndReplace(CFMutableStringRef, CFStringRef,
+    // CFStringRef, CFRange, CFStringCompareFlags)`, whose flags are a `UInt32`.
+    sig!("CFStringFindAndReplace", I64, P, P, P, I64, I64, U32),
+    sig!("CFStringCreateWithBytesNoCopy", P, P, P, I64, U32, BOOL, P),
+    sig!("CFStringGetFileSystemRepresentation", BOOL, P, P, I64),
+    sig!("CFStringGetMaximumSizeOfFileSystemRepresentation", I64, P),
     sig!("CFStringGetMaximumSizeForEncoding", I64, I64, U32),
     sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
@@ -1066,10 +1105,36 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a game does every frame.
     sig!("GetCurrentEventTime", F64),
     sig!("UpdateSystemActivity", I32, U8),
+    // ### The Carbon Event Manager
+    //
+    // `EventTargetRef GetApplicationEventTarget(void)` and the two other
+    // singletons, each an opaque pointer.
+    sig!("GetApplicationEventTarget", P),
+    sig!("GetEventDispatcherTarget", P),
+    sig!("GetMainEventLoop", P),
+    // `OSStatus InstallEventHandler(EventTargetRef, EventHandlerUPP, ItemCount,
+    // const EventTypeSpec *, void *, EventHandlerRef *)` - the handler is guest
+    // code, so it is substituted like any other callback.
+    cbsig!([1], "InstallEventHandler", I32, P, P, U64, P, P, P),
+    sig!("RemoveEventHandler", I32, P),
+    // `OSStatus InstallEventLoopTimer(EventLoopRef, EventTimerInterval,
+    // EventTimerInterval, EventLoopTimerUPP, void *, EventLoopTimerRef *)`.
+    // The two intervals are `double` seconds.
+    cbsig!([3], "InstallEventLoopTimer", I32, P, F64, F64, P, P, P),
+    sig!("RemoveEventLoopTimer", I32, P),
+    // `OSStatus ReceiveNextEvent(ItemCount, const EventTypeSpec *, EventTimeout,
+    // Boolean, EventRef *)`, whose timeout is `double` seconds.
+    sig!("ReceiveNextEvent", I32, U64, P, F64, U8, P),
+    sig!("ReleaseEvent", V, P),
+    sig!("SendEventToEventTarget", I32, P, P),
+    // `OSStatus SetSystemUIMode(SystemUIMode, SystemUIOptions)`, two `UInt32`.
+    sig!("SetSystemUIMode", I32, U32, U32),
     // `OSErr FSFindFolder(FSVolumeRefNum, OSType, Boolean, FSRef *)`.
     sig!("FSFindFolder", I16, I16, U32, U8, P),
-    // `OSStatus FSPathMakeRef(const UInt8 *, FSRef *, Boolean *)`.
+    // `OSStatus FSPathMakeRef(const UInt8 *, FSRef *, Boolean *)`, and the
+    // reverse - `OSStatus FSRefMakePath(const FSRef *, UInt8 *, UInt32)`.
     sig!("FSPathMakeRef", I32, P, P, P),
+    sig!("FSRefMakePath", I32, P, P, U32),
     // `OSStatus FSResolveAliasFile(FSRef *, Boolean, Boolean *, Boolean *)`.
     sig!("FSResolveAliasFile", I32, P, U8, P, P),
     // `OSStatus FSGetCatalogInfo(const FSRef *, FSCatalogInfoBitmap,
@@ -1086,6 +1151,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("FSFileOperationCreate", P, P),
     sig!("FSFileOperationScheduleWithRunLoop", V, P, P, P),
     sig!("GetCurrentProcess", I32, P),
+    sig!("GetFrontProcess", I32, P),
     sig!("GetProcessBundleLocation", I32, P, P),
     sig!("SameProcess", I32, P, P, P),
     sig!("SetFrontProcess", I32, P),
@@ -1197,6 +1263,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecTrustCopyAnchorCertificates", I32, P),
     sig!("SecStaticCodeCreateWithPath", I32, P, U64, P),
     sig!("SecRequirementCreateWithString", I32, P, U64, P),
+    sig!("SecRequirementCreateWithData", I32, P, U32, P),
+    sig!("SecCodeCopySelf", I32, U32, P),
+    sig!("SecCodeCheckValidity", I32, P, U32, P),
     sig!("SecStaticCodeCheckValidityWithErrors", I32, P, U64, P, P),
     // ## Text input sources, for the keyboard layout
     //
@@ -3481,11 +3550,21 @@ pub static REFUSED: &[(&str, &str)] = &[
         "CFRunLoopTimerCreate",
         "its context structure holds guest function pointers the host would call as arm64",
     ),
+    // `CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef)` returns sixteen bytes by
+    // value, in two integer registers, and the marshaller has no type wider
+    // than a doubleword to describe that with. Implemented all the same - the
+    // native backend calls it directly, with no marshaller in the way.
+    ("CFUUIDGetUUIDBytes", AGGREGATE),
     // Seventeen parameters: an allocator and the sixteen bytes of a UUID.
     (
         "CFUUIDGetConstantUUIDWithBytes",
         "seventeen parameters, more than the marshaller can place",
     ),
+    // `CFGregorianDate` is four narrow integers and a `double`, which travel in
+    // an integer register and a vector one. Implemented all the same - the
+    // native backend calls both directly, with no marshaller in the way.
+    ("CFAbsoluteTimeGetGregorianDate", AGGREGATE),
+    ("CFGregorianDateGetAbsoluteTime", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
     ("NSMouseInRect", AGGREGATE),

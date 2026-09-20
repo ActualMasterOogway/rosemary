@@ -25,12 +25,14 @@
 //! | [`bootstrap`] | the name server two unrelated processes rendezvous through |
 //! | [`task`] | `mach_task_self_`, the thread and host ports, exception ports |
 //! | [`info`] | `task_info` and the host statistics, which are not port questions at all |
+//! | [`vm`] | `vm_region_64` and the two memory calls beside it, for this task alone |
 //! | [`sync`] | Mach semaphores, which are named out of the same space |
 //! | [`kern`] | `kern_return_t` and the three numberings it is not |
 //!
 //! What is **not** here, and is refused rather than guessed at: exception
 //! delivery (see [`task`]), out-of-line memory in a message (see [`msg`]),
-//! `vm_`/`mach_vm_` against another task, and anything that would need a real
+//! `vm_`/`mach_vm_` against another task - see [`vm`], which answers for this one
+//! and refuses any other - and anything that would need a real
 //! kernel to be watching - dead-name notifications above all.
 //!
 //! The ratio the timebase reports is 1/1, so a tick *is* a nanosecond. Darwin
@@ -52,6 +54,7 @@ pub mod msg;
 pub mod space;
 pub mod sync;
 pub mod task;
+pub mod vm;
 pub mod wire;
 
 /// `mach_timebase_info_data_t`: the ratio from ticks to nanoseconds.
@@ -170,6 +173,10 @@ exports::exports! {
         "mach_port_move_member" => space::mach_port_move_member,
         "mach_port_set_attributes" => space::mach_port_set_attributes,
         "mach_port_request_notification" => space::mach_port_request_notification,
+
+        "vm_region_64" => vm::vm_region_64,
+        "vm_deallocate" => vm::vm_deallocate,
+        "vm_read_overwrite" => vm::vm_read_overwrite,
 
         "mach_msg" => msg::mach_msg,
         "mach_msg_overwrite" => msg::mach_msg_overwrite,

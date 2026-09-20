@@ -174,6 +174,7 @@ impl Native {
         // `dlopen`ing it, which is what `libsteam_api` does - binds it here.
         let steam = crate::steam::provider();
         let opengl = crate::opengl::provider();
+        let openal = crate::openal::provider();
         // Under `native` the image is host code calling the libraries it was
         // linked against, and the shortest chain that works is the honest one.
         // Under `builtin` it must reach this tree's runtime and frameworks
@@ -190,6 +191,7 @@ impl Native {
                 &dyld,
                 &steam,
                 &opengl,
+                &openal,
             ],
             false => vec![&eager, &tlv, &runtime, &platform, &steam],
         };

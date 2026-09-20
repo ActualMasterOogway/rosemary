@@ -59,6 +59,7 @@ pub mod poll;
 pub mod printf_l;
 pub mod pthread;
 pub mod random;
+pub mod regex;
 mod resolv;
 pub mod rlimit;
 pub mod sched;
@@ -249,6 +250,8 @@ static MODULES: &[exports::Module] = &[
     fortify::MODULE,
     #[cfg(not(target_os = "macos"))]
     glob::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    regex::MODULE,
     #[cfg(not(target_os = "macos"))]
     termios::MODULE,
     #[cfg(not(target_os = "macos"))]

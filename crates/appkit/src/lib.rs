@@ -20,6 +20,7 @@ pub mod backing;
 pub mod button;
 pub mod cgcontext;
 pub mod cgevent;
+pub mod cgl;
 pub mod classes;
 pub mod color;
 mod controls;
@@ -45,6 +46,7 @@ pub mod monitor;
 pub mod nib;
 pub mod nsevent;
 pub mod opengl;
+pub mod panel;
 pub mod pasteboard;
 mod pasteboard_manager;
 pub mod raster;
@@ -64,6 +66,7 @@ pub fn bootstrap() {
         foundation::bootstrap();
         classes::install();
         alert::install();
+        panel::install();
         appearance::install();
         application::install();
         dock::install();
@@ -188,11 +191,18 @@ exports::exports! {
         "CGLEnable" => CGLEnable,
         "CGLDisable" => CGLDisable,
         "CGLSetParameter" => CGLSetParameter,
+        "CGLSetCurrentContext" => opengl::CGLSetCurrentContext,
+        "CGLFlushDrawable" => opengl::CGLFlushDrawable,
+        "CGLClearDrawable" => opengl::CGLClearDrawable,
+        "CGLLockContext" => opengl::CGLLockContext,
+        "CGLUnlockContext" => opengl::CGLUnlockContext,
+        "CGLGetShareGroup" => opengl::CGLGetShareGroup,
     }
     groups {
         pasteboard_manager,
         coretext,
         cgcontext,
+        cgl,
     }
 }
 

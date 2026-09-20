@@ -22,6 +22,7 @@
 
 pub mod api;
 pub mod base;
+pub mod calendar;
 pub mod callbacks;
 pub mod collections;
 mod diskarbitration;
@@ -99,6 +100,13 @@ exports::exports! {
         "CFStringInsert" => api::CFStringInsert,
         "CFStringDelete" => api::CFStringDelete,
         "CFStringAppendCString" => api::CFStringAppendCString,
+        "CFStringReplace" => api::CFStringReplace,
+        "CFStringReplaceAll" => api::CFStringReplaceAll,
+        "CFStringFindAndReplace" => api::CFStringFindAndReplace,
+        "CFStringCreateWithBytesNoCopy" => api::CFStringCreateWithBytesNoCopy,
+        "CFStringGetFileSystemRepresentation" => api::CFStringGetFileSystemRepresentation,
+        "CFStringGetMaximumSizeOfFileSystemRepresentation"
+            => api::CFStringGetMaximumSizeOfFileSystemRepresentation,
         "CFArrayGetTypeID" => api::CFArrayGetTypeID,
         "CFArrayCreate" => api::CFArrayCreate,
         "CFArrayApplyFunction" => api::CFArrayApplyFunction,
@@ -106,6 +114,10 @@ exports::exports! {
         "CFArrayGetValueAtIndex" => api::CFArrayGetValueAtIndex,
         "CFArrayCreateMutable" => api::CFArrayCreateMutable,
         "CFArrayAppendValue" => api::CFArrayAppendValue,
+        "CFArrayCreateCopy" => api::CFArrayCreateCopy,
+        "CFArrayInsertValueAtIndex" => api::CFArrayInsertValueAtIndex,
+        "CFArrayRemoveValueAtIndex" => api::CFArrayRemoveValueAtIndex,
+        "CFArrayRemoveAllValues" => api::CFArrayRemoveAllValues,
         "CFSetGetTypeID" => api::CFSetGetTypeID,
         "CFSetApplyFunction" => api::CFSetApplyFunction,
         "CFSetGetCount" => api::CFSetGetCount,
@@ -113,6 +125,9 @@ exports::exports! {
         "CFDictionaryGetTypeID" => api::CFDictionaryGetTypeID,
         "CFDictionaryCreate" => api::CFDictionaryCreate,
         "CFDictionaryGetCount" => api::CFDictionaryGetCount,
+        "CFDictionaryGetCountOfKey" => api::CFDictionaryGetCountOfKey,
+        "CFDictionaryCreateCopy" => api::CFDictionaryCreateCopy,
+        "CFDictionaryCreateMutableCopy" => api::CFDictionaryCreateMutableCopy,
         "CFDictionaryApplyFunction" => api::CFDictionaryApplyFunction,
         "CFDictionaryGetValue" => api::CFDictionaryGetValue,
         "CFDictionaryGetValueIfPresent" => api::CFDictionaryGetValueIfPresent,
@@ -135,8 +150,15 @@ exports::exports! {
         "CFDataCreateCopy" => api::CFDataCreateCopy,
         "CFDataGetLength" => api::CFDataGetLength,
         "CFDataGetBytePtr" => api::CFDataGetBytePtr,
+        "CFDataGetMutableBytePtr" => api::CFDataGetMutableBytePtr,
+        "CFDataSetLength" => api::CFDataSetLength,
+        "CFDataIncreaseLength" => api::CFDataIncreaseLength,
+        "CFDataAppendBytes" => api::CFDataAppendBytes,
+        "CFDataDeleteBytes" => api::CFDataDeleteBytes,
+        "CFDataReplaceBytes" => api::CFDataReplaceBytes,
         "CFUUIDGetTypeID" => api::CFUUIDGetTypeID,
         "CFUUIDCreate" => api::CFUUIDCreate,
+        "CFUUIDGetUUIDBytes" => api::CFUUIDGetUUIDBytes,
         "CFUUIDCreateString" => api::CFUUIDCreateString,
         "CFUUIDGetConstantUUIDWithBytes" => api::CFUUIDGetConstantUUIDWithBytes,
         "CFURLGetTypeID" => api::CFURLGetTypeID,
@@ -211,6 +233,7 @@ exports::exports! {
         "CFRunLoopTimerIsValid" => api::CFRunLoopTimerIsValid,
     }
     groups {
+        calendar,
         preferences,
         diskarbitration,
         fsevents,
@@ -317,6 +340,22 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.push((
         "_kCFCoreFoundationVersionNumber".to_string(),
         base::global_cell("_kCFCoreFoundationVersionNumber", (1600.0f64).to_bits()),
+    ));
+    // The calendar identifiers, each of which is its own text - see
+    // `calendar::IDENTIFIERS`.
+    for (symbol, text) in calendar::IDENTIFIERS {
+        out.push((
+            (*symbol).to_string(),
+            base::global_cell(symbol, base::interned_name(text)),
+        ));
+    }
+    // A `const CFTimeInterval` like the one above it: the seconds from the 1904
+    // epoch - the one QuickTime and the old Mac OS counted from - to
+    // CoreFoundation's.
+    static INTERVAL_SINCE_1904: f64 = 3_061_152_000.0;
+    out.push((
+        "_kCFAbsoluteTimeIntervalSince1904".to_string(),
+        &INTERVAL_SINCE_1904 as *const f64 as usize as u64,
     ));
     out.extend(preferences::data_symbols());
     out.extend(diskarbitration::data_symbols());

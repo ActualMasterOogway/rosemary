@@ -17,6 +17,8 @@ mod why {
     pub const ERRNO: &str = "the errno numbers diverge above 34; see darwin::errno";
     pub const SOCKET: &str = "struct sockaddr and the AF_/MSG_ constants differ; see darwin::net";
     pub const OBJC: &str = "the Objective-C runtime is macOS-only";
+    pub const REGEX: &str = "regex_t and regmatch_t are laid out differently, and REG_NEWLINE and REG_NOSUB have \
+         each other's values; see darwin::regex";
     pub const PTHREAD: &str = "no Darwin-compatible implementation; see darwin::pthread for the family this \
          crate does implement";
 }
@@ -73,6 +75,15 @@ pub const NAMES: &[(&str, &str)] = &[
         "globfree",
         "as `glob`: it frees the pointer it reads at gl_pathv",
     ),
+    // `regmatch_t` holds two `regoff_t`, which is sixty-four bits on Darwin and
+    // `int` here, and a host `regcomp` writes sixty-four bytes into the
+    // thirty-two a guest declared. Kept listed although `crate::regex` now
+    // answers all four: the entry is what stops the host's own being bound
+    // instead, and `reason` carves an implemented name back out.
+    ("regcomp", REGEX),
+    ("regexec", REGEX),
+    ("regfree", REGEX),
+    ("regerror", REGEX),
     // `FTSENT::fts_statp` is a `struct stat *`, which is the [`STAT`] divergence
     // one pointer removed - the walk would hand the guest this host's.
     ("fts_open", STAT),

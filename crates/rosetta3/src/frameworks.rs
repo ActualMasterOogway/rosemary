@@ -147,6 +147,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(applicationservices::symbol),
     },
     Framework {
+        leaf: "CoreServices",
+        version: 'A',
+        umbrellas: &["Carbon"],
+        provide: Some(coreservices::provide),
+        data: None,
+        symbol: Some(coreservices::symbol),
+    },
+    Framework {
         leaf: "AudioToolbox",
         version: 'A',
         umbrellas: &[],
@@ -257,6 +265,7 @@ fn register_dlopen_names() {
         crate::dyld::register_synthetic(&borrowed, symbol);
     }
     register_opengl_framework();
+    register_openal_framework();
 }
 
 /// `OpenGL.framework`, as a handle over the GL library SDL is using.
@@ -274,6 +283,18 @@ fn register_opengl_framework() {
         return;
     }
     crate::dyld::register_synthetic(crate::opengl::INSTALL_PATHS, crate::opengl::symbol);
+}
+
+/// `OpenAL.framework`, as a handle over this host's own OpenAL.
+///
+/// The same reason [`register_opengl_framework`] has: a guest that `dlopen`s
+/// the framework and then `dlsym`s its way in gets the same answers a link
+/// gets, rather than a null handle.
+fn register_openal_framework() {
+    if !crate::openal::interposed() {
+        return;
+    }
+    crate::dyld::register_synthetic(crate::openal::INSTALL_PATHS, crate::openal::symbol);
 }
 
 /// Push the outermost autorelease pool, the one a process is born with.
@@ -451,6 +472,7 @@ pub fn symbol(name: &str) -> Option<u64> {
         // The host's GL, reached by `dlsym` rather than enumerated - see
         // `crate::opengl`, which publishes it through its own lazy provider.
         .or_else(|| crate::opengl::symbol(name))
+        .or_else(|| crate::openal::symbol(name))
 }
 
 /// Tell this tree's `NSBundle` which `.app` the guest is.

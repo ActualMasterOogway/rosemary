@@ -1,0 +1,350 @@
+//! `vm_region_64` and the two memory calls beside it, for this task alone.
+//!
+//! Mach's VM calls take a task port, and the only task this crate can answer
+//! for is its own - everything below reads `/proc/self/maps`, and a straight
+//! answer about somebody else's address space would be a fabrication. A port
+//! that is not [`TASK_SELF`] is refused, the way [`super::info::task_info`]
+//! refuses one.
+//!
+//! What asks: a game that reports its own memory use, and a crash reporter
+//! deciding whether a pointer is readable before it follows one. Both walk the
+//! map by calling `vm_region_64` with the address one past the region it was
+//! last told about, so the contract that matters is the *search*: the answer is
+//! the first region at or after the address handed in, and its real bounds come
+//! back in the same two out-parameters.
+
+#![cfg(not(target_os = "macos"))]
+
+use std::ffi::c_void;
+
+use super::kern::*;
+use super::space::{MACH_PORT_NULL, Name, TASK_SELF};
+
+/// `VM_REGION_BASIC_INFO_64`, the only flavour with a layout this tree can
+/// promise. The 32-bit `VM_REGION_BASIC_INFO` is a different structure and is
+/// refused rather than filled with this one.
+const VM_REGION_BASIC_INFO_64: i32 = 9;
+
+/// `VM_PROT_*`, which happen to be the same bits as `PROT_*` - stated rather
+/// than relied on, because nothing makes two operating systems agree.
+const VM_PROT_READ: i32 = 1;
+const VM_PROT_WRITE: i32 = 2;
+const VM_PROT_EXECUTE: i32 = 4;
+
+/// `VM_INHERIT_COPY`, which is `VM_INHERIT_DEFAULT` and what a private mapping
+/// on this host does across a fork.
+const VM_INHERIT_COPY: u32 = 1;
+/// `VM_INHERIT_SHARE`.
+const VM_INHERIT_SHARE: u32 = 0;
+
+/// `VM_BEHAVIOR_DEFAULT`.
+const VM_BEHAVIOR_DEFAULT: i32 = 0;
+
+/// `struct vm_region_basic_info_64`, whose layout is ABI: the guest declared
+/// one on its stack and reads the fields back by name.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BasicInfo64 {
+    protection: i32,
+    max_protection: i32,
+    inheritance: u32,
+    shared: i32,
+    reserved: i32,
+    offset: u64,
+    behavior: i32,
+    user_wired_count: u16,
+}
+
+const _: () = {
+    // `VM_REGION_BASIC_INFO_COUNT_64` is this size in 32-bit words, and a
+    // caller passes it in as the capacity of its buffer.
+    assert!(size_of::<BasicInfo64>() == 40);
+};
+
+/// One line of `/proc/self/maps`, as much of it as a region answer needs.
+struct Region {
+    start: u64,
+    end: u64,
+    protection: i32,
+    shared: bool,
+    offset: u64,
+}
+
+/// The first mapping ending above `address`, which is Mach's own search: the
+/// one containing it, or the next one up if there is a hole there.
+fn region_at_or_after(address: u64) -> Option<Region> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    maps.lines().find_map(|line| {
+        let region = parse(line)?;
+        (region.end > address).then_some(region)
+    })
+}
+
+/// `lo-hi perms offset dev inode path`.
+fn parse(line: &str) -> Option<Region> {
+    let mut fields = line.split_whitespace();
+    let (low, high) = fields.next()?.split_once('-')?;
+    let mut perms = fields.next()?.bytes();
+    let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
+    let mut protection = 0;
+    if perms.next() == Some(b'r') {
+        protection |= VM_PROT_READ;
+    }
+    if perms.next() == Some(b'w') {
+        protection |= VM_PROT_WRITE;
+    }
+    if perms.next() == Some(b'x') {
+        protection |= VM_PROT_EXECUTE;
+    }
+    Some(Region {
+        start: u64::from_str_radix(low, 16).ok()?,
+        end: u64::from_str_radix(high, 16).ok()?,
+        protection,
+        shared: perms.next() == Some(b's'),
+        offset,
+    })
+}
+
+/// Say once that a flavour went unanswered, because the alternative is a
+/// caller quietly told its own task has no regions.
+fn unsupported(flavor: i32) {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        eprintln!(
+            "rosetta3: vm_region_64: flavour {flavor} has a layout this tree does not \
+             publish; only VM_REGION_BASIC_INFO_64 is answered"
+        );
+    });
+}
+
+/// `kern_return_t vm_region_64(vm_map_t target_task, vm_address_t *address,
+/// vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info,
+/// mach_msg_type_number_t *infoCnt, mach_port_t *object_name)`
+///
+/// # Safety
+///
+/// `address` and `size` are writable words, `info` is writable for `*count`
+/// 32-bit words, `count` is writable, and `object_name` is null or writable.
+pub unsafe extern "C" fn vm_region_64(
+    task: Name,
+    address: *mut u64,
+    size: *mut u64,
+    flavor: i32,
+    info: *mut c_void,
+    count: *mut u32,
+    object_name: *mut Name,
+) -> i32 {
+    if address.is_null() || size.is_null() || info.is_null() || count.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    if task != TASK_SELF {
+        return KERN_INVALID_ARGUMENT;
+    }
+    if flavor != VM_REGION_BASIC_INFO_64 {
+        unsupported(flavor);
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller states `count` is readable.
+    if (unsafe { *count } as usize) * size_of::<u32>() < size_of::<BasicInfo64>() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller states `address` is readable.
+    let Some(region) = region_at_or_after(unsafe { *address }) else {
+        // Past the last mapping. Mach says this with `KERN_INVALID_ADDRESS`,
+        // and a walk stops on it.
+        return KERN_INVALID_ADDRESS;
+    };
+    let basic = BasicInfo64 {
+        protection: region.protection,
+        // Nothing here records what a mapping *could* be made, and reporting
+        // less than the current protection would be a contradiction.
+        max_protection: region.protection,
+        inheritance: match region.shared {
+            true => VM_INHERIT_SHARE,
+            false => VM_INHERIT_COPY,
+        },
+        shared: i32::from(region.shared),
+        reserved: 0,
+        offset: region.offset,
+        behavior: VM_BEHAVIOR_DEFAULT,
+        user_wired_count: 0,
+    };
+    // SAFETY: the caller's obligations, with the buffer's capacity checked
+    // above. Unaligned because Mach's structures are packed to four bytes.
+    unsafe {
+        *address = region.start;
+        *size = region.end - region.start;
+        info.cast::<BasicInfo64>().write_unaligned(basic);
+        *count = (size_of::<BasicInfo64>() / size_of::<u32>()) as u32;
+        if !object_name.is_null() {
+            // A name for the memory object behind the region. There is no port
+            // namespace entry for one, and null is what Mach returns for a
+            // region with no pager.
+            *object_name = MACH_PORT_NULL;
+        }
+    }
+    KERN_SUCCESS
+}
+
+/// `kern_return_t vm_deallocate(vm_map_t target_task, vm_address_t address,
+/// vm_size_t size)`
+///
+/// # Safety
+///
+/// `address` and `size` describe a mapping this process made and is done with.
+pub unsafe extern "C" fn vm_deallocate(task: Name, address: u64, size: u64) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // Mach accepts a zero-length deallocation and does nothing; `munmap` calls
+    // it an error.
+    if size == 0 {
+        return KERN_SUCCESS;
+    }
+    // SAFETY: the caller states this is its own mapping.
+    let out = unsafe { libc::munmap(address as *mut c_void, size as usize) };
+    match out {
+        0 => KERN_SUCCESS,
+        _ => KERN_INVALID_ADDRESS,
+    }
+}
+
+/// `kern_return_t vm_read_overwrite(vm_map_t target_task, vm_address_t address,
+/// vm_size_t size, vm_address_t data, vm_size_t *outsize)`
+///
+/// Within one address space this is a copy, which is what it is on Darwin too
+/// when the task is the caller's own.
+///
+/// # Safety
+///
+/// `address` is readable for `size` bytes and `data` writable for `size`; they
+/// do not overlap. `out_size` is null or writable.
+pub unsafe extern "C" fn vm_read_overwrite(
+    task: Name,
+    address: u64,
+    size: u64,
+    data: u64,
+    out_size: *mut u64,
+) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_ARGUMENT;
+    }
+    if address == 0 || data == 0 {
+        return KERN_INVALID_ADDRESS;
+    }
+    // SAFETY: the caller's obligation, including that the two do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            address as *const u8,
+            data as *mut u8,
+            usize::try_from(size).unwrap_or(0),
+        );
+        if !out_size.is_null() {
+            *out_size = size;
+        }
+    }
+    KERN_SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The call names the region a known address is in, which is the whole of
+    /// what a memory walk reads out of it.
+    #[test]
+    fn names_the_region_an_address_is_in() {
+        let page = vec![0_u8; 4096];
+        let mut address = page.as_ptr() as u64;
+        let mut size = 0_u64;
+        let mut info = [0_u32; 16];
+        let mut count = (size_of::<BasicInfo64>() / size_of::<u32>()) as u32;
+        let mut object = 1_u32;
+        // SAFETY: writable out-parameters, and a buffer whose capacity is what
+        // `count` says.
+        let status = unsafe {
+            vm_region_64(
+                TASK_SELF,
+                &mut address,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr().cast(),
+                &mut count,
+                &mut object,
+            )
+        };
+        assert_eq!(status, KERN_SUCCESS);
+        assert!(address <= page.as_ptr() as u64);
+        assert!(address + size > page.as_ptr() as u64);
+        assert_eq!(object, MACH_PORT_NULL);
+        // SAFETY: the call above filled it.
+        let basic = unsafe { info.as_ptr().cast::<BasicInfo64>().read_unaligned() };
+        assert_eq!(basic.protection & (VM_PROT_READ | VM_PROT_WRITE), 3);
+    }
+
+    /// Past the last mapping the walk is told to stop, rather than being handed
+    /// a region that is not there.
+    #[test]
+    fn the_end_of_the_map_is_an_invalid_address() {
+        let mut address = u64::MAX - 4096;
+        let mut size = 0_u64;
+        let mut info = [0_u32; 16];
+        let mut count = (size_of::<BasicInfo64>() / size_of::<u32>()) as u32;
+        // SAFETY: writable out-parameters; `object_name` is allowed to be null.
+        let status = unsafe {
+            vm_region_64(
+                TASK_SELF,
+                &mut address,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr().cast(),
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, KERN_INVALID_ADDRESS);
+    }
+
+    /// Another task is refused rather than answered about with this one's map.
+    #[test]
+    fn another_task_is_refused() {
+        let mut address = 0_u64;
+        let mut size = 0_u64;
+        let mut info = [0_u32; 16];
+        let mut count = 16_u32;
+        // SAFETY: writable out-parameters.
+        let status = unsafe {
+            vm_region_64(
+                TASK_SELF + 4,
+                &mut address,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr().cast(),
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, KERN_INVALID_ARGUMENT);
+    }
+
+    /// A read of this task's own memory is a copy.
+    #[test]
+    fn reads_this_tasks_own_memory() {
+        let from = [1_u8, 2, 3, 4];
+        let mut into = [0_u8; 4];
+        let mut wrote = 0_u64;
+        // SAFETY: two live, non-overlapping buffers of the stated length.
+        let status = unsafe {
+            vm_read_overwrite(
+                TASK_SELF,
+                from.as_ptr() as u64,
+                4,
+                into.as_mut_ptr() as u64,
+                &mut wrote,
+            )
+        };
+        assert_eq!(status, KERN_SUCCESS);
+        assert_eq!(into, from);
+        assert_eq!(wrote, 4);
+    }
+}

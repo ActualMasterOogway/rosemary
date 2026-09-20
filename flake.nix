@@ -33,6 +33,8 @@
               pkgs.libglvnd
               pkgs.libGLU
               pkgs.vulkan-loader
+              # OpenAL: dlopened by the OpenAL.framework bridge.
+              pkgs.openal
               # webkit: loaded with dlopen, so it has to be on the library path.
               pkgs.webkitgtk_6_0
             ];
