@@ -9,6 +9,10 @@ license.workspace = true
 libc.workspace = true
 llvm-bitcode.workspace = true
 rspirv.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
 
 [dev-dependencies]
 # Only `examples/shader_stats`, which compiles translated modules on a real
