@@ -7,6 +7,5 @@ license.workspace = true
 
 [dependencies]
 exports.workspace = true
-# No `machish`: this crate knows nothing about Mach-O. What it answers for is
-# published by `rosetta3`'s own objc provider, which already had that job.
 libc.workspace = true
+static_init.workspace = true

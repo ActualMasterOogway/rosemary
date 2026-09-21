@@ -10,12 +10,16 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use static_init::dynamic;
+
 static LIVE: LazyLock<Mutex<HashMap<&'static str, i64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[inline]
 pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_OBJC_CENSUS").is_some_and(|value| value != "0"))
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_OBJC_CENSUS").is_some_and(|value| value != "0");
+    *ON
 }
 
 fn adjust(class: &'static crate::class::Class, delta: i64) {
