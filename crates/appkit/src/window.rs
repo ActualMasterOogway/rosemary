@@ -811,6 +811,18 @@ unsafe extern "C" fn identity_rect(_receiver: Id, _sel: Sel, rect: NSRect) -> NS
     rect
 }
 
+/// The class-level spelling takes the style explicitly. Some older programs
+/// also send it to a window instance, so both method tables publish the same
+/// conversion.
+unsafe extern "C" fn identity_rect_style(
+    _receiver: Id,
+    _sel: Sel,
+    rect: NSRect,
+    _style_mask: usize,
+) -> NSRect {
+    rect
+}
+
 unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
     let window = window_of(receiver);
     window.requested = rect;
@@ -1737,6 +1749,10 @@ pub(crate) fn install() {
     class_methods!(class, {
         "windowNumberAtPoint:belowWindowWithWindowNumber:" => window_number_at_point,
             c"q40@0:8{CGPoint=dd}16q32";
+        "contentRectForFrameRect:styleMask:" => identity_rect_style,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
+        "frameRectForContentRect:styleMask:" => identity_rect_style,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
     });
     methods!(class, {
         "initWithContentRect:styleMask:backing:defer:" => init_with_content_rect,
@@ -1748,6 +1764,10 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "frameRectForContentRect:" => identity_rect,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "contentRectForFrameRect:styleMask:" => identity_rect_style,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
+        "frameRectForContentRect:styleMask:" => identity_rect_style,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
         "setFrame:" => set_frame, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setFrame:display:" => set_frame_display, c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48";
         "setFrame:display:animate:" => set_frame_display_animate, c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48c49";

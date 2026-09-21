@@ -375,6 +375,29 @@ unsafe extern "C" fn data_with_contents_of_file(_class: Id, _sel: Sel, path: Id)
     unsafe { api::CFAutorelease(data) as Id }
 }
 
+/// `+[NSDictionary dictionaryWithContentsOfFile:]`.
+///
+/// This convenience constructor accepts XML and binary property lists through
+/// the same parser used for bundle metadata. It answers nil when the file is
+/// unreadable, malformed, or its root is not a dictionary.
+unsafe extern "C" fn dictionary_with_contents_of_file(_class: Id, _sel: Sel, path: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let path = unsafe { crate::string::bytes(path) };
+    let Ok(path) = String::from_utf8(path) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = crate::plist::parse(&bytes) else {
+        return std::ptr::null_mut();
+    };
+    if !matches!(value, crate::plist::Value::Dictionary(_)) {
+        return std::ptr::null_mut();
+    }
+    crate::objectify::object(&value, &path)
+}
+
 /// `-writeToFile:atomically:`.
 ///
 /// The atomic flag is honoured by writing beside the target and renaming, which
@@ -1148,6 +1171,7 @@ pub(crate) fn install() {
     class_methods!(dictionary_class, {
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
         "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
+        "dictionaryWithContentsOfFile:" => dictionary_with_contents_of_file, c"@24@0:8@16";
     });
     methods!(mutable_dictionary, {
         "init" => init_mutable_dictionary, c"@16@0:8";

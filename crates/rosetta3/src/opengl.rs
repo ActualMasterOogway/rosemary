@@ -103,7 +103,21 @@ fn address(name: &str) -> Option<u64> {
     if let Some(ours) = crate::glsl::address(name) {
         return Some(ours);
     }
-    let c = CString::new(name).ok()?;
+    if name == "glDrawElements" {
+        return Some(draw_elements as *const () as usize as u64);
+    }
+    // Apple's 2.1 contexts expose vertex array objects through the APPLE
+    // extension. Mesa may return addresses for those old spellings even when
+    // the active context implements only the core/ARB object, in which case
+    // calls quietly leave VAO zero bound. Their prototypes and semantics are
+    // identical, so route the three object operations to the core names.
+    let host_name = match name {
+        "glBindVertexArrayAPPLE" => "glBindVertexArray",
+        "glGenVertexArraysAPPLE" => "glGenVertexArrays",
+        "glDeleteVertexArraysAPPLE" => "glDeleteVertexArrays",
+        _ => name,
+    };
+    let c = CString::new(host_name).ok()?;
     // GLU is not the driver's. It is a client-side library layered on GL, which
     // SDL does not load and whose names `SDL_GL_GetProcAddress` therefore does
     // not know - so this is the one part of the framework that is still the
@@ -112,4 +126,41 @@ fn address(name: &str) -> Option<u64> {
         return darwin::host_symbol(name);
     }
     sdl3::video::gl_proc_address(&c).map(|p| p as usize as u64)
+}
+
+/// Keep a malformed indexed draw from taking the host driver down with it.
+/// Apple's GL treats an index argument as an offset whenever an element array
+/// buffer is bound; Mesa dereferences a small offset as a client pointer when
+/// no such buffer is present. The diagnostic names the lost state at the ABI
+/// boundary instead of leaving a driver crash with no GL error.
+unsafe extern "C" fn draw_elements(mode_: u32, count: i32, type_: u32, indices: *const u8) {
+    type Draw = unsafe extern "C" fn(u32, i32, u32, *const u8);
+    type Get = unsafe extern "C" fn(u32, *mut i32);
+    static DRAW: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    static GET: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let draw = *DRAW.get_or_init(|| {
+        sdl3::video::gl_proc_address(c"glDrawElements").map(|entry| entry as usize)
+    });
+    let get = *GET
+        .get_or_init(|| sdl3::video::gl_proc_address(c"glGetIntegerv").map(|entry| entry as usize));
+    let (Some(draw), Some(get)) = (draw, get) else {
+        return;
+    };
+    // SAFETY: both pointers came from SDL for the named GL prototypes.
+    let (draw, get): (Draw, Get) = unsafe { (std::mem::transmute(draw), std::mem::transmute(get)) };
+    const ELEMENT_ARRAY_BUFFER_BINDING: u32 = 0x8895;
+    const VERTEX_ARRAY_BINDING: u32 = 0x85b5;
+    let (mut element, mut vao) = (0, 0);
+    unsafe {
+        get(ELEMENT_ARRAY_BUFFER_BINDING, &mut element);
+        get(VERTEX_ARRAY_BINDING, &mut vao);
+    }
+    if element == 0 && (indices as usize) < 0x1_0000 {
+        eprintln!(
+            "rosetta3: OpenGL: glDrawElements has VAO {vao}, no element-array buffer, and offset {:#x}; draw skipped",
+            indices as usize
+        );
+        return;
+    }
+    unsafe { draw(mode_, count, type_, indices) };
 }

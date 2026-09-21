@@ -949,7 +949,7 @@ fn scale(receiver: Id) -> f64 {
     }
 }
 
-unsafe extern "C" fn init_with_frame(receiver: Id, _sel: Sel, frame: NSRect) -> Id {
+pub(crate) unsafe extern "C" fn init_with_frame(receiver: Id, _sel: Sel, frame: NSRect) -> Id {
     view_of(receiver).frame = frame;
     receiver
 }

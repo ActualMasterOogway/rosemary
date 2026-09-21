@@ -34,7 +34,15 @@ impl Uid {
 #[derive(Debug)]
 pub struct Archive {
     objects: Vec<Value>,
+    nib_objects: Vec<NibObject>,
     top: BTreeMap<String, Uid>,
+}
+
+#[derive(Debug)]
+struct NibObject {
+    class_name: String,
+    classes: Vec<Value>,
+    fields: Vec<(String, Value)>,
 }
 
 /// What went wrong, as a sentence. [`plist::Error`] widened, not wrapped: a
@@ -47,6 +55,9 @@ fn bad(what: impl std::fmt::Display) -> Error {
 
 impl Archive {
     pub fn parse(bytes: &[u8]) -> Result<Archive, Error> {
+        if bytes.starts_with(b"NIBArchive") {
+            return nib::parse(bytes);
+        }
         Archive::from_plist(plist::parse(bytes)?)
     }
 
@@ -73,7 +84,11 @@ impl Archive {
                 top.insert(key.clone(), uid);
             }
         }
-        Ok(Archive { objects, top })
+        Ok(Archive {
+            objects,
+            nib_objects: Vec::new(),
+            top,
+        })
     }
 
     /// The entry `$top` files under `key`, which for a nib is `"root"`.
@@ -95,6 +110,13 @@ impl Archive {
     /// Empty for an entry that is not an archived object - a string, a number,
     /// or `$null` - which is how a caller tells the two apart.
     pub fn classes(&self, uid: Uid) -> &[Value] {
+        if !self.nib_objects.is_empty() {
+            return self
+                .nib_objects
+                .get(uid.0.checked_sub(1).unwrap_or(usize::MAX))
+                .map(|o| o.classes.as_slice())
+                .unwrap_or(&[]);
+        }
         let Some(class) = self.field_uid(uid, "$class") else {
             return &[];
         };
@@ -106,6 +128,12 @@ impl Archive {
 
     /// The name the archive recorded for the object's own class.
     pub fn class_name(&self, uid: Uid) -> Option<&str> {
+        if !self.nib_objects.is_empty() {
+            return self
+                .nib_objects
+                .get(uid.0.checked_sub(1)?)
+                .map(|o| o.class_name.as_str());
+        }
         let class = self.field_uid(uid, "$class")?;
         self.value(class)?.get("$classname")?.as_str()
     }
@@ -124,6 +152,14 @@ impl Archive {
 
     /// A keyed field of the object at `uid`, undereferenced.
     pub fn field(&self, uid: Uid, key: &str) -> Option<&Value> {
+        if !self.nib_objects.is_empty() {
+            return self
+                .nib_objects
+                .get(uid.0.checked_sub(1)?)?
+                .fields
+                .iter()
+                .find_map(|(name, value)| (name == key).then_some(value));
+        }
         self.value(uid)?.get(key)
     }
 
@@ -147,6 +183,18 @@ impl Archive {
     /// Both occur in one nib: a short key is a plain entry, and an `NSString`
     /// the graph refers to more than once is an object with `NS.string`.
     pub fn string(&self, uid: Uid) -> Option<&str> {
+        if !self.nib_objects.is_empty() {
+            let value = self
+                .field(uid, "NS.bytes")
+                .or_else(|| self.field(uid, "NS.string"))?;
+            return match value {
+                Value::String(s) => Some(s),
+                Value::Data(bytes) => std::str::from_utf8(bytes)
+                    .ok()
+                    .map(|s| s.trim_end_matches('\0')),
+                _ => None,
+            };
+        }
         match self.value(uid)? {
             Value::String(s) => Some(s),
             _ => self
@@ -158,6 +206,16 @@ impl Archive {
 
     /// The elements of an archived `NSArray` or `NSSet`.
     pub fn array(&self, uid: Uid) -> Vec<Uid> {
+        if !self.nib_objects.is_empty() {
+            return self
+                .nib_objects
+                .get(uid.0.checked_sub(1).unwrap_or(usize::MAX))
+                .into_iter()
+                .flat_map(|o| &o.fields)
+                .filter(|(key, _)| key == "UINibEncoderEmptyKey")
+                .filter_map(|(_, value)| as_uid(value))
+                .collect();
+        }
         let entries = match self.value(uid) {
             Some(Value::Array(a)) => a.as_slice(),
             _ => self
@@ -170,6 +228,13 @@ impl Archive {
 
     /// The `(key, value)` pairs of an archived `NSDictionary`, in stored order.
     pub fn dictionary(&self, uid: Uid) -> Vec<(Uid, Uid)> {
+        if !self.nib_objects.is_empty() {
+            let entries: Vec<Uid> = self.array(uid);
+            return entries
+                .chunks_exact(2)
+                .map(|pair| (pair[0], pair[1]))
+                .collect();
+        }
         let keys = self
             .field(uid, "NS.keys")
             .and_then(Value::as_array)
@@ -185,6 +250,15 @@ impl Archive {
     }
 
     pub fn integer(&self, uid: Uid) -> Option<i64> {
+        if !self.nib_objects.is_empty() {
+            return ["NS.intval", "NS.boolval"].into_iter().find_map(|key| {
+                match self.field(uid, key)? {
+                    Value::Integer(v) => Some(*v),
+                    Value::Bool(v) => Some(*v as i64),
+                    _ => None,
+                }
+            });
+        }
         match self.value(uid)? {
             Value::Integer(v) => Some(*v),
             Value::Bool(b) => Some(*b as i64),
@@ -194,11 +268,239 @@ impl Archive {
 
     /// How many entries the table has, for a caller reporting on a whole file.
     pub fn len(&self) -> usize {
-        self.objects.len()
+        if self.nib_objects.is_empty() {
+            self.objects.len()
+        } else {
+            self.nib_objects.len() + 1
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.objects.is_empty() && self.nib_objects.is_empty()
+    }
+}
+
+/// Apple's compact nib spelling. It contains the same keyed object graph as an
+/// `NSKeyedArchiver`, but keeps objects, keys, values, and class names in four
+/// separate tables. Object references are zero based; `Archive` reserves UID
+/// zero for nil, so references gain one while they are read.
+mod nib {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Object {
+        class: usize,
+        first_value: usize,
+        value_count: usize,
+    }
+
+    #[derive(Debug)]
+    struct Class {
+        name: String,
+        fallbacks: Vec<usize>,
+    }
+
+    pub(super) fn parse(bytes: &[u8]) -> Result<Archive, Error> {
+        if bytes.len() < 50 {
+            return Err(bad("a NIBArchive is shorter than its header"));
+        }
+        let format = le32(bytes, 10)?;
+        if format != 1 {
+            return Err(bad(format!("unsupported NIBArchive format {format}")));
+        }
+        let object_count = le32(bytes, 18)? as usize;
+        let object_offset = le32(bytes, 22)? as usize;
+        let key_count = le32(bytes, 26)? as usize;
+        let key_offset = le32(bytes, 30)? as usize;
+        let value_count = le32(bytes, 34)? as usize;
+        let value_offset = le32(bytes, 38)? as usize;
+        let class_count = le32(bytes, 42)? as usize;
+        let class_offset = le32(bytes, 46)? as usize;
+        for (name, offset) in [
+            ("object", object_offset),
+            ("key", key_offset),
+            ("value", value_offset),
+            ("class", class_offset),
+        ] {
+            if offset > bytes.len() {
+                return Err(bad(format!("the NIBArchive {name} table is past EOF")));
+            }
+        }
+
+        let mut at = object_offset;
+        let mut raw_objects = Vec::with_capacity(object_count);
+        for _ in 0..object_count {
+            raw_objects.push(Object {
+                class: varint(bytes, &mut at)?,
+                first_value: varint(bytes, &mut at)?,
+                value_count: varint(bytes, &mut at)?,
+            });
+        }
+        if at != key_offset {
+            return Err(bad(format!(
+                "the NIBArchive object table ends at {at}, not {key_offset}"
+            )));
+        }
+
+        let mut keys = Vec::with_capacity(key_count);
+        at = key_offset;
+        for _ in 0..key_count {
+            let len = varint(bytes, &mut at)?;
+            keys.push(text(slice(bytes, at, len)?)?);
+            at += len;
+        }
+        if at != value_offset {
+            return Err(bad(format!(
+                "the NIBArchive key table ends at {at}, not {value_offset}"
+            )));
+        }
+
+        let mut values = Vec::with_capacity(value_count);
+        at = value_offset;
+        for _ in 0..value_count {
+            let key = varint(bytes, &mut at)?;
+            let kind = *bytes
+                .get(at)
+                .ok_or_else(|| bad("a NIBArchive value has no type"))?;
+            at += 1;
+            let value = match kind {
+                0 => Value::Integer(read::<1>(bytes, &mut at)?[0] as i8 as i64),
+                1 => Value::Integer(i16::from_le_bytes(read(bytes, &mut at)?) as i64),
+                2 => Value::Integer(i32::from_le_bytes(read(bytes, &mut at)?) as i64),
+                3 => Value::Integer(i64::from_le_bytes(read(bytes, &mut at)?)),
+                4 => Value::Bool(false),
+                5 => Value::Bool(true),
+                6 => Value::Real(f32::from_le_bytes(read(bytes, &mut at)?) as f64),
+                7 => Value::Real(f64::from_le_bytes(read(bytes, &mut at)?)),
+                8 => {
+                    let len = varint(bytes, &mut at)?;
+                    let data = slice(bytes, at, len)?.to_vec();
+                    at += len;
+                    Value::Data(data)
+                }
+                9 => Value::Uid(0),
+                10 => {
+                    let object = u32::from_le_bytes(read(bytes, &mut at)?) as usize;
+                    if object >= object_count {
+                        return Err(bad(format!(
+                            "NIBArchive value references object {object} of {object_count}"
+                        )));
+                    }
+                    Value::Uid((object + 1) as u64)
+                }
+                other => return Err(bad(format!("unknown NIBArchive value type {other}"))),
+            };
+            let key = keys
+                .get(key)
+                .ok_or_else(|| bad(format!("NIBArchive value names absent key {key}")))?
+                .clone();
+            values.push((key, value));
+        }
+        if at != class_offset {
+            return Err(bad(format!(
+                "the NIBArchive value table ends at {at}, not {class_offset}"
+            )));
+        }
+
+        let mut classes = Vec::with_capacity(class_count);
+        at = class_offset;
+        for _ in 0..class_count {
+            let len = varint(bytes, &mut at)?;
+            let fallback_count = varint(bytes, &mut at)?;
+            let mut fallbacks = Vec::with_capacity(fallback_count);
+            for _ in 0..fallback_count {
+                fallbacks.push(u32::from_le_bytes(read(bytes, &mut at)?) as usize);
+            }
+            let raw = slice(bytes, at, len)?;
+            at += len;
+            let name = text(raw.strip_suffix(&[0]).unwrap_or(raw))?;
+            classes.push(Class { name, fallbacks });
+        }
+
+        let mut nib_objects = Vec::with_capacity(object_count);
+        for object in raw_objects {
+            let class = classes.get(object.class).ok_or_else(|| {
+                bad(format!(
+                    "NIBArchive object names absent class {}",
+                    object.class
+                ))
+            })?;
+            let end = object
+                .first_value
+                .checked_add(object.value_count)
+                .ok_or_else(|| bad("a NIBArchive object's value range overflows"))?;
+            let fields = values
+                .get(object.first_value..end)
+                .ok_or_else(|| bad("a NIBArchive object's values are out of bounds"))?
+                .to_vec();
+            let mut chain = vec![Value::String(class.name.clone())];
+            for fallback in &class.fallbacks {
+                let name = classes.get(*fallback).ok_or_else(|| {
+                    bad(format!("NIBArchive class names absent fallback {fallback}"))
+                })?;
+                chain.push(Value::String(name.name.clone()));
+            }
+            nib_objects.push(NibObject {
+                class_name: class.name.clone(),
+                classes: chain,
+                fields,
+            });
+        }
+
+        // The first object is the archive envelope. Its reference-valued keys
+        // are the compact format's equivalent of NSKeyedArchiver's `$top`.
+        let mut top = BTreeMap::new();
+        if let Some(envelope) = nib_objects.first() {
+            for (key, value) in &envelope.fields {
+                if let Some(uid) = as_uid(value) {
+                    top.insert(key.clone(), uid);
+                }
+            }
+        }
+        Ok(Archive {
+            objects: Vec::new(),
+            nib_objects,
+            top,
+        })
+    }
+
+    fn le32(bytes: &[u8], at: usize) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(
+            slice(bytes, at, 4)?.try_into().unwrap_or_default(),
+        ))
+    }
+
+    fn varint(bytes: &[u8], at: &mut usize) -> Result<usize, Error> {
+        let mut value = 0usize;
+        for shift in (0..usize::BITS as usize).step_by(7) {
+            let byte = *bytes
+                .get(*at)
+                .ok_or_else(|| bad("a NIBArchive varint runs past EOF"))?;
+            *at += 1;
+            value |= ((byte & 0x7f) as usize) << shift;
+            if byte & 0x80 != 0 {
+                return Ok(value);
+            }
+        }
+        Err(bad("a NIBArchive varint is too wide"))
+    }
+
+    fn read<const N: usize>(bytes: &[u8], at: &mut usize) -> Result<[u8; N], Error> {
+        let value = slice(bytes, *at, N)?.try_into().unwrap_or([0; N]);
+        *at += N;
+        Ok(value)
+    }
+
+    fn slice(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], Error> {
+        bytes
+            .get(at..at.saturating_add(len))
+            .ok_or_else(|| bad(format!("NIBArchive data at {at} runs past EOF")))
+    }
+
+    fn text(bytes: &[u8]) -> Result<String, Error> {
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| bad("a NIBArchive name is not UTF-8"))
     }
 }
 

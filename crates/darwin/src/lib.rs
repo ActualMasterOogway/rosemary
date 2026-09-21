@@ -67,6 +67,7 @@ pub mod select;
 pub mod shm;
 pub mod signal;
 pub mod spawn;
+pub mod stackprobe;
 pub mod stat;
 pub mod stdio;
 pub mod strict;
@@ -310,6 +311,8 @@ static MODULES: &[exports::Module] = &[
     kqueue::MODULE,
     #[cfg(not(target_os = "macos"))]
     backtrace::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    stackprobe::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     printf_l::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]

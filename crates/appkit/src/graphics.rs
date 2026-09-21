@@ -38,6 +38,14 @@ struct Image {
     space: CFTypeRef,
 }
 
+/// An ImageIO source. The encoded data stays retained so decoding can be
+/// deferred until `CGImageSourceCreateImageAtIndex`, as it is on Darwin.
+#[repr(C)]
+struct ImageSource {
+    isa: *const c_void,
+    data: CFTypeRef,
+}
+
 pub fn install() {
     corefoundation::base::register(c"__CGColorSpace", None, size_of::<ColorSpace>(), true);
     let provider =
@@ -51,6 +59,13 @@ pub fn install() {
     image.replace_method(
         objc::sel::get("dealloc"),
         image_dealloc as *const c_void,
+        c"v16@0:8",
+    );
+    let source =
+        corefoundation::base::register(c"__CGImageSource", None, size_of::<ImageSource>(), true);
+    source.replace_method(
+        objc::sel::get("dealloc"),
+        image_source_dealloc as *const c_void,
         c"v16@0:8",
     );
 }
@@ -81,6 +96,65 @@ unsafe extern "C" fn image_dealloc(receiver: objc::object::Id, _sel: objc::sel::
         image.space = std::ptr::null();
         objc::arc::finalize(receiver);
     }
+}
+
+unsafe extern "C" fn image_source_dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
+    // SAFETY: `-dealloc` of a `__CGImageSource`, whose body is `ImageSource`.
+    unsafe {
+        let source = &mut *(receiver as *mut ImageSource);
+        corefoundation::api::CFRelease(source.data);
+        source.data = std::ptr::null();
+        objc::arc::finalize(receiver);
+    }
+}
+
+/// Makes an ImageIO source over encoded image data.
+pub unsafe extern "C" fn CGImageSourceCreateWithData(
+    data: CFTypeRef,
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    // `CFDataGetBytePtr` rejects objects that are not this runtime's CFData.
+    // An empty CFData has a non-null sentinel pointer, and is a valid source
+    // even though it will not produce an image.
+    if unsafe { corefoundation::api::CFDataGetBytePtr(data) }.is_null() {
+        return std::ptr::null();
+    }
+    let class = objc::class::lookup(c"__CGImageSource").expect("installed during bootstrap");
+    // SAFETY: `ImageSource` is the registered class layout and `data` was
+    // checked above to be a live CFData.
+    let source = unsafe { corefoundation::base::allocate::<ImageSource>(class) };
+    unsafe {
+        (*source).data = corefoundation::api::CFRetain(data);
+    }
+    source as CFTypeRef
+}
+
+/// Decodes the sole image in a source. The formats supported here are the same
+/// ones NSImage accepts through the shared raster decoder.
+pub unsafe extern "C" fn CGImageSourceCreateImageAtIndex(
+    source: CFTypeRef,
+    index: usize,
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    let class = objc::class::lookup(c"__CGImageSource").expect("installed during bootstrap");
+    // SAFETY: null or an object supplied by the guest.
+    if index != 0 || source.is_null() || !unsafe { corefoundation::base::is_kind_of(source, class) }
+    {
+        return std::ptr::null();
+    }
+    // SAFETY: checked above to be an `ImageSource` with a retained CFData.
+    let data = unsafe { (*(source as *const ImageSource)).data };
+    let length = unsafe { corefoundation::api::CFDataGetLength(data) };
+    let Ok(length) = usize::try_from(length) else {
+        return std::ptr::null();
+    };
+    let bytes = unsafe { corefoundation::api::CFDataGetBytePtr(data) };
+    if bytes.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: the CFData owns at least `length` readable bytes.
+    let encoded = unsafe { std::slice::from_raw_parts(bytes, length) };
+    crate::raster::decode(encoded).map_or(std::ptr::null(), image_from_bitmap)
 }
 
 pub unsafe extern "C" fn CGDataProviderCreateWithData(
@@ -187,19 +261,21 @@ pub(crate) fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
             size,
             Some(release),
         );
+        let space = CGColorSpaceCreateDeviceRGB();
         let image = CGImageCreate(
             width,
             height,
             8,
             32,
             width * 4,
-            std::ptr::null(),
+            space,
             ALPHA_LAST,
             provider,
             std::ptr::null(),
             0,
             0,
         );
+        CGColorSpaceRelease(space);
         CGDataProviderRelease(provider);
         image
     }
@@ -347,6 +423,40 @@ pub unsafe extern "C" fn CGColorSpaceRelease(space: CFTypeRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_source_decodes_its_first_image() {
+        crate::bootstrap();
+        // A one-pixel, 24-bit BMP. Its stored BGR pixel is red and the row is
+        // padded to four bytes.
+        let mut bmp = vec![0u8; 58];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&58u32.to_le_bytes());
+        bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&1u32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&1u32.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+        bmp[54..58].copy_from_slice(&[0, 0, 255, 0]);
+        // SAFETY: every object remains live until its matching release.
+        unsafe {
+            let data = corefoundation::api::CFDataCreate(
+                std::ptr::null(),
+                bmp.as_ptr(),
+                bmp.len() as isize,
+            );
+            let source = CGImageSourceCreateWithData(data, std::ptr::null());
+            corefoundation::api::CFRelease(data);
+            assert!(!source.is_null());
+            assert!(CGImageSourceCreateImageAtIndex(source, 1, std::ptr::null()).is_null());
+            let image = CGImageSourceCreateImageAtIndex(source, 0, std::ptr::null());
+            assert_eq!((CGImageGetWidth(image), CGImageGetHeight(image)), (1, 1));
+            assert!(!CGImageGetColorSpace(image).is_null());
+            CGImageRelease(image);
+            corefoundation::api::CFRelease(source);
+        }
+    }
 
     #[test]
     fn image_over_little_endian_premultiplied_first_reads_as_bgra() {

@@ -829,20 +829,20 @@ unsafe extern "C" fn current_cursor(_class: Id, _sel: Sel) -> Id {
 /// otherwise show it again on the first unhide.
 static HIDDEN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-unsafe extern "C" fn hide(_class: Id, _sel: Sel) {
+fn hide_cursor() {
     let count = HIDDEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
     if tracing() {
-        eprintln!("rosetta3: appkit: +[NSCursor hide]: hidden {count} deep");
+        eprintln!("rosetta3: appkit: cursor hidden {count} deep");
     }
     if count == 1 {
         sdl3::video::set_cursor_visible(false);
     }
 }
 
-unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
+fn show_cursor() {
     let previous = HIDDEN.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     if tracing() {
-        eprintln!("rosetta3: appkit: +[NSCursor unhide]: was hidden {previous} deep");
+        eprintln!("rosetta3: appkit: cursor was hidden {previous} deep");
     }
     if previous <= 0 {
         // AppKit clamps at zero rather than letting the count go negative, or a
@@ -853,6 +853,32 @@ unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
     if previous == 1 {
         sdl3::video::set_cursor_visible(true);
     }
+}
+
+unsafe extern "C" fn hide(_class: Id, _sel: Sel) {
+    hide_cursor();
+}
+
+unsafe extern "C" fn unhide(_class: Id, _sel: Sel) {
+    show_cursor();
+}
+
+/// `CGError CGDisplayHideCursor(CGDirectDisplayID)`.
+///
+/// SDL has one process-wide pointer rather than one per display, matching the
+/// effective behavior of CoreGraphics' counted hide level. The display id is
+/// consequently immaterial; games commonly pass `kCGNullDirectDisplay` here.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayHideCursor(_display: u32) -> i32 {
+    hide_cursor();
+    0
+}
+
+/// `CGError CGDisplayShowCursor(CGDirectDisplayID)`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayShowCursor(_display: u32) -> i32 {
+    show_cursor();
+    0
 }
 
 #[allow(non_snake_case)]
@@ -999,6 +1025,16 @@ mod tests {
         // SAFETY: as above.
         unsafe { unhide(class, objc::sel::get("unhide")) };
         assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        // CoreGraphics and AppKit manipulate the same process cursor and the
+        // C entry points return `kCGErrorSuccess`.
+        assert_eq!(unsafe { CGDisplayHideCursor(0) }, 0);
+        assert_eq!(unsafe { CGDisplayHideCursor(0) }, 0);
+        assert!(!unsafe { CGCursorIsVisible() });
+        assert_eq!(unsafe { CGDisplayShowCursor(0) }, 0);
+        assert!(!unsafe { CGCursorIsVisible() });
+        assert_eq!(unsafe { CGDisplayShowCursor(0) }, 0);
+        assert!(unsafe { CGCursorIsVisible() });
     }
 
     /// A 2x image's point is in points and its pixels are not, so the two

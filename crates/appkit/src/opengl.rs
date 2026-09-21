@@ -4,6 +4,7 @@
 
 use std::ffi::c_void;
 
+use foundation::geometry::NSRect;
 use objc::object::Id;
 use objc::sel::Sel;
 use static_init::dynamic;
@@ -32,6 +33,13 @@ pub struct Context {
     /// What it takes to be current on more than one thread at once, allocated
     /// on first use by [`shared_of`]. Leaked with the object.
     shared: *mut Cell,
+}
+
+/// Storage added by `NSOpenGLView` after its `NSView` body.
+#[repr(C)]
+struct OpenGLView {
+    format: Id,
+    context: Id,
 }
 
 /// [`Shared`], and the signal a thread waiting for the context sleeps on.
@@ -84,6 +92,22 @@ struct Shared {
 
 pub const PIXEL_FORMAT_INSTANCE_SIZE: usize = size_of::<PixelFormat>();
 pub const CONTEXT_INSTANCE_SIZE: usize = size_of::<Context>();
+// `corefoundation::base::register` takes the complete instance size, not the
+// number of bytes a class adds. If this were just `OpenGLView`'s size,
+// `NSOpenGLView` would add no storage after the much larger `NSView`: these two
+// fields would then occupy the first two ivars of a guest subclass. Geometry
+// Dash exposes that collision when its `eventDelegate_` becomes the retained
+// pixel format and receives `-queueEvent:selector:`.
+pub const VIEW_INSTANCE_SIZE: usize = crate::view::INSTANCE_SIZE + size_of::<OpenGLView>();
+
+fn gl_view_of<'a>(receiver: Id) -> &'a mut OpenGLView {
+    let base = objc::class::lookup(c"NSView")
+        .expect("NSView is declared before NSOpenGLView")
+        .instance_size();
+    // SAFETY: NSOpenGLView adds exactly this body after NSView's storage, and
+    // every subclass inherits it at the same offset.
+    unsafe { &mut *receiver.cast::<u8>().add(base).cast::<OpenGLView>() }
+}
 
 /// `NSOpenGLPixelFormatAttribute`, the ones a program in this tree has asked
 /// for.
@@ -203,6 +227,15 @@ mod attribute {
 fn format_of<'a>(receiver: Id) -> &'a mut PixelFormat {
     // SAFETY: a pixel format of this crate's.
     unsafe { &mut *(receiver as *mut PixelFormat) }
+}
+
+/// `-[NSOpenGLPixelFormat CGLPixelFormatObj]`.
+///
+/// CGL pixel formats are opaque handles. The AppKit object already owns the
+/// complete chosen-format state in this runtime, so its stable object address
+/// is also the handle, with the same borrowed lifetime as Apple's accessor.
+unsafe extern "C" fn cgl_pixel_format(receiver: Id, _sel: Sel) -> *mut c_void {
+    receiver.cast()
 }
 
 fn context_of<'a>(receiver: Id) -> &'a mut Context {
@@ -446,6 +479,62 @@ unsafe extern "C" fn init_with_format(receiver: Id, _sel: Sel, format: Id, _shar
     let context = context_of(receiver);
     context.format = objc::arc::retain(format);
     receiver
+}
+
+/// `-[NSOpenGLView initWithFrame:pixelFormat:]`.
+///
+/// The view owns both the requested format and the context AppKit creates for
+/// it. The context is pointed back at the view immediately; it remains lazy at
+/// the SDL layer until the guest makes it current.
+unsafe extern "C" fn init_view_with_frame(
+    receiver: Id,
+    _sel: Sel,
+    frame: NSRect,
+    format: Id,
+) -> Id {
+    // SAFETY: initialise the inherited NSView body directly, avoiding a second
+    // dynamic dispatch through a guest subclass's own initializer.
+    let receiver =
+        unsafe { crate::view::init_with_frame(receiver, objc::sel::get("initWithFrame:"), frame) };
+    let view = gl_view_of(receiver);
+    view.format = objc::arc::retain(format);
+
+    let class = objc::class::lookup(c"NSOpenGLContext").expect("NSOpenGLContext is declared");
+    let context = objc::object::create_instance(class, 0);
+    // SAFETY: a fresh context and the initializer's declared arguments.
+    let context = unsafe {
+        init_with_format(
+            context,
+            objc::sel::get("initWithFormat:shareContext:"),
+            format,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: the context and view this initializer just established.
+    unsafe { set_view(context, objc::sel::get("setView:"), receiver) };
+    view.context = context;
+    receiver
+}
+
+unsafe extern "C" fn view_pixel_format(receiver: Id, _sel: Sel) -> Id {
+    gl_view_of(receiver).format
+}
+
+unsafe extern "C" fn open_gl_context(receiver: Id, _sel: Sel) -> Id {
+    gl_view_of(receiver).context
+}
+
+unsafe extern "C" fn set_open_gl_context(receiver: Id, _sel: Sel, context: Id) {
+    let view = gl_view_of(receiver);
+    if view.context == context {
+        return;
+    }
+    objc::arc::release(view.context);
+    view.context = objc::arc::retain(context);
+    if !context.is_null() {
+        // SAFETY: an NSOpenGLContext supplied to its declared setter.
+        unsafe { set_view(context, objc::sel::get("setView:"), receiver) };
+    }
 }
 
 /// `-setView:`, which records the drawable and nothing more.
@@ -700,6 +789,13 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
         true => primary,
         false => sibling(&mut state, primary, thread),
     };
+
+    if std::env::var_os("ROSETTA3_GL_DEBUG").is_some() {
+        eprintln!(
+            "rosetta3: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, owner={:?}",
+            state.owner
+        );
+    }
 
     if !sdl3::video::gl_make_current(window, sdl) {
         objc::fail!(
@@ -1193,6 +1289,7 @@ pub(crate) fn install() {
     methods!(format, {
         "initWithAttributes:" => init_with_attributes, c"@24@0:8^I16";
         "getValues:forAttribute:forVirtualScreen:" => get_values, c"v32@0:8^i16I24i28";
+        "CGLPixelFormatObj" => cgl_pixel_format, c"^v16@0:8";
     });
 
     let context = objc::class::lookup(c"NSOpenGLContext").expect("declared before its methods");
@@ -1214,11 +1311,34 @@ pub(crate) fn install() {
         "update" => update, c"v16@0:8";
         "setValues:forParameter:" => set_values, c"v32@0:8^i16q24";
     });
+
+    let view = objc::class::lookup(c"NSOpenGLView").expect("declared before its methods");
+    methods!(view, {
+        "initWithFrame:pixelFormat:" => init_view_with_frame,
+            c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "pixelFormat" => view_pixel_format, c"@16@0:8";
+        "openGLContext" => open_gl_context, c"@16@0:8";
+        "setOpenGLContext:" => set_open_gl_context, c"v24@0:8@16";
+        "prepareOpenGL" => update, c"v16@0:8";
+        "update" => update, c"v16@0:8";
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_gl_view_storage_precedes_subclass_ivars() {
+        crate::bootstrap();
+        let base = objc::class::lookup(c"NSView").expect("NSView");
+        let open_gl = objc::class::lookup(c"NSOpenGLView").expect("NSOpenGLView");
+
+        assert_eq!(
+            open_gl.instance_size(),
+            base.instance_size() + size_of::<OpenGLView>()
+        );
+    }
 
     /// No attribute is in both lists, and every one is in a list.
     ///

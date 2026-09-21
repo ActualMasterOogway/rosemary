@@ -47,6 +47,7 @@ pub mod nib;
 pub mod nsevent;
 pub mod opengl;
 pub mod panel;
+mod paragraph;
 pub mod pasteboard;
 mod pasteboard_manager;
 pub mod raster;
@@ -55,6 +56,7 @@ pub mod screen;
 pub mod script;
 pub mod text;
 pub mod textinput;
+mod transform;
 pub mod uchr;
 pub mod view;
 pub mod window;
@@ -85,6 +87,8 @@ pub fn bootstrap() {
         layout::install();
         controls::install();
         animation::install();
+        transform::install();
+        paragraph::install();
         backing::install();
         layer::install();
         text::install();
@@ -137,6 +141,9 @@ exports::exports! {
         "CGGetOnlineDisplayList" | "CGGetActiveDisplayList" => screen::CGGetOnlineDisplayList,
         "CGDisplayIDToOpenGLDisplayMask" => screen::CGDisplayIDToOpenGLDisplayMask,
         "CGDisplayIOServicePort" => screen::CGDisplayIOServicePort,
+        "CGDisplayHideCursor" => cursor::CGDisplayHideCursor,
+        "CGDisplayShowCursor" => cursor::CGDisplayShowCursor,
+        "CGCursorIsVisible" => cursor::CGCursorIsVisible,
         "CGWarpMouseCursorPosition" => screen::CGWarpMouseCursorPosition,
         "CGAssociateMouseAndMouseCursorPosition" => screen::CGAssociateMouseAndMouseCursorPosition,
         "CGEventSourceKeyState" => screen::CGEventSourceKeyState,
@@ -159,6 +166,8 @@ exports::exports! {
         "CGImageGetBitsPerComponent" => graphics::CGImageGetBitsPerComponent,
         "CGImageGetAlphaInfo" => graphics::CGImageGetAlphaInfo,
         "CGImageGetColorSpace" => graphics::CGImageGetColorSpace,
+        "CGImageSourceCreateWithData" => graphics::CGImageSourceCreateWithData,
+        "CGImageSourceCreateImageAtIndex" => graphics::CGImageSourceCreateImageAtIndex,
         "CGRectGetWidth" => geometry::CGRectGetWidth,
         "CGRectGetHeight" => geometry::CGRectGetHeight,
         "CGRectGetMinX" => geometry::CGRectGetMinX,
@@ -352,6 +361,7 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSDeviceResolution", "NSDeviceResolution"),
     ("_NSForegroundColorAttributeName", "NSColor"),
     ("_NSFontAttributeName", "NSFont"),
+    ("_NSParagraphStyleAttributeName", "NSParagraphStyle"),
     ("_NSObliquenessAttributeName", "NSObliqueness"),
     ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),
     ("_NSDeviceSize", "NSDeviceSize"),

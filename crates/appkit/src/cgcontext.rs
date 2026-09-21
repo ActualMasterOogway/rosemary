@@ -407,6 +407,49 @@ pub unsafe extern "C" fn CGContextClearRect(context: CFTypeRef, rect: NSRect) {
     }
 }
 
+/// Draws an image into a bitmap context, applying the current transform and
+/// nearest-neighbor scaling. Image pixels arrive premultiplied BGRA from the
+/// shared CoreGraphics representation.
+pub unsafe extern "C" fn CGContextDrawImage(context: CFTypeRef, rect: NSRect, image: CFTypeRef) {
+    let Some(ctx) = context_of(context) else {
+        return;
+    };
+    let Some((source_width, source_height, source)) = crate::graphics::image_bgra(image) else {
+        return;
+    };
+    if rect.size.width == 0.0 || rect.size.height == 0.0 {
+        return;
+    }
+    // SAFETY: every context is created with a state.
+    let state = unsafe { (*ctx.state).current };
+    let transform = state.ctm;
+    let determinant = transform.a * transform.d - transform.b * transform.c;
+    if determinant == 0.0 {
+        return;
+    }
+    let [left, bottom, right, top] = device_bounds(transform, rect);
+    for y in bottom.floor() as i64..top.ceil() as i64 {
+        for x in left.floor() as i64..right.ceil() as i64 {
+            // Map the device-pixel center back into the untransformed image
+            // rectangle. This preserves vertical flips used by cocos2d-x.
+            let dx = x as f64 + 0.5 - transform.tx;
+            let dy = y as f64 + 0.5 - transform.ty;
+            let user_x = (transform.d * dx - transform.c * dy) / determinant;
+            let user_y = (-transform.b * dx + transform.a * dy) / determinant;
+            let u = (user_x - rect.origin.x) / rect.size.width;
+            let v = (user_y - rect.origin.y) / rect.size.height;
+            if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                continue;
+            }
+            let source_x = (u * source_width as f64) as usize;
+            let source_y = ((1.0 - v) * source_height as f64) as usize;
+            let source_y = source_y.min(source_height - 1);
+            let at = (source_y * source_width + source_x) * 4;
+            write_bgra(ctx, &state, x, y, source[at..at + 4].try_into().unwrap());
+        }
+    }
+}
+
 /// The bytes of the pixel at device `(x, y)`, or `None` outside the bitmap or
 /// the clip.
 fn pixel<'a>(ctx: &BitmapContext, state: &GState, x: i64, y: i64) -> Option<&'a mut [u8]> {
@@ -425,6 +468,31 @@ fn pixel<'a>(ctx: &BitmapContext, state: &GState, x: i64, y: i64) -> Option<&'a 
     // SAFETY: the bitmap is `bytes_per_row * height` bytes, and `at` is a
     // pixel start inside it.
     Some(unsafe { std::slice::from_raw_parts_mut(ctx.data.add(at), channels) })
+}
+
+/// Writes one premultiplied BGRA source pixel in the context's component
+/// order. The texture-loading path clears its destination before drawing, so
+/// replacing rather than blending also avoids rounding already-premultiplied
+/// channels a second time.
+fn write_bgra(ctx: &BitmapContext, state: &GState, x: i64, y: i64, bgra: [u8; 4]) {
+    let Some(pixel) = pixel(ctx, state, x, y) else {
+        return;
+    };
+    if pixel.len() == 1 {
+        pixel[0] = bgra[3];
+        return;
+    }
+    let [b, g, r, a] = bgra;
+    let info = ctx.bitmap_info & ALPHA_INFO_MASK;
+    let alpha_first = matches!(info, 2 | 4 | 6);
+    let mut components = match alpha_first {
+        true => [a, r, g, b],
+        false => [r, g, b, a],
+    };
+    if ctx.bitmap_info & BYTE_ORDER_MASK == BYTE_ORDER_32_LITTLE && pixel.len() == 4 {
+        components.reverse();
+    }
+    pixel.copy_from_slice(&components[..pixel.len()]);
 }
 
 const ALPHA_INFO_MASK: u32 = 0x1f;
@@ -880,6 +948,7 @@ exports::exports! {
         "CGContextClipToRect" => CGContextClipToRect,
         "CGContextFillRect" => CGContextFillRect,
         "CGContextClearRect" => CGContextClearRect,
+        "CGContextDrawImage" => CGContextDrawImage,
         "CGContextSetShouldSmoothFonts" | "CGContextSetInterpolationQuality" | "CGContextSetLineCap" | "CGContextSetLineJoin" | "CGContextSetTextDrawingMode" | "CGContextSetBlendMode" => ignored_context_int,
         "CGContextSetLineWidth" => ignored_context_f64,
         "CGContextSetLineDash" => ignored_line_dash,
@@ -936,6 +1005,38 @@ pub fn data_symbols() -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draws_an_image_through_a_vertical_context_flip() {
+        crate::bootstrap();
+        let image = crate::graphics::image_from_bitmap(crate::raster::Bitmap {
+            width: 1,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        });
+        let mut pixels = [0u8; 8];
+        // SAFETY: `pixels` holds two writable RGBA rows and `image` is live.
+        unsafe {
+            let context =
+                CGBitmapContextCreate(pixels.as_mut_ptr().cast(), 1, 2, 8, 4, std::ptr::null(), 3);
+            CGContextTranslateCTM(context, 0.0, 2.0);
+            CGContextScaleCTM(context, 1.0, -1.0);
+            CGContextDrawImage(
+                context,
+                NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize {
+                        width: 1.0,
+                        height: 2.0,
+                    },
+                },
+                image,
+            );
+            CGContextRelease(context);
+            crate::graphics::CGImageRelease(image);
+        }
+        assert_eq!(pixels, [0, 255, 0, 255, 255, 0, 0, 255]);
+    }
 
     #[test]
     fn fills_a_translated_rect_in_a_little_endian_bitmap() {

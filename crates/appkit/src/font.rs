@@ -30,6 +30,36 @@ unsafe extern "C" fn localized_name(_receiver: Id, _sel: Sel, family: Id, face: 
     if family.is_null() { face } else { family }
 }
 
+/// `-[NSFontManager fontWithFamily:traits:weight:size:]`.
+///
+/// The named family is resolved by CoreText. Trait and legacy integer weight
+/// selection can refine a family containing several faces; the current font
+/// facade resolves the family's regular face, which is still preferable to
+/// returning nil for UI text that can use it.
+unsafe extern "C" fn font_with_family(
+    _receiver: Id,
+    _sel: Sel,
+    family: Id,
+    _traits: usize,
+    _weight: isize,
+    size: f64,
+) -> Id {
+    if family.is_null() {
+        // SAFETY: the system-font constructor's declared arguments.
+        return unsafe { system_font_of_size(std::ptr::null_mut(), _sel, size) };
+    }
+    // SAFETY: `family` is an NSString as required by the selector.
+    let font = unsafe { font_with_name(std::ptr::null_mut(), _sel, family, size) };
+    if font.is_null() {
+        // A Mac-only family such as Helvetica is routinely requested by old
+        // games. Use the platform's system face when fontconfig has no exact
+        // family rather than making otherwise renderable UI text disappear.
+        unsafe { system_font_of_size(std::ptr::null_mut(), _sel, size) }
+    } else {
+        font
+    }
+}
+
 /// `+[NSFont fontWithName:size:]`.
 ///
 /// `NSFont` is toll-free bridged to `CTFont`, so the font is the Core Text one.
@@ -72,6 +102,7 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "localizedNameForFamily:face:" => localized_name, c"@32@0:8@16@24";
+        "fontWithFamily:traits:weight:size:" => font_with_family, c"@48@0:8@16Q24q32d40";
     });
 }
 

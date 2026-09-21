@@ -15,6 +15,7 @@
 //! runner's own PNG reader says "Not a PNG" - correctly - and falls back here.
 
 use std::ffi::c_void;
+use std::{cell::RefCell, ptr};
 
 use foundation::geometry::{NSRect, NSSize};
 use objc::object::Id;
@@ -36,6 +37,9 @@ pub struct Image {
     cg_image: *const c_void,
     /// `-setTemplate:`. Only read back: nothing here tints an image.
     template: usize,
+    /// RGBA pixels for an image made with `-initWithSize:` and subsequently
+    /// locked for offscreen drawing.
+    focused_pixels: *mut Vec<u8>,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Image>();
@@ -120,6 +124,86 @@ fn recognise(bytes: &[u8]) -> Option<Recognised> {
 fn image_of<'a>(receiver: Id) -> &'a mut Image {
     // SAFETY: an image of this crate's.
     unsafe { &mut *(receiver as *mut Image) }
+}
+
+thread_local! {
+    /// Images locked for offscreen drawing, innermost last.
+    static IMAGE_FOCUS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+fn pixel_extent(size: NSSize) -> Option<(usize, usize)> {
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 0.0
+        || size.height <= 0.0
+    {
+        return None;
+    }
+    let width = size.width.ceil() as usize;
+    let height = size.height.ceil() as usize;
+    width.checked_mul(height)?.checked_mul(4)?;
+    Some((width, height))
+}
+
+/// `-[NSImage lockFocus]`: make the receiver the destination for immediate
+/// offscreen drawing.
+unsafe extern "C" fn lock_focus(receiver: Id, _sel: Sel) {
+    let image = image_of(receiver);
+    let Some((width, height)) = pixel_extent(image.size) else {
+        return;
+    };
+    let len = width * height * 4;
+    if image.focused_pixels.is_null() {
+        image.focused_pixels = Box::into_raw(Box::new(vec![0; len]));
+    } else {
+        // SAFETY: this field is created only by this method and remains owned
+        // by the image.
+        unsafe { (*image.focused_pixels).resize(len, 0) };
+    }
+    IMAGE_FOCUS.with(|stack| stack.borrow_mut().push(receiver as usize));
+}
+
+/// `-[NSImage unlockFocus]`.
+unsafe extern "C" fn unlock_focus(receiver: Id, _sel: Sel) {
+    IMAGE_FOCUS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.last().copied() == Some(receiver as usize) {
+            stack.pop();
+        }
+    });
+}
+
+/// Copy a rectangle from the currently focused image into an RGBA bitmap.
+fn focused_bitmap(rect: NSRect) -> Option<crate::raster::Bitmap> {
+    let receiver = IMAGE_FOCUS.with(|stack| stack.borrow().last().copied())? as Id;
+    let image = image_of(receiver);
+    let (image_width, image_height) = pixel_extent(image.size)?;
+    // A focused-view rect uses integral device pixels for this one-scale
+    // offscreen image. Clamp it rather than reading outside a partially
+    // intersecting image.
+    let left = rect.origin.x.floor().max(0.0) as usize;
+    let bottom = rect.origin.y.floor().max(0.0) as usize;
+    let width = rect.size.width.ceil().max(0.0) as usize;
+    let height = rect.size.height.ceil().max(0.0) as usize;
+    let width = width.min(image_width.saturating_sub(left));
+    let height = height.min(image_height.saturating_sub(bottom));
+    if width == 0 || height == 0 || image.focused_pixels.is_null() {
+        return None;
+    }
+    // SAFETY: allocated and sized for this image by `lock_focus`.
+    let source = unsafe { &*image.focused_pixels };
+    let mut pixels = vec![0; width.checked_mul(height)?.checked_mul(4)?];
+    for row in 0..height {
+        let source_row = image_height - bottom - height + row;
+        let from = (source_row * image_width + left) * 4;
+        let to = row * width * 4;
+        pixels[to..to + width * 4].copy_from_slice(&source[from..from + width * 4]);
+    }
+    Some(crate::raster::Bitmap {
+        width: width as u32,
+        height: height as u32,
+        pixels,
+    })
 }
 
 /// The bytes an image holds.
@@ -464,6 +548,11 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
         unsafe { corefoundation::api::CFRelease(image.cg_image) };
         image.cg_image = std::ptr::null();
     }
+    if !image.focused_pixels.is_null() {
+        // SAFETY: allocated by `lock_focus`, and the image owns it.
+        drop(unsafe { Box::from_raw(image.focused_pixels) });
+        image.focused_pixels = ptr::null_mut();
+    }
     objc::arc::finalize(receiver);
 }
 
@@ -600,14 +689,10 @@ pub(crate) fn install() {
     // that is wanted first names itself. The encodings are still each method's
     // own: the runtime marshals a guest's send by decoding exactly this string,
     // and the shared implementation does not make the arguments go away.
-    for (selector, types) in [
-        ("lockFocus", c"v16@0:8"),
-        ("unlockFocus", c"v16@0:8"),
-        (
-            "bestRepresentationForRect:context:hints:",
-            c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48@56",
-        ),
-    ] {
+    for (selector, types) in [(
+        "bestRepresentationForRect:context:hints:",
+        c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48@56",
+    )] {
         class.replace_method(
             objc::sel::get(selector),
             needs_pixels as *const c_void,
@@ -615,6 +700,8 @@ pub(crate) fn install() {
         );
     }
     methods!(class, {
+        "lockFocus" => lock_focus, c"v16@0:8";
+        "unlockFocus" => unlock_focus, c"v16@0:8";
         "drawInRect:fromRect:operation:fraction:" => draw_in_rect,
             c"v96@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88";
         "drawInRect:fromRect:operation:fraction:respectFlipped:hints:" =>
@@ -781,6 +868,14 @@ pub mod bitmap {
                 pixels,
             },
         )
+    }
+
+    /// `-initWithFocusedViewRect:` snapshots the current offscreen image.
+    unsafe extern "C" fn init_with_focused_view_rect(receiver: Id, _sel: Sel, rect: NSRect) -> Id {
+        match focused_bitmap(rect) {
+            Some(bitmap) => adopt(receiver, bitmap),
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// The eleven-argument designated initialiser.
@@ -985,6 +1080,8 @@ pub mod bitmap {
         methods!(class, {
             "initWithData:" => init_with_data, c"@24@0:8@16";
             "initWithCGImage:" => init_with_cg_image, c"@24@0:8^{CGImage=}16";
+            "initWithFocusedViewRect:" => init_with_focused_view_rect,
+                c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
             "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bitmapFormat:bytesPerRow:bitsPerPixel:"
                 => init_with_planes, c"@104@0:8^*16q24q32q40q48c56c64@72Q80q88q96";
             "bitmapData" => bitmap_data, c"^v16@0:8";
@@ -1224,6 +1321,44 @@ pub mod bitmap {
             // SAFETY: `-bitmapData` is `void * (id, SEL)`.
             let got = unsafe { bitmap_data(rep, objc::sel::get("bitmapData")) };
             assert_eq!(got, buffer.as_mut_ptr());
+        }
+
+        /// The legacy AppKit text path snapshots a blank `NSImage` through the
+        /// current focus and expects a stable four-channel bitmap buffer.
+        #[test]
+        fn a_focused_image_becomes_a_bitmap_rep() {
+            crate::bootstrap();
+            let image = super::super::empty(NSSize {
+                width: 7.0,
+                height: 3.0,
+            });
+            // SAFETY: the image is live for the whole focus interval.
+            unsafe { super::super::lock_focus(image, objc::sel::get("lockFocus")) };
+            let rep = objc::object::create_instance(
+                objc::class::lookup(c"NSBitmapImageRep").expect("NSBitmapImageRep"),
+                0,
+            );
+            let rect = NSRect {
+                origin: foundation::geometry::NSPoint::default(),
+                size: NSSize {
+                    width: 7.0,
+                    height: 3.0,
+                },
+            };
+            // SAFETY: the designated initialiser takes this live focused rect.
+            let rep = unsafe {
+                init_with_focused_view_rect(rep, objc::sel::get("initWithFocusedViewRect:"), rect)
+            };
+            // SAFETY: balances the lock above.
+            unsafe { super::super::unlock_focus(image, objc::sel::get("unlockFocus")) };
+            assert!(!rep.is_null());
+            // SAFETY: accessors on the rep just created.
+            unsafe {
+                assert_eq!(pixels_wide(rep, objc::sel::get("pixelsWide")), 7);
+                assert_eq!(pixels_high(rep, objc::sel::get("pixelsHigh")), 3);
+                assert_eq!(bytes_per_row(rep, objc::sel::get("bytesPerRow")), 28);
+                assert!(!bitmap_data(rep, objc::sel::get("bitmapData")).is_null());
+            }
         }
     }
 }

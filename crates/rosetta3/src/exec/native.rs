@@ -1,5 +1,3 @@
-//! Running a host-architecture image: link it against the real dylibs and call it.
-
 use machish::image::EntryPoint;
 use machish::loader::Loader;
 use machish::memory::MmapSpace;
@@ -13,12 +11,6 @@ use crate::exec::Execution;
 use crate::stack::GuestStack;
 use crate::vm::VmError;
 
-/// A host-executable spec, minus the subtypes this runtime cannot in fact run.
-///
-/// `Arm64::accepts_subtype` takes arm64e, and machish refuses its authenticated
-/// chained pointers by name. Narrowing here rather than failing later is what
-/// sends a fat binary with an arm64e slice and an x86-64 one to the emulated
-/// backend instead of stopping on `/bin/ls`.
 #[derive(Copy, Clone, Debug)]
 pub struct HostRunnable<S>(pub S);
 
@@ -109,10 +101,6 @@ unsafe extern "C" fn enter_unix_thread(_entry: u64, _sp: u64) -> ! {
     core::arch::naked_asm!("mov sp, x1", "br x0");
 }
 
-// SAFETY: none of the three fields is mutated after construction, and the raw
-// pointers inside the two `MmapSpace`s are handles to mappings that live as long
-// as the `Native`. What the program does to its own memory once running is the
-// program's business, exactly as it would be outside this runtime.
 unsafe impl Sync for Native {}
 
 impl Native {
@@ -131,55 +119,24 @@ impl Native {
             reason: e.to_string(),
         })?;
 
-        // Deliberately *not* `MmapSpace::executable`, which implies `MAP_JIT`.
-        // MAP_JIT gates every store on the per-thread write-protect toggle, and
-        // a program storing to its own globals is not a JIT writing code: with
-        // the toggle on, the first `__DATA` write is a SIGBUS, and with it off
-        // this thread has no W^X and any thread the program starts has the
-        // fault back. A plain mapping plus the loader's own `mprotect` gives
-        // `__TEXT` RX and `__DATA` RW, which is what the image asked for -
-        // measured on this host: an anonymous RW mapping does become RX.
         let mut memory = MmapSpace::new();
-        // Nothing here needs virtualizing: the image is host code calling host
-        // libraries, so the denylist that exists to force an emulated guest onto
-        // a shim would only refuse symbols nothing else answers.
         let mut host = NativeDylibProvider::system();
         host.allow_everything();
-        // ...except the names whose Darwin and host ABIs differ, which
-        // `allow_everything` would otherwise re-admit. Empty on macOS, where this
-        // image really is calling the libraries it was linked against.
         darwin::divergent::deny_in(&mut host);
-        // And, under the builtin runtime, the two families whose objects would
-        // otherwise be Apple's. Both are no-ops under `native`, and both must
-        // come after `allow_everything`, which clears the prefix list.
         crate::objc::host::deny_foreign_classes(&mut host);
         crate::frameworks::deny_host_frameworks(&mut host);
         crate::opengl::deny_host_gl(&mut host);
 
         let eager = eager_binding_shims();
         let tlv = tlv_provider();
-        // The symbols libSystem exports and no other host libc does:
-        // `___stack_chk_guard`, `__NSGetExecutablePath`, `_environ`, the Mach
-        // task port. On macOS the host provider answers every one of them, which
-        // is why this chain went without it; off Darwin nothing does, and an
-        // unbound `___stack_chk_guard` faults in the first prologue the program
-        // enters. Same provider the emulated chain uses, in the same position.
         let runtime = crate::shims::runtime::provider();
         let platform = darwin::provider();
         let objc = crate::objc::dispatch::provider();
         let frameworks = crate::frameworks::provider();
         let dyld = crate::dyld::provider();
-        // The Steam bridge's dispatch symbol, in both arms: a program linked
-        // directly against the generated `steamclient.dylib` - rather than
-        // `dlopen`ing it, which is what `libsteam_api` does - binds it here.
         let steam = crate::steam::provider();
         let opengl = crate::opengl::provider();
         let openal = crate::openal::provider();
-        // Under `native` the image is host code calling the libraries it was
-        // linked against, and the shortest chain that works is the honest one.
-        // Under `builtin` it must reach this tree's runtime and frameworks
-        // instead - including `dlopen`, or the first `dlopen("CoreFoundation")`
-        // puts Apple's classes in front of a program that has ours.
         let mut providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
             true => vec![
                 &eager,
@@ -195,34 +152,18 @@ impl Native {
             ],
             false => vec![&eager, &tlv, &runtime, &platform, &steam],
         };
-        // Last, and only when the host's own libraries are allowed to answer at
-        // all. This backend is the one an x86-64 guest gets on an x86-64 host, so
-        // leaving it out of `darwin::strict` left the mode answering nothing on
-        // the configuration it exists for: every name reached the host's libc and
-        // the program ran to completion. Same rule and same order as the emulated
-        // chain - see [`crate::program::HostProviders::chain`].
         match darwin::strict::enabled() {
             true => crate::program::announce_strict(),
             false => providers.push(&host),
         }
 
-        // A native image is of this host's architecture by definition, which is what
-        // makes it the native backend's. See [`darwin::sysctl`].
         darwin::sysctl::set_guest_arch(match cfg!(target_arch = "aarch64") {
             true => darwin::sysctl::GuestArch::Arm64,
             false => darwin::sysctl::GuestArch::X86_64,
         });
-        // And that its instructions are this CPU's, which is what lets
-        // `hw.optional.*` report what this CPU has rather than the guest
-        // architecture's baseline. See `darwin::sysctl::optional_feature`.
         #[cfg(not(target_os = "macos"))]
         darwin::sysctl::set_runs_host_instructions(true);
 
-        // The image's C++ runtime is the vendored one of this host's
-        // architecture, on macOS as well as off it. Off Darwin there is no
-        // `/usr/lib/libc++.1.dylib` to link against at all; on macOS there is,
-        // but binding to it would put the guest's C++ allocations outside
-        // [`crate::interpose`]'s reach. See [`crate::cxxlib`].
         let mut report = Loader::new(HOST_SPEC)
             .link_with(
                 &bytes,
@@ -236,9 +177,6 @@ impl Native {
                 reason: e.to_string(),
             })?;
 
-        // The unwinder and the C++ ABI, whose names the host provider would
-        // otherwise claim with its own implementations. Before anything reads
-        // the report, and in the emulated backend's order.
         let load = |e: machish::Error| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),
@@ -254,16 +192,10 @@ impl Native {
         )
         .map_err(load)?;
 
-        // `libmimalloc.3.dylib` replaces `free` for every image that binds it,
-        // and a `malloc` from one allocator freed by the other aborts inside
-        // libmalloc rather than anywhere near the allocation.
         crate::interpose::apply(&mut report, &mut memory).map_err(|e| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),
         })?;
-        // After the interpositions, because the answer wanted is the allocator
-        // the guest's code *ends up* calling. This backend only: see
-        // [`crate::interpose::adopt_guest_allocator`].
         crate::hostheap::apply(&mut report, &mut memory).map_err(|e| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),
@@ -274,13 +206,6 @@ impl Native {
         })?;
         crate::interpose::adopt_guest_allocator(&report);
 
-        // Say what did not bind, now that every repair above has had its say and
-        // `missing` means missing. The emulated backend has always done this;
-        // this one had not, and the difference is the whole diagnostic: a native
-        // image calls straight through its stub, so an unbound import is a jump
-        // to zero with no runtime in the way to name the symbol. Every failure
-        // this backend reported was "SIGSEGV at 0x0" with the answer sitting in
-        // the link report the whole time.
         let unbound = crate::program::announce_unbound_imports(&report, path);
         crate::program::announce_passthrough_imports(&report, path);
         if !unbound.is_empty() && crate::program::strict_imports() {
@@ -297,22 +222,14 @@ impl Native {
 
         flush_icache(&report);
         crate::tls::register(&report);
-        // The dynamic loader needs the executable itself as the first flat
-        // namespace. Plugins such as `libYoYoGamepad` import C++ definitions
-        // from the runner rather than from one of their dependencies.
         crate::dyld::set_executable_path(path, report.root().map_or(0, |i| i.slide));
         if let Some(root) = report.root() {
             crate::dyld::set_executable_header(root.base);
         }
-        // Before the program runs, because the first thing it may do is throw.
         crate::dyld::register_mapped_images(&report);
-        // And to LLDB, which otherwise has nothing to name a frame in the
-        // program with: these images were mapped here rather than by dyld.
         crate::lldb::register_images(&report, path);
 
         let stack = GuestStack::new(crate::stack::DEFAULT_STACK, path, args)?;
-        // What `_NSGetArgc`/`_NSGetArgv` answer with, now that there is a layout
-        // for them to point into.
         let (argc, argv, _, _) = stack.main_args();
         crate::shims::runtime::set_process_args(argc, argv);
         foundation::processinfo::set_arguments(args);
@@ -411,17 +328,6 @@ impl Execution for Native {
 
 impl Native {
     /// Realize the Objective-C metadata of an image the guest `dlopen`ed.
-    ///
-    /// The same three passes [`Native::realize_objc`] runs for the executable,
-    /// against the loaded image's own report: extend the published runtime,
-    /// point the new image's class references at the registered objects, and
-    /// unique its selectors. The third is what `register_loaded` does last and
-    /// the one a native guest cannot do without - it reaches `objc_msgSend`
-    /// directly, so a selector reference still holding a string pointer is a
-    /// message the runtime cannot match against any method it has.
-    ///
-    /// Serialised, because two threads may `dlopen` at once and each publishes a
-    /// whole new snapshot: without the lock one would be built from a copy taken
     /// before the other's classes went in and would then replace it.
     fn realize_loaded(&self, report: &LinkReport) -> Result<(), VmError> {
         static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -461,19 +367,6 @@ impl Native {
 }
 
 /// The program's memory, for the passes that write back into its own metadata.
-///
-/// A native image is mapped at the addresses it was linked for, so a guest
-/// address is a host one and the copy is a `memcpy`. The loader's regions are
-/// still what says an address is *in* the program: a metadata pointer that is
-/// not belongs in a diagnostic rather than in a fault.
-///
-/// Two places to look, because after a `dlopen` there are two loaders. The
-/// executable's `MmapSpace` holds the executable and what it was linked against;
-/// an image the *guest* loaded was mapped by [`crate::dyld`] and its regions are
-/// there. A view that knew only the first silently found nothing for every
-/// address in a loaded image, so selector uniquing rewrote no slots and reported
-/// no error - the image kept raw strings in its `__objc_selrefs` and its first
-/// message was refused by name.
 struct HostView<'a>(&'a MmapSpace);
 
 impl HostView<'_> {
@@ -541,23 +434,12 @@ impl crate::objc::Realizer for Native {
 
     /// The registered class. Nothing intercepts the sends a native image makes,
     /// so the guest's own `objc_class` would be a receiver this runtime never
-    /// made - see [`crate::objc::rewrite_refs`], which is the same argument for
-    /// the references the compiler emitted.
+    /// made - see [`crate::objc::rewrite_refs`].
     fn class_value(&self, rt: &crate::objc::ObjcRuntime, guest_va: u64) -> u64 {
         rt.host_or(guest_va)
     }
 }
 
-/// `__tlv_bootstrap`, from this runtime rather than from dyld.
-///
-/// dyld initialises the descriptors of the images *it* loaded; these were loaded
-/// here, so their thunks still hold the bootstrap pointer and dyld's own
-/// implementation aborts the process through `_tlv_bootstrap_error` on the first
-/// thread-local read. Flat, so it answers a two-level import naming libSystem.
-///
-/// Ahead of [`crate::shims::runtime::provider`] in the chain, which defines the
-/// same names for an emulated guest: that one is the plain function, and a native
-/// image reaches its thread-locals through the thunk.
 fn tlv_provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 tlv>");
     lib.flat(true);
@@ -586,14 +468,6 @@ fn flush_icache(report: &LinkReport) {
 }
 
 /// Invalidate the instruction cache over `len` bytes at `start`.
-///
-/// Darwin publishes `sys_icache_invalidate` for this; elsewhere it is the compiler
-/// builtin `__clear_cache`, which is in `libgcc`/`compiler-rt` rather than in libc and
-/// so is declared here rather than taken from the `libc` crate.
-///
-/// # Safety
-///
-/// `start..start+len` is mapped.
 unsafe fn invalidate_icache(start: *mut u8, len: usize) {
     #[cfg(target_os = "macos")]
     {
