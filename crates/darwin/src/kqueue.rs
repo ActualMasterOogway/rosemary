@@ -1,23 +1,21 @@
-//! `kqueue`, on a host that has `poll`.
+//! `kqueue`, on host readiness interfaces.
 //!
 //! BSD's event queue is the readiness interface every Darwin program with an
-//! I/O thread reaches for, and this host has nothing shaped like it. What it
-//! has is `poll`, which answers the same question one call at a time - so a
-//! kqueue here is a *record of what was registered* and `kevent` is a `poll`
-//! over that record, rebuilt on each call.
+//! I/O thread reaches for. Linux has `epoll`, whose persistent interest list is
+//! close enough to use directly. Other hosts use the portable `poll`
+//! reconstruction, which rebuilds a poll set for every `kevent` call.
 //!
 //! Two things do not fall out of that, and they are what the rest of this
 //! module is:
 //!
 //! - **The queue needs a descriptor of its own.** `kqueue()` returns one, and a
 //!   caller is entitled to close it, pass it to `poll`, or hand it to another
-//!   thread. It is an `eventfd` here, which gives all three - and it doubles as
-//!   the wakeup channel below.
+//!   thread. Linux returns the `epoll` descriptor; the generic backend returns
+//!   its `eventfd` wakeup descriptor.
 //! - **`EVFILT_USER` is not readiness at all.** It is a flag one thread sets
 //!   with `NOTE_TRIGGER` to wake another out of `kevent`, which is how a program
-//!   ends its own I/O loop. Nothing in `poll` corresponds; the trigger writes to
-//!   the queue's own eventfd, which is in the poll set, so a `kevent` blocked
-//!   with no timeout returns at once.
+//!   ends its own I/O loop. The backends use a private eventfd so a blocked
+//!   `kevent` returns at once.
 //!
 //! Deliberate refusals, following refusal-over-guessing:
 //!
@@ -109,23 +107,314 @@ impl Registration {
     }
 }
 
-#[derive(Default)]
-struct Queue {
+struct Queue<B> {
     registrations: HashMap<(usize, i16), Registration>,
     /// Triggered `EVFILT_USER` idents, in the order they were triggered, and
     /// the set form of the same thing - a second trigger before the first is
     /// delivered is one event, not two.
     triggered: VecDeque<usize>,
     triggered_set: HashSet<usize>,
+    backend: Arc<B>,
 }
 
-fn queues() -> &'static Mutex<HashMap<c_int, Arc<Mutex<Queue>>>> {
+impl<B> Queue<B> {
+    fn new(backend: B) -> Self {
+        Self {
+            registrations: HashMap::new(),
+            triggered: VecDeque::new(),
+            triggered_set: HashSet::new(),
+            backend: Arc::new(backend),
+        }
+    }
+}
+
+/// A ready descriptor reported by one concrete host readiness mechanism.
+#[derive(Clone, Copy)]
+struct Ready {
+    fd: c_int,
+    revents: i16,
+    wake: bool,
+}
+
+/// The host-specific part of a kqueue. `Queue<B>` is monomorphized with the
+/// selected backend; this is deliberately not a trait object or a run-time
+/// host capability choice.
+trait ReadinessBackend: Sized {
+    fn new() -> Result<(Self, c_int), c_int>;
+    fn wake(&self);
+    fn drain_wake(&self);
+    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int>;
+    fn wait(
+        &self,
+        queue: c_int,
+        registrations: &HashMap<(usize, i16), Registration>,
+        capacity: usize,
+        timeout: c_int,
+    ) -> Result<Vec<Ready>, c_int>;
+}
+
+/// The portable reconstruction of a readiness set. It remains the complete
+/// implementation outside Linux.
+#[cfg(not(target_os = "linux"))]
+struct PollBackend {
+    wake: c_int,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl ReadinessBackend for PollBackend {
+    fn new() -> Result<(Self, c_int), c_int> {
+        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if wake < 0 {
+            Err(crate::errno::get())
+        } else {
+            Ok((Self { wake }, wake))
+        }
+    }
+
+    fn wake(&self) {
+        wake_fd(self.wake)
+    }
+    fn drain_wake(&self) {
+        drain_fd(self.wake)
+    }
+    fn update(&self, _: c_int, _: i16, _: i16) -> Result<(), c_int> {
+        Ok(())
+    }
+
+    fn wait(
+        &self,
+        queue: c_int,
+        registrations: &HashMap<(usize, i16), Registration>,
+        _: usize,
+        timeout: c_int,
+    ) -> Result<Vec<Ready>, c_int> {
+        let mut watched = poll_set(queue, registrations);
+        let ready =
+            unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, timeout) };
+        if ready < 0 {
+            return Err(crate::errno::get());
+        }
+        Ok(watched
+            .into_iter()
+            .filter(|entry| entry.revents != 0)
+            .map(|entry| Ready {
+                fd: entry.fd,
+                revents: entry.revents,
+                wake: entry.fd == queue,
+            })
+            .collect())
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct EpollBackend {
+    epoll: c_int,
+    wake: c_int,
+    poll_only: Mutex<HashSet<c_int>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EpollBackend {
+    fn drop(&mut self) {
+        // This is the private wakeup descriptor, never the guest-visible
+        // kqueue descriptor (which the guest owns and may already have closed).
+        unsafe { libc::close(self.wake) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EpollBackend {
+    const WAKE_TOKEN: u64 = u64::MAX;
+
+    fn event(fd: c_int, interest: i16) -> libc::epoll_event {
+        libc::epoll_event {
+            events: ((interest & libc::POLLIN != 0) as u32 * libc::EPOLLIN as u32)
+                | ((interest & libc::POLLOUT != 0) as u32 * libc::EPOLLOUT as u32),
+            u64: fd as u64,
+        }
+    }
+
+    fn ctl(epoll: c_int, op: c_int, fd: c_int, interest: i16) -> Result<(), c_int> {
+        let mut event = Self::event(fd, interest);
+        if unsafe { libc::epoll_ctl(epoll, op, fd, &raw mut event) } < 0 {
+            Err(crate::errno::get())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ReadinessBackend for EpollBackend {
+    fn new() -> Result<(Self, c_int), c_int> {
+        let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if epoll < 0 {
+            return Err(crate::errno::get());
+        }
+        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if wake < 0 {
+            unsafe { libc::close(epoll) };
+            return Err(crate::errno::get());
+        }
+        let mut event = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: Self::WAKE_TOKEN,
+        };
+        if unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_ADD, wake, &raw mut event) } < 0 {
+            let errno = crate::errno::get();
+            unsafe {
+                libc::close(wake);
+                libc::close(epoll)
+            };
+            return Err(errno);
+        }
+        Ok((
+            Self {
+                epoll,
+                wake,
+                poll_only: Mutex::new(HashSet::new()),
+            },
+            epoll,
+        ))
+    }
+
+    fn wake(&self) {
+        wake_fd(self.wake)
+    }
+    fn drain_wake(&self) {
+        drain_fd(self.wake)
+    }
+
+    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int> {
+        if before == after {
+            return Ok(());
+        }
+        let mut poll_only = self.poll_only.lock().unwrap_or_else(|e| e.into_inner());
+        if poll_only.contains(&fd) {
+            if after == 0 {
+                poll_only.remove(&fd);
+            }
+            return Ok(());
+        }
+        let result = match (before != 0, after != 0) {
+            (false, true) => Self::ctl(self.epoll, libc::EPOLL_CTL_ADD, fd, after),
+            (true, true) => Self::ctl(self.epoll, libc::EPOLL_CTL_MOD, fd, after),
+            (true, false) => Self::ctl(self.epoll, libc::EPOLL_CTL_DEL, fd, 0),
+            (false, false) => Ok(()),
+        };
+        match result {
+            Err(errno) if before == 0 && errno == libc::EPERM => {
+                poll_only.insert(fd);
+                Ok(())
+            }
+            // Closing a watched FD removes it from epoll. Keep Darwin's
+            // deletion semantics even if the host has already done that work.
+            Err(errno) if after == 0 && matches!(errno, libc::ENOENT | libc::EBADF) => Ok(()),
+            other => other,
+        }
+    }
+
+    fn wait(
+        &self,
+        queue: c_int,
+        registrations: &HashMap<(usize, i16), Registration>,
+        capacity: usize,
+        timeout: c_int,
+    ) -> Result<Vec<Ready>, c_int> {
+        let mut result = Vec::new();
+        let poll_only = self
+            .poll_only
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if poll_only.is_empty() {
+            return self.wait_epoll(queue, capacity, timeout);
+        }
+        let mut watched = Vec::with_capacity(poll_only.len() + 1);
+        watched.push(libc::pollfd {
+            fd: queue,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        for fd in &poll_only {
+            let interest = interest_for(registrations, *fd);
+            if interest != 0 {
+                watched.push(libc::pollfd {
+                    fd: *fd,
+                    events: interest,
+                    revents: 0,
+                });
+            }
+        }
+        if unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, timeout) } < 0 {
+            return Err(crate::errno::get());
+        }
+        for entry in watched.iter().skip(1) {
+            if entry.revents != 0 {
+                result.push(Ready {
+                    fd: entry.fd,
+                    revents: entry.revents,
+                    wake: false,
+                });
+            }
+        }
+        if watched[0].revents != 0 {
+            result.extend(self.wait_epoll(
+                queue,
+                capacity.saturating_sub(result.len()).max(1),
+                0,
+            )?);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EpollBackend {
+    fn wait_epoll(
+        &self,
+        queue: c_int,
+        capacity: usize,
+        timeout: c_int,
+    ) -> Result<Vec<Ready>, c_int> {
+        let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; capacity.max(1)];
+        let count =
+            unsafe { libc::epoll_wait(queue, events.as_mut_ptr(), events.len() as c_int, timeout) };
+        if count < 0 {
+            return Err(crate::errno::get());
+        }
+        Ok(events
+            .into_iter()
+            .take(count as usize)
+            .map(|event| Ready {
+                fd: event.u64 as c_int,
+                revents: epoll_revents(event.events),
+                wake: event.u64 == Self::WAKE_TOKEN,
+            })
+            .collect())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn epoll_revents(events: u32) -> i16 {
+    ((events & libc::EPOLLIN as u32 != 0) as i16 * libc::POLLIN)
+        | ((events & libc::EPOLLOUT as u32 != 0) as i16 * libc::POLLOUT)
+        | ((events & libc::EPOLLERR as u32 != 0) as i16 * libc::POLLERR)
+        | ((events & libc::EPOLLHUP as u32 != 0) as i16 * libc::POLLHUP)
+}
+
+#[cfg(target_os = "linux")]
+type SelectedBackend = EpollBackend;
+#[cfg(not(target_os = "linux"))]
+type SelectedBackend = PollBackend;
+
+fn queues() -> &'static Mutex<HashMap<c_int, Arc<Mutex<Queue<SelectedBackend>>>>> {
     #[dynamic]
-    static QUEUES: Mutex<HashMap<c_int, Arc<Mutex<Queue>>>> = Default::default();
+    static QUEUES: Mutex<HashMap<c_int, Arc<Mutex<Queue<SelectedBackend>>>>> = Default::default();
     &QUEUES
 }
 
-fn queue_of(fd: c_int) -> Option<Arc<Mutex<Queue>>> {
+fn queue_of(fd: c_int) -> Option<Arc<Mutex<Queue<SelectedBackend>>>> {
     queues()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -135,25 +424,20 @@ fn queue_of(fd: c_int) -> Option<Arc<Mutex<Queue>>> {
 
 /// `int kqueue(void)`
 pub extern "C" fn kqueue() -> c_int {
-    // Non-blocking because the wakeup is drained without knowing whether
-    // anything wrote to it, and close-on-exec because a kqueue is not
-    // inherited across an `exec` on Darwin either.
-    // SAFETY: `eventfd` takes a count and a flag word.
-    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-    if fd < 0 {
+    let Ok((backend, fd)) = SelectedBackend::new() else {
         return -1;
-    }
+    };
     // Whatever this number held before is gone with the descriptor it named;
     // see the module note on `close`.
     queues()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(fd, Arc::new(Mutex::new(Queue::default())));
+        .insert(fd, Arc::new(Mutex::new(Queue::new(backend))));
     fd
 }
 
 /// Wake a `kevent` blocked on `queue`.
-fn wake(queue: c_int) {
+fn wake_fd(queue: c_int) {
     let one: u64 = 1;
     // SAFETY: an eventfd this module created, and eight bytes to write.
     unsafe { libc::write(queue, (&raw const one).cast::<c_void>(), size_of::<u64>()) };
@@ -161,7 +445,7 @@ fn wake(queue: c_int) {
 
 /// Drain the wakeup channel, which is level-triggered and would otherwise
 /// return from every later `poll` at once.
-fn drain(queue: c_int) {
+fn drain_fd(queue: c_int) {
     let mut value: u64 = 0;
     // SAFETY: as [`wake`]; the descriptor is non-blocking, so this ends with
     // `EAGAIN` rather than waiting.
@@ -173,18 +457,26 @@ fn drain(queue: c_int) {
 /// The number is **Darwin's**: it reaches the guest as an `EV_ERROR` event's
 /// `data`, which is a value rather than the `errno` slot, so nothing later
 /// translates it.
-fn apply(queue: c_int, state: &mut Queue, change: &Kevent) -> Result<(), c_int> {
+fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(), c_int> {
     if !matches!(change.filter, EVFILT_READ | EVFILT_WRITE | EVFILT_USER) {
         return Err(crate::errno::from_host(libc::EINVAL));
     }
     let key = (change.ident, change.filter);
 
+    let mut registrations = state.registrations.clone();
+    let mut triggered = state.triggered.clone();
+    let mut triggered_set = state.triggered_set.clone();
+
     if change.flags & EV_DELETE != 0 {
-        if state.registrations.remove(&key).is_none() {
+        if registrations.remove(&key).is_none() {
             return Err(crate::errno::from_host(libc::ENOENT));
         }
-        state.triggered.retain(|ident| *ident != change.ident);
-        state.triggered_set.remove(&change.ident);
+        triggered.retain(|ident| *ident != change.ident);
+        triggered_set.remove(&change.ident);
+        sync_interest(state, &registrations, change.filter, change.ident)?;
+        state.registrations = registrations;
+        state.triggered = triggered;
+        state.triggered_set = triggered_set;
         return Ok(());
     }
 
@@ -200,7 +492,7 @@ fn apply(queue: c_int, state: &mut Queue, change: &Kevent) -> Result<(), c_int> 
                 return Err(crate::errno::from_host(crate::errno::get()));
             }
         }
-        state.registrations.insert(
+        registrations.insert(
             key,
             Registration {
                 ident: change.ident,
@@ -212,7 +504,7 @@ fn apply(queue: c_int, state: &mut Queue, change: &Kevent) -> Result<(), c_int> 
             },
         );
     } else {
-        let Some(registration) = state.registrations.get_mut(&key) else {
+        let Some(registration) = registrations.get_mut(&key) else {
             return Err(crate::errno::from_host(libc::ENOENT));
         };
         if change.flags & EV_ENABLE != 0 {
@@ -224,16 +516,58 @@ fn apply(queue: c_int, state: &mut Queue, change: &Kevent) -> Result<(), c_int> 
     }
 
     if change.filter == EVFILT_USER && change.fflags & NOTE_TRIGGER != 0 {
-        let enabled = state
-            .registrations
+        let enabled = registrations
             .get(&key)
             .is_some_and(|registration| registration.enabled);
-        if enabled && state.triggered_set.insert(change.ident) {
-            state.triggered.push_back(change.ident);
-            wake(queue);
+        if enabled && triggered_set.insert(change.ident) {
+            triggered.push_back(change.ident);
         }
     }
+    sync_interest(state, &registrations, change.filter, change.ident)?;
+    let woke = change.filter == EVFILT_USER
+        && change.fflags & NOTE_TRIGGER != 0
+        && triggered != state.triggered;
+    state.registrations = registrations;
+    state.triggered = triggered;
+    state.triggered_set = triggered_set;
+    if woke {
+        state.backend.wake();
+    }
     Ok(())
+}
+
+fn interest_for(registrations: &HashMap<(usize, i16), Registration>, fd: c_int) -> i16 {
+    registrations
+        .values()
+        .filter(|registration| registration.enabled && registration.ident == fd as usize)
+        .fold(0, |interest, registration| {
+            interest
+                | match registration.filter {
+                    EVFILT_READ => libc::POLLIN,
+                    EVFILT_WRITE => libc::POLLOUT,
+                    _ => 0,
+                }
+        })
+}
+
+fn sync_interest<B: ReadinessBackend>(
+    state: &mut Queue<B>,
+    registrations: &HashMap<(usize, i16), Registration>,
+    filter: i16,
+    ident: usize,
+) -> Result<(), c_int> {
+    if filter == EVFILT_USER {
+        return Ok(());
+    }
+    let fd = c_int::try_from(ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
+    state
+        .backend
+        .update(
+            fd,
+            interest_for(&state.registrations, fd),
+            interest_for(registrations, fd),
+        )
+        .map_err(crate::errno::from_host)
 }
 
 /// The `poll` timeout in milliseconds, or -1 for "wait forever".
@@ -257,10 +591,14 @@ fn timeout_ms(timeout: *const libc::timespec) -> Result<c_int, c_int> {
 
 /// The descriptors to wait on: the wakeup channel, and every enabled readiness
 /// registration folded together by descriptor.
-fn poll_set(queue: c_int, state: &Queue) -> Vec<libc::pollfd> {
+#[cfg(not(target_os = "linux"))]
+fn poll_set(
+    queue: c_int,
+    registrations: &HashMap<(usize, i16), Registration>,
+) -> Vec<libc::pollfd> {
     let mut interest: HashMap<c_int, i16> = HashMap::new();
     interest.insert(queue, libc::POLLIN);
-    for registration in state.registrations.values() {
+    for registration in registrations.values() {
         if !registration.enabled || registration.filter == EVFILT_USER {
             continue;
         }
@@ -330,7 +668,7 @@ pub unsafe extern "C" fn kevent(
     {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         for change in changes {
-            let failure = apply(queue, &mut state, change).err();
+            let failure = apply(&mut state, change).err();
             // `EV_RECEIPT` asks for the *outcome of every change* rather than
             // for readiness, and it asks for it whether or not the change
             // failed - which is how a caller applies a batch and finds out
@@ -360,10 +698,11 @@ pub unsafe extern "C" fn kevent(
         return out.len() as c_int;
     }
 
-    let (mut watched, triggered) = {
-        let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        (poll_set(queue, &state), !state.triggered.is_empty())
-    };
+    let triggered = !state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .triggered
+        .is_empty();
     // Something is already waiting, so this is a collection rather than a wait.
     let wait = match triggered {
         true => 0,
@@ -375,18 +714,23 @@ pub unsafe extern "C" fn kevent(
             }
         },
     };
-    // SAFETY: a live array of `pollfd`, described by its own length.
-    let ready = unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, wait) };
-    if ready < 0 {
-        return -1;
-    }
+    let ready = {
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let backend = Arc::clone(&state.backend);
+        let registrations = state.registrations.clone();
+        drop(state);
+        match backend.wait(queue, &registrations, capacity, wait) {
+            Ok(ready) => ready,
+            Err(errno) => {
+                crate::errno::set(errno);
+                return -1;
+            }
+        }
+    };
 
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-    if watched
-        .iter()
-        .any(|entry| entry.fd == queue && entry.revents != 0)
-    {
-        drain(queue);
+    if ready.iter().any(|entry| entry.wake) {
+        state.backend.drain_wake();
     }
 
     // The user events first: a program triggers one to be told to stop, and a
@@ -403,8 +747,8 @@ pub unsafe extern "C" fn kevent(
         }
     }
 
-    for entry in watched {
-        if out.len() == capacity || entry.fd == queue || entry.revents == 0 {
+    for entry in ready {
+        if out.len() == capacity || entry.wake || entry.revents == 0 {
             continue;
         }
         let firing: Vec<((usize, i16), Registration)> = state
@@ -445,11 +789,17 @@ pub unsafe extern "C" fn kevent(
             // `EV_DISPATCH` disables it until it is enabled again. Both are how
             // a caller avoids being handed the same readiness on every turn.
             if registration.flags & EV_ONESHOT != 0 {
+                let before = interest_for(&state.registrations, entry.fd);
                 state.registrations.remove(&key);
-            } else if registration.flags & EV_DISPATCH != 0
-                && let Some(registration) = state.registrations.get_mut(&key)
-            {
-                registration.enabled = false;
+                let after = interest_for(&state.registrations, entry.fd);
+                let _ = state.backend.update(entry.fd, before, after);
+            } else if registration.flags & EV_DISPATCH != 0 {
+                let before = interest_for(&state.registrations, entry.fd);
+                if let Some(registration) = state.registrations.get_mut(&key) {
+                    registration.enabled = false;
+                }
+                let after = interest_for(&state.registrations, entry.fd);
+                let _ = state.backend.update(entry.fd, before, after);
             }
         }
     }
@@ -536,6 +886,88 @@ mod tests {
         assert_eq!(got[0].filter, EVFILT_READ);
         assert_eq!(got[0].udata, 0xbeef);
         assert_eq!(got[0].data, 5, "five bytes are waiting");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_queue_descriptor_is_readable_when_a_watched_descriptor_is_ready() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        let add = Kevent {
+            ident: read_end as usize,
+            filter: EVFILT_READ,
+            flags: EV_ADD,
+            ..Kevent::default()
+        };
+        let mut got = [Kevent::default(); 1];
+        // SAFETY: the descriptors and event buffers belong to this test.
+        unsafe {
+            assert_eq!(
+                kevent(
+                    queue,
+                    &raw const add,
+                    1,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT
+                ),
+                0
+            );
+            assert_eq!(libc::write(write_end, c"x".as_ptr().cast(), 1), 1);
+            let mut watched = libc::pollfd {
+                fd: queue,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(libc::poll(&raw mut watched, 1, 0), 1);
+            assert_ne!(watched.revents & libc::POLLIN, 0);
+            assert_eq!(
+                kevent(
+                    queue,
+                    std::ptr::null(),
+                    0,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT
+                ),
+                1
+            );
+            libc::close(read_end);
+            libc::close(write_end);
+            libc::close(queue);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_epoll_keeps_regular_files_on_the_poll_compatibility_path() {
+        use std::os::fd::AsRawFd;
+
+        let queue = kqueue();
+        let file = std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kqueue.rs"))
+            .expect("this Rust source file");
+        let add = Kevent {
+            ident: file.as_raw_fd() as usize,
+            filter: EVFILT_READ,
+            flags: EV_ADD,
+            ..Kevent::default()
+        };
+        let mut got = [Kevent::default(); 1];
+        // SAFETY: one valid change and one event slot.
+        let n = unsafe {
+            kevent(
+                queue,
+                &raw const add,
+                1,
+                got.as_mut_ptr(),
+                1,
+                &raw const NO_WAIT,
+            )
+        };
+        assert_eq!(n, 1);
+        assert_eq!(got[0].ident, file.as_raw_fd() as usize);
+        // SAFETY: this test's queue descriptor.
+        unsafe { libc::close(queue) };
     }
 
     /// `EVFILT_USER` is what a program wakes its own I/O thread with, and the
