@@ -7,11 +7,13 @@
 //! only one that matters is the first non-zero - which is exactly what this
 //! prints.
 
-use std::sync::OnceLock;
+use static_init::dynamic;
 
+#[inline]
 pub fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_AUDIO").is_some())
+    #[dynamic]
+    static ON: bool = std::env::var_os("ROSETTA3_TRACE_AUDIO").is_some();
+    *ON
 }
 
 /// A four-character code as its characters, for the HAL's selectors, or as a

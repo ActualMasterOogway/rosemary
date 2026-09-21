@@ -7,6 +7,8 @@
 
 use std::ffi::c_void;
 
+use static_init::dynamic;
+
 use crate::status::SUCCESS;
 use crate::stream::Format;
 
@@ -328,14 +330,17 @@ fn tally(played: usize, silenced: usize) {
 /// of "the audio sounds wrong" turns into.
 fn dump_source(bytes: &[u8]) {
     use std::io::Write;
+
+    #[dynamic]
+    static WANTED: Option<std::path::PathBuf> =
+        std::env::var_os("ROSETTA3_DUMP_AUDIO_SOURCE").map(Into::into);
+
     static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
-    static WANTED: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    let Some(path) = WANTED
-        .get_or_init(|| std::env::var_os("ROSETTA3_DUMP_AUDIO_SOURCE").map(Into::into))
-        .as_ref()
-    else {
+
+    let Some(path) = WANTED.as_ref() else {
         return;
     };
+
     let mut file = FILE.lock().unwrap_or_else(|e| e.into_inner());
     if file.is_none() {
         *file = std::fs::File::create(path).ok();
@@ -353,11 +358,10 @@ fn dump_source(bytes: &[u8]) {
 fn dump(bytes: &[u8]) {
     use std::io::Write;
     static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
-    static WANTED: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    let Some(path) = WANTED
-        .get_or_init(|| std::env::var_os("ROSETTA3_DUMP_AUDIO").map(Into::into))
-        .as_ref()
-    else {
+    #[dynamic]
+    static WANTED: Option<std::path::PathBuf> =
+        std::env::var_os("ROSETTA3_DUMP_AUDIO").map(Into::into);
+    let Some(path) = WANTED.as_ref() else {
         return;
     };
     let mut file = FILE.lock().unwrap_or_else(|e| e.into_inner());

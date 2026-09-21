@@ -42,6 +42,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex};
 
+use static_init::dynamic;
+
 /// `struct kevent`, which the guest both fills in and reads back.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -118,9 +120,9 @@ struct Queue {
 }
 
 fn queues() -> &'static Mutex<HashMap<c_int, Arc<Mutex<Queue>>>> {
-    static QUEUES: std::sync::OnceLock<Mutex<HashMap<c_int, Arc<Mutex<Queue>>>>> =
-        std::sync::OnceLock::new();
-    QUEUES.get_or_init(Default::default)
+    #[dynamic]
+    static QUEUES: Mutex<HashMap<c_int, Arc<Mutex<Queue>>>> = Default::default();
+    &QUEUES
 }
 
 fn queue_of(fd: c_int) -> Option<Arc<Mutex<Queue>>> {
