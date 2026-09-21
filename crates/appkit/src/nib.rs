@@ -18,11 +18,7 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// Print what could not be built, which is the queue for the next milestone.
-    ///
-    /// Unconditional rather than behind a trace variable. A nib that half-loaded
-    /// is the single most likely cause of the next thing that goes wrong, and a
-    /// program is loaded once.
+    /// Print what could not be built.
     pub fn report(&self, path: &Path) {
         if !self.placeholders.is_empty() {
             eprintln!(
@@ -149,12 +145,6 @@ impl Builder<'_> {
                         self.outlet(source, destination, &label);
                     }
                 }
-                // A control connector is a target and an action on a control,
-                // and a control is a view. Recorded rather than applied: the
-                // source is a placeholder until M2, and `-setTarget:` on one
-                // would be refused inside the loader rather than at the click
-                // that used it. A null destination is not a fault here - it is
-                // how a menu item says "send this up the responder chain".
                 "NSNibControlConnector" => self.loaded.unwired.push(format!(
                     "the action \"{label}\" on a {source_class} is not connected until there \
                      are controls"
@@ -235,17 +225,6 @@ impl Builder<'_> {
     }
 
     /// `[source setValue:destination forKey:label]`.
-    ///
-    /// Asked first, through `foundation::kvc::accepts`, and *reported* rather
-    /// than sent when the answer is no. Key-value coding on an object with
-    /// neither a setter nor an ivar of that name is an abort - correctly, for a
-    /// program that meant to set it - and aborting inside the loader would
-    /// replace this milestone's diagnostic with a stop on the first nib that
-    /// connects a menu to its delegate.
-    ///
-    /// The check is not "did this crate invent the class". A declared `NSMenu`
-    /// with no methods accepts an outlet exactly as badly as an invented one
-    /// does, and Deltarune's own nib is where that showed.
     fn outlet(&mut self, source: Uid, destination: Uid, label: &str) {
         let source_class = self
             .archive
@@ -270,10 +249,6 @@ impl Builder<'_> {
         let accepts = unsafe { objc::object::class_of(from) }
             .is_some_and(|c| foundation::kvc::accepts(c, label));
         if !accepts {
-            // Not noted as a class with no implementation: this one exists, and
-            // the guest's own delegate reaches here for an outlet Interface
-            // Builder kept after the class stopped declaring it. Conflating the
-            // two would put a guest class in the list of what M2 owes.
             let class = self.class_of(from, &source_class);
             self.loaded.unwired.push(format!(
                 "the outlet \"{label}\" of a {class} is not set: it has no setValue:forKey: \

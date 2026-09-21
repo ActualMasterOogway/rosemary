@@ -50,23 +50,6 @@ pub fn build_x86_64(name: &str, source: &str, extra: &[&str]) -> Option<String> 
     status.success().then(|| out.to_string_lossy().into_owned())
 }
 
-/// The milestone 2 program: it prints, formats, and registers a callback, so
-/// each of the three ways an import can be classified is exercised by a real
-/// program rather than only by the table's own tests.
-///
-/// Deliberately *not* `int main(){puts("hi");}`:
-///
-/// - `printf`/`snprintf` are **variadic**, the part of the seam with no general
-///   mechanism (and, at default `-D_FORTIFY_SOURCE`, they are imported under
-///   their `___chk` names, which is what a real guest looks like).
-/// - `atexit` takes a **guest function pointer**, so it must be refused until
-///   the host->guest thunk exists in M3.
-/// - `strlen`, `abs`, `puts` are the ordinary fast-callable case.
-///
-/// No `<math.h>`, and the `%f` argument is a constant: `sqrt` compiles to
-/// `sqrtsd` and `argc * 1.5` to `cvtsi2sd`, neither of which microlift lifts
-/// yet. A lifting gap inside an ABI fixture would be a red suite about the
-/// wrong thing - the gap is real and it belongs to the recompiler.
 pub const HELLO_C: &str = r#"
 #include <stdio.h>
 #include <string.h>
@@ -138,28 +121,6 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// The fixture [`LINK_C`] cannot be: a region whose exits do not all go to the
-/// same place.
-///
-/// `LINK_C` has one successor per exit site, so its links are perfectly predicted
-/// whether they are dispatched from one branch or from four. That is the best case
-/// of the mechanism and it is what M8.5 and M8.6 were measured on. Three loops
-/// here, each isolating one thing:
-///
-/// - `fan_out` is **one region with four out-of-region direct calls**, whose
-///   targets are constants. Under one probe per region all four successors are
-///   reached through a single `br`; under one probe per exit site each call is its
-///   own branch with its own target.
-/// - `leaf` is called from four sites in a row, so its single `ret` exit has four
-///   successors *at one site*. Per-site probes cannot help this, and it is here so
-///   that the half the change does not fix is measured beside the half it does.
-/// - `ladder` is thirty-odd blocks ending in a `ret`, which is what the range check
-///   in front of a region's in-block switch is about: leaving it should cost two
-///   compares rather than a binary search over every block.
-///
-/// The accumulator is printed, so a run that skipped an iteration or resumed at the
-/// wrong address differs in output and not only in timing. `argv[1]` scales the loop:
-/// the tests want a second, a measurement wants a minute.
 pub const POLYLINK_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,13 +161,6 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// Milestone 3's callback program: a guest comparator called by the *host's*
-/// `qsort`, and a guest handler called by the host's `exit`.
-///
-/// Both are host->guest calls, and both are falsifiable: a comparator that is
-/// never really called leaves the array unsorted, and a thunk that is called
-/// with the wrong arguments sorts it wrongly. `atexit` additionally pins down
-/// *when* - its output has to come after `main`'s.
 pub const QSORT_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -883,34 +837,6 @@ pub fn build_objc(name: &str, source: &str) -> Option<String> {
     )
 }
 
-/// M6.3's message-sending program: an Objective-C guest that actually runs.
-///
-/// Sent from *guest* code, which is the whole of M6.3, and written so that each
-/// mechanism fails on its own rather than as one blob of output:
-///
-/// - **`+load`** runs before `main`, superclass first, and the counter says so:
-///   11 means both ran and in that order, 10 means the superclass's did not.
-/// - **guest -> guest** dispatch, which is a jump rather than a call
-///   (`legs`, `says`).
-/// - **overriding**, where `[d says]` and `[[Animal alloc] ...] says]` must
-///   differ - a runtime that resolved the `IMP` on the wrong class prints the
-///   same string twice.
-/// - **`super`**, twice over: `Dog`'s initialiser calls `Animal`'s, which calls
-///   `NSObject`'s. `objc_msgSendSuper2` naming the wrong class recurses forever.
-/// - **a `double` return and a pointer argument**, so the marshaller is
-///   exercised in both register classes.
-/// - **guest -> host** dispatch by type encoding: `isKindOfClass:`,
-///   `respondsToSelector:`, `stringWithUTF8String:`, `UTF8String`, `length`.
-/// - **class identity in both directions**: `[d class] == [Dog class]` is only
-///   true if a host `Class` coming back is translated to the address the guest
-///   already has, and `!= [Animal class]` says the translation is not a
-///   constant.
-/// - **a category on a host class**, reached by messaging an `NSObject`.
-/// - **a constant `@"..."` string**, which is an object living in *guest* memory
-///   whose `isa` is the host's class.
-/// - **messaging nil**, which is the language rather than an error.
-/// - **`@synchronized` and `@autoreleasepool`**, the two runtime entry points a
-///   program reaches without naming them.
 pub const OBJC_MESSAGES_M: &str = r#"
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -2034,19 +1960,6 @@ pub fn fault_fixture() -> Option<String> {
         .clone()
 }
 
-/// A program with one loop the profiler has to find, and a second one it has to
-/// *not* attribute to the guest.
-///
-/// `spin` is arithmetic microlift translates, so its samples are in a
-/// translation and must resolve to a guest instruction inside this image.
-/// `chatty` leaves the guest on every iteration, so its cost belongs to the
-/// runtime and to the host's libraries and must not be counted as translated.
-/// A profiler that mixed the two would be answering the one question M8.2 was
-/// opened to ask - is this exit-bound or code-quality-bound - with a coin toss.
-///
-/// The iteration counts are chosen for about a second of work on an M-series
-/// host, which at the default rate is hundreds of samples: enough for a share
-/// to mean something, short enough to sit in a test suite.
 pub const PROFILE_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>

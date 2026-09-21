@@ -1,12 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! M1.7 acceptance: two-level resolution and the high-level-emulation path.
-//!
-//! The claim under test is the crate's central bet: that an Intel binary's
-//! imports can be satisfied by *native arm64 host functions* already loaded in
-//! this process, with no Intel library code translated and no system dylib on
-//! disk. [`ls_links_against_the_host_and_every_address_is_real`] is where that
-//! is checked rather than asserted - every resolved address is fed back to
-//! `dladdr`, which answers only for addresses inside a genuinely loaded image.
 
 mod common;
 

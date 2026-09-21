@@ -173,64 +173,31 @@ unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> 
 /// Symbols the runtime supplies itself, consulted before the host.
 pub fn provider() -> SyntheticDylib {
     let mut lib = SyntheticDylib::new("<rosetta3 runtime>");
-    // Flat, so it answers a two-level import naming any library: the guest asks
-    // libSystem for its canary, and the answer is not libSystem's to give.
     lib.flat(true).define_data(
         "___stack_chk_guard",
         &STACK_CHK_GUARD as *const u64 as usize as u64,
     );
-    // Both spellings; which one an image imports depends on its toolchain vintage.
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
         lib.define_fn(name, crate::tls::bootstrap as *const ());
     }
-    // The host's own `_tlv_atexit` is the right implementation where there is
-    // one - it appends a destructor to the list dyld runs when this thread ends,
-    // and a guest thread is a host thread. It is denied only because the whole
-    // `__tlv_` prefix is. Off Darwin nothing exports it and [`tlv_atexit`] is
-    // the stand-in.
     let atexit = crate::host::symbol("_tlv_atexit")
         .map_or(tlv_atexit as *const (), |f| f as usize as *const ());
     lib.define_fn("__tlv_atexit", atexit);
     lib.define_fn("_tlv_atexit", atexit);
-    // The host's `open`/`openat` are variadic, and Apple's arm64 ABI puts a
-    // variadic argument on the stack - so a fixed signature would leave the mode
-    // in a register no `va_arg` reads. These bind to fixed-arity wrappers instead.
     super::openat::provide(&mut lib);
-    // Two underscores as the Mach-O spells it: one from C mangling, one from the
-    // identifier `_NSGetExecutablePath`.
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
-    // Answered here rather than left to the host because the host answers it
-    // wrongly: dyld knows nothing of the images this runtime mapped, so its
-    // reply to the vendored `libunwind` is "no unwind info" for every guest
-    // frame. Defined in this provider rather than `dyld`'s because that one is
-    // absent from the native backend's chain unless the builtin runtime is
-    // selected, and the native backend is where a real host unwind happens.
     lib.define_fn(
         "__dyld_find_unwind_sections",
         crate::dyld::entry::dyld_find_unwind_sections as *const (),
     );
-    // Under high-level emulation the guest's Mach task *is* this process's. The
-    // address, not the value.
-    //
-    // Only where the host has a Mach to share: off Darwin these two resolve to
-    // nothing here and `darwin::mach` publishes its own, out of the synthetic
-    // port namespace. This provider is ahead of that one in the chain, so the
-    // host's real task port still wins wherever there is one.
     if let Some(port) = crate::host::symbol("mach_task_self_") {
         lib.define_data("_mach_task_self_", port);
     }
     if let Some(f) = crate::host::symbol("mach_host_self") {
         lib.define_fn("_mach_host_self", f as *const ());
     }
-    // The process arguments. Answered here on every host, not just off Darwin:
-    // the host's own `_NSGetArgc`/`_NSGetArgv` describe *this* process, so a
-    // guest asking for its arguments would be told it is `rosetta3`.
     lib.define_fn("__NSGetArgc", ns_get_argc as *const ());
     lib.define_fn("__NSGetArgv", ns_get_argv as *const ());
-    // `environ` and the accessor for its address. Off Darwin nothing exports
-    // `_NSGetEnviron`, and leaving the slot unbound is not a diagnosable
-    // failure: `libmimalloc.3.dylib` reads its options out of `environ` from a
-    // static initializer, so the program calls null before it has run a line.
     if let Some(addr) = host_environ() {
         ENVIRON.store(addr as usize as *mut *mut *mut c_char, Ordering::Relaxed);
         lib.define_data("_environ", addr);

@@ -271,17 +271,6 @@ unsafe fn open_launch_urls(receiver: Id, delegate: Id) {
     unsafe { corefoundation::api::CFRelease(array) };
 }
 
-/// `-run`.
-///
-/// No event loop: an event comes from a window, and a window is M2. What this
-/// does have to do is service the run loop, because that is where a scheduled
-/// `IOHIDManager` delivers from - so a program that reads a gamepad works
-/// before a program that draws does.
-///
-/// The sleep is for the empty case. `CFRunLoopRunInMode` returns immediately
-/// when a mode has nothing in it, and a bare loop around that is a spin at a
-/// hundred per cent of a core for a program that is only waiting to be told to
-/// stop.
 unsafe extern "C" fn run(receiver: Id, sel: Sel) {
     // SAFETY: an application.
     unsafe { (*(receiver as *mut Application)).running = 1 };
@@ -1116,12 +1105,6 @@ mod tests {
     }
 
     /// `-run` turns the run loop, and `-stop:` ends it.
-    ///
-    /// The claim the gamepad depends on: a scheduled `IOHIDManager` delivers
-    /// from a run loop source, and until this milestone nothing was turning one
-    /// after `NSApplicationMain`. Asserted with a plain source rather than a
-    /// device, because what is in the loop is not this module's business - that
-    /// it is serviced is.
     #[test]
     fn run_services_the_run_loop_until_it_is_stopped() {
         crate::bootstrap();

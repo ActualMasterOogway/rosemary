@@ -1,32 +1,7 @@
-//! Milestone 5, first half: `setjmp` and `longjmp` against the guest's own
-//! registers.
-//!
-//! Through the built driver, for the reason `run.rs` gives: the claim is about a
-//! process that jumps out of three frames and keeps running.
-//!
-//! What each test would falsify:
-//!
-//! - **the round trip** - the whole mechanism, checked against what the same
-//!   binary prints with nothing translating it. A `longjmp` that did not jump
-//!   prints the `BUG:` lines the fixture plants after every call that must not
-//!   return; one that jumped without restoring `rsp` runs `main`'s tail on a
-//!   dead frame and the guard array says so.
-//! - **the value** - including C's rule that a zero arrives as one.
-//! - **both spellings** - `__setjmp` and `_sigsetjmp` are separate imports, and
-//!   a runtime that shimmed only `_setjmp` would refuse them by name.
-//! - **the refusal** - a `longjmp` out of a host->guest callback names the case
-//!   instead of restoring a context over host frames that would never unwind.
-//! - **slow and fast agree** - `--slow` sends every promotable import through
-//!   the marshaller. `setjmp` must be a VM exit under *both* policies, because
-//!   an inlined `setjmp` would call the host's and save arm64 registers.
-
 mod common;
 
 use common::{longjmp_across_fixture, run_guest, run_guest_with, run_native, setjmp_fixture};
 
-/// What the fixture prints when everything works. Also asserted to be what the
-/// binary prints natively, so this list is a fact about C rather than a
-/// transcription of the runtime's behaviour.
 const EXPECTED: &str = "\
 first return
 level1

@@ -1,24 +1,3 @@
-//! Milestone 5: signal dispositions, and the kernel calling a guest function.
-//!
-//! The third distinct caller of a host->guest thunk after `qsort` and
-//! `pthread_create`, and the first that arrives with the runtime nowhere nearby:
-//! the kernel pushes a frame onto whichever thread it picked and calls the
-//! handler. What each test would falsify:
-//!
-//! - **the handler runs** - installed through both `signal` and `sigaction`, and
-//!   counted, so a handler that never fired is a wrong number rather than a
-//!   missing line.
-//! - **a disposition comes back** - the direction a runtime that only
-//!   substituted outbound pointers gets wrong. The guest compares what `signal`
-//!   returned against its own function and restores it.
-//! - **sentinels are not addresses** - `SIG_IGN` installed as a thunk would run
-//!   a handler where the program asked for silence.
-//! - **`SA_SIGINFO` is refused by name** - the boundary, for a reason that
-//!   belongs to the recompiler rather than to this runtime.
-//! - **both architectures agree** - the same source built for arm64 and run
-//!   natively prints the same thing, which is what says `struct sigaction`
-//!   needs no translation.
-
 mod common;
 
 use common::{SIGNAL_C, build_native, run_guest, run_native, siginfo_fixture, signal_fixture};

@@ -1,18 +1,3 @@
-//! Milestone 5: guest C++ exceptions, unwound by the runtime's own unwinder.
-//!
-//! Through the built driver, because the claim is about a process: a `throw`
-//! three frames down, destructors in order, a handler chosen by type, and
-//! execution carrying on afterwards.
-//!
-//! The assertion that matters most is equality with the *untranslated* binary.
-//! There is no other specification of what a C++ exception does that is worth
-//! writing into a test - every clause of the fixture is a sentence from the
-//! standard, and the machine already knows how to say it.
-//!
-//! The refusals are tested just as hard as the successes. Each names a case the
-//! unwinder cannot do rather than doing it wrongly, and each is the test that
-//! must *change* when that case is built.
-
 mod common;
 
 use common::{exceptions_fixture, run_guest, run_native, run_native_with, unwind_refusals_fixture};

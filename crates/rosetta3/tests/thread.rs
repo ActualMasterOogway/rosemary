@@ -1,28 +1,3 @@
-//! Milestone 4's acceptance gate: guest threads and thread-local storage.
-//!
-//! Through the built driver, for the reason `run.rs` gives: the claims are about
-//! a process. A thread that never really started, or one that shared the main
-//! thread's stack, is not visible from inside a test that only calls
-//! [`Vm::call`](rosetta3::Vm::call) - it is visible as wrong output, or as a
-//! crash.
-//!
-//! Each test names what would be false if it failed:
-//!
-//! - **thread-locals** - a `_Thread_local` read reaches a per-thread block at
-//!   the right offset. This is the one that fails as *plausible neighbouring
-//!   values* rather than as a fault, which is why the fixture's values are all
-//!   distinct.
-//! - **four threads, four counts** - the blocks really are per thread.
-//! - **join** - the start routine ran on its own guest stack and its return
-//!   value came back.
-//! - **`errno`** - the passthrough claim: a guest thread's `errno` is the host
-//!   thread's, because they are the same thread.
-//! - **the pthread surface** - mutexes, `pthread_once`, and a guest destructor
-//!   libpthread calls on teardown.
-//!
-//! Where a native run is possible the assertion is byte equality with it, which
-//! is the only specification of `pthread` worth writing down.
-
 mod common;
 
 use common::{run_guest, run_native};
@@ -235,14 +210,6 @@ fn a_threaded_guest_agrees_with_the_same_binary_run_natively() {
     assert_eq!(lines(&out), lines(&native_out), "stderr: {err}");
 }
 
-/// The mechanism the thread-local path needs and nothing else in the runtime
-/// did: an indirect call whose target is a *host* address.
-///
-/// A `_Thread_local` read is `leaq _x(%rip), %rdi; callq *(%rdi)`. There is no
-/// displacement for the lifter to match, so the call arrives as an
-/// `IndirectCall` naming the resolved `__tlv_bootstrap` address - and before M4
-/// that was `UnknownIndirectCall`, a stop. This asserts the reverse map exists
-/// and points at the right symbol, which is the difference between the two.
 #[test]
 fn an_imports_resolved_address_maps_back_to_its_symbol() {
     let Some(path) = common::tls_fixture() else {

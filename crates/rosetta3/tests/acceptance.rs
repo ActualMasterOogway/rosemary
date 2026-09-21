@@ -1,16 +1,3 @@
-//! Milestone 1's acceptance gate.
-//!
-//! The claim, stated as a test: after `machish` links an Intel Mach-O against
-//! the host, **every static call out of `__text` is an address microlift was
-//! told about** - so none of them becomes an `ExitReason::UnknownJump` with
-//! `TransferKind::DirectCall`.
-//!
-//! [`stub_addresses_are_load_bearing`] is what makes this worth writing rather
-//! than assuming. It runs the same audit twice, once with `stub_va` registered
-//! and once without, and shows the second is a catastrophe: not one import call
-//! is intercepted. Until that test existed, "`stub_va` is not optional" was a
-//! prediction from reading two source files.
-
 use std::collections::BTreeSet;
 
 use rosetta3::{Program, audit_call_targets};

@@ -1,13 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! M1.8 acceptance: the whole pipeline against a real two-image program.
-//!
-//! The fixture is a `main` plus a bundled `libmath.dylib` linked through
-//! `@rpath`, which is the shape almost every shipped macOS application has and
-//! the one that exercises all three of the milestone's pieces at once:
-//! `@rpath` expansion has to find the dylib, [`FsDylibSource`] has to open it
-//! while *declining* `/usr/lib`, and the [`Namespace`] has to let `libmath`'s
-//! export satisfy `main`'s import while libSystem's imports fall through to the
-//! provider chain.
 
 mod common;
 

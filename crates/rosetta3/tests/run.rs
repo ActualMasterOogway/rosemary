@@ -1,20 +1,3 @@
-//! Milestone 3's acceptance gate: Intel programs that actually run.
-//!
-//! Everything here goes through the built driver rather than the library, and
-//! that is the point. The claims are about a *process* - it prints, it exits
-//! with its own status, its `atexit` handlers fire from the host's exit - and
-//! none of those are visible from inside a test that only calls
-//! [`Vm::call`](rosetta3::Vm::call).
-//!
-//! Each test names what would be false if it failed:
-//!
-//! - **hello** - the loop works at all: lift, enter, service an import, resume.
-//! - **qsort** - the host called *back into* the guest. Falsifiable: a
-//!   comparator that is not really run leaves the array unsorted.
-//! - **constructors** - initializers ran, in order, before `main`.
-//! - **`/bin/ls`** - a real system binary agrees with the host's own, byte for
-//!   byte, which is the claim no fixture can make on its own.
-
 mod common;
 
 use std::path::Path;

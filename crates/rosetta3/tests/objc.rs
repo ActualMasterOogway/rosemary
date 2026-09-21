@@ -2,27 +2,6 @@
 //! Objective-C runtime, and a host without one has nothing to realize them into.
 #![cfg(target_os = "macos")]
 
-//! M6.2 acceptance: the guest's classes, realized in the host's runtime.
-//!
-//! The direction under test is **host -> guest**, and that is the whole point.
-//! Every assertion here messages a guest class from *this* process's own
-//! `objc_msgSend` - the host runtime looks the selector up, finds an `IMP`, and
-//! calls it as native arm64. That `IMP` is one of this runtime's thunks, so an
-//! answer coming back at all means realization, selector uniquing, method
-//! installation and the JIT re-entry all worked together.
-//!
-//! Guest-side dispatch is deliberately absent here: no fixture in this file
-//! sends a message from guest code. That is M6.3, and it is
-//! [`msgsend.rs`](msgsend.rs).
-//!
-//! ## Why every fixture names its class differently
-//!
-//! Class names are global to a process, and `objc_allocateClassPair` refuses a
-//! name already in use. These tests share one process and run in parallel, so a
-//! fixture reusing `Greeter` would have its registration correctly refused and
-//! the test would fail for a reason that is not about the code under test.
-//! [`source`] takes the name.
-
 mod common;
 
 use std::ffi::{CStr, OsString};
@@ -200,8 +179,6 @@ fn a_guest_class_is_visible_to_the_host_runtime_by_name() {
     );
     assert_eq!(rt.stats().classes, 1);
 
-    // The claim the milestone is named for: `NSClassFromString(@"Named")` is
-    // `objc_getClass` underneath, so this is that gate.
     let cls = class_named("Named");
     assert!(
         !cls.is_null(),
@@ -375,9 +352,6 @@ fn an_ivar_under_a_foundation_superclass_is_patched() {
     }
 }
 
-/// A category on a *host* class: `NSString` is the runtime's own, so the only
-/// thing of ours in it is the `IMP`. The host messaging a real `NSString` and
-/// reaching guest code is the sharpest form of the M6.2 claim.
 #[test]
 fn a_category_on_a_host_class_reaches_guest_code() {
     let _lock = serialized();
@@ -624,10 +598,6 @@ fn a_plain_c_program_registers_nothing() {
     assert!(rt.is_complete());
 }
 
-/// End to end, through the built driver: an Objective-C guest starts, registers,
-/// runs its initializers and its `main`, and exits with its own status. Nothing
-/// here sends a message from guest code - that is M6.3 - but everything up to
-/// the point where it could is exercised as a process.
 #[test]
 fn an_objective_c_program_starts_and_exits() {
     const SRC: &str = r#"

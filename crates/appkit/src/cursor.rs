@@ -939,8 +939,6 @@ unsafe extern "C" fn class_pop(_class: Id, _sel: Sel) {
 }
 
 unsafe extern "C" fn set_hidden_until_mouse_moves(class: Id, sel: Sel, hidden: u8) {
-    // The "until it moves" half needs the event pump, which is M2's next piece;
-    // until then this is the hide it asks for, which is the visible effect.
     match hidden != 0 {
         // SAFETY: both are `void (Class, SEL)`.
         true => unsafe { hide(class, sel) },

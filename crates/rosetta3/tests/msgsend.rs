@@ -2,27 +2,6 @@
 //! Objective-C runtime, and a host without one has nothing to realize them into.
 #![cfg(target_os = "macos")]
 
-//! M6.3 acceptance: messages sent by the guest.
-//!
-//! The direction M6.2 left open. [`objc.rs`](objc.rs) messages a guest class
-//! from the *host*, which proves realization and thunking; nothing there sends a
-//! message from guest code, and until this milestone a Cocoa guest linked
-//! cleanly and stopped at its first one.
-//!
-//! ## Why these run through the driver
-//!
-//! Every test here is a whole process, and the assertion is against what the
-//! **same binary prints natively**. That is the only specification of an
-//! Objective-C program worth having: the runtime is the host's either way, so
-//! any divergence is this runtime's doing. Rosetta 2 is still present, so the
-//! comparison is against the identical x86_64 file rather than a recompilation -
-//! and when it is not available the test skips rather than inventing an expected
-//! string.
-//!
-//! It also side-steps the constraint `objc.rs` is built around: a process runs
-//! one Objective-C guest, because class names are global to the host runtime. A
-//! test that is a process has that to itself.
-
 mod common;
 
 /// Run a fixture both ways and require the output to agree exactly.
@@ -270,12 +249,6 @@ fn an_unsatisfied_import_names_itself_when_it_is_called() {
     assert!(stderr.contains("unsatisfied import"), "{stderr}");
 }
 
-/// The slow-import policy takes the same program to the same place.
-///
-/// M2's falsifiable claim, applied to M6.3: fast imports are an optimisation of
-/// slow ones. Message sending is unaffected either way - `objc_msgSend` is
-/// shimmed, so it is a VM exit under both policies - and this says the rest of
-/// the program's imports really are interchangeable.
 #[test]
 fn the_slow_import_policy_sends_the_same_messages() {
     let Some(path) = common::objc_messages_fixture("objc_messages_slow", &[]) else {
@@ -340,19 +313,6 @@ fn a_guest_method_whose_encoding_is_undecidable_is_still_sent() {
     assert!(out.contains("1.50 7 9 2.25\n"), "{out}");
 }
 
-/// M7.4: a `dlopen`ed image's own Objective-C classes are realized too.
-///
-/// The launch-time registration pass runs over the program's images, and an
-/// image the guest maps afterwards is not one of them. Everything in the plugin
-/// therefore used to fail, and the failure that reached a real program first was
-/// the most direct one: SDL3's Cocoa backend declares its own `NSApplication`
-/// subclass, and Terraria's start-up messages it - which stopped with
-/// *"the receiver is a guest address whose class the runtime never realized"*.
-///
-/// Checked against the same binary run natively rather than against a
-/// transcript this runtime wrote down, because what `+load` prints and when is
-/// the platform's answer and not this project's. The order is the part worth
-/// having: `+load` runs inside `dlopen`, before the same image's C constructor.
 #[test]
 fn a_loaded_image_declares_classes_and_the_guest_messages_them() {
     let Some(path) = common::objc_dlopen_fixture() else {

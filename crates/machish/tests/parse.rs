@@ -1,8 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! Requires the `std` and `arch-x86_64` features; compiles away without them,
-//! so `--no-default-features` still proves the `no_std` core builds.
-
-//! M1.1 acceptance: fat demux and load-command parsing against real binaries.
 
 mod common;
 

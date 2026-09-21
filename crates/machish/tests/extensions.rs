@@ -1,10 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! M1.9 acceptance: initializers, terminators, and thread-local descriptors.
-//!
-//! Every assertion here is about what the loader *reports*, never about what it
-//! runs. Nothing in this file calls a guest function, and nothing allocates a
-//! thread block - the milestone's whole claim is that the loader can hand a
-//! driver an exact list and stop.
 
 mod common;
 

@@ -1,15 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64", feature = "ext-objc"))]
-//! M6.1 acceptance: the Objective-C metadata an image declares, decoded.
-//!
-//! Every assertion here is about what the loader *reports*. Nothing realizes a
-//! class, uniques a selector, or attaches a category - the milestone's claim is
-//! that a driver can be handed an exact description of what the guest declares,
-//! and the whole point of decoding it here is that the decision about whose
-//! runtime owns it is made somewhere else.
-//!
-//! The fixtures are built rather than found. A system binary would do for the
-//! parse, but not for the *claims*: asserting that a class has exactly one ivar
-//! named `_n` requires having written the class.
 
 mod common;
 

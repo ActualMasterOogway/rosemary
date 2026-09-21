@@ -1,19 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! M1.4/M1.5/M1.6 acceptance: decoding fixups, recovering stub addresses, and
-//! binding into an address space.
-//!
-//! The two claims worth stating outright, because they are the ones the rest of
-//! milestone 1 rests on:
-//!
-//! 1. **`stub_va` is real.** [`stub_addresses_actually_jump_through_their_slots`]
-//!    decodes the six bytes at each recovered stub as `ff 25 <rel32>` and checks
-//!    the RIP-relative target equals the slot it was paired with. That proves
-//!    the pairing rather than asserting it by construction, and it is the first
-//!    falsifiable test of the premise the microlift integration depends on.
-//! 2. **The two encodings agree.** [`both_encodings_decode_to_the_same_stream`]
-//!    builds one `.c` twice and diffs the normalized output. They are
-//!    independent expressions of one intent, so agreement is evidence no single
-//!    decoder test can give.
 
 mod common;
 

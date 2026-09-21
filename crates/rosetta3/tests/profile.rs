@@ -1,29 +1,3 @@
-//! A running guest says where its time went, in guest addresses.
-//!
-//! The gap this closes is the one M8.1 ended on: a 2.4x microbenchmark win
-//! that the application it was built for could not detect, because a sample
-//! inside translated code lands in an anonymous mapping with no image, no
-//! symbol and nothing to attribute it to. Every remaining performance
-//! candidate was a plausible story with no measurement behind it.
-//!
-//! What each test would falsify:
-//!
-//! - **it samples at all** - a sampler that never started, or one whose timer
-//!   thread died, prints nothing, and a report with zero samples is the same
-//!   observation as no report;
-//! - **it names guest instructions in the guest's own image**, which is the
-//!   whole claim: a host `pc` is not a work item and `image+offset` is, and it
-//!   is the form that survives across runs into a disassembler;
-//! - **it separates translated code from this runtime's Rust and from the
-//!   host's libraries**, which is the question M8's candidate list splits on
-//!   and which no existing tool answers, because all three are the same colour
-//!   in every one of them;
-//! - **it costs nothing when it is off**, so leaving the code in the runtime is
-//!   not a tax on every run;
-//! - **the map it writes is joinable**, which is what makes Apple's own
-//!   tooling - `xctrace`, and Processor Trace in particular - usable against
-//!   JIT code at all.
-
 mod common;
 
 use common::{profile_fixture, run_guest_env};
@@ -98,11 +72,6 @@ fn the_three_halves_of_the_profile_are_told_apart() {
         "a guest in a hot arithmetic loop should be mostly in translated code, \
          got {translated}%; stderr: {err}"
     );
-    // And its second loop crosses the seam a hundred thousand times, so the
-    // other two buckets cannot both be empty. A profiler that attributed
-    // everything to the guest would pass the assertion above and fail this one,
-    // which is the failure worth catching: it is the one that would send M8
-    // after the wrong half of its candidate list.
     assert!(
         runtime + libraries > 0.0,
         "a guest that calls snprintf a hundred thousand times spends time \

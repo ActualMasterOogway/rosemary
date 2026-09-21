@@ -1,18 +1,3 @@
-//! Milestone 2's acceptance gate.
-//!
-//! The claim: for a program we compiled and can therefore describe completely,
-//! **every import is classified** - each one is either callable with a known
-//! signature, serviced by a shim, or refused by name with a reason. Nothing is
-//! unknown, because an unknown symbol is precisely the case that becomes a
-//! plausible-looking wrong value in a register instead of a diagnostic.
-//!
-//! The fixture is a hello world rather than `/bin/ls` (which milestone 1 used)
-//! for a reason unrelated to the ABI: `/bin/ls` embeds a jump table in
-//! `__text`, and two of its fifty functions do not lift past it. That is a
-//! microlift gap, and putting it inside an ABI test would mean a red suite here
-//! whenever the recompiler is behind. `/bin/echo` is checked alongside as the
-//! system-binary case.
-
 mod common;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -255,9 +240,6 @@ fn a_writable_segment_is_not_handed_to_the_lifter_as_constant_data() {
 
 #[test]
 fn servicing_an_import_exit_calls_the_host_function() {
-    // The slow path end to end, driven the way the M3 loop will drive it: an
-    // exit names an address, the program looks it up, and the host function
-    // runs. Everything before this test checks a piece of that in isolation.
     let Some(path) = common::hello() else {
         skip!("cannot build x86_64 fixtures")
     };

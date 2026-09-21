@@ -1,25 +1,5 @@
-//! The run loop, with guest code on the other side of both callbacks.
-//!
-//! What each test would falsify:
-//!
-//! - **a guest's `perform` runs from inside `CFRunLoopRunInMode`**, which means
-//!   the function pointer buried in the `CFRunLoopSourceContext` the guest built
-//!   on its stack became a trampoline on the way in - the ordinary callback path
-//!   cannot see it, because it looks at registers;
-//! - **a timer fires repeatedly and its `info` arrives**, which is the same
-//!   claim for a callback that *is* in a register and a context that is not;
-//! - **the same program prints the same thing natively**, which is the only
-//!   specification of a run loop worth having.
-//!
-//! Under `ROSETTA3_OBJC=builtin`, which is not a detail. A
-//! `CFRunLoopSourceContext` holds guest function pointers, and the *host's*
-//! CoreFoundation would call them as arm64 - so the native path refuses
-//! `CFRunLoopSourceCreate` by name, correctly. Serving that call is precisely
-//! what `crates/corefoundation` exists for, and it is the thing under test.
-
 mod common;
 
-/// The fixture under this tree's own CoreFoundation, for the reason above.
 fn run_builtin(path: &str) -> (Option<i32>, String, String) {
     common::run_guest_env(&[("ROSETTA3_OBJC", "builtin")], path, &[])
 }
