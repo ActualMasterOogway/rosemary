@@ -10,6 +10,7 @@ impl Sha256 {
         Self(InnerSha256::new())
     }
 
+    #[inline]
     pub fn update(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
     }
@@ -21,6 +22,7 @@ impl Sha256 {
         self.update(bytes);
     }
 
+    #[inline]
     pub fn finish(self) -> [u8; 32] {
         self.0.finalize().into()
     }
@@ -35,6 +37,7 @@ impl Default for Sha256 {
 
 /// The SHA-256 of one contiguous input.
 #[allow(dead_code)]
+#[inline]
 pub fn digest(bytes: &[u8]) -> [u8; 32] {
     InnerSha256::digest(bytes).into()
 }
