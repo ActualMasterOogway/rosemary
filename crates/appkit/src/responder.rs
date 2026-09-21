@@ -271,9 +271,10 @@ unsafe extern "C" fn interpret_key_events(receiver: Id, _sel: Sel, events: Id) {
     }
 }
 
-/// `-[NSResponder mouseUp:]`: a responder that does not handle the release
-/// passes it up, so a container that took the press also sees it end.
-unsafe extern "C" fn mouse_up(receiver: Id, sel: Sel, event: Id) {
+/// An `NSResponder` event method: a responder that does not handle the event
+/// passes it up. These methods also matter when a guest override calls `super`;
+/// they are real methods on AppKit's base class rather than absent selectors.
+unsafe extern "C" fn forward_event(receiver: Id, sel: Sel, event: Id) {
     // SAFETY: installed as `v24@0:8@16`.
     unsafe { forward(receiver, sel, event) }
 }
@@ -283,7 +284,17 @@ pub(crate) fn install() {
     methods!(class, {
         "menu" => menu, c"@16@0:8";
         "setMenu:" => set_menu, c"v24@0:8@16";
-        "mouseUp:" => mouse_up, c"v24@0:8@16";
+        "mouseDown:" => forward_event, c"v24@0:8@16";
+        "mouseUp:" => forward_event, c"v24@0:8@16";
+        "rightMouseDown:" => forward_event, c"v24@0:8@16";
+        "rightMouseUp:" => forward_event, c"v24@0:8@16";
+        "otherMouseDown:" => forward_event, c"v24@0:8@16";
+        "otherMouseUp:" => forward_event, c"v24@0:8@16";
+        "mouseMoved:" => forward_event, c"v24@0:8@16";
+        "mouseDragged:" => forward_event, c"v24@0:8@16";
+        "rightMouseDragged:" => forward_event, c"v24@0:8@16";
+        "otherMouseDragged:" => forward_event, c"v24@0:8@16";
+        "scrollWheel:" => forward_event, c"v24@0:8@16";
         "interpretKeyEvents:" => interpret_key_events, c"v24@0:8@16";
         "tryToPerform:with:" => try_to_perform, c"c32@0:8:16@24";
     });
@@ -340,9 +351,40 @@ mod tests {
         unsafe {
             let add: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
             add(parent, objc::sel::get("addSubview:"), child);
-            mouse_up(child, sel, std::ptr::null_mut());
+            forward_event(child, sel, std::ptr::null_mut());
         }
         assert_eq!(SEEN.load(Ordering::Acquire), parent as usize);
+    }
+
+    /// Cocoa declares every pointer method on `NSResponder`, so a guest
+    /// override may call `super` without reaching message forwarding.
+    #[test]
+    fn pointer_event_methods_are_inherited_from_the_responder() {
+        crate::bootstrap();
+        let responder = objc::class::lookup(c"NSResponder").expect("NSResponder");
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        for name in [
+            "mouseDown:",
+            "mouseUp:",
+            "rightMouseDown:",
+            "rightMouseUp:",
+            "otherMouseDown:",
+            "otherMouseUp:",
+            "mouseMoved:",
+            "mouseDragged:",
+            "rightMouseDragged:",
+            "otherMouseDragged:",
+            "scrollWheel:",
+        ] {
+            let sel = objc::sel::get(name);
+            let owned = responder.method(sel).expect("declared on NSResponder");
+            let inherited = view.method(sel).expect("inherited by NSView");
+            assert_eq!(
+                inherited.implementation(),
+                owned.implementation(),
+                "-{name}"
+            );
+        }
     }
 
     /// The command keys, as the selectors a text client is expected to answer.
