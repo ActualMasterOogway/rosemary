@@ -17,30 +17,6 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/*
-fn prepare_process(executable: &std::path::Path) {
-    if !executable.is_absolute()
-        || executable.file_name().and_then(|name| name.to_str()) != Some("Geometry Dash")
-    {
-        return;
-    }
-    let Some(resources) = executable
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(|contents| contents.join("Resources"))
-        .filter(|path| path.is_dir())
-    else {
-        return;
-    };
-    if let Err(why) = std::env::set_current_dir(&resources) {
-        eprintln!(
-            "rosetta3: could not use {} as our working directory: {why}",
-            resources.display()
-        );
-    }
-}
-*/
-
 /// Load and execute, with `argv[0]` the path as the guest will see it.
 fn run(path: &str, args: Vec<OsString>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
     let mut argv = vec![OsString::from(path)];
@@ -192,7 +168,6 @@ fn main() -> ExitCode {
         // answer.
         rosetta3::shims::runtime::set_executable_path(std::path::Path::new(&path));
         rosetta3::frameworks::set_main_bundle(std::path::Path::new(&path));
-        // prepare_process(std::path::Path::new(&path));
         // A Mac's `~/Library` subtree, which this host has not got and a guest
         // does not create for itself.
         #[cfg(not(target_os = "macos"))]

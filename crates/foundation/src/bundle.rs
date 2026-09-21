@@ -216,13 +216,19 @@ impl Layout {
     /// spelling `[NSBundle pathForResource:@"MainMenu" ofType:@"nib"]` and
     /// `...ofType:@""` both reach.
     pub fn resource(&self, name: &str, extension: &str) -> Option<PathBuf> {
+        self.resource_in(name, extension, "")
+    }
+
+    /// `-pathForResource:ofType:inDirectory:`, with `directory` relative to
+    /// each resource root.
+    pub fn resource_in(&self, name: &str, extension: &str, directory: &str) -> Option<PathBuf> {
         let leaf = match extension.is_empty() {
             true => name.to_string(),
             false => format!("{name}.{extension}"),
         };
         std::iter::once(self.resources.clone())
             .chain(self.localizations())
-            .map(|dir| dir.join(&leaf))
+            .map(|root| root.join(directory).join(&leaf))
             .find(|p| p.exists())
     }
 
@@ -283,20 +289,28 @@ pub mod cf {
     /// `CFURLRef CFBundleCopyResourceURL(CFBundleRef, CFStringRef name,
     /// CFStringRef type, CFStringRef subDirName)`
     ///
-    /// The subdirectory is ignored for the reason
-    /// `-pathForResource:ofType:inDirectory:` ignores it.
     unsafe extern "C" fn CFBundleCopyResourceURL(
         _bundle: Id,
         name: Id,
         kind: Id,
-        _subdirectory: Id,
+        subdirectory: Id,
     ) -> Id {
         // SAFETY: the caller's obligation - each is an `NSString` or nil.
-        let (name, kind) = unsafe { (crate::string::bytes(name), crate::string::bytes(kind)) };
-        let (Ok(name), Ok(kind)) = (std::str::from_utf8(&name), std::str::from_utf8(&kind)) else {
+        let (name, kind, subdirectory) = unsafe {
+            (
+                crate::string::bytes(name),
+                crate::string::bytes(kind),
+                crate::string::bytes(subdirectory),
+            )
+        };
+        let (Ok(name), Ok(kind), Ok(subdirectory)) = (
+            std::str::from_utf8(&name),
+            std::str::from_utf8(&kind),
+            std::str::from_utf8(&subdirectory),
+        ) else {
             return std::ptr::null_mut();
         };
-        let Some(path) = super::main().and_then(|b| b.resource(name, kind)) else {
+        let Some(path) = super::main().and_then(|b| b.resource_in(name, kind, subdirectory)) else {
             return std::ptr::null_mut();
         };
         file_url(&path, false)
@@ -576,6 +590,8 @@ mod tests {
         std::fs::write(app.join("Contents/Info.plist"), info).unwrap();
         std::fs::write(app.join("Contents/MacOS/Thing"), b"").unwrap();
         std::fs::write(app.join("Contents/Resources/icon.icns"), b"").unwrap();
+        std::fs::create_dir_all(app.join("Contents/Resources/textures/ui")).unwrap();
+        std::fs::write(app.join("Contents/Resources/textures/ui/button.png"), b"").unwrap();
         std::fs::write(
             app.join("Contents/Resources/English.lproj/MainMenu.nib"),
             b"",
@@ -605,6 +621,22 @@ mod tests {
         assert!(layout.main_nib().is_some(), "the nib is in English.lproj");
         assert!(layout.resource("nothing", "txt").is_none());
         assert_eq!(layout.localization_names(), ["English"]);
+    }
+
+    #[test]
+    fn a_resource_directory_is_relative_to_the_bundle_resources() {
+        let exe = scratch("resource-directory", INFO);
+        let layout = Layout::enclosing(&exe).expect("a bundle");
+        assert_eq!(
+            layout.resource_in("button.png", "", "textures/ui"),
+            Some(layout.resources.join("textures/ui/button.png"))
+        );
+        assert!(layout.resource("button.png", "").is_none());
+        assert!(
+            layout
+                .resource_in("button.png", "", "textures/missing")
+                .is_none()
+        );
     }
 
     /// `CFBundleIconFile` is written with the extension as often as without,
@@ -885,17 +917,28 @@ pub(crate) mod class {
 
     unsafe extern "C" fn path_for_resource_in_directory(
         receiver: Id,
-        sel: Sel,
+        _sel: Sel,
         name: Id,
         kind: Id,
-        _directory: Id,
+        directory: Id,
     ) -> Id {
-        // The subdirectory is ignored: this runtime searches `Resources` and its
-        // localizations whole, so a name that is there is found either way. A
-        // bundle with the same leaf in two subdirectories would be answered
-        // wrongly, and none in this tree has one.
-        // SAFETY: the two names are `NSString`s or nil.
-        unsafe { path_for_resource(receiver, sel, name, kind) }
+        // SAFETY: each argument is an `NSString` or nil.
+        let (name, kind, directory) = unsafe {
+            (
+                crate::string::bytes(name),
+                crate::string::bytes(kind),
+                crate::string::bytes(directory),
+            )
+        };
+        let (Ok(name), Ok(kind), Ok(directory)) = (
+            std::str::from_utf8(&name),
+            std::str::from_utf8(&kind),
+            std::str::from_utf8(&directory),
+        ) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: the receiver is an `NSBundle`.
+        path(unsafe { layout_of(receiver) }.and_then(|b| b.resource_in(name, kind, directory)))
     }
 
     /// `-infoDictionary`: the whole `Info.plist` as objects.
