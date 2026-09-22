@@ -1632,6 +1632,30 @@ mod tests {
         }
     }
 
+    /// libpthread masks a static initializer before it chooses its low-nibble
+    /// kind. Old binaries may therefore carry unrelated high bits and still be
+    /// accepted as a normal static mutex.
+    #[test]
+    fn a_compatible_static_mutex_signature_with_legacy_bits_locks() {
+        let m = Mutex::statically_initialised(0xfeed_0000_32aa_aba7);
+        unsafe {
+            assert_eq!(sync::mutex_lock(m.at()), 0);
+            assert_eq!(sync::mutex_unlock(m.at()), 0);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+        }
+    }
+
+    /// libpthread accepts the static-signature mask for destruction, but lock's
+    /// deferred initializer rejects an unknown low-nibble mutex type.
+    #[test]
+    fn an_unknown_static_mutex_type_fails_lock_but_can_be_destroyed() {
+        let m = Mutex::statically_initialised(0x32aa_aba4);
+        unsafe {
+            assert_eq!(sync::mutex_lock(m.at()), err::EINVAL);
+            assert_eq!(sync::mutex_destroy(m.at()), 0);
+        }
+    }
+
     /// A statically initialised mutex first touched by several threads at once must
     /// end up as *one* host mutex. Two would lock independently and exclude nobody.
     #[test]

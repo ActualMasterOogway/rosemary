@@ -45,6 +45,17 @@ pub mod sig {
     pub const ERRORCHECK_MUTEX_INIT: u64 = 0x32AA_ABA1;
     pub const RECURSIVE_MUTEX_INIT: u64 = 0x32AA_ABA2;
     pub const FIRSTFIT_MUTEX_INIT: u64 = 0x32AA_ABA3;
+    /// `_PTHREAD_MUTEX_SIG_init_MASK`: preserves the static mutex kind.
+    pub const MUTEX_INIT_MASK: u64 = 0xFFFF_FFF0;
+    /// Bits of a static initializer that select its mutex kind.
+    pub const MUTEX_INIT_TYPE_MASK: u64 = 0x0000_000F;
+    /// `_PTHREAD_MUTEX_SIG_init_CMP`: the static mutex signature family.
+    pub const MUTEX_INIT_CMP: u64 = 0x32AA_ABA0;
+    /// The low-nibble static type values `_pthread_mutex_init` recognises.
+    pub const MUTEX_INIT_ERRORCHECK: u64 = ERRORCHECK_MUTEX_INIT & MUTEX_INIT_TYPE_MASK;
+    pub const MUTEX_INIT_RECURSIVE: u64 = RECURSIVE_MUTEX_INIT & MUTEX_INIT_TYPE_MASK;
+    pub const MUTEX_INIT_FIRSTFIT: u64 = FIRSTFIT_MUTEX_INIT & MUTEX_INIT_TYPE_MASK;
+    pub const MUTEX_INIT_NORMAL: u64 = MUTEX_INIT & MUTEX_INIT_TYPE_MASK;
     pub const COND_INIT: u64 = 0x3CB0_B1BB;
     pub const ONCE_INIT: u64 = 0x30B1_BCBA;
     pub const RWLOCK_INIT: u64 = 0x2DA8_B3B4;
@@ -122,23 +133,24 @@ impl Kind {
     }
 
     /// The signature a static initializer for this kind writes, if it has one.
-    fn static_initializers(self) -> &'static [u64] {
+    fn is_static_initializer(self, signature: u64) -> bool {
         match self {
-            Kind::Mutex => &[
-                sig::MUTEX_INIT,
-                sig::ERRORCHECK_MUTEX_INIT,
-                sig::RECURSIVE_MUTEX_INIT,
-                sig::FIRSTFIT_MUTEX_INIT,
-            ],
-            Kind::Cond => &[sig::COND_INIT],
-            Kind::RwLock => &[sig::RWLOCK_INIT],
+            // libpthread does not compare a static mutex initializer exactly.
+            // Its mask preserves the low nibble for `_pthread_mutex_init`, which
+            // selects the mutex kind, and ignores the rest. This accommodates
+            // older binaries whose initializer carried otherwise-unused bits.
+            // Keep that compatibility rule here rather than requiring one of
+            // the four initializer spellings current headers expose.
+            Kind::Mutex => (signature & sig::MUTEX_INIT_MASK) == sig::MUTEX_INIT_CMP,
+            Kind::Cond => signature == sig::COND_INIT,
+            Kind::RwLock => signature == sig::RWLOCK_INIT,
             // Darwin's implementation ignores `__sig`, so a zero-filled control
             // word is also a valid never-run once object.
-            Kind::Once => &[sig::ONCE_INIT, 0],
+            Kind::Once => matches!(signature, sig::ONCE_INIT | 0),
             // The attribute types have no static initializer: POSIX requires
             // `pthread_attr_init` and friends, so an attribute set this crate has not
             // seen is not one at all.
-            _ => &[],
+            _ => false,
         }
     }
 }
@@ -182,7 +194,7 @@ impl Record {
                 false => Found::Invalid,
             };
         }
-        match self.kind.static_initializers().contains(&sig) {
+        match self.kind.is_static_initializer(sig) {
             true => Found::Fresh(sig),
             false => Found::Invalid,
         }
@@ -222,7 +234,7 @@ impl Record {
                 std::hint::spin_loop();
                 continue;
             }
-            if !self.kind.static_initializers().contains(&sig) {
+            if !self.kind.is_static_initializer(sig) {
                 return None;
             }
             // Claim it. A loser retries and sees `BUSY` or the finished object.
@@ -264,7 +276,7 @@ impl Record {
     /// on a mutex that was simply never locked.
     pub fn take(&self) -> Option<Option<u64>> {
         let sig = self.word(0).load(Ordering::Acquire);
-        if self.kind.static_initializers().contains(&sig) {
+        if self.kind.is_static_initializer(sig) {
             return self
                 .word(0)
                 .compare_exchange(sig, DEAD, Ordering::AcqRel, Ordering::Relaxed)

@@ -90,14 +90,17 @@ fn host_mutex(darwin_type: i32, protocol: i32) -> Option<u64> {
 /// `PTHREAD_RECURSIVE_MUTEX_INITIALIZER` is a real thing a guest writes, and the
 /// difference between it and the plain one is the difference between a lock that
 /// recurses and one that deadlocks.
-fn static_mutex_type(signature: u64) -> i32 {
-    match signature {
-        sig::RECURSIVE_MUTEX_INIT => PTHREAD_MUTEX_RECURSIVE,
-        sig::ERRORCHECK_MUTEX_INIT => PTHREAD_MUTEX_ERRORCHECK,
+fn static_mutex_type(signature: u64) -> Option<i32> {
+    Some(match signature & sig::MUTEX_INIT_TYPE_MASK {
+        sig::MUTEX_INIT_RECURSIVE => PTHREAD_MUTEX_RECURSIVE,
+        sig::MUTEX_INIT_ERRORCHECK => PTHREAD_MUTEX_ERRORCHECK,
         // First-fit is a *policy*, not a type: it changes which waiter wins, which no
         // correct program observes, and the mutex itself is an ordinary one.
-        _ => PTHREAD_MUTEX_NORMAL,
-    }
+        sig::MUTEX_INIT_FIRSTFIT | sig::MUTEX_INIT_NORMAL => PTHREAD_MUTEX_NORMAL,
+        // libpthread accepts the signature mask first, then rejects an initializer
+        // whose low-nibble type `_pthread_mutex_init` does not know.
+        _ => return None,
+    })
 }
 
 /// The host mutex behind a guest one, building it from a static initializer if that
@@ -112,7 +115,7 @@ unsafe fn mutex_of(at: u64) -> Option<*mut libc::pthread_mutex_t> {
     }
     // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(at, Kind::Mutex) };
-    r.payload_or_build(|signature| host_mutex(static_mutex_type(signature), PTHREAD_PRIO_NONE))
+    r.payload_or_build(|signature| host_mutex(static_mutex_type(signature)?, PTHREAD_PRIO_NONE))
         .map(|p| p as usize as *mut libc::pthread_mutex_t)
 }
 
