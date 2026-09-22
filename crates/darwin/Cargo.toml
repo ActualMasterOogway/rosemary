@@ -23,3 +23,4 @@ cipher.workspace = true
 des.workspace = true
 rc2.workspace = true
 rc4.workspace = true
+rustix.workspace = true

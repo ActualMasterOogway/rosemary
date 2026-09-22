@@ -236,23 +236,22 @@ unsafe fn block(
     timeout_ns: Option<u64>,
     shared: bool,
 ) -> Result<(), i32> {
-    const FUTEX_WAIT: i32 = 0;
-    const FUTEX_PRIVATE_FLAG: i32 = 128;
+    use rustix::thread::futex::{self, Flags, Timespec};
+    use std::sync::atomic::AtomicU32;
 
-    let futex_op = FUTEX_WAIT | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
-    let timeout = timeout_ns.map(|timeout_ns| libc::timespec {
-        tv_sec: (timeout_ns / 1_000_000_000) as _,
+    let timeout = timeout_ns.map(|timeout_ns| Timespec {
+        tv_sec: (timeout_ns / 1_000_000_000) as i64,
         tv_nsec: (timeout_ns % 1_000_000_000) as _,
     });
-    // A null timeout is what a futex takes for "forever".
-    let timeout = timeout.as_ref().map_or(std::ptr::null(), |t| t);
-    // SAFETY: the caller's guarantee for `addr`, and `timeout` is null or a live
-    // local. `futex` reads both and writes neither.
-    let rc = unsafe { libc::syscall(libc::SYS_futex, addr, futex_op, value, timeout, 0, 0) };
-    match rc {
-        0 => Ok(()),
-        _ => Err(crate::errno::get()),
-    }
+    let flags = if shared {
+        Flags::empty()
+    } else {
+        Flags::PRIVATE
+    };
+    // SAFETY: the caller's guarantee makes `addr` a valid, aligned atomic word for
+    // the duration of this call. Rustix only reads it as the futex address.
+    let addr = unsafe { AtomicU32::from_ptr(addr) };
+    futex::wait(addr, flags, value, timeout.as_ref()).map_err(|error| error.raw_os_error())
 }
 
 /// As above, for a host with no futex: poll rather than block.
@@ -294,15 +293,21 @@ fn monotonic_nanoseconds() -> u64 {
 /// `addr` is a readable, four-byte-aligned word.
 #[cfg(target_os = "linux")]
 unsafe fn unblock(addr: *mut u32, all: bool, shared: bool) -> i64 {
-    const FUTEX_WAKE: i32 = 1;
-    const FUTEX_PRIVATE_FLAG: i32 = 128;
+    use rustix::thread::futex::{self, Flags};
+    use std::sync::atomic::AtomicU32;
 
-    let futex_op = FUTEX_WAKE | if shared { 0 } else { FUTEX_PRIVATE_FLAG };
-    let count = if all { i32::MAX } else { 1 };
-    // SAFETY: the caller's guarantee. `FUTEX_WAKE` reads the address as a key and
-    // does not dereference the remaining arguments.
-    let woken = unsafe { libc::syscall(libc::SYS_futex, addr, futex_op, count, 0, 0, 0) };
-    woken.max(0)
+    let flags = if shared {
+        Flags::empty()
+    } else {
+        Flags::PRIVATE
+    };
+    let count = if all { i32::MAX as u32 } else { 1 };
+    // SAFETY: the caller's guarantee makes `addr` a valid, aligned atomic word for
+    // the duration of this call. Rustix only uses it as the futex key.
+    let addr = unsafe { AtomicU32::from_ptr(addr) };
+    futex::wake(addr, flags, count)
+        .map(|woken| woken as i64)
+        .unwrap_or(0)
 }
 
 /// As above, for a host with no futex. The polling [`block`] needs no wake.
