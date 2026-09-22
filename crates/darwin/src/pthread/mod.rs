@@ -12,8 +12,9 @@
 //! * **Object layout.** A `pthread_mutex_t` is sixty-four bytes carrying a signature
 //!   on Darwin and forty bytes of zeroes under musl, and a `PTHREAD_MUTEX_INITIALIZER`
 //!   is a *static* initializer no call of ours ever sees written. See [`object`].
-//! * **Object lifetime.** The guest allocates the object; the host one has to live as
-//!   long and be found again from the guest's address. See [`sync`].
+//! * **Object lifetime.** Ordinary mutex state lives inline in the guest object;
+//!   larger host-backed objects have to live as long and be found again from the
+//!   guest's address. See [`mutex`] and [`sync`].
 //! * **Signatures.** `pthread_setname_np` takes one argument on Darwin and two on
 //!   Linux; `pthread_once_t` is sixteen bytes and four.
 //!
@@ -23,6 +24,7 @@
 
 pub mod attr;
 pub mod consts;
+mod mutex;
 pub mod object;
 pub mod raw;
 mod sched;
@@ -1063,11 +1065,11 @@ fn entries() -> &'static [(&'static str, u64)] {
             "pthread_attr_get_qos_class_np" => attr::imp::attr_get_qos_class_np,
 
             // Mutexes.
-            "pthread_mutex_init" => sync::mutex_init,
-            "pthread_mutex_destroy" => sync::mutex_destroy,
-            "pthread_mutex_lock" => sync::mutex_lock,
-            "pthread_mutex_trylock" => sync::mutex_trylock,
-            "pthread_mutex_unlock" => sync::mutex_unlock,
+            "pthread_mutex_init" => mutex::mutex_init,
+            "pthread_mutex_destroy" => mutex::mutex_destroy,
+            "pthread_mutex_lock" => mutex::mutex_lock,
+            "pthread_mutex_trylock" => mutex::mutex_trylock,
+            "pthread_mutex_unlock" => mutex::mutex_unlock,
             "pthread_mutexattr_init" => mutexattr_init,
             "pthread_mutexattr_destroy" => mutexattr_destroy,
             "pthread_mutexattr_settype" => mutexattr_settype,
@@ -1657,7 +1659,7 @@ mod tests {
     }
 
     /// A statically initialised mutex first touched by several threads at once must
-    /// end up as *one* host mutex. Two would lock independently and exclude nobody.
+    /// publish one coherent inline record rather than partially initialized state.
     #[test]
     fn racing_threads_build_one_object_for_one_static_mutex() {
         let m = Arc::new(Mutex::statically_initialised(object::sig::MUTEX_INIT));
@@ -1685,12 +1687,12 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::Relaxed),
             8 * 2000,
-            "a lost update means two host mutexes behind one guest one"
+            "a lost update means initialization or exclusion split"
         );
     }
 
     /// An object of one kind handed to another kind's function is `EINVAL`, not a
-    /// host mutex built out of a condition variable.
+    /// mutex state built out of a condition variable.
     #[test]
     fn a_cond_is_not_a_mutex() {
         let c = Cond::new();
@@ -1703,8 +1705,8 @@ mod tests {
     }
 
     /// Copying an initialised mutex is undefined in POSIX, and the copy sharing the
-    /// original's host lock is the quiet way to get it wrong: both would lock, and
-    /// neither would exclude the other.
+    /// original's state is the quiet way to get it wrong: both would appear to lock
+    /// while their address identity no longer agrees.
     #[test]
     fn a_copied_mutex_is_refused_rather_than_aliased() {
         let original = Mutex::new();

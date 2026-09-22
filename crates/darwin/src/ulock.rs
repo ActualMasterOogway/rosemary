@@ -24,6 +24,9 @@
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use std::ffi::c_void;
+use std::sync::atomic::AtomicU32;
+
+use crate::wait_word::{self, Scope, WakeCount};
 
 /// The operation, in the low byte of the first argument. From `<sys/ulock.h>`.
 ///
@@ -59,6 +62,7 @@ mod flag {
     pub const WAKE_MASK: u32 = NO_ERRNO | WAKE_ALL | WAKE_THREAD | WAKE_ALLOW_NON_OWNER;
 }
 
+#[inline]
 fn valid_opcode(opcode: u32) -> bool {
     matches!(
         opcode,
@@ -71,6 +75,7 @@ fn valid_opcode(opcode: u32) -> bool {
 }
 
 /// Whether an opcode compares eight bytes rather than four.
+#[inline]
 fn is_64_bit(opcode: u32) -> bool {
     matches!(
         opcode,
@@ -82,6 +87,7 @@ fn is_64_bit(opcode: u32) -> bool {
 ///
 /// A private futex is the cheaper one, and is wrong if the word really is shared - so
 /// this errs toward the shared form for the operations that say so.
+#[inline]
 fn is_shared(opcode: u32) -> bool {
     matches!(
         opcode,
@@ -185,10 +191,17 @@ unsafe fn wait_ns(operation: u32, addr: *mut c_void, value: u64, timeout_ns: u64
     } else {
         Some(timeout_ns)
     };
-    match unsafe { block(addr as *mut u32, value as u32, timeout, is_shared(opcode)) } {
+    let scope = if is_shared(opcode) {
+        Scope::Shared
+    } else {
+        Scope::Private
+    };
+    // SAFETY: validated above and guaranteed readable by the caller.
+    let word = unsafe { AtomicU32::from_ptr(addr.cast()) };
+    match unsafe { wait_word::wait_u32(word, value as u32, timeout, scope) } {
         Ok(()) => 0,
-        Err(libc::EAGAIN) => 0,
-        Err(e) => fail(operation, e),
+        Err(wait_word::WaitError::Changed) => 0,
+        Err(error) => fail(operation, error.raw_os_error()),
     }
 }
 
@@ -218,58 +231,21 @@ pub unsafe extern "C" fn wake(operation: u32, addr: *mut c_void, _wake_value: u6
     // anyway.
     let all = operation & (flag::WAKE_ALL | flag::WAKE_THREAD) != 0;
     // SAFETY: the caller states `addr` is a readable word.
-    match unsafe { unblock(addr as *mut u32, all, is_shared(opcode)) } {
-        0 => fail(operation, libc::ENOENT),
-        _ => 0,
-    }
-}
-
-/// Block on `addr` while it holds `value`, for at most `timeout_ns`, or forever.
-///
-/// # Safety
-///
-/// `addr` is a readable, four-byte-aligned word.
-#[cfg(target_os = "linux")]
-unsafe fn block(
-    addr: *mut u32,
-    value: u32,
-    timeout_ns: Option<u64>,
-    shared: bool,
-) -> Result<(), i32> {
-    use rustix::thread::futex::{self, Flags, Timespec};
-    use std::sync::atomic::AtomicU32;
-
-    let timeout = timeout_ns.map(|timeout_ns| Timespec {
-        tv_sec: (timeout_ns / 1_000_000_000) as i64,
-        tv_nsec: (timeout_ns % 1_000_000_000) as _,
-    });
-    let flags = if shared {
-        Flags::empty()
+    let scope = if is_shared(opcode) {
+        Scope::Shared
     } else {
-        Flags::PRIVATE
+        Scope::Private
     };
-    // SAFETY: the caller's guarantee makes `addr` a valid, aligned atomic word for
-    // the duration of this call. Rustix only reads it as the futex address.
-    let addr = unsafe { AtomicU32::from_ptr(addr) };
-    futex::wait(addr, flags, value, timeout.as_ref()).map_err(|error| error.raw_os_error())
-}
-
-/// As above, for a host with no futex: poll rather than block.
-///
-/// Correct - every caller re-checks its word and loops - and never reached on macOS,
-/// where the guest's `__ulock_wait` is the host's own.
-#[cfg(not(target_os = "linux"))]
-unsafe fn block(
-    addr: *mut u32,
-    value: u32,
-    _timeout_ns: Option<u64>,
-    _shared: bool,
-) -> Result<(), i32> {
-    // SAFETY: the caller states `addr` is a readable word.
-    if unsafe { addr.read_volatile() } == value {
-        std::thread::yield_now();
+    let count = if all { WakeCount::All } else { WakeCount::One };
+    // SAFETY: validated above and guaranteed readable by the caller.
+    let word = unsafe { AtomicU32::from_ptr(addr.cast()) };
+    match unsafe { wait_word::wake_u32(word, count, scope) } {
+        Ok(0) => fail(operation, libc::ENOENT),
+        Ok(_) => 0,
+        // The old Linux adapter collapsed a host wake failure into zero woken,
+        // which Darwin reports as ENOENT. Preserve that exported behavior here.
+        Err(_) => fail(operation, libc::ENOENT),
     }
-    Ok(())
 }
 
 fn monotonic_nanoseconds() -> u64 {
@@ -284,36 +260,6 @@ fn monotonic_nanoseconds() -> u64 {
     (now.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(now.tv_nsec as u64)
-}
-
-/// Wake one waiter on `addr`, or all of them, and report how many were woken.
-///
-/// # Safety
-///
-/// `addr` is a readable, four-byte-aligned word.
-#[cfg(target_os = "linux")]
-unsafe fn unblock(addr: *mut u32, all: bool, shared: bool) -> i64 {
-    use rustix::thread::futex::{self, Flags};
-    use std::sync::atomic::AtomicU32;
-
-    let flags = if shared {
-        Flags::empty()
-    } else {
-        Flags::PRIVATE
-    };
-    let count = if all { i32::MAX as u32 } else { 1 };
-    // SAFETY: the caller's guarantee makes `addr` a valid, aligned atomic word for
-    // the duration of this call. Rustix only uses it as the futex key.
-    let addr = unsafe { AtomicU32::from_ptr(addr) };
-    futex::wake(addr, flags, count)
-        .map(|woken| woken as i64)
-        .unwrap_or(0)
-}
-
-/// As above, for a host with no futex. The polling [`block`] needs no wake.
-#[cfg(not(target_os = "linux"))]
-unsafe fn unblock(_addr: *mut u32, _all: bool, _shared: bool) -> i64 {
-    1
 }
 
 /// Empty on macOS, where the host's own kernel answers these.

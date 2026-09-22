@@ -1,11 +1,9 @@
 //! Mutexes, condition variables, read-write locks and `pthread_once`.
 //!
-//! Each of the first three is a **live object** the guest allocates and this crate has
-//! to keep alive across calls, so each guest object gets a host one on the heap and
-//! keeps its address in its own bytes. See [`super::object`] for the record and for
-//! why a heap object rather than one placed in the guest's block: a Darwin
-//! `pthread_cond_t` is forty-eight bytes and so is glibc's, which leaves nowhere to
-//! put the signature that says whose it is.
+//! Condition variables and read-write locks keep host objects on the heap. Ordinary
+//! process-private mutexes are inline; see [`super::mutex`]. A condition wait uses a
+//! small host-side gate to bridge its atomic release-and-wait operation to an inline
+//! mutex without opening a lost-wakeup window.
 //!
 //! `pthread_once` needs no host object at all - it is one word of state, and the
 //! guest's sixteen bytes have room for it.
@@ -17,7 +15,9 @@
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
-use super::object::{Kind, Record, sig};
+use super::object::{Kind, Record};
+
+pub use super::mutex::{mutex_destroy, mutex_init, mutex_lock, mutex_trylock, mutex_unlock};
 
 /// A zeroed host object on the heap, for `init` to initialise **in place**.
 ///
@@ -59,174 +59,40 @@ unsafe fn reclaim<T>(at: u64) -> Box<T> {
     unsafe { Box::from_raw(at as usize as *mut T) }
 }
 
-/// A host mutex built for `kind`, or `None` if the host refused it.
-fn host_mutex(darwin_type: i32, protocol: i32) -> Option<u64> {
-    let mut attr: libc::pthread_mutexattr_t = unsafe { core::mem::zeroed() };
-    // SAFETY: a live local; `pthread_mutexattr_init` initialises the whole structure.
-    if unsafe { libc::pthread_mutexattr_init(&mut attr) } != 0 {
-        return None;
-    }
-    let host_type = mutex_type_to_host(darwin_type)?;
-    // SAFETY: an initialised attribute set and a type the translation vouched for.
-    unsafe { libc::pthread_mutexattr_settype(&mut attr, host_type) };
-    // These constants agree on Darwin and supported Unix hosts.
-    if unsafe { super::raw::pthread_mutexattr_setprotocol(&mut attr, protocol) } != 0 {
-        unsafe { libc::pthread_mutexattr_destroy(&mut attr) };
-        return None;
-    }
-
-    let m = empty::<libc::pthread_mutex_t>();
-    // SAFETY: `m` is a live zeroed object of the right type and `attr` an initialised
-    // attribute set. Initialised where it will live, never moved afterwards.
-    let rc = unsafe { libc::pthread_mutex_init(m, &attr) };
-    // SAFETY: initialised above and not used again.
-    unsafe { libc::pthread_mutexattr_destroy(&mut attr) };
-    // SAFETY: `m` came from `empty` and nothing else holds it.
-    unsafe { published(m, rc) }
+struct HostCond {
+    cond: libc::pthread_cond_t,
+    /// Serializes the inline-mutex release with entering the host condition wait.
+    gate: libc::pthread_mutex_t,
 }
-
-/// Which mutex a static initializer asks for.
-///
-/// `PTHREAD_RECURSIVE_MUTEX_INITIALIZER` is a real thing a guest writes, and the
-/// difference between it and the plain one is the difference between a lock that
-/// recurses and one that deadlocks.
-fn static_mutex_type(signature: u64) -> Option<i32> {
-    Some(match signature & sig::MUTEX_INIT_TYPE_MASK {
-        sig::MUTEX_INIT_RECURSIVE => PTHREAD_MUTEX_RECURSIVE,
-        sig::MUTEX_INIT_ERRORCHECK => PTHREAD_MUTEX_ERRORCHECK,
-        // First-fit is a *policy*, not a type: it changes which waiter wins, which no
-        // correct program observes, and the mutex itself is an ordinary one.
-        sig::MUTEX_INIT_FIRSTFIT | sig::MUTEX_INIT_NORMAL => PTHREAD_MUTEX_NORMAL,
-        // libpthread accepts the signature mask first, then rejects an initializer
-        // whose low-nibble type `_pthread_mutex_init` does not know.
-        _ => return None,
-    })
-}
-
-/// The host mutex behind a guest one, building it from a static initializer if that
-/// is all the guest wrote.
-///
-/// # Safety
-///
-/// `at` is a guest `pthread_mutex_t *`.
-unsafe fn mutex_of(at: u64) -> Option<*mut libc::pthread_mutex_t> {
-    if at == 0 {
-        return None;
-    }
-    // SAFETY: the caller's guarantee.
-    let r = unsafe { Record::at(at, Kind::Mutex) };
-    r.payload_or_build(|signature| host_mutex(static_mutex_type(signature)?, PTHREAD_PRIO_NONE))
-        .map(|p| p as usize as *mut libc::pthread_mutex_t)
-}
-
-/// `int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *)`.
-///
-/// # Safety
-///
-/// Called only through an import slot this crate defines.
-pub unsafe extern "C" fn mutex_init(at: u64, attr: u64) -> i32 {
-    if at == 0 {
-        return err::EINVAL;
-    }
-    // SAFETY: the caller's guarantee.
-    let settings = unsafe { MutexAttr::of_guest(attr) };
-    let Some(settings) = settings else {
-        return err::EINVAL;
-    };
-    if settings.pshared == PTHREAD_PROCESS_SHARED {
-        // A process-shared lock lives in memory two processes map, and the host
-        // object behind it does not: it is on this process's heap. Refused rather
-        // than silently made private, which would be a lock that excludes nobody.
-        say_unsupported("a process-shared mutex");
-        return err::ENOTSUP;
-    }
-    let Some(host) = host_mutex(settings.kind, settings.protocol) else {
-        return err::EINVAL;
-    };
-    // SAFETY: the caller's guarantee.
-    let r = unsafe { Record::at(at, Kind::Mutex) };
-    if let Some(previous) = r.reinitialise(host) {
-        // Re-initialising a live mutex is undefined in POSIX; freeing rather than
-        // leaking is the kinder undefined.
-        // SAFETY: `previous` was published by this module with this type.
-        drop(unsafe { reclaim::<libc::pthread_mutex_t>(previous) });
-    }
-    0
-}
-
-/// # Safety
-///
-/// As [`mutex_init`].
-pub unsafe extern "C" fn mutex_destroy(at: u64) -> i32 {
-    if at == 0 {
-        return err::EINVAL;
-    }
-    // SAFETY: the caller's guarantee.
-    let r = unsafe { Record::at(at, Kind::Mutex) };
-    let Some(payload) = r.take() else {
-        return err::EINVAL;
-    };
-    let Some(host) = payload else {
-        // A static initializer that was never used. Nothing was built, so nothing is
-        // freed, and destroying it is still success.
-        return 0;
-    };
-    // SAFETY: published by this module with this type, and now unreachable from the
-    // guest - `take` replaced the signature before this ran.
-    let boxed = unsafe { reclaim::<libc::pthread_mutex_t>(host) };
-    let raw = Box::into_raw(boxed);
-    // SAFETY: a live, initialised mutex this owns.
-    let rc = unsafe { libc::pthread_mutex_destroy(raw) };
-    if rc != 0 {
-        r.set_payload(host);
-        return err::from_host(rc);
-    }
-    // SAFETY: destroy succeeded and `raw` is again exclusively owned here.
-    drop(unsafe { Box::from_raw(raw) });
-    0
-}
-
-macro_rules! mutex_op {
-    ($name:ident, $host:ident) => {
-        /// # Safety
-        ///
-        /// As [`mutex_init`].
-        pub unsafe extern "C" fn $name(at: u64) -> i32 {
-            // SAFETY: the caller's guarantee.
-            let Some(m) = (unsafe { mutex_of(at) }) else {
-                return err::EINVAL;
-            };
-            // SAFETY: a live host mutex this module owns for as long as the guest's
-            // object says it does.
-            err::from_host(unsafe { libc::$host(m) })
-        }
-    };
-}
-
-mutex_op!(mutex_lock, pthread_mutex_lock);
-mutex_op!(mutex_trylock, pthread_mutex_trylock);
-mutex_op!(mutex_unlock, pthread_mutex_unlock);
 
 fn host_cond() -> Option<u64> {
-    let c = empty::<libc::pthread_cond_t>();
-    // SAFETY: a live zeroed object of the right type, initialised where it will live;
-    // a null attribute pointer is the defaults.
-    let rc = unsafe { libc::pthread_cond_init(c, core::ptr::null()) };
-    // SAFETY: `c` came from `empty` and nothing else holds it.
-    unsafe { published(c, rc) }
+    let c = empty::<HostCond>();
+    // SAFETY: both fields are live zeroed host objects and are initialized in place.
+    let mutex_rc = unsafe { libc::pthread_mutex_init(&mut (*c).gate, core::ptr::null()) };
+    if mutex_rc != 0 {
+        drop(unsafe { Box::from_raw(c) });
+        return None;
+    }
+    let cond_rc = unsafe { libc::pthread_cond_init(&mut (*c).cond, core::ptr::null()) };
+    if cond_rc != 0 {
+        unsafe { libc::pthread_mutex_destroy(&mut (*c).gate) };
+        drop(unsafe { Box::from_raw(c) });
+        return None;
+    }
+    Some(c as usize as u64)
 }
 
 /// # Safety
 ///
 /// `at` is a guest `pthread_cond_t *`.
-unsafe fn cond_of(at: u64) -> Option<*mut libc::pthread_cond_t> {
+unsafe fn cond_of(at: u64) -> Option<*mut HostCond> {
     if at == 0 {
         return None;
     }
     // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(at, Kind::Cond) };
     r.payload_or_build(|_| host_cond())
-        .map(|p| p as usize as *mut libc::pthread_cond_t)
+        .map(|p| p as usize as *mut HostCond)
 }
 
 /// # Safety
@@ -251,7 +117,7 @@ pub unsafe extern "C" fn cond_init(at: u64, attr: u64) -> i32 {
     let r = unsafe { Record::at(at, Kind::Cond) };
     if let Some(previous) = r.reinitialise(host) {
         // SAFETY: published by this module with this type.
-        drop(unsafe { reclaim::<libc::pthread_cond_t>(previous) });
+        drop(unsafe { reclaim::<HostCond>(previous) });
     }
     0
 }
@@ -272,14 +138,17 @@ pub unsafe extern "C" fn cond_destroy(at: u64) -> i32 {
         return 0;
     };
     // SAFETY: published by this module, and now unreachable from the guest.
-    let boxed = unsafe { reclaim::<libc::pthread_cond_t>(host) };
+    let boxed = unsafe { reclaim::<HostCond>(host) };
     let raw = Box::into_raw(boxed);
     // SAFETY: a live condition variable this owns.
-    let rc = unsafe { libc::pthread_cond_destroy(raw) };
+    let rc = unsafe { libc::pthread_cond_destroy(&mut (*raw).cond) };
     if rc != 0 {
         r.set_payload(host);
         return err::from_host(rc);
     }
+    // No waiter can hold the gate after condition destruction succeeds.
+    let gate_rc = unsafe { libc::pthread_mutex_destroy(&mut (*raw).gate) };
+    debug_assert_eq!(gate_rc, 0);
     // SAFETY: destroy succeeded and `raw` is again exclusively owned here.
     drop(unsafe { Box::from_raw(raw) });
     0
@@ -295,8 +164,15 @@ macro_rules! cond_signal_op {
             let Some(c) = (unsafe { cond_of(at) }) else {
                 return err::EINVAL;
             };
-            // SAFETY: a live condition variable this module owns.
-            err::from_host(unsafe { libc::$host(c) })
+            // The gate closes the release/enqueue window used by inline guest
+            // mutexes. It is harmless for host-fallback mutex waiters too.
+            let lock_rc = unsafe { libc::pthread_mutex_lock(&mut (*c).gate) };
+            if lock_rc != 0 {
+                return err::from_host(lock_rc);
+            }
+            let rc = unsafe { libc::$host(&mut (*c).cond) };
+            unsafe { libc::pthread_mutex_unlock(&mut (*c).gate) };
+            err::from_host(rc)
         }
     };
 }
@@ -308,13 +184,16 @@ cond_signal_op!(cond_broadcast, pthread_cond_broadcast);
 ///
 /// As [`cond_init`], with `mutex` a guest `pthread_mutex_t *` the caller holds.
 pub unsafe extern "C" fn cond_wait(at: u64, mutex: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
-    let (Some(c), Some(m)) = (unsafe { cond_of(at) }, unsafe { mutex_of(mutex) }) else {
+    let Some(c) = (unsafe { cond_of(at) }) else {
         return err::EINVAL;
     };
-    // SAFETY: both objects are live and this module owns them; the guest holds the
-    // lock, which is its side of the contract.
-    err::from_host(unsafe { libc::pthread_cond_wait(c, m) })
+    if let Some(m) = unsafe { super::mutex::host_pointer(mutex) } {
+        return err::from_host(unsafe { libc::pthread_cond_wait(&mut (*c).cond, m) });
+    }
+    if !unsafe { super::mutex::is_inline(mutex) } {
+        return err::EINVAL;
+    }
+    unsafe { cond_wait_inline(c, mutex, None) }
 }
 
 /// `struct timespec` is a `time_t` and a `long` on both platforms, so the guest's
@@ -324,18 +203,53 @@ pub unsafe extern "C" fn cond_wait(at: u64, mutex: u64) -> i32 {
 ///
 /// As [`cond_wait`], with `abstime` a readable `struct timespec *`.
 pub unsafe extern "C" fn cond_timedwait(at: u64, mutex: u64, abstime: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
-    let (Some(c), Some(m)) = (unsafe { cond_of(at) }, unsafe { mutex_of(mutex) }) else {
+    let Some(c) = (unsafe { cond_of(at) }) else {
         return err::EINVAL;
     };
     if abstime == 0 {
         return err::EINVAL;
     }
-    // SAFETY: as above; `abstime` is the guest's own `timespec`, whose two fields are
-    // the same width and order here.
-    err::from_host(unsafe {
-        libc::pthread_cond_timedwait(c, m, abstime as usize as *const libc::timespec)
-    })
+    let deadline = abstime as usize as *const libc::timespec;
+    if let Some(m) = unsafe { super::mutex::host_pointer(mutex) } {
+        return err::from_host(unsafe {
+            libc::pthread_cond_timedwait(&mut (*c).cond, m, deadline)
+        });
+    }
+    if !unsafe { super::mutex::is_inline(mutex) } {
+        return err::EINVAL;
+    }
+    unsafe { cond_wait_inline(c, mutex, Some(deadline)) }
+}
+
+/// Atomically, with respect to this condition's signal paths, release an inline
+/// guest mutex and enter a host condition wait. The guest mutex is reacquired before
+/// returning, including on timeout and spurious wakeup.
+unsafe fn cond_wait_inline(
+    cond: *mut HostCond,
+    mutex: u64,
+    deadline: Option<*const libc::timespec>,
+) -> i32 {
+    let rc = unsafe { libc::pthread_mutex_lock(&mut (*cond).gate) };
+    if rc != 0 {
+        return err::from_host(rc);
+    }
+    let unlock_rc = unsafe { super::mutex::mutex_unlock(mutex) };
+    if unlock_rc != 0 {
+        unsafe { libc::pthread_mutex_unlock(&mut (*cond).gate) };
+        return unlock_rc;
+    }
+    let wait_rc = match deadline {
+        Some(deadline) => unsafe {
+            libc::pthread_cond_timedwait(&mut (*cond).cond, &mut (*cond).gate, deadline)
+        },
+        None => unsafe { libc::pthread_cond_wait(&mut (*cond).cond, &mut (*cond).gate) },
+    };
+    unsafe { libc::pthread_mutex_unlock(&mut (*cond).gate) };
+    let lock_rc = unsafe { super::mutex::mutex_lock(mutex) };
+    if lock_rc != 0 {
+        return lock_rc;
+    }
+    err::from_host(wait_rc)
 }
 
 /// `pthread_cond_timedwait_relative_np`, which is Darwin's and takes an *interval*.
@@ -654,7 +568,7 @@ pub unsafe extern "C" fn once_entry(at: u64, routine: Option<extern "C" fn()>) -
 }
 
 /// Report a pthread feature this crate declines to fake, once per process.
-fn say_unsupported(what: &str) {
+pub(super) fn say_unsupported(what: &str) {
     use std::sync::atomic::AtomicBool;
     static SAID: AtomicBool = AtomicBool::new(false);
     if SAID.swap(true, Ordering::Relaxed) {

@@ -82,6 +82,7 @@ pub mod translation;
 pub mod ulock;
 pub mod uuid;
 pub mod vmmap;
+mod wait_word;
 pub mod xattr;
 pub mod xlocale;
 

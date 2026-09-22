@@ -64,7 +64,7 @@ pub mod sig {
 /// Which kind of object a record describes.
 ///
 /// Carried in the signature so that a `pthread_cond_t` handed to `pthread_mutex_lock`
-/// is `EINVAL` rather than a host mutex built out of a condition variable.
+/// is `EINVAL` rather than being interpreted as mutex state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
@@ -93,11 +93,11 @@ pub const fn ours(kind: Kind) -> u64 {
 ///
 /// Only ever observed by another thread racing to first-touch the same statically
 /// initialised object, which spins until it is gone.
-const BUSY: u64 = TAG | 0xFF;
+pub(crate) const BUSY: u64 = TAG | 0xFF;
 
 /// A destroyed object. Distinct from zero so a double destroy is `EINVAL` rather than
 /// a fresh lazy initialisation of whatever the memory now holds.
-const DEAD: u64 = TAG | 0xDE;
+pub(crate) const DEAD: u64 = TAG | 0xDE;
 
 /// One object's record, laid over the guest's bytes.
 ///
@@ -107,10 +107,12 @@ const DEAD: u64 = TAG | 0xDE;
 /// +16  u64  owner          the guest address this record was built at
 /// ```
 ///
+/// Mutexes use the same signature and identity convention but have their own inline
+/// layout in [`super::mutex`].
+///
 /// The `owner` word is what catches a guest that copies an initialised object by
 /// value. POSIX does not allow that, and without the check the copy and the original
-/// would share one host lock - which is not a crash, just two critical sections that
-/// quietly stop excluding each other.
+/// would otherwise share mutable state or a host allocation.
 ///
 /// `Once`, `MutexAttr` and `CondAttr` are sixteen bytes and have no room for `owner`;
 /// none of the three has anything to alias, because none owns a heap allocation.
@@ -133,7 +135,7 @@ impl Kind {
     }
 
     /// The signature a static initializer for this kind writes, if it has one.
-    fn is_static_initializer(self, signature: u64) -> bool {
+    pub(crate) fn is_static_initializer(self, signature: u64) -> bool {
         match self {
             // libpthread does not compare a static mutex initializer exactly.
             // Its mask preserves the low nibble for `_pthread_mutex_init`, which
@@ -345,9 +347,9 @@ impl Record {
 
 /// Report that an object was copied after being initialised, once per process.
 ///
-/// The failure this prevents is quiet: two mutexes sharing one host lock still lock
-/// and unlock, they just stop excluding each other. `EINVAL` alone would not say why.
-fn say_copied(kind: Kind, at: u64, owner: u64) {
+/// The failure this prevents is quiet: copied synchronization state can appear to
+/// work while excluding the wrong set of callers. `EINVAL` alone would not say why.
+pub(crate) fn say_copied(kind: Kind, at: u64, owner: u64) {
     use std::sync::atomic::AtomicBool;
     static SAID: AtomicBool = AtomicBool::new(false);
     if SAID.swap(true, Ordering::Relaxed) {
