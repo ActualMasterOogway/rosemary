@@ -12,9 +12,10 @@
 //! * **Object layout.** A `pthread_mutex_t` is sixty-four bytes carrying a signature
 //!   on Darwin and forty bytes of zeroes under musl, and a `PTHREAD_MUTEX_INITIALIZER`
 //!   is a *static* initializer no call of ours ever sees written. See [`object`].
-//! * **Object lifetime.** Ordinary mutex state lives inline in the guest object;
-//!   larger host-backed objects have to live as long and be found again from the
-//!   guest's address. See [`mutex`] and [`sync`].
+//! * **Object lifetime.** Every synchronization object keeps its whole state in the
+//!   guest's own bytes, so there is nothing to allocate, find again, or free. See
+//!   [`object`], and [`mutex`], [`cond`], [`rwlock`] and [`once`] for the four
+//!   layouts.
 //! * **Signatures.** `pthread_setname_np` takes one argument on Darwin and two on
 //!   Linux; `pthread_once_t` is sixteen bytes and four.
 //!
@@ -23,12 +24,18 @@
 //! implementation a guest would otherwise have called.
 
 pub mod attr;
+mod cond;
 pub mod consts;
 mod mutex;
 pub mod object;
+mod once;
 pub mod raw;
+mod rwlock;
 mod sched;
 pub mod sync;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use attr::{Attributes, HostAttr};
 pub use consts::*;
@@ -198,7 +205,7 @@ macro_rules! simple_attr {
             }
             // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
-            r.set_payload($default);
+            object::publish_cell(&r, $default);
             0
         }
 
@@ -211,10 +218,7 @@ macro_rules! simple_attr {
             }
             // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
-            match r.take() {
-                Some(_) => 0,
-                None => err::EINVAL,
-            }
+            object::destroy_plain(&r)
         }
     };
 }
@@ -266,7 +270,10 @@ pub unsafe extern "C" fn mutexattr_settype(at: u64, kind: u64) -> i32 {
         return err::EINVAL;
     };
     let kind = kind as i32;
-    if mutex_type_to_host(kind).is_none() {
+    if !matches!(
+        kind,
+        PTHREAD_MUTEX_NORMAL | PTHREAD_MUTEX_ERRORCHECK | PTHREAD_MUTEX_RECURSIVE
+    ) {
         return err::EINVAL;
     }
     let mut settings =
@@ -1231,37 +1238,15 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A guest object: the right size, and eight-byte aligned as a `long` first
-    /// member makes one.
-    #[repr(C, align(8))]
-    struct Obj<const N: usize>([u8; N]);
+    use testing::Guest;
 
-    impl<const N: usize> Obj<N> {
-        /// Zeroed, as a guest's `.bss` object arrives.
-        fn new() -> Box<Obj<N>> {
-            Box::new(Obj([0u8; N]))
-        }
-
-        /// Carrying a Darwin static initializer, as a guest's `.data` object does.
-        fn statically_initialised(signature: u64) -> Box<Obj<N>> {
-            let mut o = Obj::<N>::new();
-            o.0[..8].copy_from_slice(&signature.to_le_bytes());
-            o
-        }
-
-        fn at(&self) -> u64 {
-            self as *const Obj<N> as usize as u64
-        }
-    }
-
-    type Mutex = Obj<{ object::size::MUTEX }>;
-    type Cond = Obj<{ object::size::COND }>;
-    type RwLock = Obj<{ object::size::RWLOCK }>;
-    type Once = Obj<{ object::size::ONCE }>;
-    type Attr = Obj<{ object::size::ATTR }>;
-    type MutexAttrObj = Obj<{ object::size::MUTEXATTR }>;
-    type CondAttrObj = Obj<{ object::size::CONDATTR }>;
-    type RwLockAttrObj = Obj<{ object::size::RWLOCKATTR }>;
+    type Mutex = Guest<{ object::size::MUTEX }>;
+    type Cond = Guest<{ object::size::COND }>;
+    type RwLock = Guest<{ object::size::RWLOCK }>;
+    type Attr = Guest<{ object::size::ATTR }>;
+    type MutexAttrObj = Guest<{ object::size::MUTEXATTR }>;
+    type CondAttrObj = Guest<{ object::size::CONDATTR }>;
+    type RwLockAttrObj = Guest<{ object::size::RWLOCKATTR }>;
 
     /// The three names whose Darwin-shaped object glibc would misread must bind to
     /// *this crate's* entry, not to the host's.
@@ -1282,33 +1267,11 @@ mod tests {
         }
     }
 
-    /// A `pthread_once_t` carrying Darwin's static initializer runs its routine,
-    /// and runs it once.
-    ///
-    /// glibc's `pthread_once` reads that same word as its own state, and Darwin's
-    /// signature `0x30B1BCBA` has the bit set that glibc takes to mean "already
-    /// run" - so passing one through succeeds and never calls the routine. That
-    /// silence is the whole failure: it looks like the routine ran.
-    #[test]
-    fn a_darwin_initialised_once_runs_its_routine_exactly_once() {
-        static RUNS: AtomicU32 = AtomicU32::new(0);
-        extern "C" fn body() {
-            RUNS.fetch_add(1, Ordering::Relaxed);
-        }
-        let control = Once::statically_initialised(object::sig::ONCE_INIT);
-        // SAFETY: a live, correctly sized and aligned `pthread_once_t`.
-        unsafe {
-            assert_eq!(sync::once_entry(control.at(), Some(body)), 0);
-            assert_eq!(sync::once_entry(control.at(), Some(body)), 0);
-        }
-        assert_eq!(RUNS.load(Ordering::Relaxed), 1);
-    }
-
     /// Everything a guest sets on a thread attribute set must read back as what it
     /// set - which is the whole contract of an opaque type whose bytes are ours.
     #[test]
     fn every_thread_attribute_reads_back_as_what_was_set() {
-        let a = Attr::new();
+        let a = Attr::zeroed();
         // SAFETY: `a` is a live, correctly sized and aligned attribute object.
         unsafe {
             assert_eq!(attr::imp::attr_init(a.at()), 0);
@@ -1368,7 +1331,7 @@ mod tests {
     /// direction wrong puts a thread's frames below its own guard page.
     #[test]
     fn a_supplied_stack_is_set_by_its_base_and_read_by_its_top() {
-        let a = Attr::new();
+        let a = Attr::zeroed();
         let (base, size) = (0x2_0000_0000u64, 1 << 20);
         // SAFETY: a live attribute object; the stack address is never dereferenced.
         unsafe {
@@ -1399,7 +1362,7 @@ mod tests {
     /// because a guest that sizes a buffer off it is owed the truth.
     #[test]
     fn an_unset_stack_size_reads_back_as_darwins_default() {
-        let a = Attr::new();
+        let a = Attr::zeroed();
         // SAFETY: a live attribute object.
         unsafe {
             assert_eq!(attr::imp::attr_init(a.at()), 0);
@@ -1414,7 +1377,7 @@ mod tests {
 
     #[test]
     fn a_value_darwin_does_not_declare_is_refused() {
-        let a = Attr::new();
+        let a = Attr::zeroed();
         // SAFETY: a live attribute object.
         unsafe {
             assert_eq!(attr::imp::attr_init(a.at()), 0);
@@ -1427,7 +1390,7 @@ mod tests {
 
     #[test]
     fn an_uninitialised_attribute_set_is_refused_rather_than_read() {
-        let a = Attr::new();
+        let a = Attr::zeroed();
         // SAFETY: a live, zeroed object that was never initialised.
         unsafe {
             let mut out = 0i32;
@@ -1441,7 +1404,7 @@ mod tests {
 
     #[test]
     fn a_mutex_locks_unlocks_and_is_destroyed() {
-        let m = Mutex::new();
+        let m = Mutex::zeroed();
         // SAFETY: a live, correctly sized and aligned mutex object.
         unsafe {
             assert_eq!(sync::mutex_init(m.at(), 0), 0);
@@ -1457,7 +1420,7 @@ mod tests {
 
     #[test]
     fn a_failed_mutex_destroy_leaves_the_mutex_live() {
-        let m = Mutex::new();
+        let m = Mutex::zeroed();
         unsafe {
             assert_eq!(sync::mutex_init(m.at(), 0), 0);
             assert_eq!(sync::mutex_lock(m.at()), 0);
@@ -1476,8 +1439,8 @@ mod tests {
     /// an error-checking one - which does not recurse, it reports `EDEADLK`.
     #[test]
     fn a_recursive_mutex_recurses_and_an_errorcheck_one_does_not() {
-        let attr = MutexAttrObj::new();
-        let m = Mutex::new();
+        let attr = MutexAttrObj::zeroed();
+        let m = Mutex::zeroed();
         // SAFETY: two live, correctly sized objects.
         unsafe {
             assert_eq!(mutexattr_init(attr.at()), 0);
@@ -1497,7 +1460,7 @@ mod tests {
             assert_eq!(sync::mutex_destroy(m.at()), 0);
 
             // And the type Darwin numbers 1, which Linux numbers 2.
-            let e = Mutex::new();
+            let e = Mutex::zeroed();
             assert_eq!(
                 mutexattr_settype(attr.at(), PTHREAD_MUTEX_ERRORCHECK as u64),
                 0
@@ -1521,7 +1484,7 @@ mod tests {
     /// declare is still refused: the guest checks the return value, not the effect.
     #[test]
     fn a_mutex_policy_is_accepted_and_a_number_darwin_does_not_declare_is_not() {
-        let attr = MutexAttrObj::new();
+        let attr = MutexAttrObj::zeroed();
         // SAFETY: a live, correctly sized attribute object.
         unsafe {
             assert_eq!(mutexattr_init(attr.at()), 0);
@@ -1546,7 +1509,7 @@ mod tests {
 
     #[test]
     fn a_fresh_mutex_attribute_has_darwins_private_default() {
-        let attr = MutexAttrObj::new();
+        let attr = MutexAttrObj::zeroed();
         unsafe {
             assert_eq!(mutexattr_init(attr.at()), 0);
             let mut shared = 0;
@@ -1566,7 +1529,7 @@ mod tests {
 
     #[test]
     fn int_attribute_setters_ignore_unspecified_upper_register_bits() {
-        let attr = Attr::new();
+        let attr = Attr::zeroed();
         unsafe {
             assert_eq!(attr::imp::attr_init(attr.at()), 0);
             let garbage = 0xdead_beef_0000_0000;
@@ -1583,7 +1546,7 @@ mod tests {
 
     #[test]
     fn qos_attributes_round_trip() {
-        let attr = Attr::new();
+        let attr = Attr::zeroed();
         unsafe {
             assert_eq!(attr::imp::attr_init(attr.at()), 0);
             assert_eq!(
@@ -1662,7 +1625,7 @@ mod tests {
     /// publish one coherent inline record rather than partially initialized state.
     #[test]
     fn racing_threads_build_one_object_for_one_static_mutex() {
-        let m = Arc::new(Mutex::statically_initialised(object::sig::MUTEX_INIT));
+        let m = Mutex::statically_initialised(object::sig::MUTEX_INIT);
         let counter = Arc::new(AtomicU32::new(0));
         let threads: Vec<_> = (0..8)
             .map(|_| {
@@ -1695,7 +1658,7 @@ mod tests {
     /// mutex state built out of a condition variable.
     #[test]
     fn a_cond_is_not_a_mutex() {
-        let c = Cond::new();
+        let c = Cond::zeroed();
         // SAFETY: a live, correctly sized condition variable object.
         unsafe {
             assert_eq!(sync::cond_init(c.at(), 0), 0);
@@ -1709,14 +1672,13 @@ mod tests {
     /// while their address identity no longer agrees.
     #[test]
     fn a_copied_mutex_is_refused_rather_than_aliased() {
-        let original = Mutex::new();
+        let original = Mutex::zeroed();
         // SAFETY: a live mutex object.
         unsafe { assert_eq!(sync::mutex_init(original.at(), 0), 0) };
 
-        let mut copy = Mutex::new();
-        copy.0.copy_from_slice(&original.0);
+        let copy = Mutex::copy_of(&original);
         // SAFETY: a live, correctly sized object holding a byte copy of another's
-        // record - which is exactly what the owner word exists to catch.
+        // record - which is exactly what the identity word exists to catch.
         unsafe {
             assert_eq!(sync::mutex_lock(copy.at()), err::EINVAL);
             assert_eq!(
@@ -1729,12 +1691,14 @@ mod tests {
         }
     }
 
+    /// Re-initialising the copy claims that address for a mutex of its own and
+    /// leaves the original, which still owns its own state, untouched.
     #[test]
-    fn reinitialising_a_copied_mutex_does_not_free_the_original() {
-        let original = Mutex::new();
+    fn reinitialising_a_copy_leaves_the_original_alone() {
+        let original = Mutex::zeroed();
         unsafe { assert_eq!(sync::mutex_init(original.at(), 0), 0) };
-        let mut copy = Mutex::new();
-        copy.0.copy_from_slice(&original.0);
+        let copy = Mutex::copy_of(&original);
+        // SAFETY: two live, correctly sized mutex objects.
         unsafe {
             assert_eq!(sync::mutex_init(copy.at(), 0), 0);
             assert_eq!(sync::mutex_lock(original.at()), 0);
@@ -1746,10 +1710,10 @@ mod tests {
 
     #[test]
     fn nonnull_invalid_cond_and_rwlock_attributes_are_refused() {
-        let c = Cond::new();
-        let l = RwLock::new();
-        let ca = CondAttrObj::new();
-        let ra = RwLockAttrObj::new();
+        let c = Cond::zeroed();
+        let l = RwLock::zeroed();
+        let ca = CondAttrObj::zeroed();
+        let ra = RwLockAttrObj::zeroed();
         unsafe {
             assert_eq!(sync::cond_init(c.at(), ca.at()), err::EINVAL);
             assert_eq!(sync::rwlock_init(l.at(), ra.at()), err::EINVAL);
@@ -1758,8 +1722,8 @@ mod tests {
 
     #[test]
     fn a_process_shared_mutex_is_refused_rather_than_made_private() {
-        let attr = MutexAttrObj::new();
-        let m = Mutex::new();
+        let attr = MutexAttrObj::zeroed();
+        let m = Mutex::zeroed();
         // SAFETY: two live, correctly sized objects.
         unsafe {
             assert_eq!(mutexattr_init(attr.at()), 0);
@@ -1775,268 +1739,6 @@ mod tests {
             assert_eq!(shared, PTHREAD_PROCESS_SHARED);
             assert_eq!(sync::mutex_init(m.at(), attr.at()), err::ENOTSUP);
         }
-    }
-
-    #[test]
-    fn a_condition_variable_wakes_a_waiter() {
-        struct Shared {
-            m: Box<Mutex>,
-            c: Box<Cond>,
-            ready: AtomicU32,
-        }
-        // SAFETY: the two objects are only ever reached through this module's
-        // functions, which is what a guest does with them.
-        unsafe impl Sync for Shared {}
-        unsafe impl Send for Shared {}
-
-        let s = Arc::new(Shared {
-            m: Mutex::new(),
-            c: Cond::new(),
-            ready: AtomicU32::new(0),
-        });
-        // SAFETY: two live, correctly sized objects.
-        unsafe {
-            assert_eq!(sync::mutex_init(s.m.at(), 0), 0);
-            assert_eq!(sync::cond_init(s.c.at(), 0), 0);
-        }
-
-        let waiter = {
-            let s = Arc::clone(&s);
-            std::thread::spawn(move || {
-                // SAFETY: live objects shared with the signalling thread.
-                unsafe {
-                    assert_eq!(sync::mutex_lock(s.m.at()), 0);
-                    while s.ready.load(Ordering::Relaxed) == 0 {
-                        assert_eq!(sync::cond_wait(s.c.at(), s.m.at()), 0);
-                    }
-                    assert_eq!(sync::mutex_unlock(s.m.at()), 0);
-                }
-            })
-        };
-
-        // SAFETY: as above.
-        unsafe {
-            loop {
-                assert_eq!(sync::mutex_lock(s.m.at()), 0);
-                s.ready.store(1, Ordering::Relaxed);
-                assert_eq!(sync::cond_broadcast(s.c.at()), 0);
-                assert_eq!(sync::mutex_unlock(s.m.at()), 0);
-                if waiter.is_finished() {
-                    break;
-                }
-                std::thread::yield_now();
-            }
-        }
-        waiter.join().expect("the waiter wakes");
-        // SAFETY: nothing is waiting any more.
-        unsafe {
-            assert_eq!(sync::cond_destroy(s.c.at()), 0);
-            assert_eq!(sync::mutex_destroy(s.m.at()), 0);
-        }
-    }
-
-    /// A relative timeout is Darwin's own call and has to become a deadline. The
-    /// assertion is that it *times out* rather than returning at once or hanging.
-    #[test]
-    fn a_relative_timed_wait_times_out() {
-        let m = Mutex::new();
-        let c = Cond::new();
-        let interval = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 20_000_000,
-        };
-        // SAFETY: two live objects and a live `timespec`.
-        unsafe {
-            assert_eq!(sync::mutex_init(m.at(), 0), 0);
-            assert_eq!(sync::cond_init(c.at(), 0), 0);
-            assert_eq!(sync::mutex_lock(m.at()), 0);
-            let start = std::time::Instant::now();
-            let rc = sync::cond_timedwait_relative(
-                c.at(),
-                m.at(),
-                &interval as *const libc::timespec as usize as u64,
-            );
-            // Darwin's 60, not this host's 110 - which is the number `libc++`
-            // compares against before deciding a timed wait failed.
-            assert_eq!(rc, err::ETIMEDOUT);
-            assert!(
-                start.elapsed() >= std::time::Duration::from_millis(15),
-                "it waited"
-            );
-            assert_eq!(sync::mutex_unlock(m.at()), 0);
-            assert_eq!(sync::cond_destroy(c.at()), 0);
-            assert_eq!(sync::mutex_destroy(m.at()), 0);
-        }
-    }
-
-    #[test]
-    fn a_relative_timed_wait_rejects_invalid_intervals() {
-        let m = Mutex::new();
-        let c = Cond::new();
-        unsafe {
-            assert_eq!(sync::mutex_init(m.at(), 0), 0);
-            assert_eq!(sync::cond_init(c.at(), 0), 0);
-            assert_eq!(sync::mutex_lock(m.at()), 0);
-            for interval in [
-                libc::timespec {
-                    tv_sec: -1,
-                    tv_nsec: 0,
-                },
-                libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: -1,
-                },
-                libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 1_000_000_000,
-                },
-            ] {
-                assert_eq!(
-                    sync::cond_timedwait_relative(
-                        c.at(),
-                        m.at(),
-                        &interval as *const libc::timespec as u64,
-                    ),
-                    err::EINVAL
-                );
-            }
-            assert_eq!(sync::mutex_unlock(m.at()), 0);
-            assert_eq!(sync::cond_destroy(c.at()), 0);
-            assert_eq!(sync::mutex_destroy(m.at()), 0);
-        }
-    }
-
-    /// Asked across threads rather than on one, which is both what the property is
-    /// about and the only way to ask it: whether a thread may take a second read lock
-    /// it already holds is left undefined by POSIX, and Darwin and Linux differ.
-    #[test]
-    fn a_read_write_lock_admits_readers_together_and_writers_alone() {
-        struct Shared(Box<RwLock>);
-        // SAFETY: the lock is only ever reached through this module's functions,
-        // which is what a guest does with it.
-        unsafe impl Sync for Shared {}
-        unsafe impl Send for Shared {}
-
-        let l = Arc::new(Shared(RwLock::new()));
-        // SAFETY: a live, correctly sized lock object.
-        unsafe {
-            assert_eq!(sync::rwlock_init(l.0.at(), 0), 0);
-            assert_eq!(sync::rwlock_rdlock(l.0.at()), 0);
-        }
-
-        // With a reader holding it, another thread may read and may not write.
-        {
-            let l = Arc::clone(&l);
-            std::thread::spawn(move || {
-                // SAFETY: a live lock shared with the holding thread.
-                unsafe {
-                    assert_eq!(
-                        sync::rwlock_trywrlock(l.0.at()),
-                        libc::EBUSY,
-                        "a reader holds it"
-                    );
-                    assert_eq!(sync::rwlock_tryrdlock(l.0.at()), 0, "readers share");
-                    assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
-                }
-            })
-            .join()
-            .expect("the second reader");
-        }
-
-        // SAFETY: as above; this thread still holds its read lock.
-        unsafe {
-            assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
-            assert_eq!(sync::rwlock_wrlock(l.0.at()), 0, "and now it is free");
-        }
-
-        // With a writer holding it, another thread may do neither.
-        {
-            let l = Arc::clone(&l);
-            std::thread::spawn(move || {
-                // SAFETY: as above.
-                unsafe {
-                    assert_eq!(sync::rwlock_trywrlock(l.0.at()), libc::EBUSY);
-                    assert_eq!(sync::rwlock_tryrdlock(l.0.at()), libc::EBUSY);
-                }
-            })
-            .join()
-            .expect("the excluded thread");
-        }
-
-        // SAFETY: this thread holds the write lock and nothing else is waiting.
-        unsafe {
-            assert_eq!(sync::rwlock_unlock(l.0.at()), 0);
-            assert_eq!(sync::rwlock_destroy(l.0.at()), 0);
-        }
-    }
-
-    #[test]
-    fn a_statically_initialised_rwlock_works() {
-        let l = RwLock::statically_initialised(object::sig::RWLOCK_INIT);
-        // SAFETY: a live lock object carrying a Darwin static initializer.
-        unsafe {
-            assert_eq!(sync::rwlock_wrlock(l.at()), 0);
-            assert_eq!(sync::rwlock_unlock(l.at()), 0);
-        }
-    }
-
-    /// Exactly once, and every thread that asked waits for it - which is the whole
-    /// contract, and the one a spin that returned early would break.
-    #[test]
-    fn once_runs_once_and_everyone_waits_for_it() {
-        let o = Arc::new(Once::statically_initialised(object::sig::ONCE_INIT));
-        let ran = Arc::new(AtomicU32::new(0));
-        let finished = Arc::new(AtomicU32::new(0));
-
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                let (o, ran, finished) = (Arc::clone(&o), Arc::clone(&ran), Arc::clone(&finished));
-                std::thread::spawn(move || {
-                    // SAFETY: a live `pthread_once_t` shared with the other threads.
-                    let rc = unsafe {
-                        once(o.at(), || {
-                            // Slow on purpose: a waiter that did not wait would see
-                            // the flag still unset.
-                            std::thread::sleep(std::time::Duration::from_millis(30));
-                            ran.fetch_add(1, Ordering::SeqCst);
-                        })
-                    };
-                    assert_eq!(rc, 0);
-                    assert_eq!(
-                        ran.load(Ordering::SeqCst),
-                        1,
-                        "returned before the routine finished"
-                    );
-                    finished.fetch_add(1, Ordering::SeqCst);
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().expect("a once thread");
-        }
-        assert_eq!(ran.load(Ordering::SeqCst), 1, "the routine ran once");
-        assert_eq!(
-            finished.load(Ordering::SeqCst),
-            8,
-            "and everyone got through"
-        );
-    }
-
-    #[test]
-    fn once_accepts_a_zeroed_control_word() {
-        let o = Once::new();
-        let ran = AtomicU32::new(0);
-        // SAFETY: Darwin treats a live, zeroed control as a fresh once object.
-        assert_eq!(
-            unsafe {
-                once(o.at(), || {
-                    ran.fetch_add(1, Ordering::Relaxed);
-                })
-            },
-            0
-        );
-        assert_eq!(unsafe { once(o.at(), || unreachable!()) }, 0);
-        assert_eq!(ran.load(Ordering::Relaxed), 1);
     }
 
     /// Darwin's cancel state values are the opposite way round from the host's, so an

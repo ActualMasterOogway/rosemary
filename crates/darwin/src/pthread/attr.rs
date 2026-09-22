@@ -289,7 +289,7 @@ pub mod imp {
         set(&r, slot::SCOPE, d.scope as u64);
         set(&r, slot::INHERIT, d.inherit_sched as u64);
         set(&r, slot::SCHED, d.sched_policy as u32 as u64);
-        // Last, and with release ordering: see `Record::set_payload`.
+        // Last, and with release ordering: see `Record::publish`.
         r.slot(0, size::ATTR)
             .store(ours(Kind::Attr), std::sync::atomic::Ordering::Release);
         0
@@ -299,10 +299,7 @@ pub mod imp {
         // SAFETY: as above. Nothing is freed - an attribute set owns nothing - so
         // this only invalidates the signature.
         match unsafe { record(at) } {
-            Some(r) => {
-                r.take();
-                0
-            }
+            Some(r) => crate::pthread::object::destroy_plain(&r),
             None => err::EINVAL,
         }
     }

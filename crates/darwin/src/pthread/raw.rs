@@ -18,25 +18,6 @@ unsafe extern "C" {
         guardsize: libc::size_t,
     ) -> libc::c_int;
 
-    /// As above. The *setter* is bound and the getter is not, which is why reading a
-    /// mutex type back needs this.
-    pub fn pthread_mutexattr_gettype(
-        attr: *const libc::pthread_mutexattr_t,
-        kind: *mut libc::c_int,
-    ) -> libc::c_int;
-
-    /// As above.
-    pub fn pthread_mutexattr_getpshared(
-        attr: *const libc::pthread_mutexattr_t,
-        pshared: *mut libc::c_int,
-    ) -> libc::c_int;
-
-    /// POSIX, but not declared by the libc crate on Apple platforms.
-    pub fn pthread_mutexattr_setprotocol(
-        attr: *mut libc::pthread_mutexattr_t,
-        protocol: libc::c_int,
-    ) -> libc::c_int;
-
     /// Bound for Apple platforms and not under musl, where the crate declares only
     /// the setter.
     pub fn pthread_attr_getdetachstate(

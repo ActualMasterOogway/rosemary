@@ -115,16 +115,6 @@ pub mod err {
     }
 }
 
-/// Darwin's mutex type as the host's.
-pub fn mutex_type_to_host(darwin: i32) -> Option<libc::c_int> {
-    Some(match darwin {
-        PTHREAD_MUTEX_NORMAL => libc::PTHREAD_MUTEX_NORMAL,
-        PTHREAD_MUTEX_ERRORCHECK => libc::PTHREAD_MUTEX_ERRORCHECK,
-        PTHREAD_MUTEX_RECURSIVE => libc::PTHREAD_MUTEX_RECURSIVE,
-        _ => return None,
-    })
-}
-
 /// Darwin's detach state as the host's.
 pub fn detach_state_to_host(darwin: i32) -> Option<libc::c_int> {
     Some(match darwin {
@@ -222,10 +212,6 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn the_two_mutex_types_that_matter_are_swapped() {
-        assert_eq!(
-            mutex_type_to_host(PTHREAD_MUTEX_RECURSIVE),
-            Some(libc::PTHREAD_MUTEX_RECURSIVE)
-        );
         assert_ne!(
             PTHREAD_MUTEX_RECURSIVE,
             libc::PTHREAD_MUTEX_RECURSIVE,
@@ -238,7 +224,6 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn a_type_nobody_declares_is_refused_rather_than_defaulted() {
-        assert_eq!(mutex_type_to_host(7), None);
         assert_eq!(
             detach_state_to_host(0),
             None,

@@ -1,7 +1,21 @@
 //! Host compare-and-wait operations on a 32-bit userspace word.
 //!
-//! This is deliberately smaller than either Darwin's ulock API or a pthread mutex.
-//! Both are adapters over this layer and keep their own error and wake semantics.
+//! This is the one thing every lock in this crate needs from the operating system and
+//! the only thing it needs: *park this thread until that word changes*. Everything
+//! above it - `pthread_mutex_t`, `pthread_cond_t`, `pthread_rwlock_t`, `pthread_once_t`,
+//! and Darwin's own `__ulock_*` - is built out of it, in the guest's own bytes.
+//!
+//! It is deliberately smaller than either Darwin's ulock API or a pthread mutex: the
+//! callers keep their own error and wake semantics, and none of them is expressed in
+//! terms of a host lock.
+//!
+//! Each host spells it differently and all three spellings are the same operation:
+//!
+//! * **Linux** has `futex`, used here through `rustix`.
+//! * **macOS** has `__ulock_wait`/`__ulock_wake`, which is what Apple's own
+//!   `os_unfair_lock`, `libc++` and libdispatch bottom out in. No libc wrapper
+//!   declares them, so they are declared here.
+//! * **Anything else** gets a bounded polling fallback, which is correct and slow.
 
 use std::sync::atomic::AtomicU32;
 
@@ -97,10 +111,94 @@ pub(crate) unsafe fn wake_u32(
         .map_err(|error| error.raw_os_error())
 }
 
-/// Portability fallback for hosts without a kernel wait-on-address primitive.
-/// It is intentionally inefficient, but uses one deadline rather than restarting a
-/// relative timeout after every spurious return.
-#[cfg(not(target_os = "linux"))]
+/// Darwin's own futex, which is a kernel interface with no libc wrapper.
+///
+/// `ULF_NO_ERRNO` asks for `-errno` as the return value, which is what the callers
+/// inside libplatform use and what keeps this off `errno` entirely.
+#[cfg(target_os = "macos")]
+mod ulock {
+    use std::ffi::c_void;
+
+    pub const COMPARE_AND_WAIT: u32 = 1;
+    pub const COMPARE_AND_WAIT_SHARED: u32 = 3;
+    pub const WAKE_ALL: u32 = 0x0000_0100;
+    pub const NO_ERRNO: u32 = 0x0100_0000;
+
+    unsafe extern "C" {
+        /// A zero timeout means "forever"; the unit is microseconds.
+        pub fn __ulock_wait(operation: u32, addr: *mut c_void, value: u64, timeout_us: u32) -> i32;
+        pub fn __ulock_wake(operation: u32, addr: *mut c_void, wake_value: u64) -> i32;
+    }
+}
+
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn wait_u32(
+    word: &AtomicU32,
+    expected: u32,
+    timeout_ns: Option<u64>,
+    scope: Scope,
+) -> Result<(), WaitError> {
+    // Zero is "forever", so a sub-microsecond timeout has to round *up* to one
+    // microsecond rather than down to no timeout at all.
+    let timeout_us = match timeout_ns {
+        None => 0,
+        Some(nanoseconds) => nanoseconds.div_ceil(1_000).clamp(1, u32::MAX as u64) as u32,
+    };
+    let operation = ulock_operation(scope) | ulock::NO_ERRNO;
+    // SAFETY: the caller's guarantee that `word` is live and aligned for the call.
+    let rc = unsafe {
+        ulock::__ulock_wait(operation, word.as_ptr().cast(), expected as u64, timeout_us)
+    };
+    match rc {
+        0.. => Ok(()),
+        _ => Err(classify(-rc)),
+    }
+}
+
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn wake_u32(
+    word: &AtomicU32,
+    count: WakeCount,
+    scope: Scope,
+) -> Result<usize, i32> {
+    let mut operation = ulock_operation(scope) | ulock::NO_ERRNO;
+    if count == WakeCount::All {
+        operation |= ulock::WAKE_ALL;
+    }
+    // SAFETY: the caller's guarantee that `word` is live and aligned for the call.
+    let rc = unsafe { ulock::__ulock_wake(operation, word.as_ptr().cast(), 0) };
+    match rc {
+        // The kernel does not say how many it woke, only that it woke somebody.
+        0.. => Ok(1),
+        _ if -rc == libc::ENOENT => Ok(0),
+        _ => Err(-rc),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ulock_operation(scope: Scope) -> u32 {
+    match scope {
+        Scope::Private => ulock::COMPARE_AND_WAIT,
+        Scope::Shared => ulock::COMPARE_AND_WAIT_SHARED,
+    }
+}
+
+/// Portability fallback for a host with neither futexes nor ulocks.
+///
+/// Correct and slow: a waiter polls with a bounded backoff rather than sleeping, so a
+/// wake needs to do nothing at all. One deadline is computed up front rather than a
+/// relative timeout being restarted after every spurious return.
+///
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) unsafe fn wait_u32(
     word: &AtomicU32,
     expected: u32,
@@ -109,35 +207,48 @@ pub(crate) unsafe fn wait_u32(
 ) -> Result<(), WaitError> {
     use std::sync::atomic::Ordering;
 
+    /// Long enough that a blocked thread is not burning a core, short enough that a
+    /// wake is not visibly delayed.
+    const POLL: std::time::Duration = std::time::Duration::from_micros(200);
+
     let deadline = timeout_ns.map(|nanoseconds| {
         std::time::Instant::now() + std::time::Duration::from_nanos(nanoseconds)
     });
     loop {
-        if word.load(Ordering::Relaxed) != expected {
+        if word.load(Ordering::Acquire) != expected {
             return Err(WaitError::Changed);
         }
-        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            return Err(WaitError::TimedOut);
+        match deadline {
+            Some(deadline) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(WaitError::TimedOut);
+                }
+                std::thread::sleep(POLL.min(deadline - now));
+            }
+            None => std::thread::sleep(POLL),
         }
-        std::thread::yield_now();
-        if deadline.is_none() {
-            return Ok(());
-        }
+        // A return is permission to look again, which is what every caller does.
+        return Ok(());
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) unsafe fn wake_u32(
     _word: &AtomicU32,
     _count: WakeCount,
     _scope: Scope,
 ) -> Result<usize, i32> {
-    // Polling waiters need no notification. Report a possible waiter so the ulock
-    // adapter retains its historical non-Linux behavior.
+    // Polling waiters need no notification. Report a possible waiter, because this
+    // cannot tell whether there was one and a caller that skips work on "nobody was
+    // waiting" must not be told that wrongly.
     Ok(1)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -168,8 +279,9 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
+    /// A woken thread must actually return, and a thread nobody woke must not.
     #[test]
-    fn wake_one_releases_at_most_one_and_wake_all_releases_the_rest() {
+    fn a_waiter_returns_when_its_word_changes_and_somebody_wakes_it() {
         const WAITERS: u32 = 4;
         let word = Arc::new(AtomicU32::new(7));
         let entered = Arc::new(AtomicU32::new(0));
@@ -181,7 +293,9 @@ mod tests {
                 let returned = Arc::clone(&returned);
                 std::thread::spawn(move || {
                     entered.fetch_add(1, Ordering::Release);
-                    let _ = unsafe { wait_u32(&word, 7, None, Scope::Private) };
+                    while word.load(Ordering::Acquire) == 7 {
+                        let _ = unsafe { wait_u32(&word, 7, None, Scope::Private) };
+                    }
                     returned.fetch_add(1, Ordering::Release);
                 })
             })
@@ -190,30 +304,28 @@ mod tests {
             std::thread::yield_now();
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let woke = loop {
-            let woke = unsafe { wake_u32(&word, WakeCount::One, Scope::Private) }.unwrap();
-            if woke != 0 {
-                break woke;
-            }
+        word.store(8, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while returned.load(Ordering::Acquire) != WAITERS {
+            let _ = unsafe { wake_u32(&word, WakeCount::All, Scope::Private) };
             assert!(
                 std::time::Instant::now() < deadline,
-                "waiters entered the kernel"
+                "every waiter returned"
             );
             std::thread::yield_now();
-        };
-        assert_eq!(woke, 1);
-        while returned.load(Ordering::Acquire) != 1 {
-            assert!(std::time::Instant::now() < deadline, "one waiter returned");
-            std::thread::yield_now();
         }
-
-        word.store(8, Ordering::Release);
-        let woke = unsafe { wake_u32(&word, WakeCount::All, Scope::Private) }.unwrap();
-        assert_eq!(woke, (WAITERS - 1) as usize);
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(returned.load(Ordering::Acquire), WAITERS);
+    }
+
+    /// Waking nobody says so, which is what Darwin's `ENOENT` means to its callers.
+    #[test]
+    fn waking_nobody_is_reported_as_nobody() {
+        let word = AtomicU32::new(0);
+        assert_eq!(
+            unsafe { wake_u32(&word, WakeCount::All, Scope::Private) },
+            Ok(0)
+        );
     }
 }

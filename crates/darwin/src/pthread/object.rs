@@ -19,8 +19,15 @@
 //! All three are checked against the host's own declarations on macOS, where the
 //! guest's types and this process's are the same types. That is what makes the layout
 //! used on Linux something measured rather than something believed.
+//!
+//! Every object is **inline**: its whole state lives in the guest's own bytes, and no
+//! kind owns a heap allocation or a host object. What varies between kinds is only the
+//! shape of the body, which each of [`super::mutex`], [`super::cond`], [`super::rwlock`]
+//! and [`super::once`] lays out for itself. The lifecycle - is this an object of this
+//! kind, was it statically initialised, is somebody building it, has it been destroyed -
+//! is the same for all of them and lives here.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Darwin's object sizes on LP64, from `<sys/_pthread/_pthread_types.h>`: the `long`
 /// signature plus the `__opaque` block each type declares.
@@ -89,10 +96,12 @@ pub const fn ours(kind: Kind) -> u64 {
     TAG | ((kind as u64) << 8) | 0x01
 }
 
-/// The signature a record carries while one thread is building it.
+/// The signature a record carries while one thread is building or retiring it.
 ///
-/// Only ever observed by another thread racing to first-touch the same statically
-/// initialised object, which spins until it is gone.
+/// Only ever observed by another thread racing to touch the same object, which spins
+/// until it is gone. Short by construction: what happens under it is a handful of
+/// stores to the guest's own bytes, with no allocation, no call into the guest and no
+/// lock of ours held.
 pub(crate) const BUSY: u64 = TAG | 0xFF;
 
 /// A destroyed object. Distinct from zero so a double destroy is `EINVAL` rather than
@@ -102,36 +111,39 @@ pub(crate) const DEAD: u64 = TAG | 0xDE;
 /// One object's record, laid over the guest's bytes.
 ///
 /// ```text
-/// +0   u64  signature      ours(kind), a Darwin static initializer, BUSY, or DEAD
-/// +8   u64  payload        a boxed host object, or packed settings for an attribute
-/// +16  u64  owner          the guest address this record was built at
+/// +0             u64  signature   ours(kind), a Darwin static initializer, BUSY, or DEAD
+/// +8             u64  identity    the guest address this record was built at
+/// +[BODY]..      ..   body        whatever the kind makes of the rest
 /// ```
 ///
-/// Mutexes use the same signature and identity convention but have their own inline
-/// layout in [`super::mutex`].
-///
-/// The `owner` word is what catches a guest that copies an initialised object by
+/// The `identity` word is what catches a guest that copies an initialised object by
 /// value. POSIX does not allow that, and without the check the copy and the original
-/// would otherwise share mutable state or a host allocation.
+/// would share the state the original is excluding callers with.
 ///
-/// `Once`, `MutexAttr` and `CondAttr` are sixteen bytes and have no room for `owner`;
-/// none of the three has anything to alias, because none owns a heap allocation.
+/// `Once`, `MutexAttr` and `CondAttr` are sixteen bytes and have no room for it. None
+/// of the three needs it: an attribute set is read-only settings, and a `pthread_once_t`
+/// copied mid-flight is a guest bug whose worst outcome is running the routine twice.
 pub struct Record {
     at: u64,
     kind: Kind,
 }
 
 /// Byte offsets within a record.
-const PAYLOAD: u64 = 8;
-const OWNER: u64 = 16;
+const SIGNATURE: u64 = 0;
+const IDENTITY: u64 = 8;
 
 impl Kind {
-    /// Whether an object of this kind has room for the [`OWNER`] word.
-    const fn tracks_owner(self) -> bool {
-        matches!(
-            self,
-            Kind::Mutex | Kind::Cond | Kind::RwLock | Kind::RwLockAttr
-        )
+    /// Whether an object of this kind has room for the [`IDENTITY`] word.
+    const fn tracks_identity(self) -> bool {
+        matches!(self, Kind::Mutex | Kind::Cond | Kind::RwLock)
+    }
+
+    /// Where this kind's own state begins, after the words the lifecycle claims.
+    const fn body(self) -> u64 {
+        match self.tracks_identity() {
+            true => 16,
+            false => 8,
+        }
     }
 
     /// The signature a static initializer for this kind writes, if it has one.
@@ -158,14 +170,15 @@ impl Kind {
 }
 
 /// What a lookup found.
-pub enum Found {
-    /// An initialised object; the payload is whatever [`Record::set_payload`] stored.
-    Ready(u64),
-    /// A static initializer, not yet turned into an object. The payload is the
-    /// signature, which says *which* initializer - a recursive mutex and a plain one
-    /// are different objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    /// An initialised object of this kind, built at this address.
+    Live,
+    /// A static initializer, not yet turned into an object. The signature says
+    /// *which* - a recursive mutex and a plain one are different objects.
     Fresh(u64),
-    /// Not an object of this kind, or one that has been destroyed.
+    /// Not an object of this kind, or one that has been destroyed, or a byte copy
+    /// of one built somewhere else.
     Invalid,
 }
 
@@ -187,125 +200,166 @@ impl Record {
         unsafe { &*((self.at + offset) as usize as *const AtomicU64) }
     }
 
+    /// An eight-byte field of this kind's body, at `offset` bytes into it.
+    pub fn u64(&self, offset: u64) -> &AtomicU64 {
+        debug_assert!(offset.is_multiple_of(8), "an eight-byte field is aligned");
+        self.word(self.kind.body() + offset)
+    }
+
+    /// A four-byte field of this kind's body, at `offset` bytes into it.
+    pub fn u32(&self, offset: u64) -> &AtomicU32 {
+        debug_assert!(offset.is_multiple_of(4), "a four-byte field is aligned");
+        // SAFETY: as [`Record::word`]; the body begins eight-byte aligned and `offset`
+        // is a multiple of four.
+        unsafe { &*((self.at + self.kind.body() + offset) as usize as *const AtomicU32) }
+    }
+
+    /// The word an object whose whole state is one word keeps it in.
+    pub fn cell(&self) -> &AtomicU64 {
+        self.u64(0)
+    }
+
     /// This object's state, without changing it.
-    pub fn peek(&self) -> Found {
-        let sig = self.word(0).load(Ordering::Acquire);
-        if sig == ours(self.kind) {
-            return match self.owner_matches() {
-                true => Found::Ready(self.word(PAYLOAD).load(Ordering::Relaxed)),
-                false => Found::Invalid,
+    ///
+    /// A `BUSY` record reports [`State::Fresh`] of nothing useful only to a caller
+    /// that is willing to retry; [`Record::live_or_init`] and [`Record::seize`] are
+    /// the ones that wait it out.
+    pub fn peek(&self) -> State {
+        self.classify(self.word(SIGNATURE).load(Ordering::Acquire))
+    }
+
+    fn classify(&self, signature: u64) -> State {
+        if signature == ours(self.kind) {
+            return match self.identity_matches() {
+                true => State::Live,
+                false => State::Invalid,
             };
         }
-        match self.kind.is_static_initializer(sig) {
-            true => Found::Fresh(sig),
-            false => Found::Invalid,
+        match self.kind.is_static_initializer(signature) {
+            true => State::Fresh(signature),
+            false => State::Invalid,
         }
     }
 
     /// Whether this record was built at this address.
-    fn owner_matches(&self) -> bool {
-        if !self.kind.tracks_owner() {
+    fn identity_matches(&self) -> bool {
+        if !self.kind.tracks_identity() {
             return true;
         }
-        let owner = self.word(OWNER).load(Ordering::Relaxed);
-        if owner == self.at {
+        let identity = self.word(IDENTITY).load(Ordering::Relaxed);
+        if identity == self.at {
             return true;
         }
-        say_copied(self.kind, self.at, owner);
+        say_copied(self.kind, self.at, identity);
         false
     }
 
-    /// Get this object's payload, building it from a static initializer if that is
-    /// all it has.
+    /// Whether this record is an initialised object of its kind.
+    pub fn is_ours(&self) -> bool {
+        self.peek() == State::Live
+    }
+
+    /// Fill this object's body and publish it as live.
     ///
-    /// `build` is called at most once per object, with the signature of whichever
-    /// static initializer the guest wrote, and by exactly one thread. A second thread
-    /// arriving meanwhile waits rather than building a second object.
-    pub fn payload_or_build(&self, build: impl FnOnce(u64) -> Option<u64>) -> Option<u64> {
+    /// The signature is stored **last** and with release ordering, so a thread that
+    /// observes it observes the body and the identity too.
+    pub fn publish(&self, fill: impl FnOnce(&Record)) {
+        fill(self);
+        if self.kind.tracks_identity() {
+            self.word(IDENTITY).store(self.at, Ordering::Relaxed);
+        }
+        self.word(SIGNATURE)
+            .store(ours(self.kind), Ordering::Release);
+    }
+
+    /// Make sure this is a live object, building it from a static initializer if that
+    /// is all the guest ever wrote.
+    ///
+    /// `init` is called at most once per object, with the signature of whichever
+    /// static initializer it was, and by exactly one thread; a second thread arriving
+    /// meanwhile waits rather than building a second object. Returning `false` means
+    /// the initializer named something this crate does not implement, and leaves the
+    /// object as it was so a caller that can afford to retry is not stuck with one it
+    /// can never use.
+    pub fn live_or_init(&self, init: impl FnOnce(&Record, u64) -> bool) -> bool {
         loop {
-            let sig = self.word(0).load(Ordering::Acquire);
-            if sig == ours(self.kind) {
-                return self
-                    .owner_matches()
-                    .then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
-            }
-            if sig == BUSY {
-                // Another thread is building this object. Short by construction: it
-                // is one allocation and one initialisation, with no call into the
-                // guest and no lock of ours held.
+            let signature = self.word(SIGNATURE).load(Ordering::Acquire);
+            if signature == BUSY {
                 std::hint::spin_loop();
                 continue;
             }
-            if !self.kind.is_static_initializer(sig) {
-                return None;
+            match self.classify(signature) {
+                State::Live => return true,
+                State::Invalid => return false,
+                State::Fresh(_) => {}
             }
             // Claim it. A loser retries and sees `BUSY` or the finished object.
             if self
-                .word(0)
-                .compare_exchange(sig, BUSY, Ordering::Acquire, Ordering::Relaxed)
+                .word(SIGNATURE)
+                .compare_exchange(signature, BUSY, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
                 continue;
             }
-            let Some(payload) = build(sig) else {
-                // Put the initializer back, so a caller that can afford to retry is
-                // not left with an object it can never use.
-                self.word(0).store(sig, Ordering::Release);
-                return None;
-            };
-            self.set_payload(payload);
-            return Some(payload);
+            let mut built = false;
+            self.publish(|record| built = init(record, signature));
+            if !built {
+                self.word(SIGNATURE).store(signature, Ordering::Release);
+            }
+            return built;
         }
     }
 
-    /// Publish `payload` and mark this an object of its kind.
+    /// Take the lifecycle word for a destroy or a re-initialisation, leaving the
+    /// record `BUSY` until [`Record::restore`] or [`Record::bury`].
     ///
-    /// The signature is stored **last** and with release ordering, so a thread that
-    /// observes it observes the payload and the owner too.
-    pub fn set_payload(&self, payload: u64) {
-        self.word(PAYLOAD).store(payload, Ordering::Relaxed);
-        if self.kind.tracks_owner() {
-            self.word(OWNER).store(self.at, Ordering::Relaxed);
-        }
-        self.word(0).store(ours(self.kind), Ordering::Release);
-    }
-
-    /// Mark this object destroyed and hand back its payload, or `None` if it was not
-    /// an initialised object of this kind.
-    ///
-    /// A static initializer that was never used is destroyable and yields no payload:
-    /// there is nothing to free, and refusing it would fail a `pthread_mutex_destroy`
-    /// on a mutex that was simply never locked.
-    pub fn take(&self) -> Option<Option<u64>> {
-        let sig = self.word(0).load(Ordering::Acquire);
-        if self.kind.is_static_initializer(sig) {
-            return self
-                .word(0)
-                .compare_exchange(sig, DEAD, Ordering::AcqRel, Ordering::Relaxed)
+    /// [`State::Invalid`] claims nothing and needs neither call.
+    pub fn seize(&self) -> State {
+        loop {
+            let signature = self.word(SIGNATURE).load(Ordering::Acquire);
+            if signature == BUSY {
+                std::hint::spin_loop();
+                continue;
+            }
+            let state = self.classify(signature);
+            if state == State::Invalid {
+                return state;
+            }
+            if self
+                .word(SIGNATURE)
+                .compare_exchange(signature, BUSY, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
-                .then_some(None);
+            {
+                return state;
+            }
         }
-        if sig != ours(self.kind) || !self.owner_matches() {
-            return None;
-        }
-        let payload = self.word(PAYLOAD).load(Ordering::Relaxed);
-        self.word(0)
-            .compare_exchange(sig, DEAD, Ordering::AcqRel, Ordering::Relaxed)
-            .ok()?;
-        Some(Some(payload))
+    }
+
+    /// Undo a [`Record::seize`], leaving the object exactly as it was found.
+    pub fn restore(&self, state: State) {
+        let signature = match state {
+            State::Live => ours(self.kind),
+            State::Fresh(signature) => signature,
+            State::Invalid => return,
+        };
+        self.word(SIGNATURE).store(signature, Ordering::Release);
+    }
+
+    /// End a [`Record::seize`] by marking the object destroyed.
+    pub fn bury(&self) {
+        self.word(SIGNATURE).store(DEAD, Ordering::Release);
     }
 
     /// One eight-byte slot of this object, counted from its signature.
     ///
-    /// Slot 0 is the signature and slot 1 the payload; the rest is whatever the kind
-    /// makes of it. An attribute set has no heap allocation and no owner word, so it
-    /// spends its block on the settings themselves.
+    /// Used by the thread-attribute set, which is a plain block of settings rather
+    /// than a lock with a body of its own.
     ///
     /// # Panics
     ///
     /// If the slot is past the object, which is a bug in this crate rather than
     /// anything the guest can cause: the sizes are compile-time constants and the
-    /// callers are all in this module.
+    /// callers are all in this module's neighbours.
     pub fn slot(&self, index: usize, of_size: usize) -> &AtomicU64 {
         assert!(
             (index + 1) * 8 <= of_size,
@@ -318,30 +372,21 @@ impl Record {
     pub fn address(&self) -> u64 {
         self.at
     }
+}
 
-    /// Whether this record is an initialised object of its kind.
-    pub fn is_ours(&self) -> bool {
-        self.word(0).load(Ordering::Acquire) == ours(self.kind) && self.owner_matches()
-    }
+/// Publish an attribute set, or any other object whose whole state is one word.
+pub fn publish_cell(record: &Record, value: u64) {
+    record.publish(|r| r.cell().store(value, Ordering::Relaxed));
+}
 
-    /// The word an object with no heap allocation keeps its whole state in.
-    ///
-    /// `pthread_once_t` is sixteen bytes and needs no host object at all.
-    pub fn cell(&self) -> &AtomicU64 {
-        self.word(PAYLOAD)
-    }
-
-    /// Force this record to `ours`, discarding whatever was there.
-    ///
-    /// What an explicit `pthread_mutex_init` does. Re-initialising a live object is
-    /// undefined in POSIX; the previous payload is returned so the caller can free it
-    /// rather than leak it.
-    pub fn reinitialise(&self, payload: u64) -> Option<u64> {
-        let previous = (self.word(0).load(Ordering::Acquire) == ours(self.kind)
-            && self.owner_matches())
-        .then(|| self.word(PAYLOAD).load(Ordering::Relaxed));
-        self.set_payload(payload);
-        previous
+/// Destroy an object that owns nothing, reporting Darwin's `EINVAL` if it was not one.
+pub fn destroy_plain(record: &Record) -> i32 {
+    match record.seize() {
+        State::Invalid => super::consts::err::EINVAL,
+        _ => {
+            record.bury();
+            0
+        }
     }
 }
 
@@ -349,13 +394,13 @@ impl Record {
 ///
 /// The failure this prevents is quiet: copied synchronization state can appear to
 /// work while excluding the wrong set of callers. `EINVAL` alone would not say why.
-pub(crate) fn say_copied(kind: Kind, at: u64, owner: u64) {
+pub(crate) fn say_copied(kind: Kind, at: u64, identity: u64) {
     use std::sync::atomic::AtomicBool;
     static SAID: AtomicBool = AtomicBool::new(false);
     if SAID.swap(true, Ordering::Relaxed) {
         return;
     }
-    let _ = (kind, at, owner);
+    let _ = (kind, at, identity);
     const MESSAGE: &[u8] = b"rosetta3: pthread: a copied initialised pthread object was refused\n";
     // SAFETY: a fixed static buffer; `write` is async-signal-safe.
     unsafe { libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len()) };
@@ -400,8 +445,8 @@ mod tests {
         );
     }
 
-    /// A record must fit inside the smallest object of its kind, or it writes past
-    /// the guest's own struct.
+    /// Every kind's lifecycle words and body must fit inside the object they live in.
+    /// The body sizes each implementation needs are asserted where they are laid out.
     #[test]
     fn every_record_fits_the_object_it_lives_in() {
         for (kind, bytes) in [
@@ -414,10 +459,7 @@ mod tests {
             (Kind::CondAttr, size::CONDATTR),
             (Kind::RwLockAttr, size::RWLOCKATTR),
         ] {
-            let needed = match kind.tracks_owner() {
-                true => OWNER as usize + 8,
-                false => PAYLOAD as usize + 8,
-            };
+            let needed = kind.body() as usize + 8;
             assert!(
                 bytes >= needed,
                 "{kind:?} needs {needed} bytes and has {bytes}"
