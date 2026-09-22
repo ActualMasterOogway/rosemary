@@ -31,6 +31,31 @@ impl Gpu {
 
     /// A command buffer ready to begin, recycled where one has retired.
     pub fn acquire_context(&self) -> Result<CommandContext, String> {
+        let mut used = self
+            .context_budget
+            .used
+            .lock()
+            .expect("command buffer budget");
+        while *used >= self.context_budget.limit {
+            crate::stats::count(crate::stats::Counter::ContextPressure);
+            used = self
+                .context_budget
+                .available
+                .wait(used)
+                .expect("command buffer budget");
+        }
+        *used += 1;
+        crate::stats::peak(crate::stats::Counter::InFlightContexts, *used as u64);
+        drop(used);
+
+        let acquired = self.acquire_context_unbounded();
+        if acquired.is_err() {
+            self.release_context_budget();
+        }
+        acquired
+    }
+
+    fn acquire_context_unbounded(&self) -> Result<CommandContext, String> {
         if let Some(context) = self.contexts.lock().expect("command contexts").pop() {
             return Ok(context);
         }
@@ -86,6 +111,8 @@ impl Gpu {
         let mut contexts = self.contexts.lock().expect("command contexts");
         if reset.is_ok() && contexts.len() < RECYCLED {
             contexts.push(context);
+            drop(contexts);
+            self.release_context_budget();
             return;
         }
         drop(contexts);
@@ -94,6 +121,17 @@ impl Gpu {
             self.device.destroy_command_pool(context.pool, None);
             self.device.destroy_fence(context.fence, None);
         }
+        self.release_context_budget();
+    }
+
+    fn release_context_budget(&self) {
+        let mut used = self
+            .context_budget
+            .used
+            .lock()
+            .expect("command buffer budget");
+        *used = used.checked_sub(1).expect("a reserved command buffer");
+        self.context_budget.available.notify_one();
     }
 
     /// An empty descriptor pool, recycled where one has retired.

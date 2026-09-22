@@ -56,6 +56,18 @@ use crate::gpu::{self, Gpu, GpuImage, ImageDescription};
 use crate::object::{self, methods};
 use crate::resource::Texture;
 
+struct ReadbackQueue {
+    pending: std::sync::Mutex<std::collections::VecDeque<usize>>,
+    ready: std::sync::Condvar,
+    worker: std::sync::Once,
+}
+
+static READBACKS: ReadbackQueue = ReadbackQueue {
+    pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
+    ready: std::sync::Condvar::new(),
+    worker: std::sync::Once::new(),
+};
+
 pub(crate) struct Drawable {
     pub gpu: &'static Gpu,
     pub texture: Id,
@@ -67,19 +79,49 @@ pub(crate) struct Drawable {
     readback: Option<crate::gpu::GpuBuffer>,
 }
 
-/// The drawable a layer currently vends, remade when the layer's size changes.
-///
-/// The two `Id`s are Objective-C objects, which the runtime keeps alive for
-/// the life of the process; the addresses are what crosses threads, and every
-/// use of one is back on the thread which sent the message.
+/// Three drawable images let the guest record ahead without ever writing an
+/// image which an earlier presentation still consumes.
+const DRAWABLES_IN_FLIGHT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SlotState {
+    Available,
+    Vended,
+    Submitted,
+}
+
+struct CachedSlot {
+    drawable: usize,
+    state: SlotState,
+}
+
+impl CachedSlot {
+    fn submit(&mut self) -> bool {
+        if self.state != SlotState::Vended {
+            return false;
+        }
+        self.state = SlotState::Submitted;
+        true
+    }
+
+    fn complete(&mut self) {
+        self.state = SlotState::Available;
+    }
+}
+
+/// The drawable ring a layer currently vends, remade when its description
+/// changes. Cache references keep every slot alive while it is reusable.
 struct Cached {
     layer: usize,
     width: u32,
     height: u32,
-    drawable: usize,
+    pixel_format: u64,
+    stale: bool,
+    slots: Vec<CachedSlot>,
 }
 
-static CACHE: std::sync::Mutex<Vec<Cached>> = std::sync::Mutex::new(Vec::new());
+static CACHE: (std::sync::Mutex<Vec<Cached>>, std::sync::Condvar) =
+    (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
 
 /// `-[CAMetalLayer nextDrawable]`.
 unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
@@ -116,32 +158,6 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         pixel_format
     };
 
-    let mut cache = CACHE.lock().expect("drawable cache");
-    if let Some(entry) = cache.iter().find(|entry| {
-        entry.layer == receiver as usize && entry.width == width && entry.height == height
-    }) {
-        // Metal vends an autoreleased drawable; the cache's own reference is
-        // not the caller's to spend.
-        return objc::arc::autorelease(objc::arc::retain(entry.drawable as Id));
-    }
-    cache.retain(|entry| {
-        if entry.layer != receiver as usize {
-            return true;
-        }
-        // The layer resized: the old drawable will never be vended again, so
-        // the cache gives up its references. It does not destroy anything: a
-        // command buffer which was handed this drawable retains it precisely
-        // because its work can still be running, and the presentation that
-        // follows still reads the image. The image and the readback buffer go
-        // in `drawable_dealloc`, once the last holder has let go.
-        let stale = entry.drawable as Id;
-        // SAFETY: a drawable this module made, whose texture is this crate's.
-        let texture = unsafe { object::body::<Drawable>(stale) }.texture;
-        objc::arc::release(texture);
-        objc::arc::release(stale);
-        false
-    });
-
     let format = gpu::pixel_format(pixel_format);
     if format == vk::Format::UNDEFINED {
         gpu::trace(format!(
@@ -149,56 +165,170 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         ));
         return std::ptr::null_mut();
     }
-    let image = match gpu.create_image(&ImageDescription {
-        image_type: vk::ImageType::TYPE_2D,
-        view_type: vk::ImageViewType::TYPE_2D,
-        format,
-        width,
-        height,
-        depth: 1,
-        levels: 1,
-        layers: 1,
-        samples: 1,
-        usage: gpu::USAGE_RENDER_TARGET | gpu::USAGE_SHADER_READ,
-        cube: false,
-    }) {
-        Ok(image) => image,
-        Err(reason) => {
-            gpu::trace(format!("drawable image creation failed: {reason}"));
-            return std::ptr::null_mut();
+    let mut cache = CACHE.0.lock().expect("drawable cache");
+    retire_stale(&mut cache);
+    for entry in cache
+        .iter_mut()
+        .filter(|entry| entry.layer == receiver as usize)
+    {
+        if (entry.width, entry.height, entry.pixel_format) != (width, height, pixel_format) {
+            entry.stale = true;
+        }
+    }
+    let current = cache.iter().position(|entry| {
+        !entry.stale
+            && entry.layer == receiver as usize
+            && (entry.width, entry.height, entry.pixel_format) == (width, height, pixel_format)
+    });
+    let at = match current {
+        Some(at) => at,
+        None => {
+            let mut slots = Vec::with_capacity(DRAWABLES_IN_FLIGHT);
+            for _ in 0..DRAWABLES_IN_FLIGHT {
+                let Some(drawable) =
+                    make_drawable(gpu, receiver, width, height, pixel_format, format)
+                else {
+                    release_slots(&mut slots);
+                    return std::ptr::null_mut();
+                };
+                slots.push(CachedSlot {
+                    drawable: drawable as usize,
+                    state: SlotState::Available,
+                });
+            }
+            cache.push(Cached {
+                layer: receiver as usize,
+                width,
+                height,
+                pixel_format,
+                stale: false,
+                slots,
+            });
+            cache.len() - 1
         }
     };
+
+    loop {
+        let Some(entry) = cache.get_mut(at).filter(|entry| {
+            !entry.stale
+                && entry.layer == receiver as usize
+                && (entry.width, entry.height, entry.pixel_format) == (width, height, pixel_format)
+        }) else {
+            return std::ptr::null_mut();
+        };
+        if let Some(slot) = entry
+            .slots
+            .iter_mut()
+            .find(|slot| slot.state == SlotState::Available)
+        {
+            slot.state = SlotState::Vended;
+            crate::stats::count(crate::stats::Counter::DrawableVended);
+            // The cache's own reference is not the caller's to spend.
+            return objc::arc::autorelease(objc::arc::retain(slot.drawable as Id));
+        }
+        crate::stats::count(crate::stats::Counter::DrawablePressure);
+        cache = CACHE.1.wait(cache).expect("drawable cache");
+    }
+}
+
+fn make_drawable(
+    gpu: &'static Gpu,
+    layer: Id,
+    width: u32,
+    height: u32,
+    pixel_format: u64,
+    format: vk::Format,
+) -> Option<Id> {
+    let image = gpu
+        .create_image(&ImageDescription {
+            image_type: vk::ImageType::TYPE_2D,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format,
+            width,
+            height,
+            depth: 1,
+            levels: 1,
+            layers: 1,
+            samples: 1,
+            usage: gpu::USAGE_RENDER_TARGET | gpu::USAGE_SHADER_READ,
+            cube: false,
+        })
+        .map_err(|reason| gpu::trace(format!("drawable image creation failed: {reason}")))
+        .ok()?;
     let texture = crate::resource::drawable_texture(gpu, image, pixel_format);
     if texture.is_null() {
-        return std::ptr::null_mut();
+        return None;
     }
     let drawable = object::make(
         c"R3CAMetalDrawable",
         Drawable {
             gpu,
             texture,
-            layer: receiver,
+            layer,
             readback: None,
         },
     );
     if drawable.is_null() {
-        return std::ptr::null_mut();
+        return None;
     }
-    // The cache's own references. A drawable is vended again and again from
-    // here, and a guest which released the one it was handed - having never
-    // retained it - would otherwise leave this entry pointing at freed memory.
-    objc::arc::retain(drawable);
     objc::arc::retain(texture);
     gpu::milestone("drawable");
-    cache.push(Cached {
-        layer: receiver as usize,
-        width,
-        height,
-        drawable: drawable as usize,
-    });
-    // The reference `object::make` returned, given to the caller as Metal gives
-    // it: autoreleased, on top of the cache's own.
-    objc::arc::autorelease(drawable)
+    Some(drawable)
+}
+
+fn release_slots(slots: &mut Vec<CachedSlot>) {
+    for slot in slots.drain(..) {
+        let drawable = slot.drawable as Id;
+        // SAFETY: a drawable made above, whose cache reference is being given up.
+        let texture = unsafe { object::body::<Drawable>(drawable) }.texture;
+        objc::arc::release(texture);
+        objc::arc::release(drawable);
+    }
+}
+
+fn retire_stale(cache: &mut Vec<Cached>) {
+    let mut index = 0;
+    while index < cache.len() {
+        if cache[index].stale
+            && cache[index]
+                .slots
+                .iter()
+                .all(|slot| slot.state == SlotState::Available)
+        {
+            let mut stale = cache.remove(index);
+            release_slots(&mut stale.slots);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Transfer a vended slot to a command buffer. A duplicate presentation of
+/// the same drawable is ignored rather than creating two owners of one image.
+pub(crate) fn submit(drawable: Id) -> bool {
+    let mut cache = CACHE.0.lock().expect("drawable cache");
+    let Some(slot) = cache
+        .iter_mut()
+        .flat_map(|entry| entry.slots.iter_mut())
+        .find(|slot| slot.drawable == drawable as usize)
+    else {
+        return false;
+    };
+    slot.submit()
+}
+
+/// Return a vended or submitted slot to its layer's ring.
+pub(crate) fn complete(drawable: Id) {
+    let mut cache = CACHE.0.lock().expect("drawable cache");
+    if let Some(slot) = cache
+        .iter_mut()
+        .flat_map(|entry| entry.slots.iter_mut())
+        .find(|slot| slot.drawable == drawable as usize)
+    {
+        slot.complete();
+        CACHE.1.notify_all();
+    }
+    retire_stale(&mut cache);
 }
 
 unsafe extern "C" fn drawable_texture(receiver: Id, _sel: Sel) -> Id {
@@ -212,7 +342,9 @@ unsafe extern "C" fn drawable_layer(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn drawable_present(receiver: Id, _sel: Sel) {
-    present(receiver);
+    if submit(receiver) {
+        present(receiver);
+    }
 }
 
 /// `-[CAMetalDrawable dealloc]`.
@@ -242,6 +374,99 @@ unsafe extern "C" fn drawable_dealloc(receiver: Id, _sel: Sel) {
 
 /// Read the drawable's image back and blit it into the window.
 pub(crate) fn present(drawable: Id) {
+    if enqueue_swapchain(drawable) {
+        return;
+    }
+    present_readback(drawable);
+    complete(drawable);
+}
+
+/// Attach the swapchain copy directly behind the guest submission. The
+/// swapchain owns a retained reference until its copy fence signals.
+pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
+    if drawable.is_null() || !object::is_kind(drawable, c"R3CAMetalDrawable") {
+        return false;
+    }
+    // SAFETY: a drawable of this crate's, checked above.
+    let described = unsafe { object::body::<Drawable>(drawable) };
+    // SAFETY: a drawable's texture is this crate's.
+    let texture = unsafe { object::body::<Texture>(described.texture) };
+    // SAFETY: a `CAMetalLayer` this runtime made.
+    let view = unsafe { appkit::layer::view_of(described.layer) };
+    if appkit::view::is_hidden_or_has_hidden_ancestor(view) {
+        complete(drawable);
+        return true;
+    }
+    let Some(frame) = layer_frame(described.layer) else {
+        return false;
+    };
+    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
+        return false;
+    }
+    let owner = objc::arc::retain(drawable) as usize;
+    match crate::swapchain::present_owned(
+        described.gpu,
+        described.layer as usize,
+        &frame,
+        &texture.image,
+        &[],
+        owner,
+    ) {
+        Ok(true) => {
+            gpu::milestone("presented frame");
+            crate::stats::count(crate::stats::Counter::Frames);
+            true
+        }
+        Ok(false) => false,
+        Err(reason) => {
+            gpu::trace(format!("swapchain presentation failed: {reason}"));
+            false
+        }
+    }
+}
+
+/// Hand a completed drawable to the slow host-readback lane. `drawable` is
+/// one owned reference, consumed by the worker.
+pub(crate) fn enqueue_readback(drawable: Id) {
+    READBACKS.worker.call_once(|| {
+        std::thread::Builder::new()
+            .name("metal:readback".to_string())
+            .spawn(readback_worker)
+            .expect("a thread for Metal presentation readbacks");
+    });
+    let mut pending = READBACKS.pending.lock().expect("presentation readbacks");
+    pending.push_back(drawable as usize);
+    READBACKS.ready.notify_one();
+}
+
+fn readback_worker() {
+    loop {
+        let drawable = {
+            let mut pending = READBACKS.pending.lock().expect("presentation readbacks");
+            loop {
+                if let Some(drawable) = pending.pop_front() {
+                    break drawable as Id;
+                }
+                pending = READBACKS
+                    .ready
+                    .wait(pending)
+                    .expect("presentation readbacks");
+            }
+        };
+        present_readback(drawable);
+        complete(drawable);
+        objc::arc::release(drawable);
+    }
+}
+
+/// Called by the swapchain once the copy which reads a drawable has finished.
+pub(crate) fn presentation_complete(drawable: usize) {
+    let drawable = drawable as Id;
+    complete(drawable);
+    objc::arc::release(drawable);
+}
+
+fn present_readback(drawable: Id) {
     crate::stats::timed(crate::stats::Counter::PresentMicros, || {
         present_inner(drawable)
     });
@@ -263,15 +488,6 @@ fn present_inner(drawable: Id) {
         return;
     }
     let frame = layer_frame(described.layer);
-
-    // The swapchain is the whole of presentation where the window has one:
-    // the frame the guest drew stays on the device and the compositor scans
-    // out what the blit put there. Everything below this is the fallback.
-    if present_through_swapchain(described, texture, frame.as_ref()) {
-        gpu::milestone("presented frame");
-        crate::stats::count(crate::stats::Counter::Frames);
-        return;
-    }
 
     // The layer's own window where it has one, and the first window
     // otherwise - which is a guess, but the only one available for a layer
@@ -311,9 +527,33 @@ fn present_inner(drawable: Id) {
     let image = texture.image.image;
     let result = crate::stats::timed(crate::stats::Counter::ReadbackMicros, || {
         gpu.one_shot(|device, command_buffer| {
-            // SAFETY: recording into a command buffer the call owns; the image is
-            // in GENERAL layout from creation.
+            let barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            // SAFETY: recording into a command buffer the call owns; the image
+            // is in GENERAL layout from creation.
             unsafe {
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
                 device.cmd_copy_image_to_buffer(
                     command_buffer,
                     image,
@@ -336,43 +576,6 @@ fn present_inner(drawable: Id) {
         crate::stats::timed(crate::stats::Counter::BlitMicros, || {
             blit_to_window(pixels, width, height, texture.image.format, window)
         });
-    }
-}
-
-/// Present the drawable through its window's swapchain, if it has one.
-///
-/// The layer says which view holds it and the view says where in which
-/// window it is; without both there is no surface to present to, and the
-/// caller reads the frame back instead. `ROSETTA3_PRESENT_READBACK` forces
-/// that older path, which is the only way to compare the two on one host and
-/// the escape hatch for a driver whose swapchain misbehaves.
-fn present_through_swapchain(
-    drawable: &Drawable,
-    texture: &Texture,
-    frame: Option<&appkit::view::Frame>,
-) -> bool {
-    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
-        return false;
-    }
-    let Some(frame) = frame else {
-        gpu::trace_once(
-            "a CAMetalLayer is in no window this runtime made, so its drawables are presented \
-             through a readback",
-        );
-        return false;
-    };
-    match crate::swapchain::present(
-        drawable.gpu,
-        drawable.layer as usize,
-        frame,
-        &texture.image,
-        &[],
-    ) {
-        Ok(presented) => presented,
-        Err(reason) => {
-            gpu::trace(format!("swapchain presentation failed: {reason}"));
-            false
-        }
     }
 }
 
@@ -751,4 +954,32 @@ pub(crate) fn present_store(
         gpu::milestone("window store");
     }
     presented
+}
+
+#[cfg(test)]
+mod drawable_pool_tests {
+    use super::*;
+
+    #[test]
+    fn submitted_slot_is_not_available_until_completion() {
+        let mut slot = CachedSlot {
+            drawable: 1,
+            state: SlotState::Vended,
+        };
+        assert!(slot.submit());
+        assert_eq!(slot.state, SlotState::Submitted);
+        assert!(!slot.submit());
+        slot.complete();
+        assert_eq!(slot.state, SlotState::Available);
+    }
+
+    #[test]
+    fn duplicate_submission_does_not_create_a_second_owner() {
+        let mut slot = CachedSlot {
+            drawable: 1,
+            state: SlotState::Submitted,
+        };
+        assert!(!slot.submit());
+        assert_eq!(slot.state, SlotState::Submitted);
+    }
 }

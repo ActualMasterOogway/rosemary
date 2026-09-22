@@ -19,6 +19,23 @@ use ash::vk;
 use static_init::dynamic;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+struct Batch {
+    gpu: &'static Gpu,
+    captures: Vec<Capture>,
+}
+
+struct Queue {
+    pending: std::sync::Mutex<std::collections::VecDeque<Batch>>,
+    ready: std::sync::Condvar,
+    worker: std::sync::Once,
+}
+
+static QUEUE: Queue = Queue {
+    pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
+    ready: std::sync::Condvar::new(),
+    worker: std::sync::Once::new(),
+};
+
 /// One attachment of one pass, named while the pass is recorded and read back
 /// once the submission that wrote it completes.
 pub(crate) struct Capture {
@@ -27,7 +44,7 @@ pub(crate) struct Capture {
 }
 
 // SAFETY: the mapping a `GpuBuffer` holds is valid on any thread, and a
-// capture is only ever read on the thread that retires its submission.
+// capture is only ever read after completion, by the capture-output worker.
 unsafe impl Send for Capture {}
 
 /// What `begin_render_pass` saw, kept on the encoder until the pass ends.
@@ -158,9 +175,45 @@ pub(crate) fn record(
     })
 }
 
-/// Write out and free everything one submission captured.
+/// Hand completed capture buffers to the filesystem worker. Retirement must
+/// not wait behind large diagnostic writes, but the batch keeps every mapped
+/// buffer alive until the worker has consumed it.
 pub(crate) fn finish(gpu: &'static Gpu, captures: Vec<Capture>) {
+    if captures.is_empty() {
+        return;
+    }
+    QUEUE.worker.call_once(|| {
+        std::thread::Builder::new()
+            .name("metal:capture".to_string())
+            .spawn(worker)
+            .expect("a thread for Metal capture output");
+    });
+    let mut pending = QUEUE.pending.lock().expect("capture output queue");
+    pending.push_back(Batch { gpu, captures });
+    QUEUE.ready.notify_one();
+}
+
+fn worker() {
+    loop {
+        let batch = {
+            let mut pending = QUEUE.pending.lock().expect("capture output queue");
+            loop {
+                if let Some(batch) = pending.pop_front() {
+                    break batch;
+                }
+                pending = QUEUE.ready.wait(pending).expect("capture output queue");
+            }
+        };
+        write(batch);
+    }
+}
+
+fn write(batch: Batch) {
+    let Batch { gpu, captures } = batch;
     let Some(directory) = directory() else {
+        for capture in captures {
+            gpu.destroy_buffer(capture.buffer);
+        }
         return;
     };
     let _ = std::fs::create_dir_all(directory);

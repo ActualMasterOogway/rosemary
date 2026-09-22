@@ -36,7 +36,19 @@ counters!(
     TexturesCreated = "textures_created",
     PipelinesCreated = "pipelines_created",
     SubmitMicros = "submit_micros",
+    SubmissionQueueDepth = "submission_queue_depth_peak",
+    FenceWaitMicros = "fence_wait_micros",
+    FenceWakeToRetiredMicros = "fence_wake_to_retired_micros",
+    DrawableVended = "drawable_vended",
+    DrawablePressure = "drawable_pressure",
+    InFlightContexts = "in_flight_contexts_peak",
+    ContextPressure = "context_pressure",
+    InFlightTransientPeakBytes = "in_flight_transient_peak_bytes",
     PresentMicros = "present_micros",
+    PresentAcquireMicros = "present_acquire_micros",
+    PresentRecordMicros = "present_record_micros",
+    PresentSubmitMicros = "present_submit_micros",
+    QueuePresentMicros = "queue_present_micros",
     ReadbackMicros = "readback_micros",
     BlitMicros = "blit_micros",
     Frames = "frames",
@@ -90,6 +102,16 @@ pub fn timed<T>(counter: Counter, body: impl FnOnce() -> T) -> T {
     value
 }
 
+pub fn timer() -> Option<Instant> {
+    enabled().then(Instant::now)
+}
+
+pub fn finish_timer(counter: Counter, start: Option<Instant>) {
+    if let Some(start) = start {
+        add(counter, start.elapsed().as_micros() as u64);
+    }
+}
+
 /// Report and reset the counters, once per interval.
 pub fn tick() {
     if !enabled() {
@@ -112,7 +134,7 @@ pub fn tick() {
             if value == 0 {
                 return None;
             }
-            Some(match name.ends_with("_peak_bytes") {
+            Some(match name.contains("_peak") {
                 true => format!("{name}={value}"),
                 false => format!("{name}={:.0}/s", value as f64 / seconds),
             })

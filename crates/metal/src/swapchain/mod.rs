@@ -4,7 +4,7 @@
 //! composites every view's layer into one backing store and the window server
 //! scans that out; a swapchain is that backing store, and this module is the
 //! compositing. A drawable is still an ordinary colour image the guest renders
-//! into - nothing about `nextDrawable` changes - and `-presentDrawable:` now
+//! into, vended from a bounded per-layer ring, and `-presentDrawable:` now
 //! blits it into the window's swapchain image on the device instead of reading
 //! it back through the host.
 //!
@@ -106,6 +106,8 @@ struct Frame {
     /// them.
     done: vk::Fence,
     submitted: bool,
+    /// Retained drawable whose image this frame's command buffer reads.
+    source: Option<usize>,
 }
 
 struct PresentFence {
@@ -121,6 +123,25 @@ static SWAPCHAINS: Mutex<Option<HashMap<usize, Swapchain>>> = Mutex::new(None);
 /// Whether a swapchain could not be made for this window, so that a run does
 /// not retry - and re-report - a surface the host will never give.
 static REFUSED: Mutex<Option<HashMap<usize, ()>>> = Mutex::new(None);
+
+struct SourceOwner(Option<usize>);
+
+impl SourceOwner {
+    fn take(&mut self) -> Option<usize> {
+        self.0.take()
+    }
+}
+
+impl Drop for SourceOwner {
+    fn drop(&mut self) {
+        if let Some(source) = self.0.take() {
+            // The copy was not submitted, so only the temporary reference is
+            // returned. The command submission still owns the drawable and
+            // may send it through the readback fallback after its fence.
+            objc::arc::release(source as objc::object::Id);
+        }
+    }
+}
 
 /// Drop everything held for an SDL window that is about to be destroyed.
 ///
@@ -154,6 +175,31 @@ pub(crate) fn present(
     source: &GpuImage,
     holes: &[(usize, Region)],
 ) -> Result<bool, String> {
+    present_impl(gpu, layer, frame, source, holes, None)
+}
+
+/// Present a command buffer's drawable, consuming its retained `owner` on
+/// every return path. A successful copy holds it until the frame fence wakes.
+pub(crate) fn present_owned(
+    gpu: &'static Gpu,
+    layer: usize,
+    frame: &appkit::view::Frame,
+    source: &GpuImage,
+    holes: &[(usize, Region)],
+    owner: usize,
+) -> Result<bool, String> {
+    present_impl(gpu, layer, frame, source, holes, Some(owner))
+}
+
+fn present_impl(
+    gpu: &'static Gpu,
+    layer: usize,
+    frame: &appkit::view::Frame,
+    source: &GpuImage,
+    holes: &[(usize, Region)],
+    owner: Option<usize>,
+) -> Result<bool, String> {
+    let mut owner = SourceOwner(owner);
     if gpu.swapchain_api().is_none() || crate::vulkan::surface_api().is_none() {
         return Ok(false);
     }
@@ -221,7 +267,13 @@ pub(crate) fn present(
             &holes,
         )),
     };
-    swapchain.present(frame, source, regions.as_deref())
+    swapchain.present(frame, source, regions.as_deref(), owner.take())
+}
+
+fn finish_source(source: Option<usize>) {
+    if let Some(source) = source {
+        crate::present::presentation_complete(source);
+    }
 }
 
 /// A rectangle of window pixels, top-left origin.
@@ -353,6 +405,7 @@ impl Swapchain {
                 acquired: acquired.take(),
                 done,
                 submitted: false,
+                source: None,
             });
         }
         let mut swapchain = Self {
@@ -538,6 +591,10 @@ impl Swapchain {
     fn idle(&mut self) {
         if !self.gpu.has_present_fences() {
             self.gpu.wait_queue_idle();
+            for frame in &mut self.frames {
+                frame.submitted = false;
+                finish_source(frame.source.take());
+            }
             return;
         }
         let submitted = self
@@ -558,6 +615,7 @@ impl Swapchain {
         }
         for frame in &mut self.frames {
             frame.submitted = false;
+            finish_source(frame.source.take());
         }
         for present in &mut self.presented {
             present.pending = false;
@@ -619,7 +677,9 @@ impl Swapchain {
         frame: &appkit::view::Frame,
         source: &GpuImage,
         regions: Option<&[Region]>,
+        owner: Option<usize>,
     ) -> Result<bool, String> {
+        let mut owner = SourceOwner(owner);
         // One layer covering the window needs no accumulator: what it draws
         // is the whole of what the window shows, so it goes straight into the
         // image the presentation engine hands back.
@@ -637,11 +697,16 @@ impl Swapchain {
         unsafe { self.gpu.device.wait_for_fences(&[done], true, u64::MAX) }
             .map_err(|error| format!("vkWaitForFences failed with {error:?}"))?;
         self.frames[slot].submitted = false;
+        finish_source(self.frames[slot].source.take());
 
-        let Some(index) = self.acquire(acquired)? else {
+        let Some(index) = crate::stats::timed(crate::stats::Counter::PresentAcquireMicros, || {
+            self.acquire(acquired)
+        })?
+        else {
             // The swapchain was rebuilt underneath the acquisition. The frame
             // the guest drew is gone, which is what a resize costs; the next
             // one lands in the new swapchain.
+            finish_source(owner.take());
             return Ok(true);
         };
         let target = self.images[index as usize];
@@ -670,6 +735,7 @@ impl Swapchain {
             None
         };
 
+        let record_timer = crate::stats::timer();
         let device = &self.gpu.device;
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -687,6 +753,7 @@ impl Swapchain {
         // SAFETY: recording into a command buffer this call owns; every image
         // named below belongs to this device.
         unsafe {
+            prepare_source(device, command_buffer, source.image);
             let whole = [
                 vk::Offset3D { x: 0, y: 0, z: 0 },
                 vk::Offset3D {
@@ -778,17 +845,23 @@ impl Swapchain {
                 .end_command_buffer(command_buffer)
                 .map_err(|error| format!("vkEndCommandBuffer failed with {error:?}"))?;
         }
+        crate::stats::finish_timer(crate::stats::Counter::PresentRecordMicros, record_timer);
 
-        self.gpu.submit_synchronized(
-            command_buffer,
-            done,
-            &[(acquired, vk::PipelineStageFlags::TRANSFER)],
-            &[blitted],
-        )?;
+        crate::stats::timed(crate::stats::Counter::PresentSubmitMicros, || {
+            self.gpu.submit_synchronized(
+                command_buffer,
+                done,
+                &[(acquired, vk::PipelineStageFlags::TRANSFER)],
+                &[blitted],
+            )
+        })?;
         self.frames[slot].submitted = true;
+        self.frames[slot].source = owner.take();
         self.frame = self.frame.wrapping_add(1);
 
-        let result = self.gpu.present(self.handle, index, blitted, present_fence);
+        let result = crate::stats::timed(crate::stats::Counter::QueuePresentMicros, || {
+            self.gpu.present(self.handle, index, blitted, present_fence)
+        });
         // OUT_OF_DATE and the other ordinary WSI errors still enqueue the
         // semaphore wait. Only allocation failure is specified to leave all
         // synchronization objects untouched.
@@ -813,7 +886,13 @@ impl Swapchain {
                 self.rebuild(self.requested)?;
                 Ok(true)
             }
-            Err(error) => Err(format!("vkQueuePresentKHR failed with {error:?}")),
+            Err(error) => {
+                // The blit submission succeeded and owns the drawable until
+                // its frame fence. A WSI failure must not make the caller
+                // schedule a second consumer or release the slot early.
+                gpu::trace(format!("vkQueuePresentKHR failed with {error:?}"));
+                Ok(true)
+            }
         }
     }
 

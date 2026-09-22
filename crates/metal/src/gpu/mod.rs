@@ -72,7 +72,9 @@ pub(crate) struct ResolveSupport {
     pub independent: bool,
 }
 
-/// One logical device and the queue Metal's single command-queue model uses.
+/// One logical device and the Vulkan queue onto which this implementation
+/// deliberately serializes every Metal command queue. Multiple Vulkan queues
+/// require resource hazard tracking which this runtime does not yet have.
 pub struct Gpu {
     pub device: Device,
     pub physical: vk::PhysicalDevice,
@@ -80,6 +82,13 @@ pub struct Gpu {
     /// Vulkan requires external synchronization on a queue, and Metal lets any
     /// thread commit a command buffer.
     queue: Mutex<vk::Queue>,
+    /// Commits hold this across the guest submit and every presentation
+    /// submit attached to it. Queue calls themselves keep using `queue` for
+    /// Vulkan's external-synchronization rule.
+    submission_boundary: Mutex<()>,
+    /// In-flight work and its completion worker are device-local. Independent
+    /// Vulkan devices must never head-of-line block one another.
+    pub(crate) submissions: crate::submission::Tracker,
     memory: vk::PhysicalDeviceMemoryProperties,
     pub limits: vk::PhysicalDeviceLimits,
     /// One layout per distinct set of Metal binding indices, so pipelines
@@ -103,6 +112,7 @@ pub struct Gpu {
     /// fence and descriptor pools every frame is driver work on the thread the
     /// guest records on.
     contexts: Mutex<Vec<CommandContext>>,
+    context_budget: ContextBudget,
     descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
     upload_chunks: Mutex<Vec<GpuBuffer>>,
     /// `VK_KHR_push_descriptor`, where advertised, and the descriptor limit
@@ -151,6 +161,27 @@ pub struct CommandContext {
     pub pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
     pub fence: vk::Fence,
+}
+
+struct ContextBudget {
+    used: Mutex<usize>,
+    available: std::sync::Condvar,
+    limit: usize,
+}
+
+impl ContextBudget {
+    fn new() -> Self {
+        let limit = std::env::var("ROSETTA3_METAL_MAX_COMMAND_BUFFERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(64);
+        Self {
+            used: Mutex::new(0),
+            available: std::sync::Condvar::new(),
+            limit,
+        }
+    }
 }
 
 /// How many retired objects of each kind are kept for reuse. Enough for the
@@ -566,6 +597,8 @@ impl Gpu {
             physical,
             queue_family,
             queue: Mutex::new(queue),
+            submission_boundary: Mutex::new(()),
+            submissions: crate::submission::Tracker::new(),
             memory,
             limits: properties.limits,
             layouts: Mutex::new(HashMap::new()),
@@ -576,6 +609,7 @@ impl Gpu {
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
             contexts: Mutex::new(Vec::new()),
+            context_budget: ContextBudget::new(),
             descriptor_pools: Mutex::new(Vec::new()),
             upload_chunks: Mutex::new(Vec::new()),
             push_descriptor_api,

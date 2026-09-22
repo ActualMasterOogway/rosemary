@@ -151,7 +151,7 @@ pub(crate) struct CommandBuffer {
     /// Each is retained once however often it is bound: a retain is a global
     /// lock in the Objective-C runtime, and a frame binds the same objects
     /// thousands of times.
-    retained: Vec<Id>,
+    retained: Vec<OwnedObjcRef>,
     retained_set: AddressSet,
     /// Chunks `-setBytes:` copies are cut from, and how far into the last
     /// one the copies have reached.
@@ -160,10 +160,10 @@ pub(crate) struct CommandBuffer {
     framebuffers: Vec<vk::Framebuffer>,
     /// `ROSETTA3_PASS_OUT`: attachment readbacks written once the work is done.
     captures: Vec<crate::capture::Capture>,
-    scheduled_handlers: Vec<Id>,
-    completed_handlers: Vec<Id>,
+    scheduled_handlers: Vec<OwnedBlock>,
+    completed_handlers: Vec<OwnedBlock>,
     /// Drawables `-presentDrawable:` asked for, presented once the work is done.
-    presents: Vec<Id>,
+    presents: Vec<OwnedObjcRef>,
     completion: Arc<CommandCompletion>,
     recording: bool,
 }
@@ -216,10 +216,6 @@ pub(crate) enum Kind {
     Render,
 }
 
-// ------------------------------------------------------------- structures
-// Metal passes these by value, and the guest ABI puts anything over sixteen
-// bytes in memory, so each must be one `repr(C)` argument.
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct MtlSize {
@@ -265,14 +261,10 @@ pub(crate) struct ClearColor {
     pub alpha: f64,
 }
 
-// --------------------------------------------------------------- queue
-
-// -------------------------------------------------------- command buffer
-
 impl CommandBuffer {
     pub(super) fn retain(&mut self, object: Id) {
         if !object.is_null() && self.retained_set.insert(object as usize) {
-            self.retained.push(objc::arc::retain(object));
+            self.retained.push(OwnedObjcRef::retain(object));
         }
     }
 

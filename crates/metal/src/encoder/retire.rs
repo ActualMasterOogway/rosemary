@@ -2,6 +2,61 @@
 
 use super::*;
 
+/// One owned Objective-C reference represented by its transferable address.
+/// The wrapper releases exactly once unless ownership is explicitly handed to
+/// another executor with [`Self::into_raw`].
+pub(super) struct OwnedObjcRef(usize);
+
+// SAFETY: Objective-C reference counts are thread-safe, and uses of the
+// pointee still obey each framework object's own synchronization contract.
+unsafe impl Send for OwnedObjcRef {}
+
+impl OwnedObjcRef {
+    pub(super) fn retain(object: Id) -> Self {
+        Self(objc::arc::retain(object) as usize)
+    }
+
+    pub(super) fn as_id(&self) -> Id {
+        self.0 as Id
+    }
+
+    pub(super) fn into_raw(self) -> Id {
+        let object = self.as_id();
+        std::mem::forget(self);
+        object
+    }
+}
+
+impl Drop for OwnedObjcRef {
+    fn drop(&mut self) {
+        objc::arc::release(self.as_id());
+    }
+}
+
+/// One owned Objective-C block reference.
+pub(super) struct OwnedBlock(usize);
+
+// SAFETY: copied Objective-C blocks may be transferred to the handler worker.
+unsafe impl Send for OwnedBlock {}
+
+impl OwnedBlock {
+    pub(super) fn from_retained(block: Id) -> Self {
+        Self(block as usize)
+    }
+
+    pub(super) fn into_raw(self) -> Id {
+        let block = self.0 as Id;
+        std::mem::forget(self);
+        block
+    }
+}
+
+impl Drop for OwnedBlock {
+    fn drop(&mut self) {
+        objc::block::release(self.0 as Id);
+    }
+}
+
 pub(super) struct CommandCompletion {
     state: Mutex<CommandState>,
     changed: Condvar,
@@ -64,15 +119,16 @@ pub(crate) struct Submission {
     pub(super) timestamps: vk::QueryPool,
     pub(super) pool: vk::CommandPool,
     pub(super) command_buffer: vk::CommandBuffer,
-    pub(super) fence: vk::Fence,
+    pub(crate) fence: vk::Fence,
     pub(super) descriptor_pools: Vec<vk::DescriptorPool>,
-    pub(super) retained: Vec<usize>,
+    pub(super) retained: Vec<OwnedObjcRef>,
     pub(super) uploads: Vec<GpuBuffer>,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
     pub(super) captures: Vec<crate::capture::Capture>,
-    pub(super) completed_handlers: Vec<usize>,
-    pub(super) presents: Vec<usize>,
-    pub(super) object: usize,
+    pub(super) completed_handlers: Vec<OwnedBlock>,
+    pub(super) presents: Vec<OwnedObjcRef>,
+    pub(super) object: OwnedObjcRef,
+    pub(crate) serial: u64,
     pub(super) completion: Arc<CommandCompletion>,
     /// Host time when Vulkan accepted this submission, used if this queue has
     /// no device timestamps or reading them fails.
@@ -80,12 +136,29 @@ pub(crate) struct Submission {
 }
 
 impl Submission {
-    pub(crate) fn wait_and_finish(self) {
-        let result = self.gpu.wait(self.fence);
-        self.finish(result);
+    pub(crate) fn transient_bytes(&self) -> u64 {
+        self.uploads
+            .iter()
+            .map(|buffer| buffer.length)
+            .chain(self.captures.iter().map(|capture| capture.buffer.length))
+            .sum()
     }
 
-    pub(super) fn finish(mut self, result: Result<(), String>) {
+    /// Submit presentation copies directly behind the guest work. A
+    /// swapchain keeps its own reference until the copy fence signals; a
+    /// readback fallback remains here and is handed to its dedicated worker
+    /// after guest completion.
+    pub(super) fn schedule_presents(&mut self) {
+        self.presents
+            .retain(|drawable| !crate::present::enqueue_swapchain(drawable.as_id()));
+    }
+
+    pub(crate) fn wait_and_finish(self) {
+        let result = self.gpu.wait(self.fence);
+        stats::timed(Counter::FenceWakeToRetiredMicros, || self.finish(result));
+    }
+
+    pub(crate) fn finish(mut self, result: Result<(), String>) {
         if let Err(reason) = &result {
             gpu::trace(format!("command buffer completion failed: {reason}"));
         }
@@ -118,9 +191,12 @@ impl Submission {
             gpu_times = Some((self.scheduled_time.min(end), end));
         }
         self.gpu.release_timestamp_pool(self.timestamps);
-        for drawable in self.presents.drain(..).map(|drawable| drawable as Id) {
-            crate::present::present(drawable);
-            objc::arc::release(drawable);
+        for drawable in self.presents.drain(..) {
+            if result.is_ok() {
+                crate::present::enqueue_readback(drawable.into_raw());
+            } else {
+                crate::present::complete(drawable.as_id());
+            }
         }
         // The work has completed, so everything the recording referred to and every
         // transient object it created can go.
@@ -136,9 +212,7 @@ impl Submission {
         for chunk in self.uploads.drain(..) {
             self.gpu.release_upload_chunk(chunk);
         }
-        for object in self.retained.drain(..).map(|object| object as Id) {
-            objc::arc::release(object);
-        }
+        self.retained.clear();
         // The submission finished, or never reached the queue.
         self.gpu.release_context(CommandContext {
             pool: self.pool,
@@ -147,13 +221,12 @@ impl Submission {
         });
         self.completion
             .finish(if result.is_ok() { 4 } else { 5 }, gpu_times);
-        let object = self.object as Id;
-        for block in self.completed_handlers.drain(..).map(|block| block as Id) {
+        let object = self.object.as_id();
+        for block in self.completed_handlers.drain(..) {
             // SAFETY: `objc_retainBlock` returned a live block, whose reference this
             // gives away, and `object` is retained by this submission.
-            unsafe { crate::completion::deliver(block, object) };
+            unsafe { crate::completion::deliver(block.into_raw(), object) };
         }
-        objc::arc::release(object);
     }
 }
 

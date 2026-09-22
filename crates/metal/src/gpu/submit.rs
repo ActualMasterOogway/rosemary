@@ -10,7 +10,6 @@ impl Gpu {
         &self,
         command_buffer: vk::CommandBuffer,
         fence: vk::Fence,
-        submitted: impl FnOnce(),
     ) -> Result<(), String> {
         let buffers = [command_buffer];
         let submit = vk::SubmitInfo::default().command_buffers(&buffers);
@@ -22,10 +21,26 @@ impl Gpu {
             // SAFETY: as above; the command buffer has finished recording.
             unsafe { self.device.queue_submit(*queue, &[submit], fence) }
                 .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))?;
-            // Keep asynchronous retirement in the same order as queue
-            // submission even when several guest threads commit concurrently.
-            submitted();
         }
+        Ok(())
+    }
+
+    /// Submit guest work and attach its presentation submissions as one
+    /// ordering transaction. Presentation preparation and recording happen
+    /// after the Vulkan queue mutex is released, while concurrent guest
+    /// commits remain ordered by `submission_boundary`.
+    pub fn submit_ordered(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        fence: vk::Fence,
+        submitted: impl FnOnce(u64),
+    ) -> Result<(), String> {
+        let _boundary = self
+            .submission_boundary
+            .lock()
+            .expect("Vulkan submission boundary");
+        self.submit(command_buffer, fence)?;
+        submitted(self.submissions.next_serial());
         Ok(())
     }
 
@@ -141,7 +156,7 @@ impl Gpu {
 
     /// Wait for a submitted command buffer's fence.
     pub fn wait(&self, fence: vk::Fence) -> Result<(), String> {
-        crate::stats::timed(crate::stats::Counter::QueueMicros, || {
+        crate::stats::timed(crate::stats::Counter::FenceWaitMicros, || {
             // SAFETY: the fence belongs to this device and the submission above.
             unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
                 .map_err(|error| format!("vkWaitForFences failed with {error:?}"))
@@ -154,7 +169,7 @@ impl Gpu {
         command_buffer: vk::CommandBuffer,
         fence: vk::Fence,
     ) -> Result<(), String> {
-        self.submit(command_buffer, fence, || {})?;
+        self.submit(command_buffer, fence)?;
         self.wait(fence)
     }
 
