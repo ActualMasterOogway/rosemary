@@ -280,18 +280,50 @@ pub unsafe extern "C" fn sys_icache_invalidate(_start: *mut c_void, _len: usize)
 
 /// Locks for compiler-rt's generic atomics, one per address bucket.
 ///
-/// `std::atomic<T>` of a `T` too large to be a machine word is compiled to calls
-/// here, with the object's address naming what is locked. Hashing addresses to
-/// a fixed set of locks is compiler-rt's own scheme: two unrelated atomics may
-/// share a lock, which costs contention and never correctness.
-static ATOMIC_LOCKS: [std::sync::Mutex<()>; 64] = [const { std::sync::Mutex::new(()) }; 64];
+/// A lock is deliberately isolated on its own cache line. Generic atomics are
+/// often adjacent allocations; putting their independently selected locks in
+/// one cache line would turn that into false sharing.
+#[repr(align(64))]
+struct AtomicLock(std::sync::Mutex<()>);
+
+/// More buckets than compiler-rt's minimum, with a cache line per bucket, keep
+/// unrelated large atomics from contending. A power of two makes the final
+/// reduction a mask rather than a division.
+static ATOMIC_LOCKS: [AtomicLock; 256] = [const { AtomicLock(std::sync::Mutex::new(())) }; 256];
+
+fn atomic_lock_index(address: usize) -> usize {
+    // Objects are at least word-aligned, so the low bits carry nothing. Fold
+    // page-number bits down too: using only low bits maps every same-offset
+    // object in different pages to one lock.
+    let mut bits = address >> 3;
+    bits ^= bits >> 16;
+    bits ^= bits >> 8;
+    bits & (ATOMIC_LOCKS.len() - 1)
+}
 
 fn atomic_lock(address: *const c_void) -> std::sync::MutexGuard<'static, ()> {
-    // Objects are at least word-aligned, so the low bits carry nothing.
-    let index = ((address as usize) >> 3) % ATOMIC_LOCKS.len();
-    ATOMIC_LOCKS[index]
+    ATOMIC_LOCKS[atomic_lock_index(address as usize)]
+        .0
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// C/C++ `memory_order_seq_cst`, as passed by Clang's generic atomic builtins.
+const ATOMIC_SEQ_CST: i32 = 5;
+
+fn atomic_before(model: i32) {
+    // Each address bucket has a separate lock. Their acquire/release operations
+    // give all non-sequential orders the required synchronization, but cannot
+    // make a single total order across buckets. SeqCst fences supply that order.
+    if model == ATOMIC_SEQ_CST {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn atomic_after(model: i32) {
+    if model == ATOMIC_SEQ_CST {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// `void __atomic_load(int size, void *src, void *dest, int model)`.
@@ -305,9 +337,12 @@ pub unsafe extern "C" fn atomic_load(
     dest: *mut c_void,
     _model: i32,
 ) {
+    atomic_before(_model);
     let _guard = atomic_lock(src);
     // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
+    drop(_guard);
+    atomic_after(_model);
 }
 
 /// `void __atomic_store(int size, void *dest, void *src, int model)`.
@@ -321,9 +356,12 @@ pub unsafe extern "C" fn atomic_store(
     src: *const c_void,
     _model: i32,
 ) {
+    atomic_before(_model);
     let _guard = atomic_lock(dest);
     // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
+    drop(_guard);
+    atomic_after(_model);
 }
 
 exports::exports! {
@@ -355,6 +393,20 @@ mod tests {
             atomic_load(48, cell.as_ptr().cast(), loaded.as_mut_ptr().cast(), 5);
         }
         assert_eq!(loaded, stored);
+    }
+
+    #[test]
+    fn generic_atomic_locks_are_cache_line_isolated() {
+        assert_eq!(std::mem::align_of::<AtomicLock>(), 64);
+        assert!(std::mem::size_of::<AtomicLock>() >= 64);
+    }
+
+    #[test]
+    fn generic_atomic_lock_hash_uses_page_number() {
+        let indexes: std::collections::BTreeSet<_> = (1..=32)
+            .map(|page| atomic_lock_index(page * 4096))
+            .collect();
+        assert_eq!(indexes.len(), 32, "same-offset pages must not share a lock");
     }
 
     /// The count is what is written, and a count past the destination is an
