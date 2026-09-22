@@ -22,7 +22,7 @@
 //! The first two calls do succeed, because they are questions this tree *can*
 //! answer: a requirement is the text it was made from, and the running code is
 //! this process.
-//! 
+//!
 //! FIXME (ACCURACY): Implement actual code signing checks!
 
 #![allow(non_snake_case)]
