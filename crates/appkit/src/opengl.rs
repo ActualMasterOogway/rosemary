@@ -1009,6 +1009,121 @@ fn host_cgl_call(name: &std::ffi::CStr) -> Option<CglCall> {
     Some(unsafe { std::mem::transmute::<*mut c_void, CglCall>(entry) })
 }
 
+mod context_enable {
+    pub const SWAP_RECTANGLE: u32 = 201;
+    pub const RASTERIZATION: u32 = 221;
+    pub const STATE_VALIDATION: u32 = 301;
+    pub const SURFACE_BACKING_SIZE: u32 = 305;
+    pub const DISPLAY_LIST_OPTIMIZATION: u32 = 307;
+
+    pub fn is_known(value: u32) -> bool {
+        matches!(
+            value,
+            SWAP_RECTANGLE
+                | RASTERIZATION
+                | STATE_VALIDATION
+                | SURFACE_BACKING_SIZE
+                | DISPLAY_LIST_OPTIMIZATION
+        )
+    }
+}
+
+mod context_parameter {
+    pub const SWAP_RECTANGLE: u32 = 200;
+    pub const SWAP_INTERVAL: u32 = 222;
+    pub const DISPATCH_TABLE_SIZE: u32 = 224;
+    pub const CLIENT_STORAGE: u32 = 226;
+    pub const SURFACE_TEXTURE: u32 = 228;
+    pub const SURFACE_ORDER: u32 = 235;
+    pub const SURFACE_OPACITY: u32 = 236;
+    pub const SURFACE_BACKING_SIZE: u32 = 304;
+    pub const SURFACE_VOLATILE: u32 = 306;
+    pub const RECLAIM_RESOURCES: u32 = 308;
+    pub const CURRENT_RENDERER_ID: u32 = 309;
+    pub const GPU_VERTEX_PROCESSING: u32 = 310;
+    pub const GPU_FRAGMENT_PROCESSING: u32 = 311;
+
+    pub fn is_settable(value: u32) -> bool {
+        matches!(
+            value,
+            SWAP_RECTANGLE
+                | SWAP_INTERVAL
+                | DISPATCH_TABLE_SIZE
+                | CLIENT_STORAGE
+                | SURFACE_TEXTURE
+                | SURFACE_ORDER
+                | SURFACE_OPACITY
+                | SURFACE_BACKING_SIZE
+                | SURFACE_VOLATILE
+                | RECLAIM_RESOURCES
+        )
+    }
+
+    pub fn is_read_only(value: u32) -> bool {
+        matches!(
+            value,
+            CURRENT_RENDERER_ID | GPU_VERTEX_PROCESSING | GPU_FRAGMENT_PROCESSING
+        )
+    }
+}
+
+#[allow(non_upper_case_globals)]
+const kCGLBadEnumeration: i32 = 10010;
+#[allow(non_upper_case_globals)]
+const kCGLBadAddress: i32 = 10014;
+#[allow(non_upper_case_globals)]
+const kCGLBadValue: i32 = 10008;
+
+unsafe fn cgl_set(ctx: *mut c_void, pname: u32, _enabled: bool) -> i32 {
+    if handle_in(ctx).is_some() {
+        return if context_enable::is_known(pname) {
+            0
+        } else {
+            // `kCGLBadEnumeration`.
+            kCGLBadEnumeration
+        };
+    } else {
+        kCGLBadAddress
+    }
+}
+
+/// `CGLError CGLEnable(CGLContextObj ctx, CGLContextEnable pname)`.
+pub unsafe extern "C" fn CGLEnable(ctx: *mut c_void, pname: u32) -> i32 {
+    // SAFETY: the caller's context-handle obligation is preserved.
+    unsafe { cgl_set(ctx, pname, true) }
+}
+
+/// `CGLError CGLDisable(CGLContextObj ctx, CGLContextEnable pname)`.
+pub unsafe extern "C" fn CGLDisable(ctx: *mut c_void, pname: u32) -> i32 {
+    // SAFETY: the caller's context-handle obligation is preserved.
+    unsafe { cgl_set(ctx, pname, false) }
+}
+
+/// `CGLError CGLSetParameter(CGLContextObj ctx, CGLContextParameter pname,
+/// const GLint *params)`.
+///
+/// # Safety
+///
+/// `ctx` is a handle returned by this module
+pub unsafe extern "C" fn CGLSetParameter(_ctx: *mut c_void, pname: u32, params: *const i32) -> i32 {
+    if params.is_null() {
+        return kCGLBadAddress;
+    }
+    if context_parameter::is_read_only(pname) || !context_parameter::is_settable(pname) {
+        return kCGLBadEnumeration;
+    }
+    if pname == context_parameter::SWAP_INTERVAL {
+        // SAFETY: this parameter is documented as one `GLint` and the caller
+        // promises a readable parameter array.
+        let requested = unsafe { *params };
+        let actual = swap_interval().unwrap_or(requested);
+        if !sdl3::video::gl_set_swap_interval(actual) {
+            return kCGLBadValue;
+        }
+    }
+    0
+}
+
 /// `CGLError CGLSetCurrentContext(CGLContextObj ctx)`
 ///
 /// A render thread's way of taking the context, and the CGL spelling of

@@ -10,8 +10,6 @@
     clippy::useless_conversion
 )]
 
-use std::ffi::c_int;
-
 pub mod alert;
 mod animation;
 pub mod appearance;
@@ -197,9 +195,9 @@ exports::exports! {
         "LMGetKbdType" => textinput::LMGetKbdType,
         "LMGetKbdLast" => textinput::LMGetKbdLast,
         "UCKeyTranslate" => textinput::UCKeyTranslate,
-        "CGLEnable" => CGLEnable,
-        "CGLDisable" => CGLDisable,
-        "CGLSetParameter" => CGLSetParameter,
+        "CGLEnable" => opengl::CGLEnable,
+        "CGLDisable" => opengl::CGLDisable,
+        "CGLSetParameter" => opengl::CGLSetParameter,
         "CGLSetCurrentContext" => opengl::CGLSetCurrentContext,
         "CGLFlushDrawable" => opengl::CGLFlushDrawable,
         "CGLClearDrawable" => opengl::CGLClearDrawable,
@@ -213,22 +211,6 @@ exports::exports! {
         cgcontext,
         cgl,
     }
-}
-
-// FIXME (ACCURACY): move all of these to the opengl framework and actually respect them
-#[allow(non_snake_case)]
-extern "C" fn CGLDisable() -> c_int {
-    0
-}
-
-#[allow(non_snake_case)]
-extern "C" fn CGLEnable() -> c_int {
-    0
-}
-
-#[allow(non_snake_case)]
-extern "C" fn CGLSetParameter() -> c_int {
-    0
 }
 
 pub fn ns_app_cell() -> u64 {
