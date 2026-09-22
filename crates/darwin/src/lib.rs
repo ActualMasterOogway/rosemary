@@ -29,6 +29,7 @@ pub mod backtrace;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
+pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod data;
@@ -245,6 +246,7 @@ static MODULES: &[exports::Module] = &[
     PTHREAD,
     mach::MODULE,
     clock::MODULE,
+    commoncrypto::MODULE,
     #[cfg(not(target_os = "macos"))]
     compat::MODULE,
     #[cfg(not(target_os = "macos"))]
