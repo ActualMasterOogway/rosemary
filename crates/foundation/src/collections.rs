@@ -932,6 +932,27 @@ unsafe extern "C" fn data_with_bytes(_class: Id, _sel: Sel, bytes: *const u8, le
     unsafe { api::CFAutorelease(api::CFDataCreate(std::ptr::null(), bytes, length as isize)) as Id }
 }
 
+/// `+[NSData dataWithBytesNoCopy:length:]` with an owned compatibility copy.
+///
+/// CoreFoundation's data storage owns a `Vec`, so use the same compatibility
+/// behavior as `CFDataCreateWithBytesNoCopy` rather than borrowing guest memory.
+unsafe extern "C" fn data_with_bytes_no_copy(
+    _class: Id,
+    _sel: Sel,
+    bytes: *const u8,
+    length: usize,
+) -> Id {
+    // SAFETY: the caller says `bytes` covers `length` bytes.
+    unsafe {
+        api::CFAutorelease(api::CFDataCreateWithBytesNoCopy(
+            std::ptr::null(),
+            bytes,
+            length as isize,
+            std::ptr::null(),
+        )) as Id
+    }
+}
+
 unsafe extern "C" fn append_bytes(receiver: Id, _sel: Sel, bytes: *const u8, length: usize) {
     // SAFETY: a data object.
     let Some(d) = (unsafe { collections::data(receiver as CFTypeRef) }) else {
@@ -1208,6 +1229,7 @@ pub(crate) fn install() {
     });
     class_methods!(data, {
         "dataWithBytes:length:" => data_with_bytes, c"@32@0:8^v16Q24";
+        "dataWithBytesNoCopy:length:" => data_with_bytes_no_copy, c"@32@0:8^v16Q24";
         "dataWithContentsOfFile:" => data_with_contents_of_file, c"@24@0:8@16";
     });
     methods!(data, {
