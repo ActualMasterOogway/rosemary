@@ -43,6 +43,13 @@ rspirv = "0.13.0"
 sha2 = "0.11.0"
 sha1 = "0.11.0"
 md-5 = "0.11.0"
+aes = "0.9.3"
+blowfish = "0.10.0"
+cast5 = "0.12.0"
+cipher = "0.5.2"
+des = "0.9.0"
+rc2 = "0.9.0"
+rc4 = "0.2.0"
 
 [profile.fullnative]
 inherits = "release"

@@ -315,6 +315,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` - the
     // three past the eighth spill to the host stack, all doubleword-wide.
     sig!("CCCrypt", I32, U32, U32, U32, P, U64, P, P, U64, P, U64, P),
+    sig!("CCCryptorCreate", I32, U32, U32, U32, P, U64, P, P),
+    sig!(
+        "CCCryptorCreateFromData",
+        I32,
+        U32,
+        U32,
+        U32,
+        P,
+        U64,
+        P,
+        P,
+        U64,
+        P,
+        P
+    ),
+    sig!("CCCryptorRelease", I32, P),
+    sig!("CCCryptorUpdate", I32, P, P, U64, P, U64, P),
+    sig!("CCCryptorFinal", I32, P, P, U64, P),
+    sig!("CCCryptorGetOutputLength", U64, P, U64, BOOL),
+    sig!("CCCryptorReset", I32, P, P),
     sig!("CC_MD5", P, P, U32, P),
     sig!("CC_MD5_Final", I32, P, P),
     sig!("CC_MD5_Init", I32, P),
