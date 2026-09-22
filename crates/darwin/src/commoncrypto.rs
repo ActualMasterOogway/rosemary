@@ -210,7 +210,7 @@ struct Cryptor {
     chain: Vec<u8>,
     pending: Vec<u8>,
     finalized: bool,
-    allocated: bool,
+    heap_allocated: bool,
 }
 
 impl Cryptor {
@@ -332,11 +332,6 @@ impl Cryptor {
     }
 }
 
-fn cryptors() -> &'static Mutex<HashMap<usize, Cryptor>> {
-    static CRYPTORS: OnceLock<Mutex<HashMap<usize, Cryptor>>> = OnceLock::new();
-    CRYPTORS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 unsafe fn input<'a>(ptr: *const c_void, len: usize) -> Result<&'a [u8], i32> {
     if ptr.is_null() && len != 0 {
         return Err(KCC_PARAM_ERROR);
@@ -354,7 +349,7 @@ fn make_cryptor(
     options: u32,
     key: &[u8],
     iv: Option<&[u8]>,
-    allocated: bool,
+    heap_allocated: bool,
 ) -> Result<Cryptor, i32> {
     if op > KCC_DECRYPT || options & !(KCC_OPTION_PKCS7_PADDING | KCC_OPTION_ECB_MODE) != 0 {
         return Err(KCC_PARAM_ERROR);
@@ -397,8 +392,16 @@ fn make_cryptor(
         initial_iv: iv,
         pending: Vec::new(),
         finalized: false,
-        allocated,
+        heap_allocated,
     })
+}
+
+unsafe fn cryptor<'a>(handle: *mut c_void) -> Result<&'a mut Cryptor, i32> {
+    unsafe { handle.cast::<Cryptor>().as_mut().ok_or(KCC_PARAM_ERROR) }
+}
+
+unsafe fn cryptor_ref<'a>(handle: *mut c_void) -> Result<&'a Cryptor, i32> {
+    unsafe { handle.cast::<Cryptor>().as_ref().ok_or(KCC_PARAM_ERROR) }
 }
 
 unsafe extern "C" fn cryptor_create(
@@ -425,11 +428,7 @@ unsafe extern "C" fn cryptor_create(
         Ok(c) => c,
         Err(s) => return s,
     };
-    let handle = Box::into_raw(Box::new(0u8)).cast::<c_void>();
-    cryptors()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(handle as usize, cryptor);
+    let handle = Box::into_raw(Box::new(cryptor)).cast::<c_void>();
     unsafe {
         out.write(handle);
     }
@@ -464,16 +463,21 @@ unsafe extern "C" fn cryptor_create_from_data(
     out: *mut *mut c_void,
     data_used: *mut usize,
 ) -> i32 {
-    if out.is_null() || data.is_null() || data_len == 0 {
+    if out.is_null() || data.is_null() {
         return KCC_PARAM_ERROR;
     }
     unsafe {
         out.write(std::ptr::null_mut());
     }
+    let required = std::mem::size_of::<Cryptor>();
     if !data_used.is_null() {
-        unsafe {
-            data_used.write(0);
-        }
+        unsafe { data_used.write(required) };
+    }
+    if data_len < required {
+        return KCC_BUFFER_TOO_SMALL;
+    }
+    if data.align_offset(std::mem::align_of::<Cryptor>()) != 0 {
+        return KCC_PARAM_ERROR;
     }
     let key = match unsafe { input(key, key_len) } {
         Ok(key) => key,
@@ -490,17 +494,9 @@ unsafe extern "C" fn cryptor_create_from_data(
         Ok(c) => c,
         Err(s) => return s,
     };
-    cryptors()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(data as usize, cryptor);
+    unsafe { data.cast::<Cryptor>().write(cryptor) };
     unsafe {
         out.write(data);
-    }
-    if !data_used.is_null() {
-        unsafe {
-            data_used.write(1);
-        }
     }
     KCC_SUCCESS
 }
@@ -509,17 +505,16 @@ unsafe extern "C" fn cryptor_release(handle: *mut c_void) -> i32 {
     if handle.is_null() {
         return KCC_PARAM_ERROR;
     }
-    let Some(cryptor) = cryptors()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&(handle as usize))
-    else {
-        return KCC_PARAM_ERROR;
+    let cryptor = match unsafe { cryptor(handle) } {
+        Ok(cryptor) => cryptor,
+        Err(status) => return status,
     };
-    if cryptor.allocated {
+    if cryptor.heap_allocated {
         unsafe {
-            drop(Box::from_raw(handle.cast::<u8>()));
+            drop(Box::from_raw(handle.cast::<Cryptor>()));
         }
+    } else {
+        unsafe { std::ptr::drop_in_place(handle.cast::<Cryptor>()) };
     }
     KCC_SUCCESS
 }
@@ -541,9 +536,9 @@ unsafe extern "C" fn cryptor_update(
         Ok(input) => input,
         Err(status) => return status,
     };
-    let mut cryptors = cryptors().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(cryptor) = cryptors.get_mut(&(handle as usize)) else {
-        return KCC_PARAM_ERROR;
+    let cryptor = match unsafe { cryptor(handle) } {
+        Ok(cryptor) => cryptor,
+        Err(status) => return status,
     };
     if cryptor.finalized {
         return KCC_PARAM_ERROR;
@@ -579,9 +574,9 @@ unsafe extern "C" fn cryptor_final(
             moved.write(0);
         }
     }
-    let mut cryptors = cryptors().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(cryptor) = cryptors.get_mut(&(handle as usize)) else {
-        return KCC_PARAM_ERROR;
+    let cryptor = match unsafe { cryptor(handle) } {
+        Ok(cryptor) => cryptor,
+        Err(status) => return status,
     };
     if cryptor.finalized {
         return KCC_PARAM_ERROR;
@@ -612,17 +607,13 @@ unsafe extern "C" fn cryptor_get_output_length(
     input_len: usize,
     final_: bool,
 ) -> usize {
-    cryptors()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(handle as usize))
-        .map_or(0, |cryptor| cryptor.output_length(input_len, final_))
+    unsafe { cryptor_ref(handle) }.map_or(0, |cryptor| cryptor.output_length(input_len, final_))
 }
 
 unsafe extern "C" fn cryptor_reset(handle: *mut c_void, iv: *const c_void) -> i32 {
-    let mut cryptors = cryptors().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(cryptor) = cryptors.get_mut(&(handle as usize)) else {
-        return KCC_PARAM_ERROR;
+    let cryptor = match unsafe { cryptor(handle) } {
+        Ok(cryptor) => cryptor,
+        Err(status) => return status,
     };
     let iv = if iv.is_null() {
         None
@@ -844,7 +835,7 @@ mod tests {
         let key = *b"0123456789abcdef";
         let iv = *b"fedcba9876543210";
         let plain = b"streaming plaintext";
-        let mut storage = [0u8; 1];
+        let mut storage = std::mem::MaybeUninit::<Cryptor>::uninit();
         let mut handle = std::ptr::null_mut();
         let mut used = 0;
         assert_eq!(
@@ -857,7 +848,7 @@ mod tests {
                     key.len(),
                     iv.as_ptr().cast(),
                     storage.as_mut_ptr().cast(),
-                    storage.len(),
+                    std::mem::size_of::<Cryptor>(),
                     &mut handle,
                     &mut used,
                 )
@@ -865,7 +856,7 @@ mod tests {
             KCC_SUCCESS
         );
         assert_eq!(handle, storage.as_mut_ptr().cast());
-        assert_eq!(used, 1);
+        assert_eq!(used, std::mem::size_of::<Cryptor>());
         assert_eq!(
             unsafe { cryptor_get_output_length(handle, plain.len(), true) },
             32
