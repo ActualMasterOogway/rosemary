@@ -36,11 +36,28 @@ fn semctl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) 
     Ok(())
 }
 
+/// The `semctl` command names the `libc` crate declares on Linux and not on
+/// FreeBSD. These are FreeBSD's own numbers, which are 4.4BSD's and so Darwin's
+/// as well - they are *not* Linux's.
+#[cfg(target_os = "freebsd")]
+#[allow(dead_code)]
+mod sem {
+    pub const GETNCNT: i32 = 3;
+    pub const GETPID: i32 = 4;
+    pub const GETVAL: i32 = 5;
+    pub const GETALL: i32 = 6;
+    pub const GETZCNT: i32 = 7;
+    pub const SETVAL: i32 = 8;
+    pub const SETALL: i32 = 9;
+}
+#[cfg(not(target_os = "freebsd"))]
+use libc as sem;
+
 /// Whether `cmd` reads a fourth argument.
 fn takes_fourth_argument(cmd: i32) -> bool {
     matches!(
         cmd,
-        libc::IPC_STAT | libc::IPC_SET | libc::GETALL | libc::SETALL | libc::SETVAL
+        libc::IPC_STAT | libc::IPC_SET | sem::GETALL | sem::SETALL | sem::SETVAL
     )
 }
 
@@ -72,18 +89,18 @@ mod tests {
         for cmd in [
             libc::IPC_STAT,
             libc::IPC_SET,
-            libc::GETALL,
-            libc::SETALL,
-            libc::SETVAL,
+            sem::GETALL,
+            sem::SETALL,
+            sem::SETVAL,
         ] {
             assert!(takes_fourth_argument(cmd), "{cmd}");
         }
         for cmd in [
             libc::IPC_RMID,
-            libc::GETNCNT,
-            libc::GETPID,
-            libc::GETVAL,
-            libc::GETZCNT,
+            sem::GETNCNT,
+            sem::GETPID,
+            sem::GETVAL,
+            sem::GETZCNT,
         ] {
             assert!(!takes_fourth_argument(cmd), "{cmd}");
         }
@@ -106,12 +123,12 @@ mod tests {
 
         ctx.rdi = id as u64;
         ctx.rsi = 0;
-        ctx.rdx = libc::SETVAL as u64;
+        ctx.rdx = sem::SETVAL as u64;
         ctx.rcx = 7;
         semctl("semctl", &mut ctx, &mut mem).unwrap();
         assert_eq!(ctx.rax as i32, 0);
 
-        ctx.rdx = libc::GETVAL as u64;
+        ctx.rdx = sem::GETVAL as u64;
         ctx.rcx = 0;
         semctl("semctl", &mut ctx, &mut mem).unwrap();
         assert_eq!(ctx.rax as i32, 7);

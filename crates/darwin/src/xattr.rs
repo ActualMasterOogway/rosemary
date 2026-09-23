@@ -1,18 +1,20 @@
-//! Extended attributes, which differ in arity *and* in namespace.
+//! Extended attributes, which differ in arity, in namespace, *and* in name.
 //!
 //! Darwin's calls take two arguments this host's do not:
 //!
 //! ```text
 //! Darwin   getxattr(path, name, value, size, u_int32_t position, int options)
 //! Linux    getxattr(path, name, value, size)
+//! FreeBSD  extattr_get_file(path, namespace, name, value, size)
 //! ```
 //!
 //! Passing one through leaves `position` and `options` in registers nobody
 //! reads, which is harmless, and it works by accident. What does not work by
-//! accident is the *name*: Darwin's attribute namespace is flat, and Linux
-//! partitions it - an attribute on a regular file must be called `user.`
+//! accident is the *name*: Darwin's attribute namespace is flat, and neither
+//! host's is. On Linux an attribute on a regular file must be called `user.`
 //! something, and one that is not is refused with `EOPNOTSUPP` no matter what
-//! the filesystem supports.
+//! the filesystem supports. FreeBSD does not spell the namespace into the name
+//! at all - it is a separate argument, and the calls have different names.
 //!
 //! That is how this surfaced. Crashpad stores
 //! `org.chromium.crashpad.database.initialized` on its database directory,
@@ -20,34 +22,337 @@
 //! initialize crash reporter" - a filesystem answer wearing the shape of a
 //! missing feature.
 //!
-//! So every guest name is prefixed with `user.` on the way down and the prefix
-//! is taken off on the way back, which keeps `listxattr` reporting the names the
-//! guest wrote. An attribute already in one of Linux's own namespaces
-//! (`security.`, `system.`, `trusted.`) is not re-prefixed: the guest cannot
-//! have meant one, but a name that happens to start that way must still round
-//! trip to itself.
+//! So the guest's flat name is put in this host's user namespace on the way
+//! down and taken back out on the way up, which keeps `listxattr` reporting the
+//! names the guest wrote. How that is done is the [`host`] module's business
+//! and the only part of this file that is per-host.
 
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, CString, c_char, c_void};
 
-/// Linux's own attribute namespaces, which are not the guest's to use.
-const HOST_NAMESPACES: &[&str] = &["user.", "security.", "system.", "trusted."];
-
 /// `XATTR_NOFOLLOW`, the one Darwin option with a host counterpart - and it has
-/// one only as a different function (`lgetxattr` rather than `getxattr`).
+/// one only as a different function (`lgetxattr`, `extattr_get_link`).
 const NOFOLLOW: i32 = 0x0001;
 
-/// A guest's attribute name in this host's namespace.
+/// Darwin's `XATTR_CREATE`, which is not this host's number.
+const CREATE: i32 = 0x0002;
+
+/// Darwin's `XATTR_REPLACE`, likewise.
+const REPLACE: i32 = 0x0004;
+
+/// This host's extended-attribute calls, over the guest's own flat names.
 ///
-/// `None` for a name that is not a valid C string, or one long enough that the
-/// prefix would push it past the host's limit.
-fn to_host(name: &CStr) -> Option<CString> {
-    let text = name.to_str().ok()?;
-    if HOST_NAMESPACES.iter().any(|ns| text.starts_with(ns)) {
-        return CString::new(text).ok();
+/// Every function here takes the name the guest wrote and answers in Darwin's
+/// terms - a count and `errno`, `ERANGE` for a buffer too small, `ENOATTR` for
+/// an attribute that is not there. Putting the name in the user namespace, and
+/// getting it back out, happens inside.
+#[cfg(target_os = "linux")]
+mod host {
+    use std::ffi::{CStr, CString, c_char, c_void};
+
+    /// Linux's own attribute namespaces, which are not the guest's to use.
+    ///
+    /// A guest name is prefixed with `user.`; one that already reads as one of
+    /// these is left alone, because the guest cannot have meant one but a name
+    /// that happens to start that way must still round trip to itself.
+    const NAMESPACES: &[&str] = &["user.", "security.", "system.", "trusted."];
+
+    /// The guest's name as this host's, or `None` for one it cannot be put in.
+    pub fn name(guest: &CStr) -> Option<CString> {
+        let text = guest.to_str().ok()?;
+        if NAMESPACES.iter().any(|ns| text.starts_with(ns)) {
+            return CString::new(text).ok();
+        }
+        CString::new(format!("user.{text}")).ok()
     }
-    CString::new(format!("user.{text}")).ok()
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated and `value` is `size` writable bytes, or `size`
+    /// is zero.
+    pub unsafe fn get(
+        path: *const c_char,
+        name: &CStr,
+        value: *mut c_void,
+        size: usize,
+        nofollow: bool,
+    ) -> isize {
+        // SAFETY: the caller's path and buffer, with a name this module owns.
+        unsafe {
+            match nofollow {
+                false => libc::getxattr(path, name.as_ptr(), value, size),
+                true => libc::lgetxattr(path, name.as_ptr(), value, size),
+            }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated and `value` is `size` readable bytes.
+    pub unsafe fn set(
+        path: *const c_char,
+        name: &CStr,
+        value: *const c_void,
+        size: usize,
+        create: bool,
+        replace: bool,
+        nofollow: bool,
+    ) -> i32 {
+        let mut flags = 0;
+        if create {
+            flags |= libc::XATTR_CREATE;
+        }
+        if replace {
+            flags |= libc::XATTR_REPLACE;
+        }
+        // SAFETY: the caller's path and buffer, with a name this module owns.
+        unsafe {
+            match nofollow {
+                false => libc::setxattr(path, name.as_ptr(), value, size, flags),
+                true => libc::lsetxattr(path, name.as_ptr(), value, size, flags),
+            }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated.
+    pub unsafe fn remove(path: *const c_char, name: &CStr, nofollow: bool) -> i32 {
+        // SAFETY: the caller's path, with a name this module owns.
+        unsafe {
+            match nofollow {
+                false => libc::removexattr(path, name.as_ptr()),
+                true => libc::lremovexattr(path, name.as_ptr()),
+            }
+        }
+    }
+
+    /// Every attribute on `path` the guest could have written, in its own
+    /// spelling. `None` leaves `errno` set.
+    ///
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated.
+    pub unsafe fn list(path: *const c_char, nofollow: bool) -> Option<Vec<Vec<u8>>> {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            // SAFETY: the caller's path, and a buffer this function owns.
+            let rc = unsafe {
+                let (p, n) = (buffer.as_mut_ptr().cast::<c_char>(), buffer.len());
+                match nofollow {
+                    false => libc::listxattr(path, p, n),
+                    true => libc::llistxattr(path, p, n),
+                }
+            };
+            if rc >= 0 {
+                buffer.truncate(rc as usize);
+                break;
+            }
+            if crate::errno::get() != libc::ERANGE || buffer.len() >= 1 << 20 {
+                return None;
+            }
+            buffer.resize(buffer.len() * 2, 0);
+        }
+        Some(
+            buffer
+                .split(|b| *b == 0)
+                .filter(|n| !n.is_empty())
+                // Anything outside `user.` is one of this host's own namespaces
+                // and not something the guest wrote.
+                .filter_map(|n| n.strip_prefix(b"user.").map(<[u8]>::to_vec))
+                .collect(),
+        )
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+mod host {
+    use std::ffi::{CStr, CString, c_char, c_void};
+
+    /// Every guest attribute lives in the user namespace. The guest cannot have
+    /// meant one of the kernel's, and `EXTATTR_NAMESPACE_SYSTEM` needs a
+    /// privilege Darwin never asked the caller for.
+    const NAMESPACE: libc::c_int = libc::EXTATTR_NAMESPACE_USER;
+
+    /// The guest's name unchanged: FreeBSD carries the namespace beside the
+    /// name rather than inside it.
+    pub fn name(guest: &CStr) -> Option<CString> {
+        CString::new(guest.to_bytes()).ok()
+    }
+
+    /// The attribute's length, or `None` with `errno` set.
+    ///
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated.
+    unsafe fn length(path: *const c_char, name: &CStr, nofollow: bool) -> Option<usize> {
+        // SAFETY: the caller's path, with a name this module owns. A null
+        // buffer asks for the length, which is what `nbytes` of zero means.
+        let rc = unsafe {
+            match nofollow {
+                false => {
+                    libc::extattr_get_file(path, NAMESPACE, name.as_ptr(), core::ptr::null_mut(), 0)
+                }
+                true => {
+                    libc::extattr_get_link(path, NAMESPACE, name.as_ptr(), core::ptr::null_mut(), 0)
+                }
+            }
+        };
+        match rc < 0 {
+            true => None,
+            false => Some(rc as usize),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated and `value` is `size` writable bytes, or `size`
+    /// is zero.
+    pub unsafe fn get(
+        path: *const c_char,
+        name: &CStr,
+        value: *mut c_void,
+        size: usize,
+        nofollow: bool,
+    ) -> isize {
+        // Read through a buffer of this module's own rather than the caller's,
+        // because FreeBSD truncates into a short buffer where Darwin refuses
+        // with `ERANGE` - and a truncated attribute reported as a whole one is
+        // the answer a caller cannot tell is wrong.
+        // SAFETY: the caller's path.
+        let Some(length) = (unsafe { length(path, name, nofollow) }) else {
+            return -1;
+        };
+        if size == 0 {
+            return length as isize;
+        }
+        if length > size {
+            crate::errno::set(libc::ERANGE);
+            return -1;
+        }
+        let mut owned = vec![0u8; length];
+        // SAFETY: the caller's path, into a buffer of exactly the length the
+        // kernel just reported.
+        let rc = unsafe {
+            let (p, n) = (owned.as_mut_ptr().cast::<c_void>(), owned.len());
+            match nofollow {
+                false => libc::extattr_get_file(path, NAMESPACE, name.as_ptr(), p, n),
+                true => libc::extattr_get_link(path, NAMESPACE, name.as_ptr(), p, n),
+            }
+        };
+        if rc < 0 {
+            return -1;
+        }
+        let rc = (rc as usize).min(size);
+        // SAFETY: the caller's buffer, and `rc` bytes is within both.
+        unsafe { core::ptr::copy_nonoverlapping(owned.as_ptr(), value.cast::<u8>(), rc) };
+        rc as isize
+    }
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated and `value` is `size` readable bytes.
+    pub unsafe fn set(
+        path: *const c_char,
+        name: &CStr,
+        value: *const c_void,
+        size: usize,
+        create: bool,
+        replace: bool,
+        nofollow: bool,
+    ) -> i32 {
+        // FreeBSD has no counterpart to `XATTR_CREATE`/`XATTR_REPLACE` - its
+        // set always overwrites - so the condition is checked here. That is a
+        // test and a write rather than one atomic call: two guests racing for
+        // the same attribute can both see it absent and both succeed, where
+        // Darwin would fail one of them.
+        if create || replace {
+            // SAFETY: the caller's path.
+            let present = unsafe { length(path, name, nofollow) }.is_some();
+            if create && present {
+                crate::errno::set(libc::EEXIST);
+                return -1;
+            }
+            if replace && !present {
+                crate::errno::set(libc::ENOATTR);
+                return -1;
+            }
+        }
+        // SAFETY: the caller's path and buffer, with a name this module owns.
+        let rc = unsafe {
+            match nofollow {
+                false => libc::extattr_set_file(path, NAMESPACE, name.as_ptr(), value, size),
+                true => libc::extattr_set_link(path, NAMESPACE, name.as_ptr(), value, size),
+            }
+        };
+        // Darwin's `setxattr` answers zero, not a count.
+        match rc < 0 {
+            true => -1,
+            false => 0,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated.
+    pub unsafe fn remove(path: *const c_char, name: &CStr, nofollow: bool) -> i32 {
+        // SAFETY: the caller's path, with a name this module owns.
+        unsafe {
+            match nofollow {
+                false => libc::extattr_delete_file(path, NAMESPACE, name.as_ptr()),
+                true => libc::extattr_delete_link(path, NAMESPACE, name.as_ptr()),
+            }
+        }
+    }
+
+    /// Every attribute on `path` the guest could have written. `None` leaves
+    /// `errno` set.
+    ///
+    /// # Safety
+    ///
+    /// `path` is NUL-terminated.
+    pub unsafe fn list(path: *const c_char, nofollow: bool) -> Option<Vec<Vec<u8>>> {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            // SAFETY: the caller's path, and a buffer this function owns.
+            let rc = unsafe {
+                let (p, n) = (buffer.as_mut_ptr().cast::<c_void>(), buffer.len());
+                match nofollow {
+                    false => libc::extattr_list_file(path, NAMESPACE, p, n),
+                    true => libc::extattr_list_link(path, NAMESPACE, p, n),
+                }
+            };
+            if rc >= 0 && (rc as usize) < buffer.len() {
+                buffer.truncate(rc as usize);
+                break;
+            }
+            // A full buffer is indistinguishable from an exactly-full one here,
+            // so it is grown and asked again rather than assumed complete.
+            if rc < 0 && crate::errno::get() != libc::ERANGE {
+                return None;
+            }
+            if buffer.len() >= 1 << 20 {
+                crate::errno::set(libc::ERANGE);
+                return None;
+            }
+            buffer.resize(buffer.len() * 2, 0);
+        }
+
+        // FreeBSD's list is not NUL-separated: each name is a one-byte length
+        // followed by exactly that many bytes, with no terminator.
+        let mut names = Vec::new();
+        let mut rest = buffer.as_slice();
+        while let Some((len, tail)) = rest.split_first() {
+            let len = *len as usize;
+            if tail.len() < len {
+                break;
+            }
+            names.push(tail[..len].to_vec());
+            rest = &tail[len..];
+        }
+        Some(names)
+    }
 }
 
 /// `int getxattr(const char *, const char *, void *, size_t, u_int32_t, int)`
@@ -77,13 +382,8 @@ unsafe extern "C" fn getxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's path and buffer, with a name this function owns.
-    unsafe {
-        match options & NOFOLLOW {
-            0 => libc::getxattr(path, host.as_ptr(), value, size),
-            _ => libc::lgetxattr(path, host.as_ptr(), value, size),
-        }
-    }
+    // SAFETY: the caller's path and buffer.
+    unsafe { host::get(path, &host, value, size, options & NOFOLLOW != 0) }
 }
 
 /// `int setxattr(const char *, const char *, const void *, size_t, u_int32_t, int)`
@@ -108,21 +408,17 @@ unsafe extern "C" fn setxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // Darwin's `XATTR_CREATE`/`XATTR_REPLACE` are `0x0002`/`0x0004` and this
-    // host's are `1`/`2`, so the flag word is rebuilt rather than forwarded.
-    let mut flags = 0;
-    if options & 0x0002 != 0 {
-        flags |= libc::XATTR_CREATE;
-    }
-    if options & 0x0004 != 0 {
-        flags |= libc::XATTR_REPLACE;
-    }
-    // SAFETY: the caller's path and buffer, with a name this function owns.
+    // SAFETY: the caller's path and buffer.
     unsafe {
-        match options & NOFOLLOW {
-            0 => libc::setxattr(path, host.as_ptr(), value, size, flags),
-            _ => libc::lsetxattr(path, host.as_ptr(), value, size, flags),
-        }
+        host::set(
+            path,
+            &host,
+            value,
+            size,
+            options & CREATE != 0,
+            options & REPLACE != 0,
+            options & NOFOLLOW != 0,
+        )
     }
 }
 
@@ -137,21 +433,15 @@ unsafe extern "C" fn removexattr(path: *const c_char, name: *const c_char, optio
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's path, with a name this function owns.
-    unsafe {
-        match options & NOFOLLOW {
-            0 => libc::removexattr(path, host.as_ptr()),
-            _ => libc::lremovexattr(path, host.as_ptr()),
-        }
-    }
+    // SAFETY: the caller's path.
+    unsafe { host::remove(path, &host, options & NOFOLLOW != 0) }
 }
 
 /// `ssize_t listxattr(const char *, char *, size_t, int)`
 ///
-/// The host's answer is a run of NUL-terminated names; each is copied back with
-/// its `user.` prefix removed and anything in one of this host's other
-/// namespaces dropped, so a guest sees the names it wrote and nothing it did
-/// not.
+/// Darwin's answer is a run of NUL-terminated names, in the guest's own flat
+/// spelling - which is what [`host::list`] hands back, whatever this host's
+/// list looks like.
 ///
 /// # Safety
 ///
@@ -163,33 +453,13 @@ unsafe extern "C" fn listxattr(
     size: usize,
     options: i32,
 ) -> isize {
-    let mut buffer = vec![0u8; 4096];
-    loop {
-        // SAFETY: the caller's path, and a buffer this function owns.
-        let rc = unsafe {
-            let (p, n) = (buffer.as_mut_ptr().cast::<c_char>(), buffer.len());
-            match options & NOFOLLOW {
-                0 => libc::listxattr(path, p, n),
-                _ => libc::llistxattr(path, p, n),
-            }
-        };
-        if rc >= 0 {
-            buffer.truncate(rc as usize);
-            break;
-        }
-        if crate::errno::get() != libc::ERANGE || buffer.len() >= 1 << 20 {
-            return -1;
-        }
-        buffer.resize(buffer.len() * 2, 0);
-    }
-
+    // SAFETY: the caller's path.
+    let Some(names) = (unsafe { host::list(path, options & NOFOLLOW != 0) }) else {
+        return -1;
+    };
     let mut out: Vec<u8> = Vec::new();
-    for name in buffer.split(|b| *b == 0).filter(|n| !n.is_empty()) {
-        let Some(bare) = name.strip_prefix(b"user.") else {
-            // One of this host's own namespaces; not something the guest wrote.
-            continue;
-        };
-        out.extend_from_slice(bare);
+    for name in names {
+        out.extend_from_slice(&name);
         out.push(0);
     }
     // A zero size is the guest asking how much room it needs.
@@ -215,7 +485,7 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
         return None;
     }
     // SAFETY: the caller's guarantee.
-    to_host(unsafe { CStr::from_ptr(name) })
+    host::name(unsafe { CStr::from_ptr(name) })
 }
 
 exports::exports! {
@@ -231,27 +501,35 @@ exports::exports! {
 mod tests {
     use super::*;
 
-    /// The rule this module exists for: a flat Darwin name is not a name this
-    /// host will store on a regular file.
+    /// The rule this module exists for: a flat Darwin name is not a name Linux
+    /// will store on a regular file. FreeBSD carries the namespace separately,
+    /// so there the name crosses unchanged.
     #[test]
     fn a_guest_name_is_put_in_this_hosts_namespace() {
-        let host = to_host(c"org.chromium.crashpad.database.initialized").expect("a valid name");
+        let host = host::name(c"org.chromium.crashpad.database.initialized").expect("a valid name");
+        #[cfg(target_os = "linux")]
         assert_eq!(
             host.to_str().unwrap(),
             "user.org.chromium.crashpad.database.initialized"
         );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            host.to_str().unwrap(),
+            "org.chromium.crashpad.database.initialized"
+        );
     }
 
-    /// A name that already reads as one of this host's namespaces is left
-    /// alone, so that it still round trips to itself.
+    /// A name that already reads as one of Linux's namespaces is left alone, so
+    /// that it still round trips to itself.
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_name_already_in_a_host_namespace_is_not_prefixed_twice() {
         assert_eq!(
-            to_host(c"user.thing").unwrap().to_str().unwrap(),
+            host::name(c"user.thing").unwrap().to_str().unwrap(),
             "user.thing"
         );
         assert_eq!(
-            to_host(c"security.thing").unwrap().to_str().unwrap(),
+            host::name(c"security.thing").unwrap().to_str().unwrap(),
             "security.thing"
         );
     }

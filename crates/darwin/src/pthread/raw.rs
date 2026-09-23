@@ -32,6 +32,40 @@ unsafe extern "C" {
     pub fn pthread_setcanceltype(kind: libc::c_int, oldtype: *mut libc::c_int) -> libc::c_int;
 }
 
+// Scheduling attributes, which libpthread exports on FreeBSD and the crate
+// declares only for Linux and Apple platforms.
+#[cfg(target_os = "freebsd")]
+unsafe extern "C" {
+    pub fn pthread_attr_setinheritsched(
+        attr: *mut libc::pthread_attr_t,
+        inherit: libc::c_int,
+    ) -> libc::c_int;
+
+    pub fn pthread_attr_setschedpolicy(
+        attr: *mut libc::pthread_attr_t,
+        policy: libc::c_int,
+    ) -> libc::c_int;
+
+    pub fn pthread_attr_setschedparam(
+        attr: *mut libc::pthread_attr_t,
+        param: *const libc::sched_param,
+    ) -> libc::c_int;
+}
+
+/// FreeBSD's `<pthread.h>` values for the two the crate does not carry.
+#[cfg(target_os = "freebsd")]
+pub const PTHREAD_INHERIT_SCHED: libc::c_int = 0x4;
+
+/// As above.
+#[cfg(target_os = "freebsd")]
+pub const PTHREAD_EXPLICIT_SCHED: libc::c_int = 0;
+
+#[cfg(not(target_os = "freebsd"))]
+pub use libc::{
+    PTHREAD_EXPLICIT_SCHED, PTHREAD_INHERIT_SCHED, pthread_attr_setinheritsched,
+    pthread_attr_setschedparam, pthread_attr_setschedpolicy,
+};
+
 /// The host's own cancellation constants.
 ///
 /// Darwin's are in [`super::consts`] because they are the *guest's*; these are what
@@ -46,14 +80,18 @@ pub mod cancel {
     #[cfg(target_os = "macos")]
     pub const ASYNCHRONOUS: libc::c_int = super::super::consts::PTHREAD_CANCEL_ASYNCHRONOUS;
 
-    // The libc crate does not currently expose these header constants on Linux;
-    // these are the glibc/musl declarations used by supported non-Apple hosts.
+    // The libc crate does not currently expose these header constants on Linux
+    // or FreeBSD; these are each header's own values. They agree except for
+    // `ASYNCHRONOUS`, which FreeBSD numbers 2 - a mismatch that would set
+    // deferred cancellation where asynchronous was asked for.
     #[cfg(not(target_os = "macos"))]
     pub const ENABLE: libc::c_int = 0;
     #[cfg(not(target_os = "macos"))]
     pub const DISABLE: libc::c_int = 1;
     #[cfg(not(target_os = "macos"))]
     pub const DEFERRED: libc::c_int = 0;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "freebsd")]
+    pub const ASYNCHRONOUS: libc::c_int = 2;
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     pub const ASYNCHRONOUS: libc::c_int = 1;
 }

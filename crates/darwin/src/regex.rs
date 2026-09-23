@@ -61,7 +61,7 @@ const _: () = assert!(size_of::<GuestMatch>() == 16);
 ///
 /// Checked against the `libc` crate's own declaration for this target, which is
 /// what keeps the mirror from drifting.
-#[cfg(target_env = "musl")]
+#[cfg(all(target_env = "musl", not(target_os = "freebsd")))]
 #[repr(C)]
 struct HostRegex {
     re_nsub: usize,
@@ -71,7 +71,17 @@ struct HostRegex {
     padding2: u8,
 }
 
-#[cfg(not(target_env = "musl"))]
+/// The BSDs' `regex_t`, which is the same four fields Darwin publishes.
+#[cfg(target_os = "freebsd")]
+#[repr(C)]
+struct HostRegex {
+    re_magic: i32,
+    re_nsub: usize,
+    re_endp: *const c_char,
+    re_g: *mut c_void,
+}
+
+#[cfg(not(any(target_env = "musl", target_os = "freebsd")))]
 #[repr(C)]
 struct HostRegex {
     buffer: *mut c_void,
@@ -283,6 +293,9 @@ pub unsafe extern "C" fn darwin_regexec(
     if status != 0 {
         return from_host_error(status);
     }
+    // `regoff_t` is 32 bits on Linux and 64 - Darwin's own width - on the BSDs,
+    // so the widening is a conversion on one host and nothing on the other.
+    #[allow(clippy::useless_conversion)]
     for (at, found) in matches.iter().enumerate() {
         // SAFETY: `wanted` is the caller's own `nmatch`, and `pmatch` is
         // non-null whenever it is not zero.

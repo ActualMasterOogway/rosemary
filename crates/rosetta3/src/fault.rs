@@ -506,7 +506,13 @@ fn thread_id() -> i32 {
     unsafe {
         libc::gettid()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "freebsd")]
+    // SAFETY: as above; FreeBSD spells it `pthread_getthreadid_np`, which is
+    // the kernel's own thread id and is safe to call from a handler.
+    unsafe {
+        libc::pthread_getthreadid_np()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     // SAFETY: as above; Darwin spells it `pthread_mach_thread_np(self)`, and
     // the port number is as good an identity as the kernel's own tid.
     unsafe {
@@ -848,7 +854,7 @@ fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
 ///
 /// Linux embeds its `mcontext_t` in the `ucontext_t` rather than pointing at one,
 /// and the `libc` crate declares both - so this reads fields rather than offsets.
-#[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     if context.is_null() {
         return None;
@@ -861,8 +867,22 @@ fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     Some((at(libc::REG_RBP), at(libc::REG_RSP), None))
 }
 
+/// As above. FreeBSD embeds its `mcontext_t` too, and names each register
+/// rather than indexing an array.
+#[cfg(all(target_os = "freebsd", target_arch = "x86_64"))]
+fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: the kernel passes a live `ucontext_t` for the duration of the
+    // handler.
+    let mc = unsafe { &(*(context as *const libc::ucontext_t)).uc_mcontext };
+    // x86-64 has no link register.
+    Some((mc.mc_rbp as u64, mc.mc_rsp as u64, None))
+}
+
 /// The frame pointer, stack pointer and return address the fault interrupted.
-#[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     if context.is_null() {
         return None;
@@ -871,6 +891,22 @@ fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     // register, in the layout AAPCS64 and the kernel agree on.
     let mc = unsafe { &(*(context as *const libc::ucontext_t)).uc_mcontext };
     Some((mc.regs[29], mc.sp, Some(mc.regs[30])))
+}
+
+/// As above, out of FreeBSD's `mc_gpregs`, which keeps the link register and
+/// the stack pointer beside the thirty general-purpose ones.
+#[cfg(all(target_os = "freebsd", target_arch = "aarch64"))]
+fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
+    if context.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    let gp = unsafe {
+        &(*(context as *const libc::ucontext_t))
+            .uc_mcontext
+            .mc_gpregs
+    };
+    Some((gp.gp_x[29] as u64, gp.gp_sp as u64, Some(gp.gp_lr as u64)))
 }
 
 /// Name the translation the faulting `pc` fell in, and the guest instruction

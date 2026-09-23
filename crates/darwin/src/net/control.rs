@@ -71,6 +71,9 @@ fn host_align(len: usize) -> usize {
 const DARWIN_SOL_SOCKET: i32 = 0xffff;
 
 const DARWIN_IP_TOS: i32 = 3;
+// Not reachable on a host with no `IP_PKTINFO` of its own, and still named:
+// the point of this list is that it is the whole set Darwin can send.
+#[allow(dead_code)]
 const DARWIN_IP_PKTINFO: i32 = 26;
 const DARWIN_IP_RECVTOS: i32 = 27;
 const DARWIN_IPV6_TCLASS: i32 = 36;
@@ -125,6 +128,10 @@ pub unsafe fn to_host(control: *const c_void, len: u32) -> Result<Vec<u8>, Untra
         let host_kind = match (level, kind, payload.len()) {
             (DARWIN_SOL_SOCKET, SCM_RIGHTS, _) => SCM_RIGHTS,
             (libc::IPPROTO_IP, DARWIN_IP_TOS, 1 | 4) => libc::IP_TOS,
+            // FreeBSD has no `IP_PKTINFO`, and nothing there carries Darwin's
+            // `struct in_pktinfo`, so the message is refused rather than
+            // rewritten into a different shape.
+            #[cfg(not(target_os = "freebsd"))]
             (libc::IPPROTO_IP, DARWIN_IP_PKTINFO, 12) => libc::IP_PKTINFO,
             (libc::IPPROTO_IPV6, DARWIN_IPV6_TCLASS, 4) => libc::IPV6_TCLASS,
             (libc::IPPROTO_IPV6, DARWIN_IPV6_PKTINFO, 20) => libc::IPV6_PKTINFO,
@@ -196,6 +203,8 @@ fn message_from_host(level: i32, kind: i32, payload: &[u8]) -> Option<Message> {
             kind: DARWIN_IP_RECVTOS,
             payload: payload.to_vec(),
         }),
+        // As above; there is no FreeBSD message to recognise here.
+        #[cfg(not(target_os = "freebsd"))]
         (libc::IPPROTO_IP, libc::IP_PKTINFO) if payload.len() == 12 => Some(Message {
             level,
             kind: DARWIN_IP_PKTINFO,
@@ -329,6 +338,8 @@ mod tests {
                 libc::IP_TOS,
                 vec![3],
             ),
+            // No FreeBSD counterpart; see `to_host`.
+            #[cfg(not(target_os = "freebsd"))]
             (
                 libc::IPPROTO_IP,
                 DARWIN_IP_PKTINFO,
@@ -371,10 +382,42 @@ mod tests {
         }
     }
 
+    /// The host and guest option numbers for one address family, or `None`
+    /// where this host cannot be asked for what the test needs: FreeBSD has no
+    /// IPv4 `IP_PKTINFO`, so only the IPv6 half of this runs there.
+    fn family_options(ipv6: bool) -> Option<(i32, i32, i32, i32, i32, i32)> {
+        if ipv6 {
+            return Some((
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVTCLASS,
+                libc::IPV6_RECVPKTINFO,
+                DARWIN_IPV6_TCLASS,
+                DARWIN_IPV6_TCLASS,
+                DARWIN_IPV6_PKTINFO,
+            ));
+        }
+        #[cfg(target_os = "freebsd")]
+        return None;
+        #[cfg(not(target_os = "freebsd"))]
+        Some((
+            libc::IPPROTO_IP,
+            libc::IP_RECVTOS,
+            libc::IP_PKTINFO,
+            DARWIN_IP_TOS,
+            DARWIN_IP_RECVTOS,
+            DARWIN_IP_PKTINFO,
+        ))
+    }
+
     #[test]
     fn udp_ecn_and_packet_info_reach_the_guest() {
         use std::os::fd::AsRawFd;
         for ipv6 in [false, true] {
+            let Some((level, recv_ecn, recv_info, send_kind, ecn_kind, info_kind)) =
+                family_options(ipv6)
+            else {
+                continue;
+            };
             let address = if ipv6 { "[::1]:0" } else { "127.0.0.1:0" };
             let receiver = std::net::UdpSocket::bind(address).unwrap();
             receiver
@@ -382,25 +425,6 @@ mod tests {
                 .unwrap();
             let sender = std::net::UdpSocket::bind(address).unwrap();
             sender.connect(receiver.local_addr().unwrap()).unwrap();
-            let (level, recv_ecn, recv_info, send_kind, ecn_kind, info_kind) = if ipv6 {
-                (
-                    libc::IPPROTO_IPV6,
-                    libc::IPV6_RECVTCLASS,
-                    libc::IPV6_RECVPKTINFO,
-                    DARWIN_IPV6_TCLASS,
-                    DARWIN_IPV6_TCLASS,
-                    DARWIN_IPV6_PKTINFO,
-                )
-            } else {
-                (
-                    libc::IPPROTO_IP,
-                    libc::IP_RECVTOS,
-                    libc::IP_PKTINFO,
-                    DARWIN_IP_TOS,
-                    DARWIN_IP_RECVTOS,
-                    DARWIN_IP_PKTINFO,
-                )
-            };
             let enabled = 1i32;
             for option in [recv_ecn, recv_info] {
                 // SAFETY: a live socket and a readable integer option.

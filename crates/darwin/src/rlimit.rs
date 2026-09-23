@@ -39,9 +39,9 @@ const _: () = assert!(size_of::<Rlimit>() == size_of::<libc::rlimit>());
 /// Darwin's `RLIM_INFINITY`.
 const DARWIN_INFINITY: u64 = (1 << 63) - 1;
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "freebsd"))]
 type HostResource = c_int;
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "freebsd")))]
 type HostResource = u32;
 
 /// The host resource `darwin` is naming, or `None` for one this host has no
@@ -62,17 +62,19 @@ fn resource(darwin: c_int) -> Option<HostResource> {
     })
 }
 
-fn to_guest(host: u64) -> u64 {
+// `rlim_t` is unsigned on Linux and signed on the BSDs, so the guest's `u64`
+// crosses through `libc::rlim_t` rather than being assumed to match it.
+fn to_guest(host: libc::rlim_t) -> u64 {
     match host == libc::RLIM_INFINITY {
         true => DARWIN_INFINITY,
-        false => host,
+        false => host as u64,
     }
 }
 
-fn to_host(guest: u64) -> u64 {
+fn to_host(guest: u64) -> libc::rlim_t {
     match guest >= DARWIN_INFINITY {
         true => libc::RLIM_INFINITY,
-        false => guest,
+        false => guest as libc::rlim_t,
     }
 }
 
@@ -172,6 +174,9 @@ mod tests {
     fn no_limit_is_reported_in_the_guests_spelling() {
         assert_eq!(to_guest(libc::RLIM_INFINITY), DARWIN_INFINITY);
         assert_eq!(to_host(DARWIN_INFINITY), libc::RLIM_INFINITY);
+        // FreeBSD's sentinel *is* Darwin's, so there is nothing to differ from
+        // there; this is the Linux `~0` the module exists for.
+        #[cfg(not(target_os = "freebsd"))]
         assert_ne!(DARWIN_INFINITY, libc::RLIM_INFINITY);
         // A real one, read through the entry point: core dumps are unlimited
         // on most hosts, and `RLIMIT_CORE` is 4 on both.

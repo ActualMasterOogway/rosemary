@@ -286,6 +286,12 @@ mod plain {
         pub fn iswprint(c: c_uint) -> c_int;
         pub fn towlower(c: c_uint) -> c_uint;
         pub fn towupper(c: c_uint) -> c_uint;
+        #[cfg(target_os = "linux")]
+        pub fn __ctype_get_mb_cur_max() -> usize;
+        // The BSDs' `MB_CUR_MAX` is a macro over this, which is the same
+        // function under the name their `<stdlib.h>` gives it.
+        #[cfg(not(target_os = "linux"))]
+        #[link_name = "___mb_cur_max"]
         pub fn __ctype_get_mb_cur_max() -> usize;
         pub fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
         pub fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
@@ -666,7 +672,8 @@ pub unsafe extern "C" fn localeconv_l(loc: libc::locale_t) -> *mut c_void {
 
 /// `int __mb_cur_max_l(locale_t)`: how many bytes one character can take.
 ///
-/// glibc's `MB_CUR_MAX` is a macro over `__ctype_get_mb_cur_max()`, which is the
+/// `MB_CUR_MAX` is a macro over a function on both hosts - glibc's
+/// `__ctype_get_mb_cur_max()` and the BSDs' `___mb_cur_max()` - which is the
 /// function this reaches for.
 ///
 /// # Safety

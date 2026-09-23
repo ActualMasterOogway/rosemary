@@ -90,9 +90,11 @@ pub fn lock_type_to_host(kind: i16) -> Option<i16> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn lock_type_to_guest(kind: i16) -> i16 {
-    match kind as libc::c_int {
-        libc::F_RDLCK => lock::F_RDLCK,
-        libc::F_WRLCK => lock::F_WRLCK,
+    // Compared as `i16` rather than `c_int`: the BSDs type these constants as
+    // `c_short` and Linux as `c_int`.
+    match kind {
+        _ if kind == libc::F_RDLCK as i16 => lock::F_RDLCK,
+        _ if kind == libc::F_WRLCK as i16 => lock::F_WRLCK,
         _ => lock::F_UNLCK,
     }
 }
@@ -641,8 +643,10 @@ mod tests {
     /// A host-only status bit is dropped rather than reported: `F_GETFL` answers
     /// with `O_LARGEFILE` on nearly every descriptor here and Darwin has no name
     /// for it, so refusing would fail the call the guest is entitled to make.
+    // FreeBSD has no `O_LARGEFILE`: its offsets have always been 64-bit, so
+    // there is no host-only bit here to drop.
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     fn a_host_only_status_bit_does_not_reach_the_guest() {
         let answered = flags_to_guest(libc::O_RDONLY | libc::O_LARGEFILE | libc::O_NONBLOCK);
         assert_eq!(answered, oflag::O_RDONLY | oflag::O_NONBLOCK);

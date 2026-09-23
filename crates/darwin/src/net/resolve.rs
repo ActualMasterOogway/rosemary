@@ -74,6 +74,9 @@ const ERRORS: &[(i32, i32)] = &[
     (4, libc::EAI_FAIL),
     (5, libc::EAI_FAMILY),
     (6, libc::EAI_MEMORY),
+    // FreeBSD dropped `EAI_NODATA` with RFC 3493; Darwin's 7 has no
+    // counterpart there and falls through to the default.
+    #[cfg(not(target_os = "freebsd"))]
     (7, libc::EAI_NODATA),
     (8, libc::EAI_NONAME),
     (9, libc::EAI_SERVICE),
@@ -375,9 +378,9 @@ unsafe extern "C" fn getnameinfo(
             sockaddr.as_ptr(),
             sockaddr.len(),
             host,
-            hostlen,
+            hostlen as _,
             service,
-            servicelen,
+            servicelen as _,
             name_flags_to_host(flags),
         )
     };

@@ -497,7 +497,8 @@ pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
     unsafe { stack_of(thread) }.map_or(0, |(_, size)| size as u64)
 }
 
-/// The `(lowest address, size)` of `thread`'s stack, out of glibc's attributes.
+/// The `(lowest address, size)` of `thread`'s stack, out of the host's
+/// attributes.
 ///
 /// # Safety
 ///
@@ -507,8 +508,20 @@ unsafe fn stack_of(thread: u64) -> Option<(u64, usize)> {
     // SAFETY: zeroed is not a valid `pthread_attr_t` to *read*, but it is what
     // `pthread_getattr_np` is given to fill in, and it is only read on success.
     let mut attr: libc::pthread_attr_t = unsafe { core::mem::zeroed() };
+    // FreeBSD spells this `pthread_attr_get_np`, and unlike glibc's it fills in
+    // an attribute object the caller has already initialised.
+    #[cfg(target_os = "freebsd")]
+    // SAFETY: a live local, then a handle this process issued.
+    let rc = unsafe {
+        match libc::pthread_attr_init(&mut attr) {
+            0 => libc::pthread_attr_get_np(thread_of(thread), &mut attr),
+            rc => rc,
+        }
+    };
+    #[cfg(not(target_os = "freebsd"))]
     // SAFETY: a handle this process issued and a live attribute object.
-    if unsafe { libc::pthread_getattr_np(thread_of(thread), &mut attr) } != 0 {
+    let rc = unsafe { libc::pthread_getattr_np(thread_of(thread), &mut attr) };
+    if rc != 0 {
         return None;
     }
     let mut low: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -824,7 +837,9 @@ pub unsafe extern "C" fn key_create(
     let rc = unsafe { libc::pthread_key_create(&mut key, destructor) };
     if rc == 0 {
         // SAFETY: the caller's eight bytes.
-        unsafe { out.write_unaligned(u64::from(key)) };
+        // `pthread_key_t` is unsigned on Linux and signed on FreeBSD, so it is
+        // widened with a cast rather than a `From`.
+        unsafe { out.write_unaligned(key as u64) };
     }
     err::from_host(rc)
 }

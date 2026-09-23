@@ -199,17 +199,62 @@ unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termios) 
     unsafe { libc::tcsetattr(fd, host_action, &host) }
 }
 
-// The remaining non-Darwin hosts are the BSDs, which order the fields the same
-// way but keep `tcflag_t` at 32 bits where Darwin has 64 - so this is a
-// placeholder for a host nothing builds for yet rather than a checked cast.
+// The remaining non-Darwin hosts are the BSDs, where none of the tables above
+// is needed: every input, output, control and local flag, every `c_cc` index
+// and every speed is 4.4BSD's, and so is Darwin's. `NCCS` is twenty on both.
+//
+// What does differ is width - `tcflag_t` and `speed_t` are 32 bits here and 64
+// on Darwin - so the structure is not the same size and cannot be cast. Each
+// word is widened, and narrowed again on the way back.
+const _: () = assert!(size_of::<Termios>() != size_of::<libc::termios>());
+
 #[cfg(not(target_os = "linux"))]
-pub unsafe extern "C" fn tcgetattr(fd: c_int, out: *mut Termios) -> c_int {
-    unsafe { libc::tcgetattr(fd, out.cast()) }
+unsafe extern "C" fn tcgetattr(fd: c_int, out: *mut Termios) -> c_int {
+    let mut host = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: a live local, which the call fills in when it answers zero.
+    let status = unsafe { libc::tcgetattr(fd, host.as_mut_ptr()) };
+    if status != 0 {
+        return status;
+    }
+    // SAFETY: filled in by the call above.
+    let host = unsafe { host.assume_init() };
+    // SAFETY: the caller's Darwin `struct termios`, and `cfget*speed` read a
+    // structure this frame owns.
+    unsafe {
+        out.write(Termios {
+            c_iflag: host.c_iflag.into(),
+            c_oflag: host.c_oflag.into(),
+            c_cflag: host.c_cflag.into(),
+            c_lflag: host.c_lflag.into(),
+            c_cc: host.c_cc,
+            c_ispeed: libc::cfgetispeed(&host).into(),
+            c_ospeed: libc::cfgetospeed(&host).into(),
+        })
+    };
+    0
 }
 
 #[cfg(not(target_os = "linux"))]
-pub unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termios) -> c_int {
-    unsafe { libc::tcsetattr(fd, action, input.cast()) }
+unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termios) -> c_int {
+    // SAFETY: the caller's Darwin `struct termios`.
+    let input = unsafe { &*input };
+    // SAFETY: an all-zero `struct termios` is a valid one to fill in.
+    let mut host = unsafe { std::mem::MaybeUninit::<libc::termios>::zeroed().assume_init() };
+    // A guest's flag word cannot have bits above 32 set: there is no Darwin
+    // name for one, and the host would refuse the whole call over it.
+    host.c_iflag = input.c_iflag as libc::tcflag_t;
+    host.c_oflag = input.c_oflag as libc::tcflag_t;
+    host.c_cflag = input.c_cflag as libc::tcflag_t;
+    host.c_lflag = input.c_lflag as libc::tcflag_t;
+    host.c_cc = input.c_cc;
+    // SAFETY: a structure this frame owns.
+    unsafe {
+        libc::cfsetispeed(&mut host, input.c_ispeed as libc::speed_t);
+        libc::cfsetospeed(&mut host, input.c_ospeed as libc::speed_t);
+    }
+    // `TCSANOW`, `TCSADRAIN` and `TCSAFLUSH` are 0, 1 and 2 here as well.
+    // SAFETY: a structure this frame owns.
+    unsafe { libc::tcsetattr(fd, action, &host) }
 }
 
 exports::exports! {

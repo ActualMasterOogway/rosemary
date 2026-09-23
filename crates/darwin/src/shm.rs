@@ -66,7 +66,7 @@ pub unsafe extern "C" fn shm_open(name: *const c_char, flags: FcntlFlags, mode: 
         false => 0,
     };
     // SAFETY: a live NUL-terminated name, and flags this host understands.
-    let fd = unsafe { libc::shm_open(name.as_ptr(), host_flags, mode as libc::c_uint) };
+    let fd = unsafe { libc::shm_open(name.as_ptr(), host_flags, mode) };
     if fd >= 0 && flags.0 & oflag::O_CLOEXEC == 0 {
         // glibc set it unasked; Darwin would not have.
         // SAFETY: `fd` is the descriptor just opened.

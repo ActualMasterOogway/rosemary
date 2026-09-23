@@ -52,6 +52,11 @@ mod so {
 }
 
 /// Darwin IPv4 option names from `<netinet/in.h>`.
+///
+/// Allowed dead because the set is the point: a name missing from one of these
+/// tables is a Darwin option that would be forwarded unrecognised, and a host
+/// with no counterpart for one leaves it listed but unused.
+#[allow(dead_code)]
 mod ip {
     pub const OPTIONS: i32 = 1;
     pub const HDRINCL: i32 = 2;
@@ -69,6 +74,7 @@ mod ip {
 }
 
 /// Darwin IPv6 option names from `<netinet6/in6.h>`.
+#[allow(dead_code)]
 mod ipv6 {
     pub const UNICAST_HOPS: i32 = 4;
     pub const MULTICAST_IF: i32 = 9;
@@ -83,6 +89,7 @@ mod ipv6 {
 }
 
 /// Darwin TCP option names from `<netinet/tcp.h>`.
+#[allow(dead_code)]
 mod tcp {
     pub const NODELAY: i32 = 0x01;
     pub const MAXSEG: i32 = 0x02;
@@ -128,18 +135,32 @@ const SOCKET_OPTIONS: &[(i32, i32)] = &[
 /// The numbering agrees with this host's up to `IP_RECVOPTS` and then stops:
 /// Darwin's 26 is `IP_PKTINFO` (spelled `IP_RECVPKTINFO` when it is asked for
 /// on receive) where this host's is 8, and Darwin's 27 is `IP_RECVTOS`.
+/// FreeBSD's two, which its headers have and the `libc` crate does not declare.
+#[cfg(target_os = "freebsd")]
+mod bsd_ip {
+    pub const IP_OPTIONS: i32 = 1;
+    pub const IP_RECVOPTS: i32 = 5;
+}
+#[cfg(not(target_os = "freebsd"))]
+use libc as bsd_ip;
+
 const IP_OPTIONS: &[(i32, i32)] = &[
-    (ip::OPTIONS, libc::IP_OPTIONS),
+    (ip::OPTIONS, bsd_ip::IP_OPTIONS),
     (ip::HDRINCL, libc::IP_HDRINCL),
     (ip::TOS, libc::IP_TOS),
     (ip::TTL, libc::IP_TTL),
-    (ip::RECVOPTS, libc::IP_RECVOPTS),
+    (ip::RECVOPTS, bsd_ip::IP_RECVOPTS),
     (ip::MULTICAST_IF, libc::IP_MULTICAST_IF),
     (ip::MULTICAST_TTL, libc::IP_MULTICAST_TTL),
     (ip::MULTICAST_LOOP, libc::IP_MULTICAST_LOOP),
     (ip::ADD_MEMBERSHIP, libc::IP_ADD_MEMBERSHIP),
     (ip::DROP_MEMBERSHIP, libc::IP_DROP_MEMBERSHIP),
     (ip::RECVTTL, libc::IP_RECVTTL),
+    // FreeBSD has no `IP_PKTINFO` at all - it splits the answer into
+    // `IP_RECVDSTADDR` and `IP_RECVIF`, neither of which fills Darwin's
+    // `struct in_pktinfo` - so the option is refused rather than aimed at
+    // something that would answer with a different shape.
+    #[cfg(not(target_os = "freebsd"))]
     (ip::PKTINFO, libc::IP_PKTINFO),
     (ip::RECVTOS, libc::IP_RECVTOS),
 ];
@@ -155,7 +176,15 @@ const IPV6_OPTIONS: &[(i32, i32)] = &[
     (ipv6::MULTICAST_IF, libc::IPV6_MULTICAST_IF),
     (ipv6::MULTICAST_HOPS, libc::IPV6_MULTICAST_HOPS),
     (ipv6::MULTICAST_LOOP, libc::IPV6_MULTICAST_LOOP),
+    // The BSDs spell these `IPV6_JOIN_GROUP`/`IPV6_LEAVE_GROUP`; same numbers,
+    // same payload.
+    #[cfg(target_os = "freebsd")]
+    (ipv6::ADD_MEMBERSHIP, libc::IPV6_JOIN_GROUP),
+    #[cfg(target_os = "freebsd")]
+    (ipv6::DROP_MEMBERSHIP, libc::IPV6_LEAVE_GROUP),
+    #[cfg(not(target_os = "freebsd"))]
     (ipv6::ADD_MEMBERSHIP, libc::IPV6_ADD_MEMBERSHIP),
+    #[cfg(not(target_os = "freebsd"))]
     (ipv6::DROP_MEMBERSHIP, libc::IPV6_DROP_MEMBERSHIP),
     (ipv6::V6ONLY, libc::IPV6_V6ONLY),
     (ipv6::RECVTCLASS, libc::IPV6_RECVTCLASS),
@@ -176,10 +205,17 @@ const IPV6_OPTIONS: &[(i32, i32)] = &[
 const TCP_OPTIONS: &[(i32, i32)] = &[
     (tcp::NODELAY, libc::TCP_NODELAY),
     (tcp::MAXSEG, libc::TCP_MAXSEG),
+    // FreeBSD has Darwin's own `TCP_NOPUSH`, with Darwin's own advisory
+    // meaning, so there the mapping is exact and none of the above applies.
+    #[cfg(target_os = "freebsd")]
+    (tcp::NOPUSH, libc::TCP_NOPUSH),
+    #[cfg(not(target_os = "freebsd"))]
     (tcp::NOPUSH, libc::TCP_CORK),
     (tcp::KEEPALIVE, libc::TCP_KEEPIDLE),
     (tcp::KEEPINTVL, libc::TCP_KEEPINTVL),
     (tcp::KEEPCNT, libc::TCP_KEEPCNT),
+    // No FreeBSD counterpart; refused rather than mapped to a nearby option.
+    #[cfg(not(target_os = "freebsd"))]
     (tcp::NOTSENT_LOWAT, libc::TCP_NOTSENT_LOWAT),
 ];
 
@@ -612,11 +648,15 @@ mod tests {
             libc::IPV6_UNICAST_HOPS,
             "the collision being avoided"
         );
-        // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`.
+        // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`. FreeBSD has
+        // no counterpart at all, and the option is refused there.
+        #[cfg(not(target_os = "freebsd"))]
         assert_eq!(
             option_to_host(IPPROTO_IP, ip::PKTINFO),
             Some((IPPROTO_IP, libc::IP_PKTINFO))
         );
+        #[cfg(target_os = "freebsd")]
+        assert_eq!(option_to_host(IPPROTO_IP, ip::PKTINFO), None);
     }
 
     /// `TCP_NOPUSH` is corking, which is the closest thing this host has, and
@@ -624,6 +664,13 @@ mod tests {
     /// one. See [`TCP_OPTIONS`].
     #[test]
     fn tcp_nopush_corks_rather_than_being_refused() {
+        #[cfg(target_os = "freebsd")]
+        // FreeBSD has Darwin's own option, so nothing is being approximated.
+        assert_eq!(
+            option_to_host(IPPROTO_TCP, tcp::NOPUSH),
+            Some((IPPROTO_TCP, libc::TCP_NOPUSH))
+        );
+        #[cfg(not(target_os = "freebsd"))]
         assert_eq!(
             option_to_host(IPPROTO_TCP, tcp::NOPUSH),
             Some((IPPROTO_TCP, libc::TCP_CORK))

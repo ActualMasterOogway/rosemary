@@ -618,13 +618,23 @@ pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
             Some(core::ptr::read(&raw const (*mcontext).thread_state.pc))
         }
     }
-    #[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     // SAFETY: the kernel passes a live `ucontext_t`, which the `libc` crate does
     // declare here.
     unsafe {
         Some((*(context as *const libc::ucontext_t)).uc_mcontext.pc)
     }
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+    #[cfg(all(target_os = "freebsd", target_arch = "aarch64"))]
+    // SAFETY: as above. FreeBSD keeps the interrupted PC in `gp_elr`.
+    unsafe {
+        Some(
+            (*(context as *const libc::ucontext_t))
+                .uc_mcontext
+                .mc_gpregs
+                .gp_elr as u64,
+        )
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     // SAFETY: as above. `REG_RIP` indexes the general-purpose register array.
     unsafe {
         Some(
@@ -632,9 +642,17 @@ pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
                 as u64,
         )
     }
+    #[cfg(all(target_os = "freebsd", target_arch = "x86_64"))]
+    // SAFETY: as above. FreeBSD names the registers rather than indexing them.
+    unsafe {
+        Some((*(context as *const libc::ucontext_t)).uc_mcontext.mc_rip as u64)
+    }
     #[cfg(all(
         not(target_os = "macos"),
-        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+        not(all(
+            any(target_os = "linux", target_os = "freebsd"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))
     ))]
     {
         None

@@ -97,6 +97,9 @@ pub fn map_flags(flags: i32) -> i32 {
             // These two do *not* agree by value, and are the reason this
             // function exists.
             (darwin::MAP_ANON, libc::MAP_ANONYMOUS),
+            // FreeBSD removed `MAP_NORESERVE` in 11 - it always overcommits -
+            // so the hint has nothing to carry to and is dropped.
+            #[cfg(not(target_os = "freebsd"))]
             (darwin::MAP_NORESERVE, libc::MAP_NORESERVE),
             #[cfg(target_arch = "x86_64")]
             (darwin::MAP_32BIT, libc::MAP_32BIT),
@@ -157,6 +160,12 @@ pub fn advice(advice: i32) -> Advice {
             // Same meaning, different number: keep the mapping, let the kernel
             // reclaim the pages, and do not promise their contents afterwards.
             darwin::MADV_FREE | darwin::MADV_FREE_REUSABLE => libc::MADV_FREE,
+            // FreeBSD has no `MADV_PAGEOUT`. Its `MADV_DONTNEED` is the BSD
+            // one - a hint that the range is not wanted soon, which keeps the
+            // contents - so it asks for the same thing Darwin's does.
+            #[cfg(target_os = "freebsd")]
+            darwin::MADV_PAGEOUT => libc::MADV_DONTNEED,
+            #[cfg(not(target_os = "freebsd"))]
             darwin::MADV_PAGEOUT => libc::MADV_PAGEOUT,
             darwin::MADV_ZERO_WIRED_PAGES | darwin::MADV_FREE_REUSE | darwin::MADV_CAN_REUSE => {
                 return Advice::Nothing;
@@ -302,6 +311,7 @@ mod tests {
             let host = map_flags(flags);
             assert_eq!(host & libc::MAP_ANONYMOUS, libc::MAP_ANONYMOUS);
             assert_eq!(host & libc::MAP_PRIVATE, libc::MAP_PRIVATE);
+            #[cfg(target_os = "linux")]
             assert_eq!(host & libc::MAP_EXECUTABLE, 0, "0x1000 is not a hint here");
         }
     }
@@ -336,7 +346,7 @@ mod tests {
     /// Darwin's `MAP_NORESERVE` is Linux's `MAP_32BIT`, and a 32-bit mapping is
     /// not what a guest hinting at overcommit asked for.
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     fn noreserve_does_not_become_a_32_bit_mapping() {
         let host = map_flags(darwin::MAP_PRIVATE | darwin::MAP_ANON | darwin::MAP_NORESERVE);
         assert_eq!(host & libc::MAP_NORESERVE, libc::MAP_NORESERVE);

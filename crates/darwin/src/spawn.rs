@@ -11,6 +11,24 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use crate::signal::signal_to_host;
 
+// The two directory file actions, which FreeBSD's libc exports but the `libc`
+// crate declares only for Linux.
+#[cfg(target_os = "freebsd")]
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        path: *const c_char,
+    ) -> c_int;
+
+    fn posix_spawn_file_actions_addfchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        fd: c_int,
+    ) -> c_int;
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "freebsd")))]
+use libc::{posix_spawn_file_actions_addchdir_np, posix_spawn_file_actions_addfchdir_np};
+
 /// Darwin's `POSIX_SPAWN_*`. The first four agree with Linux; the last three do not,
 /// and two of them *collide* with a different Linux flag of the same value - Darwin's
 /// `SETEXEC` is Linux's `USEVFORK`, and `START_SUSPENDED` is `SETSID`. Passing the
@@ -345,12 +363,10 @@ impl FileActions {
                     Action::Close(fd) => libc::posix_spawn_file_actions_addclose(&mut host.0, *fd),
                     #[cfg(not(target_os = "macos"))]
                     Action::Chdir(path) => {
-                        libc::posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
+                        posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
                     }
                     #[cfg(not(target_os = "macos"))]
-                    Action::Fchdir(fd) => {
-                        libc::posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd)
-                    }
+                    Action::Fchdir(fd) => posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd),
                     // A descriptor duplicated onto itself survives the exec with its
                     // close-on-exec bit cleared, which is what "inherit" asks for.
                     Action::Inherit(fd) => {

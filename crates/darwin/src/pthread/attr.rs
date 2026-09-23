@@ -2,6 +2,7 @@
 
 use super::consts::*;
 use super::object::{Kind, Record, size};
+use super::raw;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attributes {
@@ -194,11 +195,11 @@ impl Attributes {
                 }
             }
             let inherit = match self.inherit_sched {
-                PTHREAD_INHERIT_SCHED => libc::PTHREAD_INHERIT_SCHED,
-                PTHREAD_EXPLICIT_SCHED => libc::PTHREAD_EXPLICIT_SCHED,
+                PTHREAD_INHERIT_SCHED => raw::PTHREAD_INHERIT_SCHED,
+                PTHREAD_EXPLICIT_SCHED => raw::PTHREAD_EXPLICIT_SCHED,
                 _ => return Err(err::EINVAL),
             };
-            host_result(libc::pthread_attr_setinheritsched(a, inherit))?;
+            host_result(raw::pthread_attr_setinheritsched(a, inherit))?;
             if self.inherit_sched == PTHREAD_EXPLICIT_SCHED {
                 let Some(policy) = sched_policy_to_host(self.sched_policy) else {
                     return Err(err::EINVAL);
@@ -206,10 +207,10 @@ impl Attributes {
                 let Some(priority) = sched_priority_to_host(self.sched_priority, policy) else {
                     return Err(err::EINVAL);
                 };
-                host_result(libc::pthread_attr_setschedpolicy(a, policy))?;
+                host_result(raw::pthread_attr_setschedpolicy(a, policy))?;
                 let mut param: libc::sched_param = core::mem::zeroed();
                 param.sched_priority = priority;
-                host_result(libc::pthread_attr_setschedparam(a, &param))?;
+                host_result(raw::pthread_attr_setschedparam(a, &param))?;
             }
         }
         Ok(attr)

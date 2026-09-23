@@ -39,17 +39,94 @@ fn flags_from_host(flags: u32) -> u32 {
         }
 }
 
+/// What a host link record says about an interface, in the terms Darwin's
+/// `sockaddr_dl` wants.
+///
+/// The two hosts describe a link in two different structures - Linux's
+/// `sockaddr_ll` and FreeBSD's `sockaddr_dl` - so the reading of one is the
+/// only per-host part, and [`link_address`] below is shared.
+#[derive(Default)]
+struct Link {
+    index: u32,
+    /// An `IFT_*` media type, or `None` where the host names nothing this can
+    /// be turned into.
+    kind: Option<u8>,
+    hardware: [u8; 8],
+    hardware_len: usize,
+}
+
+/// Whether `addr` is this host's link record rather than an IP address.
+///
+/// # Safety
+///
+/// `addr` is null or a live `struct sockaddr`.
+unsafe fn is_link(addr: *const libc::sockaddr) -> bool {
+    #[cfg(target_os = "linux")]
+    let family = libc::AF_PACKET;
+    #[cfg(not(target_os = "linux"))]
+    let family = libc::AF_LINK;
+    // SAFETY: the caller's guarantee.
+    !addr.is_null() && unsafe { (*addr).sa_family as i32 == family }
+}
+
+/// A host link record, read out of the structure this host uses for one.
+///
+/// # Safety
+///
+/// `addr` is a live link `struct sockaddr`, as [`is_link`] reports.
+#[cfg(target_os = "linux")]
+unsafe fn link_from_host(addr: *const libc::sockaddr) -> Link {
+    // SAFETY: AF_PACKET addresses have `sockaddr_ll` layout.
+    let packet = unsafe { &*addr.cast::<libc::sockaddr_ll>() };
+    let len = usize::from(packet.sll_halen).min(packet.sll_addr.len());
+    let mut link = Link {
+        index: packet.sll_ifindex as u32,
+        // ARPHRD values are not IFT values, so only the three with a Darwin
+        // counterpart are named and anything else stays unknown.
+        kind: match packet.sll_hatype {
+            libc::ARPHRD_ETHER => Some(6),
+            libc::ARPHRD_PPP => Some(23),
+            libc::ARPHRD_SLIP => Some(28),
+            _ => None,
+        },
+        hardware_len: len.min(8),
+        ..Link::default()
+    };
+    link.hardware[..link.hardware_len].copy_from_slice(&packet.sll_addr[..link.hardware_len]);
+    link
+}
+
+/// As above. FreeBSD's link record is Darwin's own `sockaddr_dl`, down to the
+/// `IFT_*` numbering, so nothing has to be translated - only unpacked.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+unsafe fn link_from_host(addr: *const libc::sockaddr) -> Link {
+    // SAFETY: AF_LINK addresses have `sockaddr_dl` layout.
+    let dl = unsafe { &*addr.cast::<libc::sockaddr_dl>() };
+    // `sdl_data` holds the interface name first and the hardware address after
+    // it; the name is rebuilt from `ifa_name`, so only the second part is read.
+    let at = usize::from(dl.sdl_nlen);
+    let len = usize::from(dl.sdl_alen).min(dl.sdl_data.len().saturating_sub(at));
+    let mut link = Link {
+        index: u32::from(dl.sdl_index),
+        kind: (dl.sdl_type != 0).then_some(dl.sdl_type),
+        hardware_len: len.min(8),
+        ..Link::default()
+    };
+    for (out, byte) in link.hardware.iter_mut().zip(&dl.sdl_data[at..at + len]) {
+        *out = *byte as u8;
+    }
+    link
+}
+
 fn link_address(
     name: &[u8],
     index: u32,
     flags: u32,
-    packet: Option<&libc::sockaddr_ll>,
+    link: Option<&Link>,
 ) -> ([u8; addr::STORAGE], usize) {
     let mut bytes = [0; addr::STORAGE];
     let name = &name[..name.len().saturating_sub(1).min(libc::IF_NAMESIZE - 1)];
-    let hardware = packet.map_or(&[][..], |p| {
-        &p.sll_addr[..usize::from(p.sll_halen).min(p.sll_addr.len())]
-    });
+    let hardware = link.map_or(&[][..], |l| &l.hardware[..l.hardware_len]);
     let len = (8 + name.len() + hardware.len()).max(20);
     bytes[0] = len as u8;
     bytes[1] = 18; // AF_LINK
@@ -57,18 +134,22 @@ fn link_address(
     bytes[4] = if flags & libc::IFF_LOOPBACK as u32 != 0 {
         24 // IFT_LOOP
     } else {
-        match packet.map(|p| p.sll_hatype) {
-            Some(libc::ARPHRD_ETHER) => 6,
-            Some(libc::ARPHRD_PPP) => 23,
-            Some(libc::ARPHRD_SLIP) => 28,
-            _ => 1, // IFT_OTHER; ARPHRD values are not IFT values.
-        }
+        link.and_then(|l| l.kind).unwrap_or(1) // IFT_OTHER
     };
     bytes[5] = name.len() as u8;
     bytes[6] = hardware.len() as u8;
     bytes[8..8 + name.len()].copy_from_slice(name);
     bytes[8 + name.len()..8 + name.len() + hardware.len()].copy_from_slice(hardware);
     (bytes, len)
+}
+
+/// The host's peer or broadcast address, which Linux keeps in a union named
+/// `ifa_ifu` and the BSDs spell `ifa_dstaddr`.
+fn peer(host: &libc::ifaddrs) -> *mut libc::sockaddr {
+    #[cfg(target_os = "linux")]
+    return host.ifa_ifu.cast();
+    #[cfg(not(target_os = "linux"))]
+    return host.ifa_dstaddr;
 }
 
 /// One entry, as a single allocation: the node, its name, then up to three
@@ -85,16 +166,15 @@ unsafe fn node_from_host(host: &libc::ifaddrs) -> Option<*mut IfAddrs> {
     };
     let mut converted = [None, None, None];
     // Linux link records can have no sockaddr at all (no IFLA_ADDRESS).
-    let link =
-        host.ifa_addr.is_null() || unsafe { (*host.ifa_addr).sa_family as i32 == libc::AF_PACKET };
-    if link {
-        let packet = if host.ifa_addr.is_null() {
-            None
-        } else {
-            // SAFETY: AF_PACKET addresses have sockaddr_ll layout.
-            Some(unsafe { &*host.ifa_addr.cast::<libc::sockaddr_ll>() })
+    // SAFETY: the host's own address, which it says is live.
+    let is_link = host.ifa_addr.is_null() || unsafe { is_link(host.ifa_addr.cast()) };
+    if is_link {
+        let link = match host.ifa_addr.is_null() {
+            true => None,
+            // SAFETY: `is_link` just said this is one.
+            false => Some(unsafe { link_from_host(host.ifa_addr.cast()) }),
         };
-        let index = packet.map_or_else(
+        let index = link.as_ref().map_or_else(
             || {
                 if host.ifa_name.is_null() {
                     0
@@ -103,15 +183,14 @@ unsafe fn node_from_host(host: &libc::ifaddrs) -> Option<*mut IfAddrs> {
                     unsafe { libc::if_nametoindex(host.ifa_name) }
                 }
             },
-            |p| p.sll_ifindex as u32,
+            |l| l.index,
         );
-        converted[0] = Some(link_address(name, index, host.ifa_flags, packet));
+        converted[0] = Some(link_address(name, index, host.ifa_flags, link.as_ref()));
         // Darwin link records have neither an IP mask nor a broadcast address.
     } else {
-        for (slot, from) in
-            converted
-                .iter_mut()
-                .zip([host.ifa_addr, host.ifa_netmask, host.ifa_ifu])
+        for (slot, from) in converted
+            .iter_mut()
+            .zip([host.ifa_addr, host.ifa_netmask, peer(host)])
         {
             if from.is_null() {
                 continue;
@@ -279,7 +358,20 @@ mod tests {
         }
     }
 
+    /// Sets the peer address, which the two hosts spell differently.
+    fn set_peer(host: &mut libc::ifaddrs, to: *mut libc::sockaddr) {
+        #[cfg(target_os = "linux")]
+        {
+            host.ifa_ifu = to.cast();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            host.ifa_dstaddr = to;
+        }
+    }
+
     #[test]
+    #[cfg(target_os = "linux")]
     fn packet_address_preserves_name_index_and_mac() {
         let mut packet: libc::sockaddr_ll = unsafe { core::mem::zeroed() };
         packet.sll_family = libc::AF_PACKET as _;
@@ -290,7 +382,8 @@ mod tests {
         let mut host: libc::ifaddrs = unsafe { core::mem::zeroed() };
         host.ifa_name = c"longdevice12345".as_ptr().cast_mut();
         host.ifa_addr = (&mut packet as *mut libc::sockaddr_ll).cast();
-        host.ifa_ifu = host.ifa_addr;
+        let addr = host.ifa_addr;
+        set_peer(&mut host, addr);
         unsafe {
             let node = node_from_host(&host).unwrap();
             let bytes = core::slice::from_raw_parts((*node).addr.cast::<u8>(), 29);
@@ -306,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn linux_private_flags_do_not_become_darwin_link_flags() {
         let flags = libc::IFF_UP
             | libc::IFF_MULTICAST
@@ -327,7 +421,8 @@ mod tests {
         host.ifa_name = c"tun0".as_ptr().cast_mut();
         host.ifa_addr = (&mut ip as *mut libc::sockaddr_in6).cast();
         host.ifa_netmask = host.ifa_addr;
-        host.ifa_ifu = host.ifa_addr;
+        let addr = host.ifa_addr;
+        set_peer(&mut host, addr);
         host.ifa_flags = libc::IFF_POINTOPOINT as u32;
         unsafe {
             let node = node_from_host(&host).unwrap();

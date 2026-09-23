@@ -1,4 +1,6 @@
-#[cfg(target_os = "macos")]
+/// Darwin's own request numbers, which the BSDs share: direction, size, group
+/// and number are encoded the same way and the tty group is the same group.
+#[cfg(not(target_os = "linux"))]
 pub fn request(request: u64) -> Option<libc::c_ulong> {
     Some(request as libc::c_ulong)
 }
@@ -8,7 +10,7 @@ pub unsafe extern "C" fn ioctl(fd: libc::c_int, request: u64, arg: usize) -> lib
     unsafe { libc::ioctl(fd, request as libc::c_ulong, arg) }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn request(request: u64) -> Option<libc::Ioctl> {
     // BSD encodes direction, size, group, and number while Linux's tty ioctls
     // use an unrelated numbering.  These payloads have identical layouts; a

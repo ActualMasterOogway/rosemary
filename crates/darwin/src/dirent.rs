@@ -96,8 +96,13 @@ fn entries<T>(with: impl FnOnce(&mut HashMap<usize, Box<Dirent>>) -> T) -> T {
 unsafe fn convert(host: *const libc::dirent) -> Dirent {
     // SAFETY: the caller's guarantee.
     let host = unsafe { &*host };
+    // FreeBSD spells the inode number `d_fileno`; Darwin and Linux spell it `d_ino`.
+    #[cfg(target_os = "freebsd")]
+    let ino = host.d_fileno;
+    #[cfg(not(target_os = "freebsd"))]
+    let ino = host.d_ino;
     let mut out = Dirent {
-        ino: host.d_ino,
+        ino,
         seekoff: host.d_off as u64,
         kind: host.d_type,
         ..Dirent::default()

@@ -143,6 +143,7 @@ pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
 /// # Safety
 ///
 /// Each handler is null or a function this process can call.
+#[cfg_attr(not(target_env = "gnu"), allow(unused_variables))]
 pub unsafe extern "C" fn pthread_atfork(
     prepare: *const (),
     parent: *const (),

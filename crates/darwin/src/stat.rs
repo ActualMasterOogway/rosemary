@@ -443,6 +443,20 @@ pub struct Statfs {
 /// # Safety
 ///
 /// `out` is null or a writable Darwin `struct statfs`.
+/// A count this host reports signed, as Darwin's unsigned one.
+///
+/// FreeBSD's `f_bavail` and `f_ffree` are signed, because the root reserve can
+/// push them below zero; Darwin has no way to say that, so it says none left.
+#[cfg(target_os = "freebsd")]
+fn unsigned(count: i64) -> u64 {
+    count.max(0) as u64
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn unsigned(count: u64) -> u64 {
+    count
+}
+
 unsafe fn fill_statfs(host: &libc::statfs, out: *mut Statfs) {
     if out.is_null() {
         return;
@@ -452,9 +466,9 @@ unsafe fn fill_statfs(host: &libc::statfs, out: *mut Statfs) {
         iosize: host.f_bsize as i32,
         blocks: host.f_blocks,
         bfree: host.f_bfree,
-        bavail: host.f_bavail,
+        bavail: unsigned(host.f_bavail),
         files: host.f_files,
-        ffree: host.f_ffree,
+        ffree: unsigned(host.f_ffree),
         // Two 32-bit halves on both sides, and opaque on both: it is only ever
         // compared against another `f_fsid`.
         fsid: unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(host.f_fsid) },

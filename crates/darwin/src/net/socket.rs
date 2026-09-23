@@ -669,7 +669,8 @@ unsafe fn sendfile_iovecs(
 /// struct sf_hdtr *hdtr, int flags)`
 ///
 /// Linux's function has four arguments in a different order and returns the
-/// byte count directly. Darwin returns zero or minus one and makes `len` a
+/// byte count directly; FreeBSD's has seven and reports the count through an
+/// out-parameter of its own. Darwin returns zero or minus one and makes `len` a
 /// value-result parameter. Its count includes headers and trailers, and a
 /// zero input count means through end-of-file.
 ///
@@ -743,14 +744,43 @@ unsafe extern "C" fn sendfile(
             Some(left) => left.min(0x7fff_f000) as usize,
             None => 0x7fff_f000,
         };
+        #[cfg(not(target_os = "freebsd"))]
         // SAFETY: a local offset slot; the kernel validates both descriptors.
         let wrote = unsafe { libc::sendfile(socket, file, &raw mut host_offset, count) };
+        #[cfg(target_os = "freebsd")]
+        // SAFETY: a local count slot; the kernel validates both descriptors.
+        let wrote = unsafe {
+            // FreeBSD takes the descriptors the other way round, takes the
+            // offset by value, and reports the count through `sbytes` rather
+            // than as its result - which is zero on success. A send that stops
+            // short still moved the bytes it reports, so those are kept and the
+            // failure is left for the next pass to run into.
+            let mut moved: libc::off_t = 0;
+            let rc = libc::sendfile(
+                file,
+                socket,
+                host_offset,
+                count,
+                core::ptr::null_mut(),
+                &raw mut moved,
+                0,
+            );
+            match rc < 0 && moved == 0 {
+                true => -1,
+                false => moved as isize,
+            }
+        };
         if wrote < 0 {
             unsafe { len.write_unaligned(sent) };
             return -1;
         }
         if wrote == 0 {
             break;
+        }
+        // The offset slot Linux advances is a value argument on FreeBSD.
+        #[cfg(target_os = "freebsd")]
+        {
+            host_offset += wrote as libc::off_t;
         }
         sent = sent.saturating_add(wrote as i64);
         if let Some(left) = &mut file_left {

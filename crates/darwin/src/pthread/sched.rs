@@ -21,8 +21,6 @@ impl DarwinTranslation<libc::sched_param> for SchedParam {
     }
 }
 
-/// https://github.com/apple/darwin-libpthread/blob/2b46cbcc56ba33791296cd9714b2c90dae185ec7/src/pthread.c#L1614
-///
 /// On some operating systems, particularly Windows and some BSDs, inputting a NULL `policy` or `param` is considered invalid and not optional.
 /// Additionally, SCHED_ constants are different between systems.
 pub unsafe extern "C" fn pthread_getschedparam(

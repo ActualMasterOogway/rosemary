@@ -119,11 +119,15 @@ const NUMBERS: &[(i32, i32)] = &[
     (92, libc::EILSEQ),
     (94, libc::EBADMSG),
     (95, libc::EMULTIHOP),
+    #[cfg(not(target_os = "freebsd"))]
     (96, libc::ENODATA),
     (97, libc::ENOLINK),
+    #[cfg(not(target_os = "freebsd"))]
     (98, libc::ENOSR),
+    #[cfg(not(target_os = "freebsd"))]
     (99, libc::ENOSTR),
     (100, libc::EPROTO),
+    #[cfg(not(target_os = "freebsd"))]
     (101, libc::ETIME),
     // The second host 95, listed after `ENOTSUP` so it never wins `from_host`.
     (102, libc::EOPNOTSUPP),
@@ -178,18 +182,18 @@ pub fn to_host(darwin: i32) -> i32 {
 
 /// This thread's `errno` slot.
 ///
-/// The one accessor the rest of this project should use. `libc::__error` exists only
-/// on Darwin and `libc::__errno_location` only on Linux, so a direct call to either
-/// is a portability bug waiting for the other host.
+/// The one accessor the rest of this project should use. `libc::__errno_location`
+/// exists only on Linux and `libc::__error` only on the BSDs, so a direct call to
+/// either is a portability bug waiting for the other host.
 #[inline(always)]
 pub fn location() -> *mut libc::c_int {
-    // SAFETY: both spellings return this thread's own slot, live for as long as the
-    // thread is, and neither takes an argument.
-    #[cfg(target_os = "macos")]
+    // SAFETY: every spelling returns this thread's own slot, live for as long as the
+    // thread is, and none takes an argument.
+    #[cfg(not(target_os = "linux"))]
     unsafe {
         libc::__error()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::__errno_location()
     }
