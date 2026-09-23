@@ -50,19 +50,33 @@ static GUEST_EXECUTABLE: std::sync::Mutex<String> = std::sync::Mutex::new(String
 /// same symlinks for the same reason.
 pub fn set_executable_path(path: &std::path::Path) {
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // What the guest is told, so the *guest* spelling: a program outside the
+    // prefix is named through the `/Volumes/Host` mount rather than by a host
+    // path it would go on to compare and store. See `docs/prefixes.md`.
+    let spelled = prefix::ns::to_guest(&resolved).unwrap_or(resolved);
     *GUEST_EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()) =
-        resolved.to_string_lossy().into_owned();
+        spelled.to_string_lossy().into_owned();
 }
 
-/// The address of the host's `environ` variable, or `None` if it has none.
+/// The address of the *guest's* `environ` variable.
 ///
-/// `getenv`/`setenv`/`putenv` are passed through to the host, so a guest reading
-/// `environ` - or calling `_NSGetEnviron` to get at it, which is how Darwin spells
-/// taking its address - must be looking at the same block those calls edit.
+/// `getenv`/`setenv`/`putenv` work on a block of the guest's own - see
+/// `darwin::env` for why - so a guest reading `environ`, or calling
+/// `_NSGetEnviron` to get at it, which is how Darwin spells taking its address,
+/// must be looking at that same block rather than at this process's.
 ///
-/// Darwin does not export `environ` from a dylib at all, only the accessor; every
-/// other host exports the variable and has no accessor. Try both.
-fn host_environ() -> Option<u64> {
+/// Darwin does not export `environ` from a dylib at all, only the accessor;
+/// every other host exports the variable and has no accessor. Both are
+/// published, from one address.
+#[cfg(not(target_os = "macos"))]
+fn guest_environ() -> Option<u64> {
+    Some(darwin::env::environ_slot() as usize as u64)
+}
+
+/// On macOS the guest runs against a real Darwin root and the host's own block
+/// is the right one, exactly as before.
+#[cfg(target_os = "macos")]
+fn guest_environ() -> Option<u64> {
     if let Some(f) = crate::host::symbol("_NSGetEnviron") {
         // SAFETY: `_NSGetEnviron` is `char ***(void)`, a pure accessor for a
         // libSystem global, so its result is valid for the life of the process.
@@ -76,7 +90,7 @@ fn host_environ() -> Option<u64> {
     crate::host::symbol("environ")
 }
 
-/// Whatever [`host_environ`] found, resolved once at provider time.
+/// Whatever [`guest_environ`] found, resolved once at provider time.
 static ENVIRON: AtomicPtr<*mut *mut c_char> = AtomicPtr::new(std::ptr::null_mut());
 
 /// A stable address inside *this* binary, for glibc's `dso_symbol` argument.
@@ -198,7 +212,7 @@ pub fn provider() -> SyntheticDylib {
     }
     lib.define_fn("__NSGetArgc", ns_get_argc as *const ());
     lib.define_fn("__NSGetArgv", ns_get_argv as *const ());
-    if let Some(addr) = host_environ() {
+    if let Some(addr) = guest_environ() {
         ENVIRON.store(addr as usize as *mut *mut *mut c_char, Ordering::Relaxed);
         lib.define_data("_environ", addr);
         lib.define_fn("__NSGetEnviron", ns_get_environ as *const ());

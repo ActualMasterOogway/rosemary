@@ -9,6 +9,7 @@ license.workspace = true
 machish.workspace = true
 exports = { workspace = true, features = ["machish"] }
 darwin.workspace = true
+prefix.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
 iokit.workspace = true

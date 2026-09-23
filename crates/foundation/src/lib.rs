@@ -100,28 +100,19 @@ exports::group! {
     timer::cf,
 }
 
-/// This user's home directory.
+/// This user's home directory, as the guest spells it.
 ///
-/// `HOME` first, as every Unix does, and the password database only if it is
-/// unset - which is the order a guest's own `getenv("HOME")` would see, so the
-/// two agree about where a save file goes.
+/// `/Users/<name>` under a prefix, and this host's `$HOME` without one. This is
+/// the answer `NSHomeDirectory`, `~` expansion and `NSSearchPath...` give, and
+/// it is a *guest* path: anything that means to open a file under it wants
+/// [`host_home_directory`] instead. See `docs/prefixes.md`.
 pub fn home_directory() -> String {
-    if let Some(home) = std::env::var_os("HOME")
-        && !home.is_empty()
-    {
-        return home.to_string_lossy().into_owned();
-    }
-    // SAFETY: `getpwuid` returns a pointer into the library's own storage, valid
-    // until the next call to it - which this makes before returning.
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() || (*pw).pw_dir.is_null() {
-            return "/".to_string();
-        }
-        std::ffi::CStr::from_ptr((*pw).pw_dir)
-            .to_string_lossy()
-            .into_owned()
-    }
+    prefix::ns::home().to_string()
+}
+
+/// The same directory as a host path, for opening files under it.
+pub fn host_home_directory() -> std::path::PathBuf {
+    prefix::ns::host_path(&home_directory())
 }
 
 /// An integer as an autoreleased `NSNumber`.

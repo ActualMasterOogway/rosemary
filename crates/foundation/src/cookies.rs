@@ -70,7 +70,7 @@ fn store_path() -> PathBuf {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
         let identifier = crate::bundle::main().and_then(|bundle| bundle.identifier());
-        PathBuf::from(crate::home_directory())
+        crate::host_home_directory()
             .join("Library/Cookies")
             .join(store_file_name(identifier))
     })

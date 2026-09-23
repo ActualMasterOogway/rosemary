@@ -342,7 +342,10 @@ unsafe extern "C" fn init_with_contents_of_file(receiver: Id, sel: Sel, path: Id
     let Ok(path) = String::from_utf8(path) else {
         return std::ptr::null_mut();
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    // The guest named it, so it is read at this host's spelling. Without this a
+    // prefixed guest gets nil for a file that is plainly there, and a program
+    // that does not expect nil from its own splash screen crashes on it.
+    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
         return std::ptr::null_mut();
     };
     let data = corefoundation::collections::new_data(bytes);

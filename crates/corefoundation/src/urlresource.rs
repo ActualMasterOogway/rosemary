@@ -225,7 +225,10 @@ fn property(path: &std::path::Path, key: &str) -> Option<CFTypeRef> {
 unsafe fn path_of(url: CFTypeRef) -> Option<std::path::PathBuf> {
     // SAFETY: the caller's obligation.
     let path = unsafe { crate::url::as_url(url) }?.file_path()?;
-    Some(std::path::PathBuf::from(path))
+    // The guest named it, so every question below is put at this host's
+    // spelling. The last component is the same either way, which is what the
+    // name properties answer with.
+    Some(prefix::ns::host_path(&path))
 }
 
 /// The text of a `CFStringRef`.

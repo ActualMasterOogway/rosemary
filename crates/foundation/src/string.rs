@@ -214,7 +214,8 @@ unsafe extern "C" fn string_with_contents_of_url(
         }
         return std::ptr::null_mut();
     };
-    let bytes = match std::fs::read(&path) {
+    // The guest named it by URL, so it is read at this host's spelling.
+    let bytes = match std::fs::read(prefix::ns::host_path(&path)) {
         Ok(bytes) => bytes,
         Err(why) => {
             if !error.is_null() {

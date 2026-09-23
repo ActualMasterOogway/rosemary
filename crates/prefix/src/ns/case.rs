@@ -13,9 +13,8 @@
 //! entry ambiguously is not resolved at all - the real filesystem would have to
 //! answer, and it cannot.
 //!
-//! Not needed on macOS, where the kernel already does this.
-
-#![cfg(not(target_os = "macos"))]
+//! Not needed on macOS, where the kernel already does this - so the
+//! namespace never asks for it there. See [`crate::ns`].
 
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
@@ -33,7 +32,13 @@ use std::path::{Path, PathBuf};
 /// to tell the end of a directory from an error, so a walk that finds nothing
 /// turns the caller's `ENOENT` into a failure with `errno == 0`. Boost reads
 /// that as "not a not-found error" and throws `status: Success`.
-pub fn insensitive(path: &CStr) -> Option<CString> {
+pub(crate) fn insensitive(path: &CStr) -> Option<CString> {
+    // macOS's own kernel folds, so the walk would only ever confirm what the
+    // caller already asked. Refused at run time rather than compiled out, so
+    // that one code path serves every host.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let _errno = crate::errno::Held::now();
     let text = path.to_str().ok()?;
     if text.is_empty() {
@@ -60,10 +65,7 @@ pub fn insensitive(path: &CStr) -> Option<CString> {
                     at = exact;
                     continue;
                 }
-                at = match sole_match(&at, name.to_str()?) {
-                    Some(found) => found,
-                    None => return None,
-                };
+                at = sole_match(&at, name.to_str()?)?;
             }
         }
     }
@@ -77,7 +79,7 @@ pub fn insensitive(path: &CStr) -> Option<CString> {
 /// `/proc/self/fd` preserves `openat`'s starting point without changing the
 /// process working directory. If procfs is unavailable, the ordinary exact
 /// `openat` attempt has already happened and this fallback simply finds none.
-pub fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString> {
+pub(crate) fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString> {
     if path.to_bytes().starts_with(b"/") || dirfd == libc::AT_FDCWD {
         return insensitive(path);
     }
@@ -111,7 +113,9 @@ fn sole_match(directory: &Path, name: &str) -> Option<PathBuf> {
     found
 }
 
-#[cfg(test)]
+// The walk answers `None` unconditionally on macOS, so there is nothing here
+// to assert about.
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 

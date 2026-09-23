@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{build_native, build_native_with, driver, run_guest_with, run_native};
+use common::{build_native, build_native_with, run_guest_with, run_native};
 
 /// Run `path` through the driver, letting it choose a backend.
 fn run(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
@@ -186,7 +186,7 @@ fn an_x86_64_binary_takes_the_backend_the_host_makes_available() {
     // not told. A region entry is the thing only the emulated backend can
     // report, because only the emulated backend translates a region to enter -
     // the image map is not that thing, since both backends print one.
-    let out = std::process::Command::new(driver())
+    let out = common::driver_command()
         .args(["run", &path])
         .env("ROSETTA3_STATS", "1")
         .output()
@@ -258,7 +258,7 @@ fn an_arm64e_slice_does_not_claim_the_native_backend() {
     assert!(err.contains("arm64e"), "{err}");
 
     // And with nothing forced it runs, which is the part that would regress.
-    let out = std::process::Command::new(driver())
+    let out = common::driver_command()
         .args(["run", "/bin/ls", "/bin"])
         .output()
         .expect("running the driver");

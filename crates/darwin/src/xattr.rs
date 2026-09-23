@@ -382,8 +382,12 @@ unsafe extern "C" fn getxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's path and buffer.
-    unsafe { host::get(path, &host, value, size, options & NOFOLLOW != 0) }
+    // SAFETY: the caller's guarantee.
+    let Some(path) = (unsafe { host_file(path) }) else {
+        return -1;
+    };
+    // SAFETY: a translated path and the caller's buffer.
+    unsafe { host::get(path.as_ptr(), &host, value, size, options & NOFOLLOW != 0) }
 }
 
 /// `int setxattr(const char *, const char *, const void *, size_t, u_int32_t, int)`
@@ -408,10 +412,14 @@ unsafe extern "C" fn setxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's path and buffer.
+    // SAFETY: the caller's guarantee.
+    let Some(path) = (unsafe { host_file(path) }) else {
+        return -1;
+    };
+    // SAFETY: a translated path and the caller's buffer.
     unsafe {
         host::set(
-            path,
+            path.as_ptr(),
             &host,
             value,
             size,
@@ -433,8 +441,12 @@ unsafe extern "C" fn removexattr(path: *const c_char, name: *const c_char, optio
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's path.
-    unsafe { host::remove(path, &host, options & NOFOLLOW != 0) }
+    // SAFETY: the caller's guarantee.
+    let Some(path) = (unsafe { host_file(path) }) else {
+        return -1;
+    };
+    // SAFETY: a translated path.
+    unsafe { host::remove(path.as_ptr(), &host, options & NOFOLLOW != 0) }
 }
 
 /// `ssize_t listxattr(const char *, char *, size_t, int)`
@@ -453,8 +465,12 @@ unsafe extern "C" fn listxattr(
     size: usize,
     options: i32,
 ) -> isize {
-    // SAFETY: the caller's path.
-    let Some(names) = (unsafe { host::list(path, options & NOFOLLOW != 0) }) else {
+    // SAFETY: the caller's guarantee.
+    let Some(path) = (unsafe { host_file(path) }) else {
+        return -1;
+    };
+    // SAFETY: a translated path.
+    let Some(names) = (unsafe { host::list(path.as_ptr(), options & NOFOLLOW != 0) }) else {
         return -1;
     };
     let mut out: Vec<u8> = Vec::new();
@@ -486,6 +502,24 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
     }
     // SAFETY: the caller's guarantee.
     host::name(unsafe { CStr::from_ptr(name) })
+}
+
+/// The host path the guest's `path` names.
+///
+/// No case fold: these calls are about a file the guest has already opened or
+/// listed, so a spelling that does not exist is the guest's answer, not a
+/// lookup to retry. See [`crate::fs`] for the translation itself.
+///
+/// # Safety
+///
+/// `path` is null or a NUL-terminated string.
+unsafe fn host_file(path: *const c_char) -> Option<CString> {
+    if path.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return None;
+    }
+    // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
+    Some(prefix::ns::to_host(unsafe { CStr::from_ptr(path) }).into_owned())
 }
 
 exports::exports! {

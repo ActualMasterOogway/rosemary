@@ -77,7 +77,10 @@ fn lldb_at_the_fault(settings: &[&str], commands: &[&str]) -> Option<String> {
     }
     command
         .args(["--", driver(), "run", "--emulated", &path])
-        .env("ROSETTA3_LLDB", "1");
+        .env("ROSETTA3_LLDB", "1")
+        // lldb passes its environment to the driver it launches, so the
+        // isolation has to be set here - see `common::test_prefix`.
+        .env("ROSETTA3_PREFIX", common::test_prefix());
 
     let out = command.output().ok()?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -307,7 +310,7 @@ fn a_debugger_that_arrives_late_still_sees_everything() {
     // works: on attach LLDB walks from `first_entry` and registers the lot. A
     // version that only ever published the newest translation would pass every
     // other test in this file and fail this one.
-    let mut guest = Command::new(driver())
+    let mut guest = common::driver_command()
         .args(["run", "--emulated", &path])
         .env("ROSETTA3_LLDB", "1")
         .stdout(Stdio::piped())

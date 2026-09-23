@@ -66,7 +66,7 @@ fn items() -> std::sync::MutexGuard<'static, BTreeMap<Identity, Vec<u8>>> {
 }
 
 fn store_path() -> PathBuf {
-    PathBuf::from(foundation::home_directory()).join("Library/Keychains/rosetta3-items.tsv")
+    foundation::host_home_directory().join("Library/Keychains/rosetta3-items.tsv")
 }
 
 /// Tab-separated, with the value hex-encoded.

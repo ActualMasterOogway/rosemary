@@ -9,7 +9,6 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use objc::object::Id;
@@ -66,7 +65,7 @@ fn start() -> Result<Engine, String> {
         .and_then(|bundle| bundle.identifier())
         .unwrap_or("rosetta3")
         .to_string();
-    let home = PathBuf::from(foundation::home_directory());
+    let home = foundation::host_home_directory();
     let data = home.join("Library/WebKit").join(&identifier);
     let cache = home.join("Library/Caches").join(&identifier).join("WebKit");
     let data = gtk::c_string(&data.to_string_lossy());

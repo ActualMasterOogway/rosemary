@@ -30,6 +30,20 @@
 /// guest code, and entering it needs the guest's thread pointer on a host that is
 /// not Darwin. See [`crate::callback`], which is where they are now.
 ///
+/// `chdir`, `chown`, `freopen`, `getcwd`, `link`, `remove`, `rename`, `rmdir`,
+/// `symlink`, `truncate` and `unlink` came off for the same reason as `access`
+/// and one more. A guest names `/usr/lib` or `/Users/user/Library`, and this
+/// host has neither: the path has to be translated into the prefix before the
+/// host is asked, and `getcwd` has to be translated back out of it, or a guest
+/// is handed a host path it will store and compare. See [`crate::fs`], and
+/// `docs/prefixes.md` for what the translation is.
+///
+/// `getenv`, `setenv`, `putenv` and `unsetenv` came off because the guest's
+/// environment is not this process's. A guest reads `HOME` and builds a path
+/// under it, so the variable has to answer the way the filesystem does - see
+/// [`crate::env`], which gives the guest a block of its own and leaves the host
+/// libraries reading the real one.
+///
 /// `write` came off for a subtler reason: the call is identical and what it does
 /// to a *socket* is not. `SO_NOSIGPIPE` is a property of the descriptor on
 /// Darwin and of the call here, so a write to a socket the guest asked not to be
@@ -112,13 +126,10 @@ pub const CLAIMED: &[&str] = &[
     // differ and `rosetta3::shims::openat` bridges them.
     "_exit",
     "alarm",
-    "chdir",
-    "chown",
     // The exec family is *not* here: the program being launched is usually another
     // Mach-O, which this host's kernel cannot execute. See `crate::spawn`.
     "fsync",
     "ftruncate",
-    "getcwd",
     "getegid",
     "geteuid",
     "getgid",
@@ -126,17 +137,12 @@ pub const CLAIMED: &[&str] = &[
     "getppid",
     "getuid",
     "isatty",
-    "link",
     "lseek",
     "pipe",
     "pread",
     "pwrite",
     "read",
-    "rmdir",
-    "symlink",
     "sync",
-    "truncate",
-    "unlink",
     // <stdio.h>, minus the `FILE *` globals, which are named differently and live in
     // [`crate::stdio`]. `FILE` itself never crosses: the guest receives a pointer and
     // hands it back.
@@ -152,7 +158,6 @@ pub const CLAIMED: &[&str] = &[
     "fputc",
     "fputs",
     "fread",
-    "freopen",
     "fseek",
     "fseeko",
     "ftell",
@@ -162,8 +167,6 @@ pub const CLAIMED: &[&str] = &[
     "gets",
     "putchar",
     "puts",
-    "remove",
-    "rename",
     "rewind",
     "setbuf",
     "setvbuf",
@@ -208,10 +211,6 @@ pub const CLAIMED: &[&str] = &[
     // symbol for it, so there is nothing to pass through to. `rosetta3`'s
     // `shims::atexit` registers the handler through `__cxa_atexit` instead,
     // which it would have to do anyway - the handler is a guest address.
-    "getenv",
-    "putenv",
-    "setenv",
-    "unsetenv",
     "exit",
     // <sys/mman.h>, the half of it that takes no flag word. `PROT_READ`,
     // `PROT_WRITE` and `PROT_EXEC` are the same three bits on both sides, an

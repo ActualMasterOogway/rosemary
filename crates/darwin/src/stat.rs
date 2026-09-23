@@ -101,19 +101,27 @@ fn from_host(host: &libc::stat) -> Stat {
     }
 }
 
-/// Run `ask` on `path`, and again on the case-insensitive reading of it if the
-/// first attempt says the file is not there.
+/// Run `ask` on the host path `path` names, and again on the case-insensitive
+/// reading of it if the first attempt says the file is not there.
 ///
-/// Only on `ENOENT`: a path that exists and cannot be read is a permission
-/// problem, and looking for a differently-cased neighbour would answer about a
-/// different file.
-fn with_fallback<T>(path: *const c_char, mut ask: impl FnMut(*const c_char) -> (T, bool)) -> T {
-    let (result, ok) = ask(path);
-    if ok || path.is_null() || crate::errno::get() != libc::ENOENT {
-        return result;
+/// The mapping is unconditional and costs no syscall. The fold is tried only on
+/// `ENOENT`: a path that exists and cannot be read is a permission problem, and
+/// looking for a differently-cased neighbour would answer about a different
+/// file.
+pub(crate) fn with_fallback<T>(
+    path: *const c_char,
+    mut ask: impl FnMut(*const c_char) -> (T, bool),
+) -> T {
+    if path.is_null() {
+        return ask(path).0;
     }
     // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
-    let Some(found) = crate::path::insensitive(unsafe { CStr::from_ptr(path) }) else {
+    let host = prefix::ns::to_host(unsafe { CStr::from_ptr(path) });
+    let (result, ok) = ask(host.as_ptr());
+    if ok || crate::errno::get() != libc::ENOENT {
+        return result;
+    }
+    let Some(found) = prefix::ns::fold(&host) else {
         return result;
     };
     ask(found.as_ptr()).0
@@ -201,7 +209,7 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
 /// the room there is - and Linux's `PATH_MAX` is 4096. Resolving into the caller's
 /// buffer directly would let a path longer than a guest expects overrun it, which
 /// is why [`realpath`] resolves into its own and copies.
-const DARWIN_PATH_MAX: usize = 1024;
+pub(crate) const DARWIN_PATH_MAX: usize = 1024;
 
 /// `char *realpath(const char *, char *resolved)`, with the same fallback.
 ///
@@ -218,7 +226,15 @@ const DARWIN_PATH_MAX: usize = 1024;
 /// The second is the buffer. Darwin's `PATH_MAX` is a quarter of this host's, so
 /// the result is measured against [`DARWIN_PATH_MAX`] and refused with
 /// `ENAMETOOLONG` if it does not fit - which is what Darwin itself answers, and
-/// the alternative is writing past the end of the caller's array.
+/// the alternative is writing past the end of the caller's array. The length
+/// that matters is the *guest* spelling's, which is why the path is translated
+/// back before it is measured.
+///
+/// The third is that a resolved path is a host path, and a guest that is given
+/// one will store it, compare it and be wrong about it later. A resolution that
+/// lands outside every mount has no guest spelling and is reported as `ENOENT`,
+/// which is also what a real Darwin kernel would say about a path that is not
+/// in its filesystem.
 ///
 /// # Safety
 ///
@@ -243,6 +259,10 @@ pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) ->
         }
     });
     let Some(found) = found else {
+        return std::ptr::null_mut();
+    };
+    let Some(found) = guest_path(&found) else {
+        crate::errno::set(libc::ENOENT);
         return std::ptr::null_mut();
     };
     let bytes = found.as_bytes_with_nul();
@@ -281,11 +301,52 @@ pub unsafe extern "C" fn readlink(
     buffer: *mut c_char,
     size: libc::size_t,
 ) -> libc::ssize_t {
-    with_fallback(path, |path| {
-        // SAFETY: the caller's obligation.
-        let n = unsafe { libc::readlink(path, buffer, size) };
+    // Read into this crate's own buffer rather than the caller's: an absolute
+    // target is a host path, and the guest spelling of it is not necessarily
+    // the same length.
+    let mut target = [0u8; libc::PATH_MAX as usize];
+    let read = with_fallback(path, |path| {
+        // SAFETY: the caller's obligation for `path`; `target` is a live local
+        // of the host's `PATH_MAX`.
+        let n = unsafe { libc::readlink(path, target.as_mut_ptr().cast::<c_char>(), target.len()) };
         (n, n >= 0)
-    })
+    });
+    if read < 0 {
+        return read;
+    }
+    let target = &target[..read as usize];
+    // A relative target is resolved against the link's own directory, which is
+    // already inside the namespace, so it is its own guest spelling.
+    let spelled;
+    let target = match target.first() {
+        Some(b'/') => {
+            let Some(guest) = std::str::from_utf8(target)
+                .ok()
+                .and_then(|host| prefix::ns::to_guest(std::path::Path::new(host)))
+            else {
+                crate::errno::set(libc::ENOENT);
+                return -1;
+            };
+            spelled = guest.into_os_string().into_encoded_bytes();
+            spelled.as_slice()
+        }
+        _ => target,
+    };
+    // Darwin truncates rather than failing, and answers with what it wrote.
+    let copied = target.len().min(size);
+    // SAFETY: the caller's buffer is writable for `size` bytes and `copied` is
+    // no larger; the two do not overlap, `target` being this crate's own.
+    unsafe { std::ptr::copy_nonoverlapping(target.as_ptr().cast::<c_char>(), buffer, copied) };
+    copied as libc::ssize_t
+}
+
+/// The guest spelling of a host path this crate is about to hand back.
+///
+/// `None` for one no mount reaches, which the caller reports as `ENOENT`.
+pub(crate) fn guest_path(host: &CStr) -> Option<std::ffi::CString> {
+    let host = host.to_str().ok()?;
+    let guest = prefix::ns::to_guest(std::path::Path::new(host))?;
+    std::ffi::CString::new(guest.into_os_string().into_encoded_bytes()).ok()
 }
 
 /// `FILE *fopen(const char *, const char *)`, with the same fallback.
@@ -350,12 +411,16 @@ pub unsafe extern "C" fn openat(
         let fd = unsafe { libc::openat(dirfd, path, host_flags, mode) };
         (fd, fd >= 0)
     };
-    let (result, ok) = ask(path);
-    if ok || path.is_null() || crate::errno::get() != libc::ENOENT {
-        return result;
+    if path.is_null() {
+        return ask(path).0;
     }
     // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
-    let Some(found) = crate::path::insensitive_at(dirfd, unsafe { CStr::from_ptr(path) }) else {
+    let host = prefix::ns::to_host_at(dirfd, unsafe { CStr::from_ptr(path) });
+    let (result, ok) = ask(host.as_ptr());
+    if ok || crate::errno::get() != libc::ENOENT {
+        return result;
+    }
+    let Some(found) = prefix::ns::fold_at(dirfd, &host) else {
         return result;
     };
     ask(found.as_ptr()).0

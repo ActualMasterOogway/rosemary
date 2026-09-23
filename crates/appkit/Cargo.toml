@@ -10,6 +10,7 @@ exports.workspace = true
 darwin.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
+prefix.workspace = true
 foundation.workspace = true
 sdl3.workspace = true
 gamecontroller.workspace = true

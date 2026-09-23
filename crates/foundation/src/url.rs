@@ -349,7 +349,10 @@ fn resource_value(path: &str, key: &str) -> Option<corefoundation::base::CFTypeR
     let number = |value: i64| {
         corefoundation::collections::new_number(corefoundation::collections::Number::Integer(value))
     };
-    let metadata = std::fs::symlink_metadata(path);
+    // `path` stays the guest's spelling - `NSURLPathKey` and the name below
+    // answer with it - and only the question put to the filesystem is
+    // translated.
+    let metadata = std::fs::symlink_metadata(prefix::ns::host_path(path));
     Some(match key {
         "NSURLNameKey" | "NSURLLocalizedNameKey" => {
             let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");

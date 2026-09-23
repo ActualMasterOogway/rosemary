@@ -78,13 +78,15 @@ fn pathconf_name(name: i32) -> Option<i32> {
 }
 #[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn pathconf(path: *const libc::c_char, name: i32) -> i64 {
-    match pathconf_name(name) {
-        Some(name) => unsafe { libc::pathconf(path, name) as i64 },
-        None => {
-            crate::errno::set(libc::EINVAL);
-            -1
-        }
-    }
+    let Some(name) = pathconf_name(name) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+    // The path is the guest's; see [`crate::fs`] for why it is translated.
+    crate::stat::with_fallback(path, |path| {
+        let value = unsafe { libc::pathconf(path, name) as i64 };
+        (value, value >= 0)
+    })
 }
 #[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {

@@ -1,14 +1,13 @@
 mod common;
 
 use std::path::Path;
-use std::process::Command;
 
 use common::{run_guest, run_guest_with};
 
 #[test]
 #[cfg(target_os = "macos")]
 fn objc_debug_rejects_the_native_objc_runtime_before_loading_the_guest() {
-    let output = Command::new(common::driver())
+    let output = common::driver_command()
         .args(["run", "--objc-debug", "/etc/hosts"])
         .env("ROSETTA3_OBJC", "native")
         .output()
@@ -22,7 +21,7 @@ fn objc_debug_rejects_the_native_objc_runtime_before_loading_the_guest() {
 #[test]
 #[cfg(not(target_os = "macos"))]
 fn objc_debug_is_accepted_with_the_default_builtin_runtime() {
-    let output = Command::new(common::driver())
+    let output = common::driver_command()
         .args(["run", "--objc-debug", "/etc/hosts"])
         .output()
         .expect("running the driver");

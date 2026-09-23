@@ -16,6 +16,29 @@ use std::sync::RwLock;
 
 use crate::plist::{self, Value};
 
+/// A path this crate holds, as the guest spells it.
+///
+/// Every `NSBundle` and `CFBundle` answer goes through here. A [`Layout`] holds
+/// *host* paths, because it opens files with them - `resource` probes with
+/// `exists`, `localization_names` reads a directory, `icon` is handed to the
+/// image decoder. What a guest gets back has to be the other spelling: it joins
+/// onto `-bundlePath` to find its data beside its saves, and compares
+/// `-executablePath` against what `_NSGetExecutablePath` told it.
+///
+/// `None` for a path no mount reaches, which every caller below turns into the
+/// nil that `NSBundle` already answers for a resource that is not there.
+fn spelled(path: &Path) -> Option<PathBuf> {
+    prefix::ns::to_guest(path)
+}
+
+/// A path a guest named, as this crate must open it.
+///
+/// The way back in, for `+bundleWithPath:` and `CFBundleCreate` - the two
+/// places a guest hands a path to this module rather than being given one.
+fn opened(path: &Path) -> PathBuf {
+    prefix::ns::host_path(&path.to_string_lossy())
+}
+
 /// A `.app` on disk, and what its `Info.plist` says.
 #[derive(Debug)]
 pub struct Layout {
@@ -514,7 +537,9 @@ pub mod cf {
         let Some(path) = url.file_path() else {
             return std::ptr::null_mut();
         };
-        if std::path::Path::new(&path) != bundle.root {
+        // The guest named it, so it is compared at the spelling this crate
+        // keeps rather than the one the guest used.
+        if super::opened(std::path::Path::new(&path)) != bundle.root {
             return std::ptr::null_mut();
         }
         // A `Create`, so the caller owns a reference to the singleton.
@@ -523,8 +548,11 @@ pub mod cf {
         object
     }
 
-    /// A path as a `CFURL` the caller owns.
+    /// A path as a `CFURL` the caller owns, spelled the guest's way.
     fn file_url(path: &std::path::Path, directory: bool) -> Id {
+        let Some(path) = super::spelled(path) else {
+            return std::ptr::null_mut();
+        };
         match path.to_str() {
             Some(path) => corefoundation::url::new_file_url(path, directory) as Id,
             None => std::ptr::null_mut(),
@@ -729,11 +757,12 @@ pub(crate) mod class {
         let Ok(path) = std::str::from_utf8(&path) else {
             return std::ptr::null_mut();
         };
-        let path = std::path::Path::new(path);
+        // The guest named it, so it is opened at this crate's spelling.
+        let path = super::opened(std::path::Path::new(path));
         if super::main().is_some_and(|main| main.root == path) {
             return main_object();
         }
-        let Some(layout) = super::Layout::at(path) else {
+        let Some(layout) = super::Layout::at(&path) else {
             return std::ptr::null_mut();
         };
         // SAFETY: `class` is `NSBundle`, which this crate registered.
@@ -798,7 +827,7 @@ pub(crate) mod class {
     }
 
     fn path(p: Option<std::path::PathBuf>) -> Id {
-        match p {
+        match p.as_deref().and_then(super::spelled) {
             Some(p) => autoreleased(&p.to_string_lossy()),
             None => std::ptr::null_mut(),
         }
@@ -812,7 +841,7 @@ pub(crate) mod class {
     /// The `file:` URL forms of the two paths above, which is what a program
     /// that hands the bundle to `NSWorkspace` or `NSTask` asks for.
     fn url(p: Option<std::path::PathBuf>) -> Id {
-        let Some(p) = p else {
+        let Some(p) = p.as_deref().and_then(super::spelled) else {
             return std::ptr::null_mut();
         };
         // SAFETY: a URL this call just made.
@@ -828,11 +857,17 @@ pub(crate) mod class {
         let Some(p) = p else {
             return std::ptr::null_mut();
         };
+        // Asked of the host path, and before the spelling changes: only that
+        // one names a directory this process can look at.
+        let directory = p.is_dir();
+        let Some(p) = super::spelled(&p) else {
+            return std::ptr::null_mut();
+        };
         // SAFETY: a URL this call just made.
         unsafe {
             corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(
                 &p.to_string_lossy(),
-                p.is_dir(),
+                directory,
             )) as Id
         }
     }
@@ -849,7 +884,11 @@ pub(crate) mod class {
 
     unsafe extern "C" fn executable_url(receiver: Id, _sel: Sel) -> Id {
         // SAFETY: as above. Not a directory: this one names the binary.
-        let Some(path) = unsafe { layout_of(receiver) }.map(|b| b.executable.clone()) else {
+        let Some(path) = unsafe { layout_of(receiver) }
+            .map(|b| b.executable.clone())
+            .as_deref()
+            .and_then(super::spelled)
+        else {
             return std::ptr::null_mut();
         };
         // SAFETY: a URL this call just made.

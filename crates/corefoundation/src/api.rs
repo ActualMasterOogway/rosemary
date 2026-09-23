@@ -1768,7 +1768,7 @@ const HFS_PATH_STYLE: CFIndex = 1;
 /// A POSIX path in the old Mac notation.
 ///
 /// There are no HFS volumes here, so the leading name is the root directory's:
-/// a path under `/` becomes `/:home:velo:game`. That keeps the two directions
+/// a path under `/` becomes `/:home:user:game`. That keeps the two directions
 /// exact inverses of each other - see [`posix_from_hfs`] - which is the only
 /// thing a caller that converts a path and converts it back depends on. It is
 /// *not* a path this host can open, but neither is an HFS path on a Mac: a
@@ -3160,7 +3160,7 @@ mod path_style_tests {
     fn an_hfs_path_round_trips() {
         for path in [
             "/",
-            "/Users/velo",
+            "/Users/user",
             "/Applications/Life Is Strange.app/Contents/MacOS",
             "/a directory: with a colon/file",
         ] {
@@ -3174,8 +3174,8 @@ mod path_style_tests {
     /// has to be a deliberate one.
     #[test]
     fn the_root_volume_leads_and_colons_separate() {
-        assert_eq!(hfs_from_posix("/Users/velo"), "/:Users:velo");
-        assert_eq!(posix_from_hfs("/:Users:velo"), "/Users/velo");
+        assert_eq!(hfs_from_posix("/Users/user"), "/:Users:user");
+        assert_eq!(posix_from_hfs("/:Users:user"), "/Users/user");
     }
 }
 

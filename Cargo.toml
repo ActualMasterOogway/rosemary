@@ -12,6 +12,7 @@ machish = { path = "crates/machish" }
 exports = { path = "crates/exports" }
 darwin = { path = "crates/darwin" }
 objc = { path = "crates/objc" }
+prefix = { path = "crates/prefix" }
 corefoundation = { path = "crates/corefoundation" }
 foundation = { path = "crates/foundation" }
 sdl3 = { path = "crates/sdl3" }

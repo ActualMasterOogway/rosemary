@@ -1,9 +1,10 @@
 //! `NSFileManager`, over `std::fs`.
 //!
 //! Everything here answers about the *host's* filesystem, because that is the
-//! one the guest's files are on: this runtime maps a guest's paths straight
-//! through, so `-fileExistsAtPath:` asks the same question the guest's own
-//! `stat` would.
+//! one the guest's files are on. A guest names them its own way, so every path
+//! argument goes through [`path_of`] first and `-fileExistsAtPath:` then asks
+//! the same question the guest's own `stat` would - which reaches the same
+//! translation. See `docs/prefixes.md`.
 //!
 //! The error out-parameters are written as nil rather than as an `NSError`.
 //! There is no `NSError` in this tree, and a method that reported failure
@@ -42,9 +43,13 @@ unsafe extern "C" fn default_manager(class: Id, _sel: Sel) -> Id {
 /// # Safety
 ///
 /// `path` must be null or an `NSString`.
-unsafe fn path_of(path: Id) -> Option<String> {
+unsafe fn path_of(path: Id) -> Option<std::path::PathBuf> {
     // SAFETY: the caller's obligation.
-    String::from_utf8(unsafe { crate::string::bytes(path) }).ok()
+    let guest = String::from_utf8(unsafe { crate::string::bytes(path) }).ok()?;
+    // The guest named it, so it is opened at this host's spelling. Every caller
+    // below asks the filesystem something; none hands the string back, so the
+    // translation belongs here rather than at eleven call sites.
+    Some(prefix::ns::host_path(&guest))
 }
 
 /// Write nil through an `NSError **`, which is what "no error" looks like.
@@ -566,7 +571,7 @@ unsafe extern "C" fn is_executable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
     let Some(path) = (unsafe { path_of(path) }) else {
         return 0;
     };
-    let Ok(path) = std::ffi::CString::new(path) else {
+    let Ok(path) = std::ffi::CString::new(path.into_os_string().into_encoded_bytes()) else {
         return 0;
     };
     // `access(X_OK)` rather than a mode-bit test, because the answer depends on

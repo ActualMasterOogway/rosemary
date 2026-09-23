@@ -39,6 +39,11 @@ fn to_host_name(name: &CStr) -> Option<CString> {
 
 /// The name as a host name, or `EINVAL` set and `None`.
 ///
+/// Deliberately *not* a prefix translation. A POSIX shared-memory name looks
+/// like a path and is not one: it names an object in the kernel's own
+/// namespace, which a prefix does not hold and cannot heal. `to_host_name`
+/// above is the escaping that namespace needs.
+///
 /// # Safety
 ///
 /// `name` is null or a NUL-terminated string.

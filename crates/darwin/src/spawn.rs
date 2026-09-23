@@ -156,6 +156,39 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
 ///
 /// Read from the file rather than inferred from the name: the whole point is to tell a
 /// Mach-O helper from the host's own `/bin/sh`, and only the magic says which is which.
+/// The environment for a rewritten exec: the guest's, with this runtime's own
+/// corrections undone.
+///
+/// The child is another copy of *this runtime*, and it resolves its prefix and
+/// its own host paths before it builds a guest environment of its own. Handed
+/// the guest's `HOME` it would look for the prefix inside the prefix. See
+/// [`crate::env::host_spelling`], which keeps everything the guest set itself.
+///
+/// # Safety
+///
+/// `envp` is null or a null-terminated array of NUL-terminated strings.
+unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
+    // SAFETY: the caller's obligation.
+    unsafe { crate::env::host_spelling(envp) }
+}
+
+/// The path an exec should actually open, for a path the guest named.
+///
+/// The prefix's spelling when there is a file there, and the path as given
+/// otherwise. Both are needed: a guest naming `/usr/bin/foo` means the
+/// prefix's, and the runtime also exec's host binaries by their own host path -
+/// which is what a `PATH` search answers - and those are not in it.
+fn exec_path(given: &CStr) -> CString {
+    let host = prefix::ns::to_host(given);
+    match host
+        .to_str()
+        .is_ok_and(|p| std::path::Path::new(p).exists())
+    {
+        true => host.into_owned(),
+        false => given.to_owned(),
+    }
+}
+
 fn is_mach_o(path: &CStr) -> bool {
     let Ok(text) = path.to_str() else {
         return false;
@@ -217,11 +250,13 @@ unsafe fn argv_of(argv: *const *const c_char) -> Vec<CString> {
 /// The guest's `argv[0]` is dropped rather than preserved: this runtime derives the
 /// guest's `argv[0]` from the image it is told to run, so passing the original through
 /// as well would put it in front of the program's real first argument.
-fn rewrite(path: &CStr, argv: &[CString]) -> Option<(CString, Vec<CString>)> {
-    if !is_mach_o(path) {
+fn rewrite(path: &CStr, on_disk: &CStr, argv: &[CString]) -> Option<(CString, Vec<CString>)> {
+    if !is_mach_o(on_disk) {
         return None;
     }
     let runtime = runtime_path()?;
+    // The *guest* spelling goes to the child: it is another copy of this
+    // runtime, with the same prefix, and it translates the path for itself.
     let mut rewritten = vec![runtime.clone(), c"run".to_owned(), path.to_owned()];
     rewritten.extend(argv.iter().skip(1).cloned());
     Some((runtime, rewritten))
@@ -254,15 +289,20 @@ pub unsafe extern "C" fn execve(
     }
     // SAFETY: the caller's guarantee.
     let (given, arguments) = unsafe { (CStr::from_ptr(path), argv_of(argv)) };
-    let Some((runtime, rewritten)) = rewrite(given, &arguments) else {
+    let on_disk = exec_path(given);
+    let Some((runtime, rewritten)) = rewrite(given, &on_disk, &arguments) else {
         // SAFETY: not a Mach-O, so the host's own `execve` is the right call and the
         // caller's arguments are already in the shape it wants.
-        return unsafe { libc::execve(path, argv, envp) };
+        return unsafe { libc::execve(on_disk.as_ptr(), argv, envp) };
     };
     let raw = as_argv(&rewritten);
-    // SAFETY: `runtime` and every string in `rewritten` outlive the call, and `raw` is
-    // null-terminated. On success this does not return.
-    unsafe { libc::execve(runtime.as_ptr(), raw.as_ptr(), envp) }
+    // SAFETY: the caller's obligation for `envp`.
+    let environment = unsafe { runtime_environ(envp) };
+    let environment = as_argv(&environment);
+    // SAFETY: `runtime` and every string in `rewritten` and `environment`
+    // outlive the call, and both arrays are null-terminated. On success this
+    // does not return.
+    unsafe { libc::execve(runtime.as_ptr(), raw.as_ptr(), environment.as_ptr()) }
 }
 
 /// `int execv(const char *path, char *const argv[])`.
@@ -290,7 +330,7 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
     match search_path(name) {
         // Resolved to a Mach-O, so it has to go through the rewrite; the host's
         // `execvp` would find the same file and fail to execute it.
-        Some(found) if is_mach_o(&found) => {
+        Some(found) if is_mach_o(&exec_path(&found)) => {
             // SAFETY: `found` outlives the call, and the caller's guarantee for argv.
             unsafe { execve(found.as_ptr(), argv, environ()) }
         }
@@ -316,12 +356,14 @@ fn search_path(name: &CStr) -> Option<CString> {
 }
 
 /// This process's environment, as the exec family's implicit third argument.
+/// "The current environment", for the `exec` forms that do not take one.
+///
+/// The *guest's*, not this process's: `execv` means "the environment I have",
+/// and what the guest has is [`crate::env`]'s block.
 fn environ() -> *const *const c_char {
-    unsafe extern "C" {
-        static environ: *const *const c_char;
-    }
-    // SAFETY: `environ` is defined by the C library and read, never written.
-    unsafe { environ }
+    // SAFETY: the slot holds a null-terminated vector this runtime published
+    // and never frees.
+    unsafe { *crate::env::environ_slot() as *const *const c_char }
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +594,8 @@ pub unsafe extern "C" fn posix_spawn(
         .map(|a| &a.0 as *const _)
         .unwrap_or(std::ptr::null());
 
-    match rewrite(given, &arguments) {
+    let on_disk = exec_path(given);
+    match rewrite(given, &on_disk, &arguments) {
         None => {
             // SAFETY: not a Mach-O, so the host runs it directly; the objects are
             // this module's translations and outlive the call.
@@ -569,7 +612,11 @@ pub unsafe extern "C" fn posix_spawn(
         }
         Some((runtime, rewritten)) => {
             let raw = as_argv(&rewritten);
-            // SAFETY: as above, and `runtime` and `raw` outlive the call.
+            // SAFETY: the caller's obligation for `envp`.
+            let environment = unsafe { runtime_environ(envp) };
+            let environment = as_argv(&environment);
+            // SAFETY: as above, and `runtime`, `raw` and `environment` outlive
+            // the call.
             unsafe {
                 libc::posix_spawn(
                     pid,
@@ -577,7 +624,7 @@ pub unsafe extern "C" fn posix_spawn(
                     actions_ptr,
                     attr_ptr,
                     raw.as_ptr() as *const *mut c_char,
-                    envp as *const *mut c_char,
+                    environment.as_ptr() as *const *mut c_char,
                 )
             }
         }
@@ -659,8 +706,10 @@ pub unsafe extern "C" fn file_actions_addopen(
     if path.is_null() {
         return libc::EINVAL;
     }
+    // The child opens this on the host's behalf, after this process has gone,
+    // so the prefix's spelling is what has to be recorded.
     // SAFETY: the caller's guarantee.
-    let path = unsafe { CStr::from_ptr(path) }.to_owned();
+    let path = prefix::ns::to_host(unsafe { CStr::from_ptr(path) }).into_owned();
     // SAFETY: the caller's guarantee.
     unsafe {
         add(
@@ -706,8 +755,9 @@ pub unsafe extern "C" fn file_actions_addchdir_np(at: *mut c_void, path: *const 
     if path.is_null() {
         return libc::EINVAL;
     }
+    // As `addopen`: recorded now, used by the child.
     // SAFETY: the caller's guarantee.
-    let path = unsafe { CStr::from_ptr(path) }.to_owned();
+    let path = prefix::ns::to_host(unsafe { CStr::from_ptr(path) }).into_owned();
     // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Chdir(path)) }
 }
@@ -902,7 +952,7 @@ mod tests {
         let path = CString::new(helper.to_str().unwrap()).unwrap();
 
         let argv = vec![c"RobloxCrashHandler".to_owned(), c"--pipe=3".to_owned()];
-        let (runtime, rewritten) = rewrite(&path, &argv).expect("a Mach-O is rewritten");
+        let (runtime, rewritten) = rewrite(&path, &path, &argv).expect("a Mach-O is rewritten");
 
         assert_eq!(runtime, rewritten[0], "argv[0] is the runtime itself");
         assert_eq!(rewritten[1], c"run".to_owned());
@@ -916,7 +966,7 @@ mod tests {
     /// Anything that is not a Mach-O is left entirely alone.
     #[test]
     fn a_host_program_is_not_rewritten() {
-        assert!(rewrite(c"/bin/sh", &[c"sh".to_owned()]).is_none());
+        assert!(rewrite(c"/bin/sh", c"/bin/sh", &[c"sh".to_owned()]).is_none());
     }
 
     /// Darwin's attribute types are `void *`, so the guest's eight bytes must hold

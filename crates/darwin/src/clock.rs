@@ -126,12 +126,12 @@ unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
 #[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> i32 {
     let host = unsafe { timevals(times) };
-    unsafe {
-        host_utimes(
-            path,
-            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
-        )
-    }
+    let times = host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
+    // The path is the guest's; see [`crate::fs`] for why it is translated.
+    crate::stat::with_fallback(path, |path| {
+        let rc = unsafe { host_utimes(path, times) };
+        (rc, rc == 0)
+    })
 }
 #[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
@@ -141,12 +141,11 @@ unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
 #[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 {
     let host = unsafe { timevals(times) };
-    unsafe {
-        host_lutimes(
-            path,
-            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
-        )
-    }
+    let times = host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
+    crate::stat::with_fallback(path, |path| {
+        let rc = unsafe { host_lutimes(path, times) };
+        (rc, rc == 0)
+    })
 }
 
 /// `int settimeofday(const struct timeval *, const struct timezone *)`.

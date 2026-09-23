@@ -626,7 +626,8 @@ impl Walk {
                 false => libc::lstat(path, out),
             }
         };
-        if ask(path.as_ptr(), &raw mut out) == 0 {
+        let host = prefix::ns::to_host(path);
+        if ask(host.as_ptr(), &raw mut out) == 0 {
             return Ok(Some(out.st_mode as u32));
         }
         // As `open`: the guest may have spelled a literal component in the
@@ -635,7 +636,7 @@ impl Walk {
         if crate::errno::get() != libc::ENOENT {
             return Ok(None);
         }
-        let Some(found) = crate::path::insensitive(path) else {
+        let Some(found) = prefix::ns::fold(&host) else {
             return Ok(None);
         };
         Ok((ask(found.as_ptr(), &raw mut out) == 0).then_some(out.st_mode as u32))

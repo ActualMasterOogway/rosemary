@@ -36,10 +36,13 @@ pub mod data;
 pub mod dirent;
 pub mod dispatch;
 pub mod divergent;
+#[cfg(not(target_os = "macos"))]
+pub mod env;
 pub mod errno;
 pub mod fcntl;
 #[cfg(not(target_os = "macos"))]
 pub mod fortify;
+pub mod fs;
 #[cfg(not(target_os = "macos"))]
 pub mod glob;
 pub mod heap;
@@ -55,7 +58,6 @@ pub mod net;
 mod oslog;
 pub mod passthrough;
 pub mod passwd;
-pub mod path;
 pub mod poll;
 pub mod printf_l;
 pub mod pthread;
@@ -252,6 +254,10 @@ static MODULES: &[exports::Module] = &[
     compat::MODULE,
     #[cfg(not(target_os = "macos"))]
     fortify::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    env::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    fs::MODULE,
     #[cfg(not(target_os = "macos"))]
     glob::MODULE,
     #[cfg(not(target_os = "macos"))]
@@ -469,6 +475,32 @@ mod tests {
         assert!(
             overlap.is_empty(),
             "claimed safe and also denied: {overlap:?}"
+        );
+    }
+
+    /// A module that is written but not listed in [`MODULES`] answers nothing,
+    /// and nothing says so: every name it meant to shim quietly reaches the
+    /// host instead. That is how `crate::fs` shipped unreachable, and how a
+    /// guest's `mkdir` of a Darwin path went to the host with the path
+    /// untranslated - which fails, far from here, as `ENOENT` on a directory
+    /// that is plainly there.
+    ///
+    /// Named one by one rather than counted, so that adding an entry point and
+    /// forgetting the table is the failure this reports.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn every_path_taking_shim_is_reachable() {
+        let unreachable: Vec<&str> = [
+            "getenv", "setenv", "putenv", "unsetenv", "chdir", "getcwd", "unlink", "rmdir",
+            "remove", "mkdir", "chmod", "chown", "lchown", "truncate", "link", "rename", "symlink",
+            "freopen", "mkstemp", "mkdtemp",
+        ]
+        .into_iter()
+        .filter(|name| implemented(name).is_none())
+        .collect();
+        assert!(
+            unreachable.is_empty(),
+            "written but not reachable - is the module in MODULES? {unreachable:?}"
         );
     }
 

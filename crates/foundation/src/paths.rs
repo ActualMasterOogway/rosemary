@@ -38,6 +38,9 @@ fn relative(directory: u64) -> Option<&'static str> {
 
 /// The root of each domain in `mask`, in the order Apple returns them.
 ///
+/// Guest paths throughout - `/System`, `/Network` and the guest's own home -
+/// because these are answers a guest is given, not files this crate opens.
+///
 /// `expand` false keeps the user domain's tilde, which is the whole point of
 /// that argument: a caller passing false means to store the path, not open it.
 fn roots(mask: u64, expand: bool) -> Vec<String> {
@@ -117,9 +120,12 @@ unsafe extern "C" fn home_directory() -> Id {
 /// The list is what a guest may assume rather than everything Apple ships: an
 /// unused directory created here costs an empty directory, and a missing one
 /// costs a failure the guest reports as something else.
+///
+/// Created at their *host* spelling: under a prefix these belong to the
+/// prefix's own home, not to the host's.
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_standard_directories() {
-    let home = crate::home_directory();
+    let home = crate::host_home_directory();
     for relative in [
         "Library/Application Support",
         "Library/Caches",
@@ -127,7 +133,7 @@ pub fn ensure_standard_directories() {
         "Library/Preferences",
         "Library/Saved Application State",
     ] {
-        let _ = std::fs::create_dir_all(format!("{home}/{relative}"));
+        let _ = std::fs::create_dir_all(home.join(relative));
     }
 }
 

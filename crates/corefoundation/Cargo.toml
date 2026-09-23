@@ -9,6 +9,7 @@ license.workspace = true
 exports.workspace = true
 darwin.workspace = true
 objc.workspace = true
+prefix.workspace = true
 libc.workspace = true
 getrandom.workspace = true
 static_init.workspace = true

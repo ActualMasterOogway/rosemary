@@ -58,6 +58,7 @@ dependencies = [
  "gamecontroller",
  "objc",
  "owned_ttf_parser",
+ "prefix",
  "sdl3",
  "static_init",
 ]
@@ -314,6 +315,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "objc",
+ "prefix",
  "static_init",
 ]
 
@@ -566,6 +568,7 @@ dependencies = [
  "machish",
  "md-5",
  "objc",
+ "prefix",
  "rc2",
  "rc4",
  "rustix",
@@ -697,6 +700,7 @@ dependencies = [
  "exports",
  "libc",
  "objc",
+ "prefix",
  "ureq",
 ]
 
@@ -1304,6 +1308,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
+name = "prefix"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1435,6 +1446,7 @@ dependencies = [
  "microlift",
  "mimalloc",
  "objc",
+ "prefix",
  "sdl3",
  "security",
  "static_init",

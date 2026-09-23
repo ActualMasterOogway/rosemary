@@ -984,8 +984,14 @@ fn resolve_path(path: &str) -> Option<String> {
         candidates.extend(search_path("DYLD_FALLBACK_LIBRARY_PATH", name));
     }
 
+    // Each candidate is a path the *guest* named, so the prefix's spelling of it
+    // is tried before the path as given. Both, and in that order: a prefix holds
+    // the Darwin userland a guest asks for, and the runtime's own libraries -
+    // the Steam bridge, a dylib beside the executable - are on the host beside
+    // it. See `docs/prefixes.md`.
     candidates
         .into_iter()
+        .flat_map(|c| [prefix::ns::host_path(&c), std::path::PathBuf::from(c)])
         .filter_map(|c| std::fs::canonicalize(&c).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .next()

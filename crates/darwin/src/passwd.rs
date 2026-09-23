@@ -111,28 +111,40 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
 
 /// The home directory to report for `host`.
 ///
-/// `$HOME` wins for the calling user, and the reason is not politeness: this
-/// runtime creates the `~/Library` subdirectories a Mac program assumes exist
-/// (`foundation::paths`), and it uses `$HOME` to find them. A guest told a
-/// *different* home by `getpwuid` would create its own `Library` somewhere the
-/// runtime never prepared, and every path either of them built would disagree.
+/// The guest's own spelling for the calling user, and the reason is not
+/// politeness: this runtime creates the `~/Library` subdirectories a Mac
+/// program assumes exist (`foundation::paths`), and it creates them under the
+/// guest's home. A guest told a *different* home here would build its `Library`
+/// somewhere the runtime never prepared, and every path the two of them built
+/// would disagree - which is exactly what `$HOME` used to do, putting Roblox's
+/// data in `<prefix>/root/home/user/Library` beside the `/Users/user/Library`
+/// nothing would ever look in again.
+///
+/// Another user's home is a host path, so it is given the guest spelling that
+/// names it; one no mount reaches is reported as empty rather than as a path
+/// the guest cannot use.
 fn home_of(host: &libc::passwd) -> CString {
     // SAFETY: takes no argument and cannot fail.
     if host.pw_uid == unsafe { libc::getuid() }
-        && let Some(home) = std::env::var_os("HOME")
+        && let Ok(home) = CString::new(prefix::ns::home())
     {
-        use std::os::unix::ffi::OsStrExt;
-        if let Ok(home) = CString::new(home.as_bytes()) {
-            return home;
-        }
+        return home;
     }
     // SAFETY: libc's own NUL-terminated string, or null.
-    unsafe {
+    let theirs = unsafe {
         match host.pw_dir.is_null() {
-            true => CString::default(),
-            false => CString::from(CStr::from_ptr(host.pw_dir)),
+            true => return CString::default(),
+            false => CStr::from_ptr(host.pw_dir),
         }
-    }
+    };
+    let Some(spelled) = theirs
+        .to_str()
+        .ok()
+        .and_then(|path| prefix::ns::to_guest(std::path::Path::new(path)))
+    else {
+        return CString::default();
+    };
+    CString::new(spelled.into_os_string().into_encoded_bytes()).unwrap_or_default()
 }
 
 /// `struct passwd *getpwuid(uid_t)`
@@ -195,10 +207,9 @@ pub fn home(user: Option<&CStr>) -> Option<CString> {
         // `$HOME` is still the answer for the calling user.
         return match user {
             Some(_) => None,
-            None => std::env::var_os("HOME").and_then(|home| {
-                use std::os::unix::ffi::OsStrExt;
-                CString::new(home.as_bytes()).ok()
-            }),
+            // A container often has no passwd entry for the uid it runs as,
+            // and the guest's own home is still the answer for the caller.
+            None => CString::new(prefix::ns::home()).ok(),
         };
     }
     // SAFETY: non-null, and libc's own entry.

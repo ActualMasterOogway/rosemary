@@ -70,7 +70,7 @@ unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
 /// Under the directory macOS keeps preferences in, so a second launch finds
 /// what the first one wrote.
 fn store_path() -> PathBuf {
-    PathBuf::from(crate::home_directory()).join("Library/Preferences/rosetta3-defaults.tsv")
+    crate::host_home_directory().join("Library/Preferences/rosetta3-defaults.tsv")
 }
 
 /// Tab-separated `key\tvalue`. A key or a value containing a tab or a newline

@@ -18,8 +18,18 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// Load and execute, with `argv[0]` the path as the guest will see it.
-fn run(path: &str, args: Vec<OsString>, policy: ImportPolicy, forced: Option<Engine>) -> ExitCode {
-    let mut argv = vec![OsString::from(path)];
+///
+/// `path` is this host's - it is what gets opened - and `guest` is the spelling
+/// the guest is given, which under a prefix is not the same string. See
+/// `docs/prefixes.md`.
+fn run(
+    path: &str,
+    guest: &str,
+    args: Vec<OsString>,
+    policy: ImportPolicy,
+    forced: Option<Engine>,
+) -> ExitCode {
+    let mut argv = vec![OsString::from(guest)];
     argv.extend(args);
     rosetta3::stats::start();
 
@@ -99,6 +109,146 @@ fn emulated(
     Ok(vm)
 }
 
+/// The program to open, for a path that may be spelled either way.
+///
+/// Usually a person typed a host path. But this runtime also re-executes
+/// *itself* for a guest that spawned another Mach-O, and hands the child the
+/// path the guest used - so `rosetta3 run /Applications/Foo.app/...` is an
+/// ordinary thing to be asked, and only the prefix knows where that is.
+///
+/// The path as given wins when there is a file there, so nothing a person types
+/// changes meaning; the prefix's spelling is the fallback.
+fn program_path(path: &str) -> String {
+    if std::path::Path::new(path).exists() {
+        return path.to_string();
+    }
+    let host = prefix::ns::host_path(path);
+    match host.exists() {
+        true => host.to_string_lossy().into_owned(),
+        false => path.to_string(),
+    }
+}
+
+/// The prefix directory this command uses when nobody named one.
+///
+/// `$XDG_DATA_HOME/rosetta3/prefixes/default`, falling back to
+/// `$HOME/.local/share/...`.
+fn default_prefix() -> Option<std::path::PathBuf> {
+    prefix::layout::default_directory(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+}
+
+/// Settle which prefix a guest runs in, before anything can ask.
+///
+/// Off Darwin a guest runs *inside a prefix* by default: this host has no
+/// `/Users`, no `/Applications` and no `/Library`, and a Mac program that is
+/// told otherwise writes its files into a shape nothing else agrees about.
+///
+/// The prefix is made if it is not there - the one named by the variable just
+/// as much as the default one. A variable pointing at a directory that is not a
+/// prefix yet would otherwise give the guest a `/` with nothing in it, and fail
+/// far from here; `WINEPREFIX` creates for the same reason.
+///
+/// macOS keeps its own Darwin root, which a second one would only hide.
+///
+/// The decision is recorded in the environment rather than passed down, for two
+/// reasons: `prefix` is a library and a caller that said nothing should get
+/// nothing, and a guest that spawns another Mach-O re-executes this command,
+/// which must land in the same prefix.
+fn settle_prefix() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let named = std::env::var_os("ROSETTA3_PREFIX");
+    // An explicit `off` is the one way to run with no prefix at all.
+    if matches!(
+        prefix::layout::setting_from(named.clone()),
+        prefix::layout::Setting::Off
+    ) && named.is_some()
+    {
+        return;
+    }
+    let Some(directory) = named.map(std::path::PathBuf::from).or_else(default_prefix) else {
+        // No `$HOME` and no `$XDG_DATA_HOME` is a host this cannot place a
+        // prefix on. Running without one is what happened before prefixes
+        // existed, and is better than refusing to start.
+        return;
+    };
+    match prefix::layout::create(&directory) {
+        Ok(true) => eprintln!("rosetta3: created a prefix at {}", directory.display()),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!(
+                "rosetta3: {}: {e}; running without a prefix",
+                directory.display()
+            );
+            // SAFETY: before any thread has been started.
+            unsafe { std::env::set_var("ROSETTA3_PREFIX", "off") };
+            return;
+        }
+    }
+    // SAFETY: before any thread has been started; the string is copied by the
+    // call.
+    unsafe { std::env::set_var("ROSETTA3_PREFIX", &directory) };
+}
+
+/// `rosetta3 prefix <create|info> [PREFIX]`.
+fn prefix_command(mut args: impl Iterator<Item = OsString>) -> ExitCode {
+    let action = args.next().unwrap_or_default();
+    let named = args.next().map(std::path::PathBuf::from);
+    let Some(directory) = named.or_else(default_prefix) else {
+        eprintln!("rosetta3: no $HOME, so there is nowhere to put a prefix; name one");
+        return ExitCode::FAILURE;
+    };
+    match action.to_str().unwrap_or_default() {
+        "create" => match prefix::layout::create(&directory) {
+            Ok(true) => {
+                println!("created {}", directory.display());
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                println!("{} is already a prefix", directory.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("rosetta3: {}: {e}", directory.display());
+                ExitCode::FAILURE
+            }
+        },
+        "info" => {
+            if !prefix::layout::created(&directory) {
+                println!("{}: not a prefix", directory.display());
+                return ExitCode::FAILURE;
+            }
+            let prefix = prefix::Prefix::at(&directory);
+            println!("prefix:  {}", directory.display());
+            println!("guest /: {}", prefix.drive().display());
+            match std::fs::read_to_string(prefix::layout::state_path(&directory)) {
+                Ok(state) => {
+                    println!();
+                    print!("{state}");
+                }
+                Err(e) => eprintln!("rosetta3: the state file cannot be read: {e}"),
+            }
+            ExitCode::SUCCESS
+        }
+        other => {
+            eprintln!("rosetta3: prefix: {other:?} is not create or info");
+            eprintln!("usage: rosetta3 prefix <create|info> [PREFIX]");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A host path as the guest spells it, or the path itself when no mount
+/// reaches it - which is every path in identity mode.
+fn guest_spelling(path: &str) -> String {
+    let host = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    prefix::ns::to_guest(&host)
+        .unwrap_or(host)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn main() -> ExitCode {
     // `args_os`, not `args`: a process argument is a byte string, and
     // `std::env::args` *panics* on one that is not UTF-8. Some apps spawn
@@ -110,10 +260,17 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: rosetta3 run [--native|--emulated] [--objc-debug] <mach-o path> [args...]"
         );
+        eprintln!("       rosetta3 prefix <create|info> [PREFIX]");
         eprintln!("       rosetta3 <mach-o path> [--audit] [--ir]");
         return ExitCode::FAILURE;
     };
+    if first == "prefix" {
+        return prefix_command(args);
+    }
     if first == "run" {
+        // Before anything can ask which prefix this is, including the paths
+        // published below.
+        settle_prefix();
         // `--slow` turns every import into a VM exit; `--native`/`--emulated`
         // force a backend the file's own slices would not have chosen.
         let mut policy = ImportPolicy::FastWhenKnown;
@@ -166,8 +323,13 @@ fn main() -> ExitCode {
         // Before anything can ask: both say which program the guest is, and a
         // guest that finds its own resources through either must get the same
         // answer.
+        // The argument may be a host path or one the guest spells; everything
+        // below opens files, so it is resolved to this host's spelling first.
+        let path = program_path(&path);
         rosetta3::shims::runtime::set_executable_path(std::path::Path::new(&path));
         rosetta3::frameworks::set_main_bundle(std::path::Path::new(&path));
+        // The same path as the guest spells it, for `argv[0]`.
+        let guest = guest_spelling(&path);
         // A Mac's `~/Library` subtree, which this host has not got and a guest
         // does not create for itself.
         #[cfg(not(target_os = "macos"))]
@@ -182,7 +344,7 @@ fn main() -> ExitCode {
             // strictly better than not running.
             eprintln!("rosetta3: could not re-execute from the bundle mirror: {e}");
         }
-        return run(&path, args.collect(), policy, engine);
+        return run(&path, &guest, args.collect(), policy, engine);
     }
     let Some(path) = first.to_str().map(str::to_owned) else {
         eprintln!("rosetta3: the program's path is not valid UTF-8");

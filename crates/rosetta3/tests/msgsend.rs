@@ -59,7 +59,7 @@ fn an_objective_c_program_runs_with_builtin_hardening_enabled() {
     let native = std::process::Command::new(&path)
         .output()
         .expect("run fixture natively");
-    let output = std::process::Command::new(common::driver())
+    let output = common::driver_command()
         .args(["run", "--emulated", "--objc-debug", &path])
         .env("ROSETTA3_OBJC", "builtin")
         .output()

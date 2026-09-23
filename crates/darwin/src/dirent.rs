@@ -241,12 +241,13 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
         return std::ptr::null_mut();
     }
     // SAFETY: the caller's obligation.
-    let dir = unsafe { libc::opendir(path) };
+    let host = prefix::ns::to_host(unsafe { CStr::from_ptr(path) });
+    // SAFETY: a NUL-terminated path.
+    let dir = unsafe { libc::opendir(host.as_ptr()) };
     if !dir.is_null() || crate::errno::get() != libc::ENOENT {
         return dir;
     }
-    // SAFETY: as above.
-    let Some(found) = crate::path::insensitive(unsafe { CStr::from_ptr(path) }) else {
+    let Some(found) = prefix::ns::fold(&host) else {
         return dir;
     };
     // SAFETY: a NUL-terminated path this crate just built.

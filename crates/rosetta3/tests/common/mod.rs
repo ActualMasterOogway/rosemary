@@ -2361,8 +2361,10 @@ pub fn run_guest_env(
     path: &str,
     args: &[&str],
 ) -> (Option<i32>, String, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rosetta3"));
+    let mut command = driver_command();
     command.arg("run").arg("--emulated").arg(path).args(args);
+    // After the isolation `driver_command` set, so that a test may still name a
+    // prefix of its own.
     for (key, value) in env {
         command.env(key, value);
     }
@@ -2375,8 +2377,38 @@ pub fn run_guest_env(
 }
 
 /// The driver binary, for a test that has to launch it itself.
+///
+/// A caller that spawns it directly should use [`driver_command`] instead, so
+/// that the run is isolated from this user's own prefix.
 pub fn driver() -> &'static str {
     env!("CARGO_BIN_EXE_rosetta3")
+}
+
+/// The prefix the test suite's guests run in.
+///
+/// Not this user's. `rosetta3 run` makes a prefix at
+/// `~/.local/share/rosetta3/prefixes/default` and runs every guest inside it,
+/// so a suite that said nothing would write its fixtures' files into the prefix
+/// the person running the tests actually uses.
+///
+/// One per test binary and reused between runs, so that repeated `cargo test`
+/// does not fill the temporary directory.
+pub fn test_prefix() -> String {
+    let name = std::path::Path::new(driver())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rosetta3".to_string());
+    std::env::temp_dir()
+        .join(format!("rosetta3-test-prefix-{name}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// [`Command`] for the driver, isolated from this user's prefix.
+pub fn driver_command() -> Command {
+    let mut command = Command::new(driver());
+    command.env("ROSETTA3_PREFIX", test_prefix());
+    command
 }
 
 /// [`run_guest`], with extra driver flags before the program path.
@@ -2385,7 +2417,7 @@ pub fn driver() -> &'static str {
 /// x86-64 fixture must pass `--emulated` itself - see [`run_guest`] for why that
 /// matters on an x86-64 host.
 pub fn run_guest_with(flags: &[&str], path: &str, args: &[&str]) -> (Option<i32>, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rosetta3"))
+    let out = driver_command()
         .arg("run")
         .args(flags)
         .arg(path)

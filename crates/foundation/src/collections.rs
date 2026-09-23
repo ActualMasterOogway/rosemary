@@ -367,7 +367,8 @@ unsafe extern "C" fn data_with_contents_of_file(_class: Id, _sel: Sel, path: Id)
     let Ok(path) = String::from_utf8(path) else {
         return std::ptr::null_mut();
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    // The guest named it, so it is read at this host's spelling.
+    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
         return std::ptr::null_mut();
     };
     let data = collections::new_data(bytes);
@@ -386,7 +387,7 @@ unsafe extern "C" fn dictionary_with_contents_of_file(_class: Id, _sel: Sel, pat
     let Ok(path) = String::from_utf8(path) else {
         return std::ptr::null_mut();
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
         return std::ptr::null_mut();
     };
     let Ok(value) = crate::plist::parse(&bytes) else {
@@ -413,10 +414,15 @@ unsafe extern "C" fn write_to_file(receiver: Id, _sel: Sel, path: Id, atomically
     let Some(bytes) = (unsafe { collections::data(receiver as CFTypeRef) }) else {
         return 0;
     };
+    let path = prefix::ns::host_path(&path);
     if atomically == 0 {
         return std::fs::write(&path, &**bytes).is_ok() as u8;
     }
-    let temporary = format!("{path}.rosetta3-{}", std::process::id());
+    // Appended, not `with_extension`, which would *replace* `.dat` and could
+    // collide with a real neighbour.
+    let mut temporary = path.clone().into_os_string();
+    temporary.push(format!(".rosetta3-{}", std::process::id()));
+    let temporary = std::path::PathBuf::from(temporary);
     if std::fs::write(&temporary, &**bytes).is_err() {
         return 0;
     }

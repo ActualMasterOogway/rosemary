@@ -982,7 +982,10 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorsFromURL(url: CFTypeRe
     else {
         return std::ptr::null();
     };
-    descriptors_for(&fonts::register_file(&path))
+    // Translated once, here: `register_file` keeps the path in each `FaceInfo`
+    // and `fonts::load` reads it again later.
+    let path = prefix::ns::host_path(&path);
+    descriptors_for(&fonts::register_file(&path.to_string_lossy()))
 }
 
 /// As [`CTFontManagerCreateFontDescriptorsFromURL`], for font bytes in memory,
