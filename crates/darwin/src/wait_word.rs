@@ -15,6 +15,7 @@
 //! * **macOS** has `__ulock_wait`/`__ulock_wake`, which is what Apple's own
 //!   `os_unfair_lock`, `libc++` and libdispatch bottom out in. No libc wrapper
 //!   declares them, so they are declared here.
+//! * **FreeBSD** has `_umtx_op`, which is what its own libthr is built on.
 //! * **Anything else** gets a bounded polling fallback, which is correct and slow.
 
 use std::sync::atomic::AtomicU32;
@@ -189,6 +190,107 @@ fn ulock_operation(scope: Scope) -> u32 {
     }
 }
 
+/// FreeBSD's futex, under the name its own libthr uses.
+///
+/// `UMTX_OP_WAIT_UINT*` compares a 32-bit word and sleeps, which is the whole
+/// operation. The timeout is passed as a `struct _umtx_time` in `uaddr2`, with
+/// its *size* in `uaddr` - the kernel tells that structure from the bare
+/// `timespec` older callers pass by the length.
+///
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(target_os = "freebsd")]
+pub(crate) unsafe fn wait_u32(
+    word: &AtomicU32,
+    expected: u32,
+    timeout_ns: Option<u64>,
+    scope: Scope,
+) -> Result<(), WaitError> {
+    use std::sync::atomic::Ordering;
+
+    // The kernel answers zero for a word that no longer holds `expected`, where
+    // every other host here reports it distinctly - so it is checked first, and
+    // the contract is the same on all of them. The kernel re-checks atomically,
+    // so a word that changes after this point simply does not sleep.
+    if word.load(Ordering::Acquire) != expected {
+        return Err(WaitError::Changed);
+    }
+    let operation = match scope {
+        Scope::Private => libc::UMTX_OP_WAIT_UINT_PRIVATE,
+        Scope::Shared => libc::UMTX_OP_WAIT_UINT,
+    };
+    // Zeroed rather than optional so the structure outlives the call below.
+    let mut timeout: libc::_umtx_time = unsafe { core::mem::zeroed() };
+    if let Some(nanoseconds) = timeout_ns {
+        timeout._timeout.tv_sec = (nanoseconds / 1_000_000_000).min(i64::MAX as u64) as _;
+        timeout._timeout.tv_nsec = (nanoseconds % 1_000_000_000) as _;
+        // `_flags` of zero is a relative timeout, which is what the callers
+        // hand down; the clock has to be named even so.
+        timeout._clockid = libc::CLOCK_MONOTONIC as u32;
+    }
+    let (size, at) = match timeout_ns {
+        None => (core::ptr::null_mut(), core::ptr::null_mut()),
+        Some(_) => (
+            size_of::<libc::_umtx_time>() as *mut core::ffi::c_void,
+            (&raw mut timeout).cast(),
+        ),
+    };
+    // SAFETY: the caller's guarantee that `word` is live and aligned, and a
+    // timeout this frame owns for the duration of the call.
+    let rc = unsafe {
+        libc::_umtx_op(
+            word.as_ptr().cast(),
+            operation,
+            expected as libc::c_ulong,
+            size,
+            at,
+        )
+    };
+    // A return of zero is permission to look again, which is what every caller
+    // does - it covers both a real wake and a word that changed in the window
+    // above.
+    match rc {
+        0 => Ok(()),
+        _ => Err(classify(crate::errno::get())),
+    }
+}
+
+/// # Safety
+///
+/// As the Linux form above.
+#[cfg(target_os = "freebsd")]
+pub(crate) unsafe fn wake_u32(
+    word: &AtomicU32,
+    count: WakeCount,
+    scope: Scope,
+) -> Result<usize, i32> {
+    let operation = match scope {
+        Scope::Private => libc::UMTX_OP_WAKE_PRIVATE,
+        Scope::Shared => libc::UMTX_OP_WAKE,
+    };
+    let count = match count {
+        WakeCount::One => 1,
+        WakeCount::All => libc::c_int::MAX as libc::c_ulong,
+    };
+    // SAFETY: the caller's guarantee that `word` is live and aligned.
+    let rc = unsafe {
+        libc::_umtx_op(
+            word.as_ptr().cast(),
+            operation,
+            count,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    };
+    match rc {
+        // The kernel does not say how many it woke. Report a possible waiter,
+        // as the fallback below does and for the same reason.
+        0 => Ok(1),
+        _ => Err(crate::errno::get()),
+    }
+}
+
 /// Portability fallback for a host with neither futexes nor ulocks.
 ///
 /// Correct and slow: a waiter polls with a bounded backoff rather than sleeping, so a
@@ -198,7 +300,7 @@ fn ulock_operation(scope: Scope) -> u32 {
 /// # Safety
 ///
 /// As the Linux form above.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 pub(crate) unsafe fn wait_u32(
     word: &AtomicU32,
     expected: u32,
@@ -236,7 +338,7 @@ pub(crate) unsafe fn wait_u32(
 /// # Safety
 ///
 /// As the Linux form above.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 pub(crate) unsafe fn wake_u32(
     _word: &AtomicU32,
     _count: WakeCount,
@@ -248,7 +350,10 @@ pub(crate) unsafe fn wake_u32(
     Ok(1)
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", target_os = "freebsd")
+))]
 mod tests {
     use super::*;
     use std::sync::Arc;
