@@ -94,6 +94,19 @@ sudo apt-get install build-essential pkg-config libcurl4-openssl-dev \
 cargo build --release --bin rosetta3
 ```
 
+On FreeBSD, install the native build and runtime dependencies first:
+
+```sh
+sudo pkg install curl sdl3 mesa-libs libGLU
+cargo build --release --bin rosetta3
+```
+
+FreeBSD support is newer than the Linux port and is not yet at parity: the build
+and the test suite run, but everything that reads `/proc` - `libproc`, Mach
+task-info, the region map behind a fault report, and the Mach port
+transport, which uses Linux's abstract socket namespace, still need a FreeBSD
+path. Expect a guest that needs those to fail.
+
 Development from a macOS host can also use the configured Debian container:
 
 ```sh
