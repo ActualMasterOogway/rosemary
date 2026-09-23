@@ -231,8 +231,8 @@ macro_rules! call_as_darwin {
 /// **Where this stands.** Three cases, and only one of them needs anything:
 ///
 /// * **macOS.** Empty, and compiles away. The host's array is already Darwin's.
-/// * **x86-64 Linux.** A real swap, and cheap. Darwin keeps its array in `%gs` and
-///   Linux keeps its own in `%fs`, so the two never collide and the host's
+/// * **x86-64 Linux and FreeBSD.** Darwin keeps its array in `%gs` and
+///   the host keeps its own in `%fs`, so the two never collide and the host's
 ///   thread-locals stay live across the boundary. Both sides are SysV besides, so
 ///   nothing else about the call needs bridging.
 /// * **aarch64 Linux.** Nothing, deliberately - see [`can_enter_darwin`]. Darwin arm64
@@ -258,7 +258,11 @@ pub struct DarwinThread {
 /// run native Darwin code should ask *before* running it, so the failure is a sentence
 /// rather than a fault inside somebody else's prologue.
 pub const fn can_enter_darwin() -> bool {
-    cfg!(target_os = "macos") || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+    cfg!(target_os = "macos")
+        || cfg!(all(
+            any(target_os = "linux", target_os = "freebsd"),
+            target_arch = "x86_64"
+        ))
 }
 
 /// Whether entering Darwin code requires changing the thread pointer at all.
@@ -366,7 +370,24 @@ fn set_thread_pointer(base: u64) {
     INSTALLED.with(|at| at.set(base));
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(target_os = "freebsd", target_arch = "x86_64"))]
+#[inline(always)]
+fn set_thread_pointer(base: u64) {
+    unsafe extern "C" {
+        fn amd64_set_gsbase(base: *mut libc::c_void) -> libc::c_int;
+    }
+
+    // SAFETY: this sets only this thread's %gs base. FreeBSD keeps its own TLS
+    // in %fs, so host thread-local access remains valid.
+    let rc = unsafe { amd64_set_gsbase(base as usize as *mut libc::c_void) };
+    assert_eq!(rc, 0, "failed to install the Darwin thread pointer");
+    INSTALLED.with(|at| at.set(base));
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    target_arch = "x86_64"
+))]
 thread_local! {
     /// What this runtime last installed as this thread's Darwin thread pointer.
     ///
@@ -386,17 +407,26 @@ thread_local! {
 /// True wherever nothing is swapped: on Darwin the host's array *is* the guest's,
 /// and where [`can_enter_darwin`] is false no boundary can be raised anyway.
 pub fn entered() -> bool {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        target_arch = "x86_64"
+    ))]
     {
         INSTALLED.with(|at| at.get()) == tsd_base()
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg(not(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        target_arch = "x86_64"
+    )))]
     {
         !swaps()
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    target_arch = "x86_64"
+)))]
 fn set_thread_pointer(_base: u64) {
     debug_assert!(!swaps(), "a host that swaps must say how");
 }
@@ -525,7 +555,10 @@ mod tests {
     /// put this thread's array where Darwin code looks for it. Reading `%gs:0` is
     /// how the guest's own `pthread_self` is compiled, so this is the guest's view.
     #[test]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        target_arch = "x86_64"
+    ))]
     fn darwin_code_finds_its_array_in_gs() {
         let _darwin = DarwinThread::enter();
         let base: u64;
