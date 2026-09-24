@@ -111,7 +111,7 @@ impl Args {
 /// `al` is set to eight because a variadic callee reads it as the number of
 /// vector registers in use, and a non-variadic one ignores it - neither the
 /// dispatch table nor the SDK headers say which a given slot is.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(target_os = "macos")))]
 #[unsafe(naked)]
 unsafe extern "C" fn call_raw(
     func: *const core::ffi::c_void,
@@ -176,6 +176,22 @@ unsafe extern "C" fn call_raw(
         "pop rbp",
         "ret",
     )
+}
+
+// The bridge calls a Linux x86-64 Steam client using the System V ABI. It is
+// unavailable on macOS (and on non-x86 hosts), but the shared module still
+// needs this symbol to type-check on every target.
+#[cfg(any(not(target_arch = "x86_64"), target_os = "macos"))]
+unsafe extern "C" fn call_raw(
+    _func: *const core::ffi::c_void,
+    _ints: *const u64,
+    _sses: *const u64,
+    _stack: *const u64,
+    _nstack: usize,
+    out: *mut Returned,
+) {
+    // The Steam host client is never available for this target.
+    unsafe { out.write(Returned::default()) };
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]

@@ -31,7 +31,11 @@ fn report(message: Option<Vec<u8>>, suffix: Suffix) {
     };
     // SAFETY: the name `getprogname` returns is NUL-terminated and lives for
     // the process.
-    let name = unsafe { std::ffi::CStr::from_ptr(darwin::progname::getprogname()) };
+    #[cfg(not(target_os = "macos"))]
+    let name_ptr = darwin::progname::getprogname();
+    #[cfg(target_os = "macos")]
+    let name_ptr = unsafe { libc::getprogname() };
+    let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
     let mut line = name.to_bytes().to_vec();
     line.extend_from_slice(b": ");
     let had_message = message.is_some();
@@ -44,7 +48,11 @@ fn report(message: Option<Vec<u8>>, suffix: Suffix) {
         }
         // SAFETY: the Darwin-numbered `strerror`, answered with a
         // NUL-terminated string.
-        let text = unsafe { std::ffi::CStr::from_ptr(darwin::string::strerror(errno)) };
+        #[cfg(not(target_os = "macos"))]
+        let text_ptr = darwin::string::strerror(errno);
+        #[cfg(target_os = "macos")]
+        let text_ptr = unsafe { libc::strerror(errno) };
+        let text = unsafe { std::ffi::CStr::from_ptr(text_ptr) };
         line.extend_from_slice(text.to_bytes());
     }
     line.push(b'\n');

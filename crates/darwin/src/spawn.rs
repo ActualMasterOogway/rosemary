@@ -167,9 +167,30 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
 /// # Safety
 ///
 /// `envp` is null or a null-terminated array of NUL-terminated strings.
+#[cfg(not(target_os = "macos"))]
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
     // SAFETY: the caller's obligation.
     unsafe { crate::env::host_spelling(envp) }
+}
+
+// On macOS the guest and host share Darwin's environment and path namespace.
+// Keep the helper available for the common implementation below, although this
+// module does not publish its spawn replacements on that host.
+#[cfg(target_os = "macos")]
+unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
+    if envp.is_null() {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    let mut entry = envp;
+    // SAFETY: `envp` is the null-terminated vector required by the caller.
+    while !unsafe { *entry }.is_null() {
+        // SAFETY: each vector element is a valid NUL-terminated string.
+        entries.push(unsafe { CStr::from_ptr(*entry) }.to_owned());
+        // SAFETY: advance within the null-terminated vector.
+        entry = unsafe { entry.add(1) };
+    }
+    entries
 }
 
 /// The host path an exec of the guest's `given` opens.
@@ -506,10 +527,18 @@ fn search_path(name: &CStr) -> Result<CString, c_int> {
 ///
 /// The *guest's*, not this process's: `execv` means "the environment I have",
 /// and what the guest has is [`crate::env`]'s block.
+#[cfg(not(target_os = "macos"))]
 fn environ() -> *const *const c_char {
     // SAFETY: the slot holds a null-terminated vector this runtime published
     // and never frees.
     unsafe { *crate::env::environ_slot() as *const *const c_char }
+}
+
+#[cfg(target_os = "macos")]
+fn environ() -> *const *const c_char {
+    // This helper is not exported on macOS; keep its signature valid for the
+    // shared implementation without depending on the non-macOS guest block.
+    std::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
