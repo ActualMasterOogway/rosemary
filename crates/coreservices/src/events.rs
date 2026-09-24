@@ -1,25 +1,8 @@
 //! The Carbon Event Manager, as a process that has no Carbon events.
 //!
-//! An Unreal Engine 3 game on the Mac drives its window through Cocoa and only
-//! touches Carbon: it asks the event loop for the time, installs a handler
-//! for events it will never be sent, and pumps `ReceiveNextEvent` beside its
-//! Cocoa loop. Under this tree the window and its input come from AppKit over
-//! SDL, so there is no Carbon event queue to read and there is nothing behind
-//! these calls to reimplement.
-//!
-//! So the queue is empty and says so, in the two spellings a caller checks:
-//! `eventLoopTimedOutErr` from a receive that waited, and
-//! `eventNotHandledErr` from a send nothing claimed. Both are ordinary answers
-//! a Carbon program already handles - an empty queue is what a game sees on
-//! most frames anyway - which is the difference between this and a stub that
-//! returns `noErr` and leaves the caller reading an event that was never
-//! written.
-//!
-//! What is *not* answered is the part that would have to be a lie: a handler
-//! installed here is never called, and a timer installed here never fires. The
-//! reference handed back is real enough to be removed again, and the
-//! installation is recorded so that a later `RemoveEventHandler` can be
-//! checked rather than merely tolerated.
+//! AppKit supplies input, so the Carbon queue stays empty. Receives return
+//! `eventLoopTimedOutErr` and unhandled sends return `eventNotHandledErr`.
+//! Handler registrations can be removed, but handlers and timers never fire.
 
 use std::collections::HashSet;
 use std::ffi::c_void;
