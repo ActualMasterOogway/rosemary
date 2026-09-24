@@ -2,26 +2,9 @@
 
 //! `AudioUnit` output, over SDL3.
 //!
-//! One thing, done the way a Mac game does it: find the default output
-//! component, make an instance, tell it a stream format, give it a render
-//! callback, initialize, start. Everything else an `AudioUnit` can be - a
-//! mixer, a converter, an effect - is not here, and a component description
-//! asking for one finds nothing rather than getting an output unit under
-//! another name.
-//!
-//! **The render callback is the guest's, and it is pulled on SDL's audio
-//! thread.** That is the same shape Apple's has, and the same shape SDL's
-//! stream callback has, so there is no queue in the middle: SDL asks for more
-//! bytes, this asks the guest for frames, and the frames go straight in.
-//!
-//! What this does *not* do is convert. The stream format the guest sets is
-//! handed to SDL, which converts to whatever the device runs at - so a guest
-//! asking for 44100 Hz stereo float gets exactly that in its buffers, whatever
-//! the hardware is doing. A format SDL cannot name is refused when it is set,
-//! by returning the framework's own `kAudioUnitErr_FormatNotSupported`, rather
-//! than accepted and then played as noise.
-
-// The C spellings are the interface, as they are in `corevideo`.
+//! Only output units are available. SDL's audio thread pulls frames directly
+//! from the guest render callback and converts the requested format for the
+//! device. Unsupported input formats return `kAudioUnitErr_FormatNotSupported`.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
