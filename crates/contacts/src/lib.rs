@@ -1,10 +1,5 @@
-//! The small part of Contacts needed to ask whether a contact store is usable.
-//!
-//! There is no address-book backend in this runtime. `CNContactStore` therefore
-//! reports contacts as restricted: unlike `NotDetermined`, that answer does not
-//! invite an application to present a permission request that can never be
-//! satisfied, and unlike `Authorized`, it does not promise a store which is not
-//! implemented.
+//! Contact authorization without an address-book backend. The store reports
+//! `Restricted` because it cannot fulfill a permission request.
 
 use objc::object::Id;
 use objc::sel::Sel;
@@ -28,9 +23,7 @@ pub fn bootstrap() {
 
 /// `+[CNContactStore authorizationStatusForEntityType:]`.
 ///
-/// `CNEntityType` currently has only the contacts case. Keeping the argument in
-/// the ABI while returning one policy for every value also gives an unknown
-/// future case the conservative answer.
+/// Unknown entity types also receive the conservative `Restricted` status.
 unsafe extern "C" fn authorization_status_for_entity_type(
     _class: Id,
     _sel: Sel,
