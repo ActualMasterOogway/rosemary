@@ -1,23 +1,9 @@
-//! The frameworks this tree implements, and whether they are the ones in use.
-//!
-//! Each is selected the same way [`crate::objc::host`] selects a runtime, and
-//! for the same reason: a framework written here can then be exercised on macOS,
-//! where its answers can be compared against Apple's, instead of only on the
-//! host that has no alternative.
-//!
-//! The selection is not free-standing. Every CoreFoundation object is an object
-//! of *this tree's* Objective-C runtime, so a builtin CoreFoundation over the
-//! host's libobjc would hand Apple's runtime structures it would read as its
-//! own. The frameworks therefore follow `ROSETTA3_OBJC` rather than carrying a
-//! switch each.
-
 use exports::Exports;
 use machish::resolve::{NativeDylibProvider, SyntheticDylib};
 
 use crate::objc::host::{Backend, backend};
 
-/// Whether this process is using the frameworks in this tree.
-pub fn builtin() -> bool {
+pub fn using_builtin() -> bool {
     backend() == Backend::Builtin
 }
 
@@ -48,55 +34,20 @@ fn install_block_runtime() {
         crate::objc::host::symbol("_Block_copy"),
         crate::objc::host::symbol("_Block_release"),
     ) else {
-        // Not an error to leave unset: on macOS nothing binds `darwin`'s libdispatch
-        // at all. Where something does, a block-taking entry point refuses rather
-        // than queueing a block it cannot keep alive.
         return;
     };
     darwin::dispatch::block::set_runtime(copy, release);
 }
 
-/// Every library in this tree, and the paths a guest opens it by.
-///
-/// A guest that `dlopen`s a framework this runtime implements must get a live
-/// handle rather than null: the frameworks have no file on disk, so the
-/// filesystem search in `dyld::resolve_path` can never find one. It also stops
-/// the *host's* framework being loaded in its place, which under the builtin
-/// runtime would put Apple's classes in front of a guest that has ours.
-///
-/// Both spellings of each: the install name, and the versioned path an
-/// `LC_LOAD_DYLIB` records.
-/// A framework this tree implements, and everything the three published views of
-/// it are derived from.
-///
-/// They used to be three hand-kept lists - the paths a `dlopen` answers, the
-/// loop that publishes, the chain a `dlsym` walks - and a framework in one and
-/// not another is a name that binds and cannot be found, or a path that returns
-/// null. `AudioToolbox` had been missing from the first.
 struct Framework {
-    /// The leaf, which is the framework directory's name and the spelling a
-    /// `dlopen("AppKit")` uses.
     leaf: &'static str,
-    /// The `Versions/` letter a real install carries: C for the two frameworks
-    /// old enough to have one, A for everything younger.
     version: char,
-    /// Umbrellas that re-export it. A program that links Cocoa imports AppKit's
-    /// symbols through that name.
     umbrellas: &'static [&'static str],
-    /// Its entry points, which the generated table publishes.
     provide: Option<fn(&mut dyn exports::Exports)>,
-    /// Its data symbols, which are objects built at run time rather than a list.
     data: Option<fn() -> Vec<(String, u64)>>,
-    /// What a `dlsym` of a bare C name answers. `None` where the framework
-    /// publishes only class objects, which a guest binds at link and never asks
-    /// for by name - see `contacts`.
     symbol: Option<fn(&str) -> Option<u64>>,
 }
 
-/// In the order they were published in before this was one list, because the
-/// library underneath is a map and the last definition of a name would win.
-/// `no_framework_defines_a_symbol_another_one_does` is what says the order
-/// cannot matter.
 static FRAMEWORKS: &[Framework] = &[
     Framework {
         leaf: "CoreFoundation",
@@ -220,18 +171,9 @@ static FRAMEWORKS: &[Framework] = &[
     },
 ];
 
-/// The spellings a guest opens `framework` by.
-///
-/// Both the install name and the versioned path an `LC_LOAD_DYLIB` records, and
-/// the bare leaf - `dyld::synthetic::find` matches a query against a registered
-/// name by the whole path or by the query's leaf, never by the leaf of the
-/// registered name, so a framework without its bare spelling is one a
-/// `dlopen("AppKit")` cannot reach.
 fn paths_of(framework: &Framework) -> Vec<String> {
     let mut out = Vec::new();
     for leaf in std::iter::once(framework.leaf).chain(framework.umbrellas.iter().copied()) {
-        // An umbrella is always Versions/A; only what it re-exports is old
-        // enough to be C.
         let version = if leaf == framework.leaf {
             framework.version
         } else {
@@ -248,15 +190,8 @@ fn paths_of(framework: &Framework) -> Vec<String> {
     out
 }
 
-/// Every library in this tree, and the paths a guest opens it by.
-///
-/// A guest that `dlopen`s a framework this runtime implements must get a live
-/// handle rather than null: the frameworks have no file on disk, so the
-/// filesystem search in `dyld::resolve_path` can never find one. It also stops
-/// the *host's* framework being loaded in its place, which under the builtin
-/// runtime would put Apple's classes in front of a guest that has ours.
 fn register_dlopen_names() {
-    if !builtin() {
+    if !using_builtin() {
         return;
     }
     for framework in FRAMEWORKS {
@@ -269,13 +204,8 @@ fn register_dlopen_names() {
     register_system_libraries();
 }
 
-/// libSystem and libobjc, which this runtime is.
-///
-/// A prefix's base has real copies of both on disk, so without a handle here
-/// `dyld::resolve_path` would find the file and map Apple's libSystem into a
-/// guest that is already bound to `darwin` - two C libraries, one heap each.
 fn register_system_libraries() {
-    crate::dyld::register_synthetic(darwin::LIBSYSTEM, crate::dyld::system_symbol);
+    crate::dyld::register_synthetic(darwin::LIBRARY_NAMES, crate::dyld::system_symbol);
     crate::dyld::register_synthetic(
         &["/usr/lib/libobjc.A.dylib", "/usr/lib/libobjc.dylib"],
         objc_symbol,
@@ -286,16 +216,6 @@ fn objc_symbol(name: &str) -> Option<u64> {
     symbol(name).or_else(|| crate::objc::host::symbol(name))
 }
 
-/// `OpenGL.framework`, as a handle over the GL library SDL is using.
-///
-/// Without a handle for that path the loader returns null, every `dlsym` after
-/// it answers null, and the program reports **"Missing GL version"** and then
-/// "OpenGL 3.2 support or higher required" - a version check that failed
-/// because there was no library to ask, not because the driver is old.
-///
-/// The other half of [`crate::opengl`]: the same answers a link gets, so that a
-/// program which resolves half its GL by import and half by `dlsym` draws
-/// through one library either way.
 fn register_opengl_framework() {
     if !crate::opengl::interposed() {
         return;
@@ -303,11 +223,6 @@ fn register_opengl_framework() {
     crate::dyld::register_synthetic(crate::opengl::INSTALL_PATHS, crate::opengl::symbol);
 }
 
-/// `OpenAL.framework`, as a handle over this host's own OpenAL.
-///
-/// The same reason [`register_opengl_framework`] has: a guest that `dlopen`s
-/// the framework and then `dlsym`s its way in gets the same answers a link
-/// gets, rather than a null handle.
 fn register_openal_framework() {
     if !crate::openal::interposed() {
         return;
@@ -315,38 +230,13 @@ fn register_openal_framework() {
     crate::dyld::register_synthetic(crate::openal::INSTALL_PATHS, crate::openal::symbol);
 }
 
-/// Push the outermost autorelease pool, the one a process is born with.
-///
-/// A real Darwin process reaches `main` inside a pool the runtime pushed, and
-/// `NSApplicationMain` pushes another per event. Without the outer one, the
-/// first `-autorelease` before the guest makes a pool of its own has nowhere to
-/// go, and this runtime says so and leaks it - which is Apple's behaviour and
-/// still the wrong thing to reproduce here, because it happens on the way in
-/// rather than in the guest's own code.
-///
-/// Here rather than in `startup::run`, because class realization autoreleases
-/// and that happens while the program is still being loaded. On the thread that
-/// first builds the provider chain, which is the one the program starts on.
-/// Never popped: it is the process's, and the process ending is what drains it.
 fn push_main_pool() {
-    if !builtin() {
+    if !using_builtin() {
         return;
     }
     objc::arc::pool_push();
 }
 
-/// Whether `ROSETTA3_WITHHOLD` names this symbol, so the loader leaves it unbound.
-///
-/// The A/B this tree could not otherwise run. A framework answer that is subtly
-/// wrong is invisible - the guest takes a different branch and something stops
-/// working three layers away - and the way to find one is to compare against a
-/// runtime that does not answer at all. Withholding a name here reproduces that
-/// side of the comparison without a rebuild.
-///
-/// What it costs is the difference `appkit::NOTIFICATION_NAMES` states: a
-/// withheld **data** symbol binds to zero and a message to it answers nil, which
-/// is survivable and is the interesting case; a withheld **function** faults at
-/// the call. So this is a diagnostic and not a mode, and it says what it did.
 fn withheld(name: &str) -> bool {
     #[static_init::dynamic]
     static NAMES: Vec<String> = std::env::var("ROSETTA3_WITHHOLD")
@@ -364,21 +254,15 @@ fn withheld(name: &str) -> bool {
     out
 }
 
-/// The frameworks, as a library the loader can bind against.
-///
-/// Flat, like the rest of this runtime's providers: which framework an image
-/// thinks `CFRelease` comes from is not the question.
 pub fn provider() -> SyntheticDylib {
     install();
     let mut lib = SyntheticDylib::new("<rosetta3 frameworks>");
     lib.flat(true);
-    if !builtin() {
+    if !using_builtin() {
         return lib;
     }
     // Before anything is published: `kCFNull` is the `NSNull` singleton, and
-    // `NSNull` is Foundation's class. A provider built before Foundation had
-    // registered it would publish a null for that symbol, which is the very
-    // failure the globals exist to avoid.
+    // `NSNull` is Foundation's class.
     foundation::bootstrap();
     let out = &mut exports::Denying {
         inner: &mut lib,
@@ -403,22 +287,6 @@ pub fn provider() -> SyntheticDylib {
     lib
 }
 
-/// String globals belonging to frameworks this tree does not implement at all.
-///
-/// Published anyway, and only because of the difference AppKit's
-/// `NOTIFICATION_NAMES` states: an unresolved *function* import is refused by
-/// name at the call, while an unresolved **data** import binds to zero and the
-/// guest dereferences it. A program that registers for
-/// `AVCaptureDeviceWasConnectedNotification` before it ever touches a camera
-/// therefore segfaults on the `objc_msgSend` that passes the name, with nothing
-/// to say which symbol it was.
-///
-/// Nothing posts any of these, which is the honest state: there is no capture
-/// session here. A name nothing posts is a gap the program survives.
-///
-/// The values are Apple's own, not the symbol names. Three of them differ, and
-/// they are the ones a program compares rather than merely passes on:
-/// `AVMediaTypeVideo` is the four-character code `vide`.
 const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     (
         "_AVCaptureDeviceWasConnectedNotification",
@@ -446,22 +314,10 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_AVMediaTypeText", "text"),
 ];
 
-/// Each of [`MEDIA_CONSTANTS`] as a cell holding an `NSString *`.
-///
-/// A cell rather than the string itself, for the reason `foundation`'s own
-/// globals go through one: the symbol names a *variable* holding the pointer,
-/// and a guest loads it before dereferencing.
 fn media_constants() -> Vec<(String, u64)> {
     corefoundation::base::string_globals(MEDIA_CONSTANTS)
 }
 
-/// Names this tree answers only as a shim, and the address the loader binds.
-///
-/// A shim is reached by *name* on the way through an intercepted call, so under
-/// the emulated backend the address only has to resolve here rather than
-/// somewhere else - see the roadmap's "a shim needs its import to resolve
-/// first". The native backend intercepts nothing, so the address is the whole
-/// implementation there, and a stub is what says which one is still missing.
 fn shimmed() -> Vec<(&'static str, *const ())> {
     vec![
         ("NSLog", crate::shims::nslog::native::nslog() as *const ()),
@@ -473,7 +329,7 @@ fn shimmed() -> Vec<(&'static str, *const ())> {
 }
 
 pub fn symbol(name: &str) -> Option<u64> {
-    if !builtin() {
+    if !using_builtin() {
         return None;
     }
     foundation::bootstrap();
@@ -493,22 +349,12 @@ pub fn symbol(name: &str) -> Option<u64> {
         .or_else(|| crate::openal::symbol(name))
 }
 
-/// Tell this tree's `NSBundle` which `.app` the guest is.
-///
-/// Nothing here reads the *host* process's path, which is why the builtin path
-/// needs no re-exec: see `rosetta3::bundle` for the hack this replaces, and
-/// `foundation::bundle::set_main` for what is told.
-///
-/// A loose binary is not an error - most guests are one - so a `false` here is
-/// only reported under the trace.
 pub fn set_main_bundle(executable: &std::path::Path) {
     install();
-    if !builtin() {
+    if !using_builtin() {
         return;
     }
     let found = foundation::bundle::set_main(executable);
-    // Before anything brings SDL up, which is what makes it reach the audio
-    // server and the compositor: see `appkit::metadata`.
     appkit::metadata::publish(executable);
     if !found && std::env::var_os("ROSETTA3_TRACE_VM").is_some() {
         eprintln!(
@@ -518,26 +364,11 @@ pub fn set_main_bundle(executable: &std::path::Path) {
     }
 }
 
-/// Keep the host's own framework symbols away from a guest using these.
-///
-/// The same argument as [`crate::objc::host::deny_foreign_classes`]: an object
-/// from Apple's CoreFoundation handed to this one is a foreign structure read as
-/// a native one. `darwin::divergent` already denies the `CF` and `NS` families
-/// off macOS; this is what denies them *on* macOS when the builtin frameworks
-/// are the ones in use.
 pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     install();
-    if !builtin() {
+    if !using_builtin() {
         return;
     }
-    // `_SC` and Contacts with them, and for the same reason one step removed:
-    // SystemConfiguration is Apple's own and takes CoreFoundation objects, so
-    // `SCDynamicStoreCreate` handed one of this tree's strings is Apple's
-    // CoreFoundation reading a structure this runtime laid out. Denied whole
-    // rather than per name, so that an entry point `corefoundation::sysconfig`
-    // does not implement is refused by name instead of corrupting memory. An
-    // an unimplemented Contacts, GameController or WebKit call likewise must
-    // not hand an object from this tree to Apple's corresponding framework.
     for prefix in [
         "_CF", "_NS", "_kCF", "_kNS", "_SC", "_kSC", "_CN", "_kCN", "_GC", "_kGC", "_Web",
     ] {
@@ -549,7 +380,6 @@ pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
 mod tests {
     use super::*;
 
-    /// Everything the provider publishes, in order.
     fn published() -> exports::Recording {
         let mut out = exports::Recording::default();
         foundation::bootstrap();
@@ -566,13 +396,9 @@ mod tests {
         out
     }
 
-    /// The library underneath is a map, so a name two frameworks define is one
-    /// whose address depends on the order they are listed in - while `symbol`
-    /// answers with the first that knows it, which may be the other one. Both
-    /// `foundation` and `appkit` had been defining `_CGPointZero`.
     #[test]
     fn no_framework_defines_a_symbol_another_one_does() {
-        if !builtin() {
+        if !using_builtin() {
             return;
         }
         let out = published();
@@ -588,9 +414,6 @@ mod tests {
         assert!(twice.is_empty(), "defined more than once: {twice:?}");
     }
 
-    /// A framework with no bare spelling is one a `dlopen("AudioToolbox")`
-    /// cannot reach, because `dyld::synthetic::find` never takes the leaf of a
-    /// registered name. Deriving the paths is what makes that unrepresentable.
     #[test]
     fn every_framework_answers_a_dlopen_by_its_leaf() {
         for framework in FRAMEWORKS {
@@ -607,11 +430,9 @@ mod tests {
         }
     }
 
-    /// The invariant the three lists could not state when they were three: the
-    /// address a link binds and the address a `dlsym` answers are one.
     #[test]
     fn a_published_function_is_the_one_dlsym_answers() {
-        if !builtin() {
+        if !using_builtin() {
             return;
         }
         for framework in FRAMEWORKS {

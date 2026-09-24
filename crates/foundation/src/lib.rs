@@ -311,15 +311,9 @@ fn zeroed<T>() -> u64 {
     Box::leak(vec![0u8; size_of::<T>()].into_boxed_slice()).as_ptr() as usize as u64
 }
 
-/// The `NSString *` globals whose value is a fixed name.
-///
-/// Each is a documented constant rather than something this runtime chooses, so
-/// a guest using one as a dictionary key gets the key Apple's Foundation would.
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSLocalizedDescriptionKey", "NSLocalizedDescription"),
     ("_NSArgumentDomain", "NSArgumentDomain"),
-    // The cookie property keys, whose values are the bare words a `Set-Cookie`
-    // attribute is spelled with.
     ("_NSHTTPCookieDiscard", "Discard"),
     ("_NSHTTPCookieDomain", "Domain"),
     ("_NSHTTPCookieExpires", "Expires"),
@@ -335,15 +329,8 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The Foundation notification names a program compares against.
-///
-/// Published whether or not anything posts them, for the reason AppKit's are: an
-/// unresolved data import binds to zero and the guest's next instruction
-/// dereferences it.
 pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSProcessInfoThermalStateDidChangeNotification",
-    // Weakly imported by programs that predate it, and still dereferenced
-    // without a null check by at least one of them.
     "NSProcessInfoPowerStateDidChangeNotification",
 ];
 

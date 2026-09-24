@@ -1033,218 +1033,110 @@ pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
     })
 }
 
-/// The address of the implementation for `name`, or `None`.
-///
-/// Empty on macOS, where the host's libpthread *is* the guest's and passing a call
-/// through is both correct and free. Everything above is still compiled and tested
-/// there; what changes is only whether a guest import is bound to it.
-pub fn symbol(name: &str) -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = name;
-        None
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        entries().iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
-    }
+unsafe extern "C" {
+    fn pthread_testcancel();
+    fn pthread_getconcurrency() -> libc::c_int;
+    fn pthread_setconcurrency(new_level: libc::c_int) -> libc::c_int;
 }
 
-/// Every entry, as `(C name, address)`.
-#[cfg(not(target_os = "macos"))]
-fn entries() -> &'static [(&'static str, u64)] {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<Vec<(&'static str, u64)>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        macro_rules! table {
-            ($($name:literal => $f:expr),* $(,)?) => {
-                vec![$(($name, $f as *const () as usize as u64)),*]
-            };
-        }
-        table! {
-            // Attributes.
-            "pthread_attr_init" => attr::imp::attr_init,
-            "pthread_attr_destroy" => attr::imp::attr_destroy,
-            "pthread_attr_setdetachstate" => attr::imp::attr_setdetachstate,
-            "pthread_attr_getdetachstate" => attr::imp::attr_getdetachstate,
-            "pthread_attr_setstacksize" => attr::imp::attr_setstacksize,
-            "pthread_attr_getstacksize" => attr::imp::attr_getstacksize,
-            "pthread_attr_setstackaddr" => attr::imp::attr_setstackaddr,
-            "pthread_attr_getstackaddr" => attr::imp::attr_getstackaddr,
-            "pthread_attr_setstack" => attr::imp::attr_setstack,
-            "pthread_attr_getstack" => attr::imp::attr_getstack,
-            "pthread_attr_setguardsize" => attr::imp::attr_setguardsize,
-            "pthread_attr_getguardsize" => attr::imp::attr_getguardsize,
-            "pthread_attr_setscope" => attr::imp::attr_setscope,
-            "pthread_attr_getscope" => attr::imp::attr_getscope,
-            "pthread_attr_setinheritsched" => attr::imp::attr_setinheritsched,
-            "pthread_attr_getinheritsched" => attr::imp::attr_getinheritsched,
-            "pthread_attr_setschedpolicy" => attr::imp::attr_setschedpolicy,
-            "pthread_attr_getschedpolicy" => attr::imp::attr_getschedpolicy,
-            "pthread_attr_setschedparam" => attr::imp::attr_setschedparam,
-            "pthread_attr_getschedparam" => attr::imp::attr_getschedparam,
-            "pthread_attr_set_qos_class_np" => attr::imp::attr_set_qos_class_np,
-            "pthread_attr_get_qos_class_np" => attr::imp::attr_get_qos_class_np,
+exports::exports! {
+    functions {
+        "pthread_attr_init" => attr::imp::attr_init,
+        "pthread_attr_destroy" => attr::imp::attr_destroy,
+        "pthread_attr_setdetachstate" => attr::imp::attr_setdetachstate,
+        "pthread_attr_getdetachstate" => attr::imp::attr_getdetachstate,
+        "pthread_attr_setstacksize" => attr::imp::attr_setstacksize,
+        "pthread_attr_getstacksize" => attr::imp::attr_getstacksize,
+        "pthread_attr_setstackaddr" => attr::imp::attr_setstackaddr,
+        "pthread_attr_getstackaddr" => attr::imp::attr_getstackaddr,
+        "pthread_attr_setstack" => attr::imp::attr_setstack,
+        "pthread_attr_getstack" => attr::imp::attr_getstack,
+        "pthread_attr_setguardsize" => attr::imp::attr_setguardsize,
+        "pthread_attr_getguardsize" => attr::imp::attr_getguardsize,
+        "pthread_attr_setscope" => attr::imp::attr_setscope,
+        "pthread_attr_getscope" => attr::imp::attr_getscope,
+        "pthread_attr_setinheritsched" => attr::imp::attr_setinheritsched,
+        "pthread_attr_getinheritsched" => attr::imp::attr_getinheritsched,
+        "pthread_attr_setschedpolicy" => attr::imp::attr_setschedpolicy,
+        "pthread_attr_getschedpolicy" => attr::imp::attr_getschedpolicy,
+        "pthread_attr_setschedparam" => attr::imp::attr_setschedparam,
+        "pthread_attr_getschedparam" => attr::imp::attr_getschedparam,
+        "pthread_attr_set_qos_class_np" => attr::imp::attr_set_qos_class_np,
+        "pthread_attr_get_qos_class_np" => attr::imp::attr_get_qos_class_np,
 
-            // Mutexes.
-            "pthread_mutex_init" => mutex::mutex_init,
-            "pthread_mutex_destroy" => mutex::mutex_destroy,
-            "pthread_mutex_lock" => mutex::mutex_lock,
-            "pthread_mutex_trylock" => mutex::mutex_trylock,
-            "pthread_mutex_unlock" => mutex::mutex_unlock,
-            "pthread_mutexattr_init" => mutexattr_init,
-            "pthread_mutexattr_destroy" => mutexattr_destroy,
-            "pthread_mutexattr_settype" => mutexattr_settype,
-            "pthread_mutexattr_gettype" => mutexattr_gettype,
-            "pthread_mutexattr_setprotocol" => mutexattr_setprotocol,
-            "pthread_mutexattr_getprotocol" => mutexattr_getprotocol,
-            "pthread_mutexattr_setpshared" => mutexattr_setpshared,
-            "pthread_mutexattr_getpshared" => mutexattr_getpshared,
-            "pthread_mutexattr_setpolicy_np" => mutexattr_setpolicy_np,
+        "pthread_mutex_init" => mutex::mutex_init,
+        "pthread_mutex_destroy" => mutex::mutex_destroy,
+        "pthread_mutex_lock" => mutex::mutex_lock,
+        "pthread_mutex_trylock" => mutex::mutex_trylock,
+        "pthread_mutex_unlock" => mutex::mutex_unlock,
+        "pthread_mutexattr_init" => mutexattr_init,
+        "pthread_mutexattr_destroy" => mutexattr_destroy,
+        "pthread_mutexattr_settype" => mutexattr_settype,
+        "pthread_mutexattr_gettype" => mutexattr_gettype,
+        "pthread_mutexattr_setprotocol" => mutexattr_setprotocol,
+        "pthread_mutexattr_getprotocol" => mutexattr_getprotocol,
+        "pthread_mutexattr_setpshared" => mutexattr_setpshared,
+        "pthread_mutexattr_getpshared" => mutexattr_getpshared,
+        "pthread_mutexattr_setpolicy_np" => mutexattr_setpolicy_np,
 
-            // Condition variables.
-            "pthread_cond_init" => sync::cond_init,
-            "pthread_cond_destroy" => sync::cond_destroy,
-            "pthread_cond_wait" => sync::cond_wait,
-            "pthread_cond_timedwait" => sync::cond_timedwait,
-            "pthread_cond_timedwait_relative_np" => sync::cond_timedwait_relative,
-            "pthread_cond_signal" => sync::cond_signal,
-            "pthread_cond_broadcast" => sync::cond_broadcast,
-            "pthread_condattr_init" => condattr_init,
-            "pthread_condattr_destroy" => condattr_destroy,
-            "pthread_condattr_setpshared" => condattr_setpshared,
-            "pthread_condattr_getpshared" => condattr_getpshared,
+        "pthread_cond_init" => sync::cond_init,
+        "pthread_cond_destroy" => sync::cond_destroy,
+        "pthread_cond_wait" => sync::cond_wait,
+        "pthread_cond_timedwait" => sync::cond_timedwait,
+        "pthread_cond_timedwait_relative_np" => sync::cond_timedwait_relative,
+        "pthread_cond_signal" => sync::cond_signal,
+        "pthread_cond_broadcast" => sync::cond_broadcast,
+        "pthread_condattr_init" => condattr_init,
+        "pthread_condattr_destroy" => condattr_destroy,
+        "pthread_condattr_setpshared" => condattr_setpshared,
+        "pthread_condattr_getpshared" => condattr_getpshared,
 
-            // Read-write locks.
-            "pthread_rwlock_init" => sync::rwlock_init,
-            "pthread_rwlock_destroy" => sync::rwlock_destroy,
-            "pthread_rwlock_rdlock" => sync::rwlock_rdlock,
-            "pthread_rwlock_tryrdlock" => sync::rwlock_tryrdlock,
-            "pthread_rwlock_wrlock" => sync::rwlock_wrlock,
-            "pthread_rwlock_trywrlock" => sync::rwlock_trywrlock,
-            "pthread_rwlock_unlock" => sync::rwlock_unlock,
-            "pthread_rwlockattr_init" => rwlockattr_init,
-            "pthread_rwlockattr_destroy" => rwlockattr_destroy,
-            "pthread_rwlockattr_setpshared" => rwlockattr_setpshared,
-            "pthread_rwlockattr_getpshared" => rwlockattr_getpshared,
+        "pthread_rwlock_init" => sync::rwlock_init,
+        "pthread_rwlock_destroy" => sync::rwlock_destroy,
+        "pthread_rwlock_rdlock" => sync::rwlock_rdlock,
+        "pthread_rwlock_tryrdlock" => sync::rwlock_tryrdlock,
+        "pthread_rwlock_wrlock" => sync::rwlock_wrlock,
+        "pthread_rwlock_trywrlock" => sync::rwlock_trywrlock,
+        "pthread_rwlock_unlock" => sync::rwlock_unlock,
+        "pthread_rwlockattr_init" => rwlockattr_init,
+        "pthread_rwlockattr_destroy" => rwlockattr_destroy,
+        "pthread_rwlockattr_setpshared" => rwlockattr_setpshared,
+        "pthread_rwlockattr_getpshared" => rwlockattr_getpshared,
 
-            // Thread-specific data. `pthread_key_create` is *also* a shim under
-            // emulation, where the destructor is guest code that needs a thunk -
-            // the entry here is what the native backend binds, and what stops
-            // glibc writing four bytes into the guest's eight.
-            "pthread_key_create" => key_create,
-            "pthread_once" => sync::once_entry,
-            "pthread_key_delete" => key_delete,
-            "pthread_getspecific" => getspecific,
-            "pthread_setspecific" => setspecific,
+        "pthread_key_create" => key_create,
+        "pthread_once" => sync::once_entry,
+        "pthread_key_delete" => key_delete,
+        "pthread_getspecific" => getspecific,
+        "pthread_setspecific" => setspecific,
 
-            // Lifecycle and the `_np` family.
-            "pthread_create" => create,
-            "pthread_join" => join,
-            "pthread_detach" => detach,
-            "pthread_kill" => kill,
-            "pthread_get_stackaddr_np" => get_stackaddr_np,
-            "pthread_get_stacksize_np" => get_stacksize_np,
-            "pthread_setname_np" => setname_np,
-            "pthread_getname_np" => getname_np,
-            "pthread_main_np" => main_np,
-            "pthread_threadid_np" => threadid_np,
-            "pthread_mach_thread_np" => mach_thread_np,
-            "pthread_yield_np" => yield_np,
-            "pthread_set_qos_class_self_np" => set_qos_class_self_np,
-            "pthread_get_qos_class_np" => get_qos_class_np,
-            "pthread_setcancelstate" => setcancelstate,
-            "pthread_setcanceltype" => setcanceltype,
+        "pthread_create" => create,
+        "pthread_join" => join,
+        "pthread_detach" => detach,
+        "pthread_kill" => kill,
+        "pthread_get_stackaddr_np" => get_stackaddr_np,
+        "pthread_get_stacksize_np" => get_stacksize_np,
+        "pthread_setname_np" => setname_np,
+        "pthread_getname_np" => getname_np,
+        "pthread_main_np" => main_np,
+        "pthread_threadid_np" => threadid_np,
+        "pthread_mach_thread_np" => mach_thread_np,
+        "pthread_yield_np" => yield_np,
+        "pthread_set_qos_class_self_np" => set_qos_class_self_np,
+        "pthread_get_qos_class_np" => get_qos_class_np,
+        "pthread_setcancelstate" => setcancelstate,
+        "pthread_setcanceltype" => setcanceltype,
 
-            // Scheduler
-            "pthread_getschedparam" => sched::pthread_getschedparam,
-            "pthread_setschedparam" => sched::pthread_setschedparam,
-        }
-    })
-}
+        "pthread_getschedparam" => sched::pthread_getschedparam,
+        "pthread_setschedparam" => sched::pthread_setschedparam,
 
-/// Known Darwin pthread exports that are intentionally still unavailable.
-///
-/// Keeping this inventory next to `entries` makes the blanket `pthread_` denial in
-/// `divergent` explicit rather than making an absent symbol look overlooked.
-const _KNOWN_MISSING: &[&str] = &[
-    "pthread_mutexattr_setprioceiling",
-    "pthread_mutexattr_getprioceiling",
-    "pthread_mutex_setprioceiling",
-    "pthread_mutex_getprioceiling",
-];
-
-/// Names this module deliberately leaves to the host, and why.
-///
-/// Every one is a call whose arguments and result are plain scalars the two platforms
-/// agree about, and whose object - if it has one - never crosses the seam: a
-/// `pthread_t` is eight opaque bytes on both, and every value a guest holds came from
-/// a `pthread_create` this runtime serviced.
-pub const PASSED_THROUGH: &[&str] = &[
-    "pthread_self",
-    "pthread_equal",
-    // `pthread_join` and `pthread_detach` were on this list and are not any
-    // more. The arguments do agree; the *result* does not, because a `pthread_*`
-    // call returns its error as a number and `EDEADLK` is 11 on Darwin and 35
-    // here. Both are wrapped above for that one reason.
-    "pthread_exit",
-    // `pthread_cancel` is deliberately absent. Cancellation unwinds a stack the host's
-    // unwinder never saw, so `rosetta3::abi::table` refuses it outright - and this
-    // list vouching for it would quietly undo that.
-    "pthread_testcancel",
-    "pthread_getconcurrency",
-    "pthread_setconcurrency",
-    "sched_yield",
-];
-
-/// Names this crate leaves to the **runtime above it**, which services them with a
-/// thunk for the guest function pointer they take.
-///
-/// Reaching guest code needs emulation vocabulary this crate does not have, so
-/// `rosetta3::shims::pthread` owns the call. Listed here so the blanket denial of the
-/// `pthread_` family in [`crate::divergent`] does not take their import slots with it:
-/// the slot still has to resolve to *something* for the runtime to intercept the call.
-///
-/// **Being on this list is not enough for anything that takes a Darwin-shaped
-/// object.** Interception is an emulated-backend thing; the native backend
-/// intercepts nothing and calls whatever the slot holds. So `pthread_create`,
-/// `pthread_once` and `pthread_key_create` have all been taken off this list and
-/// given entries of their own - each was handing glibc a structure of the wrong
-/// shape, and each failed silently rather than loudly. `pthread_once` is the one
-/// worth remembering: Darwin's `PTHREAD_ONCE_INIT` signature has the bit set that
-/// glibc reads as "already run".
-pub const SHIMMED_ABOVE: &[&str] = &[
-    // Takes three handlers, and is otherwise plain scalars. The slot it binds to
-    // is `crate::bsd`'s and not the host's: glibc keeps `pthread_atfork` in
-    // `libc_nonshared.a`, so the passthrough below finds nothing for it.
-    "pthread_atfork",
-];
-
-/// Register every entry under the name a Mach-O imports it by.
-///
-/// [`PASSED_THROUGH`] is registered too, bound to the host's own function. That is not
-/// redundant: it is what lets the host resolver deny the whole `pthread_` family
-/// outright, so a name this crate has *not* thought about is refused rather than
-/// quietly answered. A passthrough registered here costs nothing at run time - the
-/// guest's slot holds the host address either way.
-pub fn provide(out: &mut dyn exports::Exports) {
-    #[cfg(not(target_os = "macos"))]
-    {
-        for (name, address) in entries() {
-            crate::define_fn(out, &format!("_{name}"), *address as *const ());
-        }
-        // Both lists are bound to the host's own function: [`PASSED_THROUGH`] because
-        // that is the implementation, and [`SHIMMED_ABOVE`] because the slot has to
-        // hold *some* address for the runtime to intercept the call at. Neither costs
-        // anything at run time - the guest's slot holds the host address either way.
-        for name in PASSED_THROUGH.iter().chain(SHIMMED_ABOVE) {
-            if let Some(host) = crate::host_symbol(name) {
-                crate::define_fn(out, &format!("_{name}"), host as *const ());
-            }
-        }
+        "pthread_self" => libc::pthread_self,
+        "pthread_equal" => libc::pthread_equal,
+        "pthread_exit" => libc::pthread_exit,
+        "pthread_testcancel" => pthread_testcancel,
+        "pthread_getconcurrency" => pthread_getconcurrency,
+        "pthread_setconcurrency" => pthread_setconcurrency,
+        "sched_yield" => libc::sched_yield,
     }
-    #[cfg(target_os = "macos")]
-    let _ = out;
 }
 
 #[cfg(test)]
@@ -1263,12 +1155,6 @@ mod tests {
     type CondAttrObj = Guest<{ object::size::CONDATTR }>;
     type RwLockAttrObj = Guest<{ object::size::RWLOCKATTR }>;
 
-    /// The three names whose Darwin-shaped object glibc would misread must bind to
-    /// *this crate's* entry, not to the host's.
-    ///
-    /// Being intercepted above is not enough: interception is an emulated-backend
-    /// thing, and the native backend calls whatever the slot holds. `pthread_once`
-    /// is the reason this test exists - see [`sync::once_entry`].
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn the_calls_whose_object_is_darwin_shaped_do_not_bind_to_the_host_s() {
@@ -1282,8 +1168,6 @@ mod tests {
         }
     }
 
-    /// Everything a guest sets on a thread attribute set must read back as what it
-    /// set - which is the whole contract of an opaque type whose bytes are ours.
     #[test]
     fn every_thread_attribute_reads_back_as_what_was_set() {
         let a = Attr::zeroed();
@@ -1837,31 +1721,6 @@ mod tests {
     fn this_thread() -> u64 {
         // SAFETY: `pthread_self` is infallible; the handle is pointer-sized.
         unsafe { core::mem::transmute_copy(&libc::pthread_self()) }
-    }
-
-    /// Nothing may be both implemented here and claimed as a passthrough - the two
-    /// lists are the same question answered opposite ways.
-    #[test]
-    fn nothing_is_both_implemented_and_passed_through() {
-        for name in PASSED_THROUGH {
-            assert!(
-                symbol(name).is_none(),
-                "{name} is passed through and also implemented"
-            );
-        }
-    }
-
-    /// Every implemented name must be one Darwin actually exports, or it is answering
-    /// an import no guest can make.
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn every_entry_names_a_real_darwin_symbol() {
-        // The list Darwin's libsystem_pthread exports, as of the SDK this was written
-        // against. Kept short: only the entries this module claims.
-        for (name, address) in entries() {
-            assert!(name.starts_with("pthread_"), "{name}");
-            assert_ne!(*address, 0, "{name} resolved to nothing");
-        }
     }
 
     /// A thread this module starts runs with the *Darwin* thread pointer, which is

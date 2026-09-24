@@ -1,27 +1,5 @@
-//! Host functions that call guest code back before they return.
-//!
-//! The call itself is the host's own and the two platforms agree about it - these
-//! would all be [`crate::passthrough`] entries but for one thing. What they take
-//! is a *guest* function pointer, and on a host that is not Darwin the guest's
-//! code cannot be entered with this thread's own thread pointer: `pthread_self`,
-//! `errno` and a `-fstack-protector` canary are direct loads off it and never
-//! call anything, so a comparator entered with the host's pointer reads whatever
-//! those offsets happen to address. See [`crate::tls`].
-//!
-//! It does not go wrong on the thread that is usually asking. A guest thread is
-//! already inside Darwin code, so the boundary these wrappers raise is free and
-//! changes nothing. It goes wrong on a thread *this runtime* started - a
-//! libdispatch worker running a guest block that sorts something - where the
-//! thread pointer is the host's until something says otherwise.
-//!
-//! Only the functions whose callback runs *during the call* belong here. A
-//! registration whose callback runs later - `atexit`, `_tlv_atexit` - is not
-//! fixed by a boundary around the registration, and needs a trampoline per
-//! registered handler instead.
-
 use core::ffi::{c_int, c_void};
 
-/// `int (*)(const void *, const void *)`, the comparator both take.
 type Compare = unsafe extern "C" fn(*const c_void, *const c_void) -> c_int;
 
 /// `void qsort(void *base, size_t nel, size_t width, int (*compar)(const void *, const void *))`

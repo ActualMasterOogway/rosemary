@@ -1,25 +1,10 @@
-//! Entries a Mac's libSystem publishes and this host's libc does not export.
-//!
-//! Grouped because the reason is the same for all of them, and because it is not
-//! the usual one: these are not Darwin *behaviour* differences, they are names a
-//! `dlsym` here cannot find. Three ways that happens:
-//!
-//! - the symbol exists but only for a static link - `atexit` lives in glibc's
-//!   `libc_nonshared.a`, so nothing dynamic defines it;
-//! - the symbol is a BSD extension glibc never had - `srandomdev`;
-//! - the symbol is optional C - `memset_s` is C11 Annex K, which glibc declined.
-//!
-//! `__assert_rtn` is the fourth kind: the same function under another name.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 unsafe extern "C" {
-    /// glibc's, which *is* exported, and which `atexit` is a special case of.
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
     #[cfg(target_env = "gnu")]
-    /// glibc's exported `pthread_atfork`, which takes the DSO handle as well.
     fn __register_atfork(
         prepare: *const (),
         parent: *const (),
@@ -28,29 +13,10 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// The DSO handle this crate's registrations are made against.
-///
-/// Its own object rather than the guest's: a guest handle would ask the host's
-/// exit machinery to key destructors on an image it never loaded.
 static DSO_HANDLE: u8 = 0;
 
-/// `int atexit(void (*handler)(void))`
-///
-/// Registered through `__cxa_atexit` with a null argument. A function compiled
-/// to take none ignores the register it arrives in, under both ABIs in play.
-///
-/// The emulated backend does **not** use this: there `handler` is a guest
-/// address that has to become a trampoline first, which is
-/// `rosetta3::shims::atexit`'s job and which it still wins because interception
-/// reads the link report rather than the slot. The slot has to hold something
-/// for the native backend, where the guest's code already is host code.
-///
-/// # Safety
-///
-/// `handler` is a function this process can call and that outlives the process's
-/// exit.
 pub unsafe extern "C" fn atexit(handler: *const ()) -> c_int {
-    // SAFETY: the caller's guarantee, and a DSO handle of this crate's own.
+    // SAFETY: registering against the host should be fine since the ABIs match
     unsafe {
         __cxa_atexit(
             handler,
@@ -60,23 +26,10 @@ pub unsafe extern "C" fn atexit(handler: *const ()) -> c_int {
     }
 }
 
-/// `BLOCK_IS_GLOBAL` in a block literal's flags.
-///
-/// A global block's storage is its image's `__DATA`, so it outlives the process's
-/// exit without being copied. That is what makes [`atexit_b`] work even where no
-/// block runtime is registered, and the case in hand: a `^{ }` with nothing
-/// captured is always global.
 const BLOCK_IS_GLOBAL: u32 = 1 << 28;
 
-/// Byte offset of `flags` in a block literal, after `isa`.
 const BLOCK_FLAGS_OFFSET: u64 = 8;
 
-/// Run a block registered by [`atexit_b`], and give back the reference taken for
-/// it.
-///
-/// # Safety
-///
-/// Called by the host's exit machinery with the block `atexit_b` registered.
 unsafe extern "C" fn run_exit_block(block: *mut c_void) {
     let block = block as u64;
     // SAFETY: a block this process copied or a global one, either way still live:
@@ -85,23 +38,6 @@ unsafe extern "C" fn run_exit_block(block: *mut c_void) {
     crate::dispatch::block::release(block);
 }
 
-/// `int atexit_b(void (^block)(void))`
-///
-/// The block form of [`atexit`], and a real entry point rather than a courtesy:
-/// Qt's Cocoa plugin registers its application delegate's teardown this way, and
-/// the call is a *tail* jump - so an unbound slot is a jump to address zero whose
-/// backtrace does not even name the block it came from.
-///
-/// The block is copied, because a caller may pass a stack block and this one
-/// outlives every frame. Where no block runtime is registered - see
-/// `darwin::dispatch::block::set_runtime` - a **global** block is still accepted
-/// as it stands, since its storage is its image's; anything else is refused by
-/// returning non-zero, which is what a caller checks and is the truth: the
-/// handler was not registered.
-///
-/// # Safety
-///
-/// `block` is null or a live block literal taking no arguments.
 pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
     if block.is_null() {
         return -1;
@@ -129,20 +65,6 @@ pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
     }
 }
 
-/// `int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void))`
-///
-/// Here for exactly `atexit`'s reason: glibc keeps `pthread_atfork` in
-/// `libc_nonshared.a` too, so `crate::pthread`'s passthrough for it found
-/// nothing and the slot stayed unbound. `__register_atfork` is the exported
-/// form, and takes the DSO handle the wrapper would have supplied.
-///
-/// As with `atexit`, the emulated backend does not use this - the three
-/// handlers are guest addresses that have to become trampolines first, which is
-/// why the name is on `crate::pthread::SHIMMED_ABOVE`.
-///
-/// # Safety
-///
-/// Each handler is null or a function this process can call.
 #[cfg_attr(not(target_env = "gnu"), allow(unused_variables))]
 pub unsafe extern "C" fn pthread_atfork(
     prepare: *const (),
@@ -161,15 +83,6 @@ pub unsafe extern "C" fn pthread_atfork(
     }
 }
 
-/// `void __assert_rtn(const char *func, const char *file, int line, const char *expr)`
-///
-/// Darwin's spelling of what glibc calls `__assert_fail`, with the arguments in
-/// a different order and the function name first rather than last. Forwarding it
-/// under the host's name would print the expression as the file.
-///
-/// # Safety
-///
-/// Each pointer is a NUL-terminated string or null.
 pub unsafe extern "C" fn assert_rtn(
     function: *const c_char,
     file: *const c_char,
@@ -193,17 +106,8 @@ pub unsafe extern "C" fn assert_rtn(
     std::process::abort()
 }
 
-/// `void srandomdev(void)`
-///
-/// Seeds `random()` from the kernel rather than from the clock. BSD's, and the
-/// point of it is that the seed is not guessable, so a fallback that used the
-/// time would answer the wrong question - this one fails to a seed drawn from
-/// whatever entropy the host did give, and asks for it in the one way that
-/// cannot fail silently.
 pub unsafe extern "C" fn srandomdev() {
     let mut seed = [0u8; 4];
-    // SAFETY: four writable bytes and their own length. A short read leaves the
-    // rest zero, which is a weaker seed and not an incorrect one.
     let read = unsafe {
         libc::getrandom(
             seed.as_mut_ptr().cast::<c_void>(),
@@ -212,36 +116,14 @@ pub unsafe extern "C" fn srandomdev() {
         )
     };
     if read < seed.len() as isize {
-        // Nothing better is available, and `random()` unseeded is worse than
-        // `random()` seeded badly: it returns the same sequence every run.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         seed = now.to_ne_bytes();
     }
-    // SAFETY: a scalar; `srand` touches no caller memory. glibc's `srandom` and
-    // `srand` seed the same generator, and only the latter is declared here.
     unsafe { libc::srand(u32::from_ne_bytes(seed)) };
 }
 
-/// `errno_t memset_s(void *dest, rsize_t destsz, int ch, rsize_t count)`
-///
-/// C11 Annex K, which Apple ships and glibc does not. Two things separate it
-/// from `memset` and both matter to the callers that reach for it - OpenSSL's
-/// `OPENSSL_cleanse` among them:
-///
-/// - it takes the destination's *size* as well as the count, and refuses rather
-///   than overruns;
-/// - the write may not be optimised away, which is the whole reason a program
-///   clearing a key calls this instead of `memset`.
-///
-/// The runtime-constraint handler Annex K also describes is not called: this
-/// host has no `set_constraint_handler_s` to have installed one through, so
-/// there is nothing that could have been registered.
-///
-/// # Safety
-///
-/// `dest` is `destsz` writable bytes, or null with `destsz` zero.
 pub unsafe extern "C" fn memset_s(
     dest: *mut c_void,
     destsz: usize,
@@ -273,14 +155,9 @@ pub unsafe extern "C" fn memset_s(
     }
 }
 
-/// Darwin's instruction-cache invalidation primitive.
-///
-/// x86-64 keeps its instruction and data caches coherent, so a native guest's
-/// freshly written code is already executable and there is nothing to flush.
+// FIXME (ACCURACY): STUB!
 pub unsafe extern "C" fn sys_icache_invalidate(_start: *mut c_void, _len: usize) {}
 
-/// Locks for compiler-rt's generic atomics, one per address bucket.
-///
 /// A lock is deliberately isolated on its own cache line. Generic atomics are
 /// often adjacent allocations; putting their independently selected locks in
 /// one cache line would turn that into false sharing.
@@ -309,7 +186,6 @@ fn atomic_lock(address: *const c_void) -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// C/C++ `memory_order_seq_cst`, as passed by Clang's generic atomic builtins.
 const ATOMIC_SEQ_CST: i32 = 5;
 
 fn atomic_before(model: i32) {
@@ -327,8 +203,6 @@ fn atomic_after(model: i32) {
     }
 }
 
-/// `void __atomic_load(int size, void *src, void *dest, int model)`.
-///
 /// # Safety
 ///
 /// `src` and `dest` must each be valid for `size` bytes.
@@ -346,8 +220,6 @@ pub unsafe extern "C" fn atomic_load(
     atomic_after(_model);
 }
 
-/// `void __atomic_store(int size, void *dest, void *src, int model)`.
-///
 /// # Safety
 ///
 /// As [`atomic_load`].
@@ -386,12 +258,6 @@ pub unsafe extern "C" fn reallocf(ptr: *mut c_void, size: usize) -> *mut c_void 
     }
 }
 
-/// `long long strtonum(const char *, long long, long long, const char **)`
-///
-/// OpenBSD's, as Apple ships it: a whole-string decimal parse bounded by
-/// `minval` and `maxval`, with the reason for a failure as a constant string.
-/// `errno` is left as it was on success.
-///
 /// # Safety
 ///
 /// `numstr` is NUL-terminated and `errstrp` is null or writable.
@@ -434,16 +300,10 @@ pub unsafe extern "C" fn strtonum(
     if error.is_some() { 0 } else { value }
 }
 
-/// `int issetugid(void)`
-///
-/// Whether the process was made set-id at `exec`, which this host's loader
-/// records as `AT_SECURE`.
 pub extern "C" fn issetugid() -> c_int {
     #[cfg(target_os = "linux")]
-    // SAFETY: reads the auxiliary vector, which is always present.
     let secure = unsafe { libc::getauxval(libc::AT_SECURE) } != 0;
     #[cfg(not(target_os = "linux"))]
-    // SAFETY: four calls that take nothing and cannot fail.
     let secure = unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() };
     secure as c_int
 }
@@ -464,6 +324,9 @@ unsafe extern "C" {
 /// The buffers are compatible in size, which is the whole question: glibc
 /// writes 80 bytes on x86-64 (registers, the saved-mask flag, and the 8-byte
 /// kernel mask) into Darwin's 152, and 192 on arm64 into Darwin's 196.
+/// 
+/// FIXME (ACCURACY): I hate this. This will definitely cause unpredictable issues
+/// on another OS or architecture. Please fix this. Please.
 #[cfg(target_os = "linux")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn sigsetjmp(_env: *mut c_void, _savemask: c_int) -> c_int {
@@ -473,7 +336,6 @@ pub unsafe extern "C" fn sigsetjmp(_env: *mut c_void, _savemask: c_int) -> c_int
     core::arch::naked_asm!("b {}", sym __sigsetjmp);
 }
 
-/// `csops` operations, from `<sys/codesign.h>`.
 const CS_OPS_STATUS: u32 = 0;
 
 /// `int csops(pid_t, unsigned int ops, void *useraddr, size_t usersize)`
@@ -481,6 +343,8 @@ const CS_OPS_STATUS: u32 = 0;
 /// Only `CS_OPS_STATUS` of this process, answered with no flags: nothing here
 /// is code-signed, and a Mac reports an unsigned process the same way. Apple's
 /// bash asks to learn whether it runs under the installer's restrictions.
+/// 
+/// FIXME (ACCURACY): No real code signing, this always reports success!
 ///
 /// # Safety
 ///

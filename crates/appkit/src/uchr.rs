@@ -868,8 +868,6 @@ mod tests {
         typed_with(code, modifiers, 0, &mut 0)
     }
 
-    /// The whole point of building a resource rather than refusing one: a guest
-    /// that translates a key code gets the character on the key.
     #[test]
     fn the_unshifted_keys_type_what_they_are_printed_with() {
         assert_eq!(typed(vk::ANSI_A, 0), "a");

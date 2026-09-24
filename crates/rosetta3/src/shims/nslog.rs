@@ -67,7 +67,7 @@ pub fn run_alert_panel(
         String::from_utf8_lossy(&out)
     );
 
-    if crate::frameworks::builtin() {
+    if crate::frameworks::using_builtin() {
         ctx.rax = appkit::alert::run_alert_panel(&title, &out) as u64;
         return Ok(());
     }
@@ -200,7 +200,7 @@ type NsLogFn = unsafe extern "C" fn(*const c_void, ...);
 /// stderr fallback in [`emit`] is what a process with no Foundation already
 /// took, and it is the right path for a process whose Foundation is this one.
 fn host_nslog() -> Option<NsLogFn> {
-    if crate::frameworks::builtin() {
+    if crate::frameworks::using_builtin() {
         return None;
     }
     static FOUND: OnceLock<Option<usize>> = OnceLock::new();

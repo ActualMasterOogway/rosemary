@@ -285,10 +285,12 @@ static MODULES: &[exports::Module] = &[
     errno::MODULE,
     sysctl::MODULE,
     sysinfo::MODULE,
-    PTHREAD,
     mach::MODULE,
     clock::MODULE,
     commoncrypto::MODULE,
+    math::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    pthread::MODULE,
     #[cfg(not(target_os = "macos"))]
     compat::MODULE,
     #[cfg(not(target_os = "macos"))]
@@ -389,58 +391,16 @@ static MODULES: &[exports::Module] = &[
     wait::MODULE,
 ];
 
-/// `pthread` as a row, written out because it has no table to generate one.
-///
-/// Its `provide` binds most names to the *host's* address, looked up at run
-/// time, so there is no list of names to derive - see `pthread::provide`.
-const PTHREAD: exports::Module = exports::Module {
-    path: "darwin::pthread",
-    names: pthread_names,
-    symbol: pthread::symbol,
-    provide: pthread::provide,
-};
-
-fn pthread_names() -> exports::Names {
-    exports::Names::new()
-}
-
 fn implemented(name: &str) -> Option<u64> {
     registered(name)
         .or_else(|| exports::Module::resolve(MODULES, name))
-        // Not a row: it probes the host and consults `strict`, so which answer
-        // it gives depends on more than the name. See `math_symbol`.
-        .or_else(|| math_symbol(name))
-}
-
-/// The part of [`math`] this crate answers everywhere, which is not the whole
-/// of it: the four Darwin-ABI returns in [`SHIMMED_ABOVE`] are intercepted by
-/// the runtime above and must stay libSystem's on Darwin.
-///
-/// The same two conditions [`provider`] publishes under, so that a `dlsym` of
-/// one of these names and an import of it answer the same address.
-fn math_symbol(name: &str) -> Option<u64> {
-    let ours = || math::symbol(name).map(|f| f as usize as u64);
-    if math::SHADOWED.contains(&name) {
-        return ours();
-    }
-    let unclaimed = strict::enabled() || host_symbol(name).is_none();
-    (math::PLAIN.contains(&name) && unclaimed)
-        .then(ours)
-        .flatten()
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
     implemented(base_name(symbol)).is_some()
 }
 
-pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__divdc3", "__mulsc3"];
-
-/// The install names this crate stands in for: libSystem, the libraries it
-/// re-exports, and the older names a Mac keeps as links to it.
-///
-/// Claiming them is what keeps a prefix's own x86-64 libSystem out of a link
-/// that loads guest libraries depending on it - see `rosetta3::userland`.
-pub const LIBSYSTEM: &[&str] = &[
+pub const LIBRARY_NAMES: &[&str] = &[
     "/usr/lib/libSystem.B.dylib",
     "/usr/lib/libSystem.dylib",
     "/usr/lib/libc.dylib",
@@ -467,47 +427,18 @@ pub const LIBSYSTEM: &[&str] = &[
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
-    for name in LIBSYSTEM {
+    for name in LIBRARY_NAMES {
         lib.alias(name);
     }
-    // Every definition goes through the null guard: a slot holding zero is
-    // worse than an unbound import, which is at least refused by name at the
-    // call rather than jumping to address zero.
     let out = &mut exports::NonNull(&mut lib);
-    for name in SHIMMED_ABOVE.iter().chain(math::PLAIN) {
-        // Only where the host has none: on Darwin these are libSystem's own, and
-        // shadowing them would replace an implementation with a placeholder in
-        // the one case the shim ever stopped intercepting. Under [`strict`] the
-        // host answers nothing, so this tree's own entry is the only answer left.
-        if (strict::enabled() || host_symbol(name).is_none())
-            && let Some(f) = math::symbol(name)
-        {
-            define_fn(out, &format!("_{name}"), f);
-        }
-    }
-    // These the host does define, and differently - see [`math::SHADOWED`].
-    for name in math::SHADOWED {
-        if let Some(f) = math::symbol(name) {
-            define_fn(out, &format!("_{name}"), f);
-        }
-    }
     exports::Module::provide_all(MODULES, out);
     lib
-}
-
-/// Define `mach_o` as a function, for the modules not yet on the table.
-pub(crate) fn define_fn(out: &mut dyn exports::Exports, mach_o: &str, f: *const ()) {
-    out.function(mach_o, f as usize as u64);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The publishing order is the lookup order, and neither may decide an
-    /// answer. Two modules defining one name would make it decide both: the
-    /// library is a map, so the later definition wins the link, while
-    /// `implemented` stops at the earlier one and a `dlsym` gets that.
     #[test]
     fn no_module_defines_a_name_another_one_does() {
         let mut seen: Vec<(&str, &str)> = Vec::new();
@@ -521,13 +452,6 @@ mod tests {
         }
     }
 
-    /// Every name a module publishes is one a `dlsym` answers - the invariant
-    /// the two lists could not state when they were two, and which `atomics` and
-    /// `oslog` had been breaking.
-    ///
-    /// Through `symbol` rather than `implemented`, in the Mach-O spelling a
-    /// guest actually asks with, so the underscore this crate strips is part of
-    /// what is checked.
     #[test]
     fn a_published_name_is_the_one_dlsym_answers() {
         for module in MODULES {
@@ -542,9 +466,6 @@ mod tests {
         }
     }
 
-    /// A name cannot be both claimed safe to pass through and denied as divergent -
-    /// the two lists are the same question answered opposite ways, and a name in both
-    /// means one of them is wrong.
     #[test]
     fn nothing_is_both_claimed_safe_and_divergent() {
         let overlap: Vec<&str> = passthrough::CLAIMED
@@ -558,15 +479,6 @@ mod tests {
         );
     }
 
-    /// A module that is written but not listed in [`MODULES`] answers nothing,
-    /// and nothing says so: every name it meant to shim quietly reaches the
-    /// host instead. That is how `crate::fs` shipped unreachable, and how a
-    /// guest's `mkdir` of a Darwin path went to the host with the path
-    /// untranslated - which fails, far from here, as `ENOENT` on a directory
-    /// that is plainly there.
-    ///
-    /// Named one by one rather than counted, so that adding an entry point and
-    /// forgetting the table is the failure this reports.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn every_path_taking_shim_is_reachable() {
@@ -584,8 +496,6 @@ mod tests {
         );
     }
 
-    /// Nor can a name this crate implements be claimed as a passthrough: the whole
-    /// reason it has an implementation is that the host's own is not the answer.
     #[test]
     fn nothing_implemented_is_also_claimed_safe() {
         let overlap: Vec<&str> = passthrough::CLAIMED
@@ -606,16 +516,13 @@ mod tests {
         assert_eq!(c_name("sysctl"), "sysctl");
     }
 
-    /// A `$` suffix names the same function, so every list is asked about the
-    /// base - including [`divergent`], which would otherwise pass a suffixed
-    /// spelling of a denied name straight through to the host.
+    /// A `$` suffix names the same function
     #[test]
     fn a_variant_suffix_is_not_part_of_the_name() {
         assert_eq!(base_name("_close$NOCANCEL"), "close");
         assert_eq!(base_name("_fopen$DARWIN_EXTSN"), "fopen");
         assert_eq!(base_name("_getdirentries$INODE64"), "getdirentries");
         assert!(divergent::contains(base_name("_getdirentries$INODE64")));
-        // Neither half may be empty, or `$` alone would name everything.
         assert_eq!(base_name("_$NOCANCEL"), "$NOCANCEL");
         assert_eq!(base_name("_close$"), "close$");
     }

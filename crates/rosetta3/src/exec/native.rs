@@ -137,7 +137,7 @@ impl Native {
         let steam = crate::steam::provider();
         let opengl = crate::opengl::provider();
         let openal = crate::openal::provider();
-        let mut providers: Vec<&dyn SymbolProvider> = match crate::frameworks::builtin() {
+        let mut providers: Vec<&dyn SymbolProvider> = match crate::frameworks::using_builtin() {
             true => vec![
                 &eager,
                 &tlv,
@@ -281,7 +281,7 @@ impl Execution for Native {
     }
 
     fn prepare(&self) -> Result<(), VmError> {
-        if crate::frameworks::builtin() {
+        if crate::frameworks::using_builtin() {
             return self.realize_objc();
         }
         // Registering the image's classes with the host's Objective-C runtime, which

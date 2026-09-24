@@ -565,6 +565,7 @@ dependencies = [
  "exports",
  "getrandom 0.3.4",
  "libc",
+ "libm",
  "machish",
  "md-5",
  "objc",

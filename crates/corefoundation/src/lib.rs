@@ -356,16 +356,6 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out
 }
 
-/// The `CFStringRef` globals whose value is a fixed name.
-///
-/// Each is a documented constant string rather than something this runtime
-/// chooses, which is what makes publishing them safe: a guest using one as a
-/// dictionary key gets the key Apple's CoreFoundation would have given it.
-///
-/// They matter more than they look. An unresolved *function* import is refused
-/// by name at the call; an unresolved **data** import binds to zero, and the
-/// guest's very next instruction dereferences it - which is a segfault at
-/// address zero with nothing anywhere to say which symbol it was.
 static KEY_STRINGS: &[(&str, &str)] = &[
     ("_kCFBundleIdentifierKey", "CFBundleIdentifier"),
     ("_kCFBundleNameKey", "CFBundleName"),

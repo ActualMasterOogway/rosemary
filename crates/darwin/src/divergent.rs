@@ -326,9 +326,7 @@ pub fn reason(name: &str) -> Option<&'static str> {
 /// is what this crate has looked at and vouched for, and `SHIMMED_ABOVE` what it
 /// leaves to the runtime above. Neither has a `symbol` entry.
 fn implemented_here(name: &str) -> bool {
-    crate::pthread::PASSED_THROUGH.contains(&name)
-        || crate::pthread::SHIMMED_ABOVE.contains(&name)
-        || crate::is_implemented(name)
+        crate::is_implemented(name)
 }
 
 pub fn contains(name: &str) -> bool {

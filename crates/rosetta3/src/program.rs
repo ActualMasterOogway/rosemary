@@ -374,8 +374,9 @@ pub fn announce_unbound_imports<'r>(
         return unbound;
     }
     eprintln!(
-        "rosetta3: {what}: {} import(s) unbound - using one faults instead of working",
-        unbound.len()
+        "rosetta3: {what}: {} import{} unbound, continuing anyway",
+        unbound.len(),
+        if unbound.len() > 1 { "s" } else { "" }
     );
     let limit = unbound_detail_limit();
     for (image, m) in unbound.iter().take(limit) {

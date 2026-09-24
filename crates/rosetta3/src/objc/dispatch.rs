@@ -661,7 +661,7 @@ fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> 
 /// half-replacing them would hand this runtime's `type_info` builder a class
 /// structure it did not make.
 fn exception_shim(symbol: &str) -> Option<crate::jmpbuf::Shim> {
-    if !crate::frameworks::builtin() {
+    if !crate::frameworks::using_builtin() {
         return None;
     }
     Some(match symbol {

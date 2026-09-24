@@ -160,7 +160,7 @@ pub type CallbackShim = super::CallbackShim;
 /// a guest's context structure is the host's business and a thunk in it would be
 /// this runtime interposing on a call it has no reason to.
 pub fn shim_for(name: &str) -> Option<CallbackShim> {
-    if !crate::frameworks::builtin() {
+    if !crate::frameworks::using_builtin() {
         return None;
     }
     match name {

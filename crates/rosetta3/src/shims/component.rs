@@ -84,7 +84,7 @@ fn find_next_component(
 
 /// Whether this run's AudioUnit registry is the one in `crates/coreaudio`.
 fn builtin() -> bool {
-    crate::frameworks::builtin()
+    crate::frameworks::using_builtin()
 }
 
 /// `OSErr OpenAComponent(Component aComponent, ComponentInstance *ci)`

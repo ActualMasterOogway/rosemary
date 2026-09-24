@@ -179,7 +179,7 @@ pub fn bind<M: machish::memory::Regions>(
 ) -> Result<usize> {
     // Under the host's libobjc every one of these symbols is Apple's, and its
     // `type_info` records describe Apple's classes.
-    if !crate::frameworks::builtin() {
+    if !crate::frameworks::using_builtin() {
         return Ok(0);
     }
     let Some(slide) = report

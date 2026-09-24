@@ -248,7 +248,7 @@ fn main() -> ExitCode {
         #[cfg(not(target_os = "macos"))]
         foundation::paths::ensure_standard_directories();
         #[cfg(target_os = "macos")]
-        if !rosetta3::frameworks::builtin()
+        if !rosetta3::frameworks::using_builtin()
             && let Some(mirror) = rosetta3::bundle::remirror(std::path::Path::new(&path))
         {
             eprintln!("rosetta3: re-executing from {}", mirror.display());

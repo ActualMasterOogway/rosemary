@@ -32,6 +32,7 @@ metal_translate = { path = "crates/metal_translate" }
 metal = { path = "crates/metal" }
 ash = "0.38"
 libc = "0.2"
+libm = "0.2"
 backtrace = "0.3"
 gimli = "0.34"
 getrandom = "0.3"

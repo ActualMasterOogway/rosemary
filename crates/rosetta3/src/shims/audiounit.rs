@@ -140,7 +140,7 @@ unsafe fn apply(
     data: *const c_void,
     size: u32,
 ) -> Result<i32> {
-    if crate::frameworks::builtin() {
+    if crate::frameworks::using_builtin() {
         // SAFETY: the caller's obligation, and `unit` is a handle
         // `coreaudio::AudioComponentInstanceNew` handed out - which it checks.
         return Ok(unsafe {
