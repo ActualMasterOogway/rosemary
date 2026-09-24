@@ -5,7 +5,7 @@ enum CGWindowLevelKey {
 
 type CGWindowLevel = i32;
 
-// FIXME (ACCURACY): STUB!
+// FIXME: Window levels are not implemented; every key returns zero.
 #[allow(non_snake_case)]
 extern "C" fn CGWindowLevelForKey(_key: CGWindowLevelKey) -> CGWindowLevel {
     0
