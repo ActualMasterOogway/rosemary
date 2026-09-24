@@ -433,19 +433,6 @@ pub fn is_implemented(symbol: &str) -> bool {
     implemented(base_name(symbol)).is_some()
 }
 
-/// Names the **runtime above** shims and no host exports.
-///
-/// A shim is only reached once its import resolves: `abi::call_import_inner`
-/// refuses a null address *before* it looks for one, so a name nothing defines
-/// fails as an unsatisfied import and never reaches the code that implements it.
-/// On Darwin these are libSystem's and resolve on their own; off it, nothing
-/// defines them and [`crate::math`] is what makes the slot non-null.
-///
-/// Each is a Darwin ABI of its own rather than a missing function: `__sincos_stret`
-/// returns two doubles in the vector registers, which no glibc entry point does.
-/// The runtime above intercepts all four for an emulated guest and never reaches
-/// the published address; a native guest calls it, so it is a real implementation
-/// rather than a placeholder.
 pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__divdc3", "__mulsc3"];
 
 /// The install names this crate stands in for: libSystem, the libraries it
@@ -453,8 +440,6 @@ pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__div
 ///
 /// Claiming them is what keeps a prefix's own x86-64 libSystem out of a link
 /// that loads guest libraries depending on it - see `rosetta3::userland`.
-/// `/usr/lib/system/libunwind.dylib` is absent on purpose: the runtime supplies
-/// a vendored unwinder under that name, and a claim here would skip it.
 pub const LIBSYSTEM: &[&str] = &[
     "/usr/lib/libSystem.B.dylib",
     "/usr/lib/libSystem.dylib",
@@ -468,8 +453,6 @@ pub const LIBSYSTEM: &[&str] = &[
     "/usr/lib/libdbm.dylib",
     "/usr/lib/librpcsvc.dylib",
     "/usr/lib/libgcc_s.1.dylib",
-    "/usr/lib/libutil.dylib",
-    "/usr/lib/libutil1.0.dylib",
     "/usr/lib/system/libcompiler_rt.dylib",
     "/usr/lib/system/libmacho.dylib",
     "/usr/lib/system/libsystem_blocks.dylib",

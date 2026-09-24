@@ -3,12 +3,11 @@
 //! Everything else under `/usr/lib` is bridged symbol by symbol, and that is the
 //! rule for good reason: libSystem, the Objective-C runtime and GL are this
 //! runtime's to implement, because they are where a guest meets the host. The
-//! libraries listed here are the opposite case. `libedit` and `libncurses` are
-//! ordinary userland code on top of libSystem, with variadic entry points that
-//! take guest callbacks per operation (`el_set(el, EL_ADDFN, ...)`), and a bridge
-//! to the host's copies would be a reimplementation of their ABI with none of the
-//! behaviour guaranteed. The base already ships the real ones; running them is
-//! exact, and their own imports go through this runtime like any guest's.
+//! libraries listed here are the opposite case. `libedit`, `libncurses`, and
+//! `libutil` are ordinary userland code on top of libSystem. `libedit` even has
+//! variadic entry points that take guest callbacks (`el_set(el, EL_ADDFN, ...)`).
+//! The base ships the real libraries, so their own imports go through this
+//! runtime like any guest's.
 //!
 //! Only under a prefix: without one there is no base to take them from.
 
@@ -25,6 +24,8 @@ use crate::cxxlib::Flavor;
 /// `libncurses` under older names, and `libreadline` is `libedit`'s
 /// compatibility name - so all of a family is listed or none of it.
 const LIBRARIES: &[&str] = &[
+    "libutil.dylib",
+    "libutil1.0.dylib",
     "libedit.dylib",
     "libedit.2.dylib",
     "libedit.3.dylib",
@@ -94,15 +95,18 @@ impl Flavor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use machish::resolve::SymbolProvider;
 
     #[test]
-    fn answers_for_editline_and_curses_and_nothing_else() {
+    fn answers_for_userland_libraries_and_nothing_else() {
+        assert!(from_base("/usr/lib/libutil.dylib"));
+        assert!(from_base("/usr/lib/libutil1.0.dylib"));
         assert!(from_base("/usr/lib/libedit.3.dylib"));
         assert!(from_base("/usr/lib/libncurses.5.4.dylib"));
         assert!(from_base("/usr/lib/libreadline.dylib"));
         assert!(!from_base("/usr/lib/libSystem.B.dylib"));
-        assert!(!from_base("/usr/lib/libutil.dylib"));
         assert!(!from_base("@rpath/libedit.3.dylib"));
         assert!(!from_base("/usr/local/lib/libedit.3.dylib"));
+        assert!(!darwin::provider().stands_for("/usr/lib/libutil.dylib"));
     }
 }
