@@ -76,10 +76,7 @@ pub struct DisplayMode {
 
 /// `SDL_Event`, as bytes.
 ///
-/// The union is a hundred and twenty-eight bytes of variants this tree does not
-/// need to name: the fields it reads are at fixed offsets in the few structs it
-/// cares about, and declaring the rest would be a copy of a header that changes
-/// without this crate hearing about it. [`video::Event`] is the decoded form.
+/// The 128-byte union is decoded into [`video::Event`] only where needed.
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
 pub struct Event {
