@@ -751,7 +751,7 @@ unsafe fn stat_entry(sp: *mut Fts, p: *mut Ftsent, follow: Follow) -> u16 {
                 return FTS_NS;
             }
             if follow == Follow::DirsOnly
-                && u32::from((*sbp).mode) & libc::S_IFMT != libc::S_IFDIR
+                && libc::mode_t::from((*sbp).mode) & libc::S_IFMT != libc::S_IFDIR
                 && crate::stat::at_path(path, sbp, true) != 0
             {
                 return failed(sbp);
@@ -760,7 +760,7 @@ unsafe fn stat_entry(sp: *mut Fts, p: *mut Ftsent, follow: Follow) -> u16 {
             return failed(sbp);
         }
 
-        match u32::from((*sbp).mode) & libc::S_IFMT {
+        match libc::mode_t::from((*sbp).mode) & libc::S_IFMT {
             libc::S_IFDIR => {
                 (*p).dev = (*sbp).dev;
                 (*p).ino = (*sbp).ino;
