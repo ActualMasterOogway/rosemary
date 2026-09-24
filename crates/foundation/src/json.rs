@@ -33,8 +33,6 @@ const CORRUPT: i64 = 3840;
 /// a stack overflow, where a refusal is an ordinary parse failure.
 const MAX_DEPTH: usize = 512;
 
-// --- writing ---
-
 /// Append `object` as JSON, or name what could not be represented.
 fn write(object: CFTypeRef, out: &mut Vec<u8>, options: usize, depth: usize) -> Result<(), String> {
     if depth > MAX_DEPTH {
@@ -186,8 +184,6 @@ fn write_number(number: &Number, out: &mut Vec<u8>) -> Result<(), String> {
     }
     Ok(())
 }
-
-// --- reading ---
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -472,8 +468,6 @@ fn is_container(object: CFTypeRef) -> bool {
             || corefoundation::collections::dictionary(object).is_some()
     }
 }
-
-// --- the class ---
 
 /// Report `message` through the caller's `NSError **`, if it passed one.
 ///

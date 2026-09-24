@@ -1,31 +1,9 @@
 //! `CFNumberFormatter`, `CFDateFormatter` and `CFCalendar`.
 //!
-//! These are the calls `QSystemLocale::query` is made of, and Qt asks all of
-//! them while `QApplication`'s constructor is still running - so an unbound one
-//! is not a wrong date later, it is a jump to address zero before the first
-//! window.
-//!
-//! What is answered here, and what is deliberately not:
-//!
-//! * **Formatting a number works.** Latin digits, `.` for the decimal point and
-//!   `,` every three places, which is the English form. A guest formatting a
-//!   number for display gets a number rather than an empty string.
-//! * **Naming a month does not, unless the locale is English.** Month and
-//!   weekday names are locale *data*, it lives in CLDR, and this tree carries
-//!   none - so the English tables below are published only when the locale this
-//!   tree reports is an English one, and every other locale gets nil. That is
-//!   not a gap being hidden: nil is the documented answer for a property a
-//!   formatter has no value for, and it is the branch the caller already has.
-//!   Qt's is its own compiled-in CLDR data, which is *better* than anything here
-//!   could be - so a German guest gets German months by being told nothing,
-//!   where it would get English ones by being told the wrong thing.
-//!
-//! The date *patterns* [`cf::CFDateFormatterGetFormat`] returns are Unicode
-//! `LDML` skeletons, because that is what the function returns on a Mac and what
-//! a caller parses - Qt converts one into its own format string rather than
-//! using it as text.
-
-// The C spellings are the interface.
+//! Number formatting uses English separators. Month and weekday names are
+//! available only for English locales; other locales receive nil so callers
+//! can use their own locale data. [`cf::CFDateFormatterGetFormat`] returns LDML
+//! skeletons.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
