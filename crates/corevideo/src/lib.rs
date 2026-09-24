@@ -2,25 +2,9 @@
 
 //! `CVDisplayLink`, on a thread of its own.
 //!
-//! A display link is a callback at the refresh rate, and it is how a Mac game
-//! that does not use `NSTimer` gets a frame loop. Deltarune is one: after
-//! `applicationDidFinishLaunching:` returns, *nothing else* would ever run its
-//! code again.
-//!
-//! The thread is not an implementation detail. This was a run loop timer first,
-//! on the argument that a callback drawing into an `NSOpenGLContext` needs the
-//! thread that context is current on - and Deltarune deadlocked on it. Its frame
-//! function spins on a counter that the *callback* increments, so a callback
-//! that waits for the main thread to come back round waits for a main thread
-//! waiting for it. Apple's runs on a dedicated thread, guests are written
-//! against that, and matching it is the only thing that terminates.
-//!
-//! What a guest may do in the callback follows from where it runs: a GL context
-//! is current per thread, so a callback that draws has to make one current on
-//! this thread first, exactly as it would on Apple's.
-
-// The C spellings are the interface, as they are in `objc::api`; renaming them
-// would only hide it.
+//! Callbacks run on a dedicated thread. Running them on the main loop can
+//! deadlock guests that wait for the callback while drawing a frame. A callback
+//! that draws with GL must make its context current on this thread.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
