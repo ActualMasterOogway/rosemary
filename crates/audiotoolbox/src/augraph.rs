@@ -1,15 +1,7 @@
 //! `AUGraph`, over the `AudioUnit` output in `coreaudio`.
 //!
-//! An `AUGraph` is bookkeeping: a set of audio units, the connections between
-//! their buses, and the two-phase "describe it, then make it so" that
-//! `AUGraphOpen` and `AUGraphInitialize` are. None of it is signal processing -
-//! the units do that - so all of it belongs here, over the one unit
-//! [`coreaudio`] has.
-//!
-//! What this cannot do is *mix*. A graph whose nodes are all units this runtime
-//! knows how to build works; a graph asking for a mixer or an effect gets a
-//! node with no unit behind it, and says which component it could not make
-//! rather than failing silently three calls later. See [`AUGraphOpen`].
+//! Graphs track units and bus connections; the units process audio. Mixer and
+//! effect nodes have no implementation and are reported by [`AUGraphOpen`].
 
 use std::ffi::c_void;
 use std::sync::Mutex;
