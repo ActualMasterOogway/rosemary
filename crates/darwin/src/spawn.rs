@@ -148,10 +148,6 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
     0
 }
 
-// ---------------------------------------------------------------------------
-// Is this a Mach-O?
-// ---------------------------------------------------------------------------
-
 /// Whether `path` names a Mach-O - thin or fat, either byte order.
 ///
 /// Read from the file rather than inferred from the name: the whole point is to tell a
@@ -381,10 +377,6 @@ fn as_argv(strings: &[CString]) -> Vec<*const c_char> {
     raw
 }
 
-// ---------------------------------------------------------------------------
-// The exec family.
-// ---------------------------------------------------------------------------
-
 /// `int execve(const char *path, char *const argv[], char *const envp[])`.
 ///
 /// # Safety
@@ -540,10 +532,6 @@ fn environ() -> *const *const c_char {
     // shared implementation without depending on the non-macOS guest block.
     std::ptr::null()
 }
-
-// ---------------------------------------------------------------------------
-// posix_spawn.
-// ---------------------------------------------------------------------------
 
 impl FileActions {
     /// Build the host object these actions describe.
@@ -842,10 +830,6 @@ pub unsafe extern "C" fn posix_spawnp(
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// The attribute objects.
-// ---------------------------------------------------------------------------
 
 /// # Safety
 ///

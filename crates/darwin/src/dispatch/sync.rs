@@ -83,10 +83,6 @@ unsafe fn semaphore<'a>(handle: u64) -> Option<&'a Semaphore> {
         .map(|h| unsafe { &*(h as *const Header as *const Semaphore) })
 }
 
-// ---------------------------------------------------------------------------
-// Groups.
-// ---------------------------------------------------------------------------
-
 /// `dispatch_group_t dispatch_group_create(void)`.
 pub unsafe extern "C" fn group_create() -> u64 {
     Box::into_raw(Box::new(Group {
@@ -273,10 +269,6 @@ pub unsafe extern "C" fn group_wait(handle: u64, timeout: u64) -> i64 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Semaphores.
-// ---------------------------------------------------------------------------
 
 /// `dispatch_semaphore_t dispatch_semaphore_create(long value)`.
 pub unsafe extern "C" fn semaphore_create(value: i64) -> u64 {

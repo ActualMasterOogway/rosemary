@@ -1,21 +1,8 @@
 //! Mach, on a host that has not got one.
 //!
-//! Two very different things live here. The clock - `mach_absolute_time` and
-//! the timebase - is not really a kernel interface at all and needs nothing but
-//! a monotonic counter; it is in this file. Everything else is a synthetic
-//! **port namespace**: names, rights, messages and a name server, built out of
-//! unix sockets, and split across the modules below.
-//!
-//! The namespace exists for one reason. A program with a crash reporter -
-//! Crashpad, which is most of them - registers a Mach exception port and talks
-//! to its handler process over `mach_msg` before it will run a line of its own
-//! code, and a program whose crash reporter fails to initialise does not
-//! degrade, it stops. Refusing the Mach family by name, which is what this
-//! crate did before, turns that into a segfault at address zero inside
-//! libSystem with `mach_task_self_` the unbound data import behind it.
-//!
-//! Read [`wire`] first: it says what a port is made of, and the rest follows
-//! from that.
+//! The clock uses a monotonic counter. Ports, rights, messages, and bootstrap
+//! names use a synthetic namespace over Unix sockets. Crash reporters require
+//! this namespace during startup.
 //!
 //! | Module | What it holds |
 //! | --- | --- |
@@ -29,17 +16,8 @@
 //! | [`sync`] | Mach semaphores, which are named out of the same space |
 //! | [`kern`] | `kern_return_t` and the three numberings it is not |
 //!
-//! What is **not** here, and is refused rather than guessed at: exception
-//! delivery (see [`task`]), out-of-line memory in a message (see [`msg`]),
-//! `vm_`/`mach_vm_` against another task - see [`vm`], which answers for this one
-//! and refuses any other - and anything that would need a real
-//! kernel to be watching - dead-name notifications above all.
-//!
-//! The ratio the timebase reports is 1/1, so a tick *is* a nanosecond. Darwin
-//! on Apple Silicon reports 125/3 over a 24 MHz counter and a guest that reads
-//! the timebase gets the same answer either way; one that assumes 1/1 without
-//! asking - and they exist - is right here and wrong on the Mac, which is the
-//! safer direction.
+//! Exception delivery, out-of-line message memory, cross-task VM calls, and
+//! dead-name notifications are unsupported. The timebase reports 1 ns/tick.
 
 // The clock below is compiled and tested on macOS and bound to nothing there:
 // the host's own Mach is the guest's. See [`symbol`].

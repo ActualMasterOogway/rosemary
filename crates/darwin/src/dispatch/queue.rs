@@ -1,19 +1,8 @@
 //! Queues, and the threads that drain them.
 //!
-//! The promises a guest relies on, and where each is kept:
-//!
-//! * A **serial** queue runs one block at a time, in submission order. [`State`]
-//!   carries a `draining` flag that at most one worker may hold, so the ordering
-//!   survives a pool of threads picking the queue up concurrently.
-//! * A **concurrent** queue runs as many at once as there are workers.
-//! * The **main** queue runs only on the main thread, and only while something is
-//!   turning the run loop - see [`drain_main`]. Work submitted before then waits,
-//!   which is what it does on Darwin too.
-//!
-//! The pool grows on demand rather than being sized up front. A block is guest code
-//! that may block on anything - a semaphore, a socket, another queue - so a fixed
-//! pool deadlocks as soon as every worker is parked inside one; Darwin overcommits
-//! for the same reason.
+//! Serial queues preserve submission order; concurrent queues use available workers.
+//! [`drain_main`] runs main-queue work on the main thread during the run loop.
+//! Workers grow on demand because guest blocks may wait on other queued work.
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
@@ -161,10 +150,6 @@ pub fn create_serial(label: &str) -> u64 {
     new(label, false, false)
 }
 
-// ---------------------------------------------------------------------------
-// The main queue, and the main thread.
-// ---------------------------------------------------------------------------
-
 /// The main thread, as `pthread` numbers threads. Recorded rather than assumed:
 /// `dispatch_sync` to the main queue has to know whether it is already there, and
 /// answering that wrongly is either a deadlock or a broken ordering promise.
@@ -227,10 +212,6 @@ pub fn drain_main() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Which queue this thread is inside.
-// ---------------------------------------------------------------------------
-
 thread_local! {
     /// The queues whose work this thread is currently running, innermost last.
     ///
@@ -268,10 +249,6 @@ fn current_label() -> *const c_char {
         None => c"".as_ptr(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// The worker pool.
-// ---------------------------------------------------------------------------
 
 struct Pool {
     state: Mutex<PoolState>,
@@ -430,10 +407,6 @@ fn submit(handle: u64, item: Item) {
 fn enqueue(handle: u64, work: Work) {
     submit(handle, Item { work, done: None });
 }
-
-// ---------------------------------------------------------------------------
-// The entry points.
-// ---------------------------------------------------------------------------
 
 /// `dispatch_queue_t dispatch_queue_create(const char *label, dispatch_queue_attr_t)`.
 ///
@@ -608,10 +581,6 @@ pub unsafe extern "C" fn sync_f(handle: u64, context: u64, function: u64) {
     let f = unsafe { std::mem::transmute::<u64, Function>(function) };
     sync_work(handle, Work::Function(f, context));
 }
-
-// ---------------------------------------------------------------------------
-// Timers.
-// ---------------------------------------------------------------------------
 
 struct Timer {
     deadline: u64,
