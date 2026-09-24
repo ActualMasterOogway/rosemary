@@ -13,9 +13,11 @@
 //! driver - keep reading the real one through the host's own libc, which is the
 //! point: isolating the guest's view does not disturb theirs.
 //!
-//! Only three variables are corrected, and each is a path this runtime has an
-//! opinion about. Everything else is copied verbatim, because a guest that
-//! wants `LANG` or `PATH` wants this machine's.
+//! Four variables are corrected, and each is a path this runtime has an
+//! opinion about. `PATH` is one of them because its directories are: this
+//! machine's `/run/current-system/sw/bin` names nothing inside a prefix, and a
+//! shell given it finds no commands at all. Everything else is copied
+//! verbatim, because a guest that wants `LANG` wants this machine's.
 //!
 //! Entries are leaked rather than freed. `getenv` hands out an interior pointer
 //! that C callers hold indefinitely, so freeing a replaced entry is how a guest
@@ -47,8 +49,15 @@ fn block() -> std::sync::MutexGuard<'static, Vec<&'static CStr>> {
     if !block.is_empty() {
         return block;
     }
+    let mut has_path = false;
     for (name, value) in std::env::vars_os() {
         use std::os::unix::ffi::OsStrExt;
+        // The hand-off from a parent guest, which is this runtime's and not
+        // the guest's; see [`host_spelling`].
+        if name == GUEST_PATH_VAR {
+            continue;
+        }
+        has_path |= name == "PATH";
         let value = match corrected(&name) {
             Some(replacement) => std::ffi::OsString::from(replacement),
             None => value,
@@ -62,8 +71,31 @@ fn block() -> std::sync::MutexGuard<'static, Vec<&'static CStr>> {
             block.push(Box::leak(entry.into_boxed_c_str()));
         }
     }
+    // A prefixed guest has a `PATH` even when this process has none.
+    if !has_path
+        && let Some(path) = corrected(std::ffi::OsStr::new("PATH"))
+        && let Ok(entry) = CString::new(format!("PATH={path}"))
+    {
+        block.push(Box::leak(entry.into_boxed_c_str()));
+    }
     publish(&block);
     block
+}
+
+/// A Mac's default `PATH`: `/etc/paths`, in its order.
+pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Where a parent guest leaves its own `PATH` for a child it execs.
+///
+/// The child is another copy of this runtime, and [`host_spelling`] gives it
+/// this machine's `PATH` - host libraries in it may launch host helpers - so
+/// the guest's value, which may be one the guest set itself, travels here and
+/// becomes the child guest's `PATH` in place of [`DEFAULT_PATH`].
+pub const GUEST_PATH_VAR: &str = "ROSETTA3_GUEST_PATH";
+
+/// The `PATH` a prefixed guest starts with: its parent's, if it has one.
+fn guest_path(inherited: Option<String>) -> String {
+    inherited.unwrap_or_else(|| DEFAULT_PATH.to_string())
 }
 
 /// The value this runtime gives `name` instead of the host's, if any.
@@ -78,6 +110,8 @@ fn corrected(name: &std::ffi::OsStr) -> Option<String> {
         // Darwin's is per-session and ends in a separator, which a program that
         // concatenates rather than joining depends on.
         "TMPDIR" => Some("/tmp/".to_string()),
+        // Directories in the guest's namespace, not this machine's.
+        "PATH" => Some(guest_path(std::env::var(GUEST_PATH_VAR).ok())),
         // A shell sets this to the directory it started the program in. It is
         // the same directory `getcwd` reports, so it gets the same spelling.
         "PWD" => prefix::ns::to_guest(&std::env::current_dir().ok()?)
@@ -280,6 +314,15 @@ pub unsafe fn host_spelling(envp: *const *const c_char) -> Vec<CString> {
             Some(split) => &bytes[..split],
             None => bytes,
         };
+        if name == b"PATH"
+            && prefix::ns::current().is_some()
+            && let Some(value) = bytes.get(b"PATH=".len()..)
+            && let Ok(entry) = CString::new([GUEST_PATH_VAR.as_bytes(), b"=", value].concat())
+        {
+            // The guest's own `PATH`, for the child to take back; see
+            // [`GUEST_PATH_VAR`].
+            out.push(entry);
+        }
         let restored = std::str::from_utf8(name)
             .ok()
             .filter(|name| corrected(std::ffi::OsStr::new(name)).is_some())
@@ -304,6 +347,7 @@ fn host_value(name: &str) -> Option<String> {
     match name {
         "HOME" => Some(prefix::ns::host_home_directory()),
         "TMPDIR" => std::env::var("TMPDIR").ok(),
+        "PATH" => std::env::var("PATH").ok(),
         "PWD" => std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().into_owned()),
@@ -328,6 +372,13 @@ mod tests {
     /// own rather than a shared one.
     fn unique(what: &str) -> CString {
         CString::new(format!("ROSETTA3_TEST_{what}_{}", std::process::id())).expect("no NUL")
+    }
+
+    #[test]
+    fn a_guest_path_is_the_parents_or_a_macs_default() {
+        assert_eq!(guest_path(None), DEFAULT_PATH);
+        assert_eq!(guest_path(Some("/opt/bin".into())), "/opt/bin");
+        assert!(DEFAULT_PATH.split(':').any(|d| d == "/usr/local/bin"));
     }
 
     /// `PATH` is not `PATHX`. Comparing the prefix alone would have `getenv`
