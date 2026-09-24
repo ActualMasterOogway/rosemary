@@ -6,10 +6,8 @@
 
 //! The ForceFeedback C API, implemented with SDL3's portable two-motor rumble.
 //!
-//! SDL cannot expose the rich device-specific effect programs available on old
-//! Mac hardware. It does expose the part games use for gamepads: a pair of
-//! motors with a duration. Effects are therefore retained as API objects and
-//! reduced to a motor magnitude when started.
+//! Effects remain API objects, but playback reduces them to SDL's two-motor
+//! rumble with a duration.
 
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
