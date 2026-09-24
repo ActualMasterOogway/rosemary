@@ -9,16 +9,8 @@
 
 //! CoreFoundation, on this tree's own Objective-C runtime.
 //!
-//! Every CF type here is a class in [`objc`] and every `CFTypeRef` is an object,
-//! so `CFRetain` *is* `objc_retain` and toll-free bridging is class identity
-//! rather than a conversion. A parallel object model would have to be reconciled
-//! at every `CFStringGetLength(nsstring)` and every `[cfstring length]`, and
-//! would be wrong at whichever crossing was forgotten.
-//!
-//! What is here is what the guests in this tree have actually reached for. An
-//! entry nobody has needed is absent rather than guessed at, and absent means
-//! the import is refused by name - see `darwin::divergent` for why that is the
-//! rule everywhere in this project.
+//! CF types are [`objc`] classes, so toll-free bridging preserves object identity.
+//! Unimplemented imports are refused by name instead of given guessed behavior.
 
 pub mod api;
 pub mod base;
