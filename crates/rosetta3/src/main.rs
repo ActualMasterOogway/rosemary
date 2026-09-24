@@ -122,12 +122,11 @@ fn emulated(
 /// path the guest used - so `rosetta3 run /Applications/Foo.app/...` is an
 /// ordinary thing to be asked, and only the prefix knows where that is.
 ///
-/// The path as given wins when there is a file there, so nothing a person types
-/// changes meaning; the prefix's spelling is the fallback.
+/// The prefix's spelling wins when there is a file there, and the path as given
+/// is the fallback. Host-first would let this host's own files shadow the
+/// guest's: `/bin/sh` exists on nearly every Linux host, so a guest spawning
+/// `/bin/sh` would be handed the host's ELF shell instead of the prefix's.
 fn program_path(path: &str) -> String {
-    if std::path::Path::new(path).exists() {
-        return path.to_string();
-    }
     let host = prefix::ns::host_path(path);
     match host.exists() {
         true => host.to_string_lossy().into_owned(),
@@ -137,8 +136,24 @@ fn program_path(path: &str) -> String {
 
 /// A host path as the guest spells it, or the path itself when no mount
 /// reaches it - which is every path in identity mode.
+///
+/// Only the directory is canonicalized, never the final name: resolving that
+/// symlink would turn `/bin/sh` into `/bin/bash`, and a multi-call program
+/// picks its personality from `argv[0]`.
 fn guest_spelling(path: &str) -> String {
-    let host = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let path = std::path::Path::new(path);
+    let host = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => {
+            let dir = if dir.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                dir
+            };
+            std::fs::canonicalize(dir).map(|dir| dir.join(name))
+        }
+        _ => std::fs::canonicalize(path),
+    }
+    .unwrap_or_else(|_| path.to_path_buf());
     prefix::ns::to_guest(&host)
         .unwrap_or(host)
         .to_string_lossy()
