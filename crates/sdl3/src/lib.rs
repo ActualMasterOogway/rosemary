@@ -105,6 +105,7 @@ struct Api {
     SDL_PumpEvents: Option<unsafe extern "C" fn()>,
     SDL_ShowSimpleMessageBox:
         Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, Window) -> bool>,
+    SDL_ShowMessageBox: Option<unsafe extern "C" fn(*const MessageBoxData, *mut c_int) -> bool>,
 
     SDL_GetJoysticks: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
     SDL_OpenJoystick: Option<unsafe extern "C" fn(JoystickId) -> Joystick>,
@@ -321,6 +322,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetError,
             SDL_PumpEvents,
             SDL_ShowSimpleMessageBox,
+            SDL_ShowMessageBox,
             SDL_GetJoysticks,
             SDL_OpenJoystick,
             SDL_CloseJoystick,
@@ -491,6 +493,75 @@ pub mod message_box {
     pub const ERROR: u32 = 0x0000_0010;
     pub const WARNING: u32 = 0x0000_0020;
     pub const INFORMATION: u32 = 0x0000_0040;
+
+    /// `SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT`
+    pub const RETURN_KEY_DEFAULT: u32 = 0x0000_0001;
+    /// `SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT`
+    pub const ESCAPE_KEY_DEFAULT: u32 = 0x0000_0002;
+}
+
+/// `SDL_MessageBoxButtonData`
+#[repr(C)]
+struct MessageBoxButtonData {
+    flags: u32,
+    button_id: c_int,
+    text: *const c_char,
+}
+
+/// `SDL_MessageBoxData`
+#[repr(C)]
+struct MessageBoxData {
+    flags: u32,
+    window: Window,
+    title: *const c_char,
+    message: *const c_char,
+    num_buttons: c_int,
+    buttons: *const MessageBoxButtonData,
+    color_scheme: *const c_void,
+}
+
+/// One button: its [`message_box`] button flags, the id reported when it is
+/// pressed, and its label.
+pub struct Button<'a> {
+    pub flags: u32,
+    pub id: i32,
+    pub text: &'a CStr,
+}
+
+/// Show a platform-native message box with `buttons`, and wait for one.
+///
+/// `None` when no box could be shown - no SDL, or no display - which is the
+/// signal to ask some other way. `Some(-1)` when it was closed without a
+/// button.
+pub fn show_message_box(
+    flags: u32,
+    title: &CStr,
+    message: &CStr,
+    buttons: &[Button],
+) -> Option<i32> {
+    let show = api()?.SDL_ShowMessageBox?;
+    let raw: Vec<MessageBoxButtonData> = buttons
+        .iter()
+        .map(|button| MessageBoxButtonData {
+            flags: button.flags,
+            button_id: button.id,
+            text: button.text.as_ptr(),
+        })
+        .collect();
+    let data = MessageBoxData {
+        flags,
+        window: std::ptr::null_mut(),
+        title: title.as_ptr(),
+        message: message.as_ptr(),
+        num_buttons: raw.len() as c_int,
+        buttons: raw.as_ptr(),
+        color_scheme: std::ptr::null(),
+    };
+    let mut pressed: c_int = -1;
+    // SAFETY: `data` and every pointer in it - the strings and `raw` - outlive
+    // the call, a null parent window and a null colour scheme are both allowed,
+    // and `pressed` is a live local.
+    unsafe { show(&data, &mut pressed) }.then_some(pressed)
 }
 
 /// What the desktop is told this program is.

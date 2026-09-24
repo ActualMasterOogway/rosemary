@@ -19,6 +19,8 @@
 | `ROSETTA3_SWAP_INTERVAL` | `none` | Force a specific swap interval on OpenGL applications. Allows enabling immediate (0), VSync (1), and -1 (Adaptive VSync), along with other V-blank values, allowing unlocked framerate on apps that use VSync. |
 | `ROSETTA3_PREFIX` | the default prefix (`off` on macOS) | The prefix a guest runs in: a directory holding a Darwin filesystem, whose `root/` subdirectory is the guest's `/`. Unset, `rosetta3 run` uses `$XDG_DATA_HOME/rosetta3/prefixes/default` (or `$HOME/.local/share/rosetta3/prefixes/default`), creating it on first use. Set it to another path to keep a guest's files separate, or to `off` to leave guest paths alone entirely. See `docs/prefixes.md`. |
 | `ROSETTA3_PREFIX_HOME` | `prefix` | Where the guest's home directory is. `prefix` keeps it inside the prefix, so a prefix is one directory to copy, archive or delete. `host` mounts the guest's `/Users/<name>` onto the real `$HOME` instead, for a user who would rather keep one set of documents than two. |
+| `ROSETTA3_PREFIX_SETUP` | `ask` | What to do when a prefix needs its Darwin base and it is not cached. `ask` asks - a dialog under `rosetta3 run` when there is a display, then the terminal - and declines when there is nobody to ask. `download` fetches it without asking. `fail` never downloads. The base is verified against hashes compiled into Rosetta 3 whichever route it takes. |
+| `ROSETTA3_ROOTFS_CACHE` | `$XDG_CACHE_HOME/rosetta3/rootfs` | Where verified Darwin bases are cached, shared by every prefix. Falls back to `$HOME/.cache/rosetta3/rootfs`. |
 | `ROSETTA3_TRACE_PREFIX` | unset | Report every guest-to-host path translation on stderr, as the pair of spellings. The namespace sits underneath every file call a guest makes, so this is the first thing to reach for when a program behaves differently inside a prefix. |
 
 ## Prefixes
@@ -48,10 +50,49 @@ To run a guest in a prefix of its own - separate saves, separate preferences:
 ROSETTA3_PREFIX=~/prefixes/game rosetta3 run ~/games/Foo.app/Contents/MacOS/Foo
 ```
 
-A prefix made today is a directory shape and nothing more: the system libraries
-a guest links against are this runtime's own reimplementations, not files in
-`/usr/lib`. Filling the prefix with a verified MiniDarwin userland is a separate
-step that does not exist yet, but is planned.
+### The Darwin base
+
+A prefix also holds a **base**: the [MiniDarwin](https://github.com/V3L0C1T13S/minidarwin)
+userland - real `/usr/lib` dylibs, the BSD tools in `/bin` and `/usr/bin`, and a
+terminfo database. The system libraries a guest *links against* are still this
+runtime's own reimplementations; the base is there for a guest that stats,
+reads or `dlopen`s a system file, and so that a prefix has a real Darwin
+filesystem shape. A prefix without one still runs guests.
+
+A new prefix gets its base when it is created, and nothing is downloaded
+without consent: `rosetta3 run` asks with a dialog or on the terminal, and
+`ROSETTA3_PREFIX_SETUP` answers in advance. The download (about 2 MB) is
+checked against hashes compiled into this build of Rosetta 3, and kept in a
+cache so that every other prefix, and every repair, works offline.
+
+```sh
+rosetta3 prefix create                        # shape, then base for this host's architecture
+rosetta3 prefix create --arch x86_64          # the base for a given guest architecture
+rosetta3 prefix create --bundle B.bundle.zip  # offline, from a MiniDarwin release bundle
+rosetta3 prefix create --spec S.spec.yaml     # a MiniDarwin image this build does not pin
+rosetta3 prefix create --system-files immutable
+rosetta3 prefix create --no-base              # the shape only
+
+rosetta3 prefix verify         # hash every system file against the manifest
+rosetta3 prefix repair         # put back what differs, offline (--dry-run to preview)
+rosetta3 prefix reset-system   # also moves aside what a user put in a system directory
+rosetta3 prefix update         # move to the release this build pins (--allow-downgrade)
+rosetta3 prefix cache list     # cached bases, and which prefixes use them
+rosetta3 prefix cache gc       # remove the ones nothing uses
+```
+
+`--bundle` checks the bundle against the pinned spec (or `--spec`), never
+against the spec inside it. That file travelled with what it vouches for.
+
+`--system-files` decides what happens when a guest writes a file the base owns:
+
+* `repair` (the default) - allowed, and restored at the guest's next start;
+* `warn` - allowed, and reported at every start until `prefix repair`;
+* `immutable` - refused with `EROFS`. The base's files are then hardlinked
+  from the cache where the filesystem cannot clone them.
+
+Nothing a user made is ever deleted. `repair` and `reset-system` move
+anything in the way to `<prefix>/.rosetta3/displaced/`.
 
 When a guest behaves differently inside a prefix, `ROSETTA3_TRACE_PREFIX=1`
 prints every path translation as a pair, which is almost always enough to
@@ -70,9 +111,10 @@ autorelease pools, synchronization, selectors, and class handles. The option
 requires `ROSETTA3_OBJC=builtin`; it is intended for diagnosis rather than
 normal execution and can substantially increase memory use.
 
-`rosetta3 prefix create [PREFIX]` makes a prefix, and `rosetta3 prefix info
-[PREFIX]` describes one. Both default to the standard prefix when no path is
-given. See the Prefixes section above.
+`rosetta3 prefix <create|info|verify|repair|reset-system|update> [PREFIX]`
+manages a prefix, defaulting to the standard one when no path is given, and
+`rosetta3 prefix cache <list|gc>` the cache of Darwin bases. See the Prefixes
+section above.
 
 Rosetta 3 has two execution modes currently:
 

@@ -127,6 +127,50 @@ pub(crate) fn with_fallback<T>(
     ask(found.as_ptr()).0
 }
 
+/// Whether the guest may write the host path `path`, which is about to be
+/// written. A write to a file the prefix's base owns is recorded, or refused
+/// with `EROFS` under `system_files: immutable` - see `prefix::system`.
+///
+/// `false` means refused, with `errno` set for the caller to return.
+pub(crate) fn may_write(path: *const c_char) -> bool {
+    may_write_at(libc::AT_FDCWD, path)
+}
+
+/// [`may_write`] for a path interpreted against an open directory.
+pub(crate) fn may_write_at(dirfd: c_int, path: *const c_char) -> bool {
+    if path.is_null() {
+        return true;
+    }
+    // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
+    match prefix::ns::may_write_at(dirfd, unsafe { CStr::from_ptr(path) }) {
+        Ok(()) => true,
+        Err(errno) => {
+            crate::errno::set(errno);
+            false
+        }
+    }
+}
+
+/// Whether host `open` flags can change the file they open.
+fn writes(host_flags: c_int) -> bool {
+    host_flags & libc::O_ACCMODE != libc::O_RDONLY
+        || host_flags & (libc::O_CREAT | libc::O_TRUNC) != 0
+}
+
+/// Whether an `fopen` mode string can change the file it opens.
+///
+/// # Safety
+///
+/// `mode` is null or a NUL-terminated string.
+pub(crate) unsafe fn stdio_writes(mode: *const c_char) -> bool {
+    if mode.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's obligation.
+    let mode = unsafe { CStr::from_ptr(mode) }.to_bytes();
+    mode.iter().any(|b| matches!(b, b'w' | b'a' | b'+'))
+}
+
 /// `int stat(const char *, struct stat *)`
 ///
 /// # Safety
@@ -355,7 +399,12 @@ pub(crate) fn guest_path(host: &CStr) -> Option<std::ffi::CString> {
 ///
 /// Both arguments are NUL-terminated strings.
 pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
+    // SAFETY: the caller's obligation.
+    let writing = unsafe { stdio_writes(mode) };
     with_fallback(path, |path| {
+        if writing && !may_write(path) {
+            return (std::ptr::null_mut(), false);
+        }
         // SAFETY: the caller's obligation.
         let file = unsafe { libc::fopen(path, mode) };
         (file, !file.is_null())
@@ -377,6 +426,9 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c
     };
     let mode = open_mode(flags, mode);
     with_fallback(path, |path| {
+        if writes(host_flags) && !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let fd = unsafe { libc::open(path, host_flags, mode) };
         (fd, fd >= 0)
@@ -407,6 +459,9 @@ pub unsafe extern "C" fn openat(
     };
     let mode = open_mode(flags, mode);
     let ask = |path| {
+        if writes(host_flags) && !may_write_at(dirfd, path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let fd = unsafe { libc::openat(dirfd, path, host_flags, mode) };
         (fd, fd >= 0)

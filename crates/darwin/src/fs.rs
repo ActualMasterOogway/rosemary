@@ -21,7 +21,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 
-use crate::stat::{DARWIN_PATH_MAX, guest_path, with_fallback};
+use crate::stat::{DARWIN_PATH_MAX, guest_path, may_write, stdio_writes, with_fallback};
 
 /// The host path `path` names, or `None` for a null pointer.
 fn host(path: *const c_char) -> Option<CString> {
@@ -130,6 +130,9 @@ pub unsafe extern "C" fn getcwd(buffer: *mut c_char, size: libc::size_t) -> *mut
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     with_fallback(path, |path| {
+        if !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let rc = unsafe { libc::unlink(path) };
         (rc, rc == 0)
@@ -143,6 +146,9 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     with_fallback(path, |path| {
+        if !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let rc = unsafe { libc::rmdir(path) };
         (rc, rc == 0)
@@ -156,6 +162,9 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     with_fallback(path, |path| {
+        if !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let rc = unsafe { libc::remove(path) };
         (rc, rc == 0)
@@ -186,6 +195,9 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int {
     with_fallback(path, |path| {
+        if !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let rc = unsafe { libc::chmod(path, mode) };
         (rc, rc == 0)
@@ -225,6 +237,9 @@ pub unsafe extern "C" fn lchown(path: *const c_char, uid: libc::uid_t, gid: libc
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c_int {
     with_fallback(path, |path| {
+        if !may_write(path) {
+            return (-1, false);
+        }
         // SAFETY: the caller's obligation.
         let rc = unsafe { libc::truncate(path, length) };
         (rc, rc == 0)
@@ -237,8 +252,13 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c
 ///
 /// Both arguments are NUL-terminated strings.
 pub unsafe extern "C" fn link(from: *const c_char, to: *const c_char) -> c_int {
-    // SAFETY: the caller's obligation.
-    with_pair(from, to, |from, to| unsafe { libc::link(from, to) })
+    with_pair(from, to, |from, to| {
+        if !may_write(to) {
+            return -1;
+        }
+        // SAFETY: the caller's obligation.
+        unsafe { libc::link(from, to) }
+    })
 }
 
 /// `int rename(const char *, const char *)`
@@ -247,8 +267,14 @@ pub unsafe extern "C" fn link(from: *const c_char, to: *const c_char) -> c_int {
 ///
 /// Both arguments are NUL-terminated strings.
 pub unsafe extern "C" fn rename(from: *const c_char, to: *const c_char) -> c_int {
-    // SAFETY: the caller's obligation.
-    with_pair(from, to, |from, to| unsafe { libc::rename(from, to) })
+    with_pair(from, to, |from, to| {
+        // Both ends: a system file renamed away is as gone as one deleted.
+        if !may_write(from) || !may_write(to) {
+            return -1;
+        }
+        // SAFETY: the caller's obligation.
+        unsafe { libc::rename(from, to) }
+    })
 }
 
 /// `int symlink(const char *target, const char *link)`
@@ -267,6 +293,9 @@ pub unsafe extern "C" fn symlink(target: *const c_char, link: *const c_char) -> 
         crate::errno::set(libc::EFAULT);
         return -1;
     };
+    if !may_write(link.as_ptr()) {
+        return -1;
+    }
     // SAFETY: two NUL-terminated paths.
     unsafe { libc::symlink(target.as_ptr(), link.as_ptr()) }
 }
@@ -282,7 +311,12 @@ pub unsafe extern "C" fn freopen(
     mode: *const c_char,
     stream: *mut libc::FILE,
 ) -> *mut libc::FILE {
+    // SAFETY: the caller's obligation.
+    let writing = unsafe { stdio_writes(mode) };
     with_fallback(path, |path| {
+        if writing && !may_write(path) {
+            return (std::ptr::null_mut(), false);
+        }
         // SAFETY: the caller's obligation.
         let file = unsafe { libc::freopen(path, mode, stream) };
         (file, !file.is_null())

@@ -19,7 +19,10 @@
 //! no mount reaches has no guest spelling and is refused rather than leaked.
 
 mod case;
+mod guard;
 pub mod mount;
+
+pub use guard::{may_write, may_write_at};
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};

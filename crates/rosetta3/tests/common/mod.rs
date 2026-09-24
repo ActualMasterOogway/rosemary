@@ -2408,6 +2408,9 @@ pub fn test_prefix() -> String {
 pub fn driver_command() -> Command {
     let mut command = Command::new(driver());
     command.env("ROSETTA3_PREFIX", test_prefix());
+    // A test must never download a Darwin base, nor wait on a dialog asking
+    // whether to: the prefix is made without one.
+    command.env("ROSETTA3_PREFIX_SETUP", "fail");
     command
 }
 
