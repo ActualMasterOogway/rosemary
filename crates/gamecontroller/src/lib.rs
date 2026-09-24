@@ -472,8 +472,7 @@ fn replace_block(slot: &mut usize, block: Id) {
 }
 
 unsafe extern "C" fn controllers(_class: Id, _sel: Sel) -> Id {
-    // Enumeration discovers current devices but does not manufacture a connect
-    // event for one that was already present before the observer registered.
+    // Existing devices do not generate connection events for new observers.
     sync_devices(false);
     let values: Vec<_> = CONTROLLERS
         .lock()
