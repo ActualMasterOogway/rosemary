@@ -88,10 +88,6 @@ fn gtk_of(object: Id) -> Option<(&'static Engine, Ptr)> {
     Some((engine::get()?, gtk as Ptr))
 }
 
-// ---------------------------------------------------------------------------
-// Objects WebKit hands its delegates.
-// ---------------------------------------------------------------------------
-
 /// Retained object references, released with their holder.
 struct Owned(Vec<usize>);
 
@@ -362,10 +358,6 @@ fn new_navigation() -> Id {
     objc::object::create_instance(class, 0)
 }
 
-// ---------------------------------------------------------------------------
-// Policy decisions.
-// ---------------------------------------------------------------------------
-
 struct Decision {
     /// The `WebKitPolicyDecision`, referenced; taken when the guest decides.
     decision: AtomicUsize,
@@ -498,10 +490,6 @@ unsafe extern "C" fn decide_policy(gtk: Ptr, decision: Ptr, kind: c_int, data: P
         _ => 0,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Load progress.
-// ---------------------------------------------------------------------------
 
 /// Tell the navigation delegate about the current navigation, if it listens.
 fn notify(view: &Delegates, id: usize, selector: &'static str) {
@@ -657,10 +645,6 @@ unsafe extern "C" fn create(gtk: Ptr, action: Ptr, data: Ptr) -> Ptr {
     }
     std::ptr::null_mut()
 }
-
-// ---------------------------------------------------------------------------
-// Creation and drawing.
-// ---------------------------------------------------------------------------
 
 fn connect(engine: &Engine, gtk: Ptr, signal: &std::ffi::CStr, handler: *const (), id: usize) {
     // SAFETY: a live widget, a signal it has and a handler of that signal's
@@ -1174,10 +1158,6 @@ unsafe extern "C" fn snapshot_ready(source: Ptr, result: Ptr, data: Ptr) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Methods.
-// ---------------------------------------------------------------------------
-
 unsafe extern "C" fn configuration_getter(receiver: Id, _sel: Sel) -> Id {
     with_object(receiver, |v| v.configuration).unwrap_or_default() as Id
 }
@@ -1388,10 +1368,6 @@ unsafe extern "C" fn set_value_for_key(receiver: Id, sel: Sel, value: Id, key: I
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Input.
-// ---------------------------------------------------------------------------
 
 unsafe extern "C" fn input_ready(source: Ptr, result: Ptr, _data: Ptr) {
     let Some(engine) = engine::get() else {

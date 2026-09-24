@@ -1,11 +1,7 @@
 //! The one WebKitGTK instance, and the turn of its main context.
 //!
-//! GTK is single-threaded: every call has to be made on the thread that
-//! initialized it, and its callbacks run only while that thread iterates the
-//! main context. WebKit on macOS makes the same promise from the other side -
-//! delegates are called on the main thread - so the engine is started on the
-//! thread that first makes a web view and its context is turned from AppKit's
-//! event pump, which is where the guest's run loop already spends its time.
+//! GTK calls and callbacks stay on the initialization thread. AppKit's event
+//! pump iterates its main context so WebKit delegates run on that thread.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
