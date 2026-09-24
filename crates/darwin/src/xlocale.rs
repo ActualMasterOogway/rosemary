@@ -24,6 +24,7 @@
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// POSIX's distinguished `(locale_t)-1`, omitted by the Rust libc bindings on
 /// this target.
@@ -98,8 +99,19 @@ pub unsafe extern "C" fn setlocale(category: c_int, locale: *const c_char) -> *m
         return core::ptr::null_mut();
     };
     // SAFETY: the caller's string and the translated host category.
-    unsafe { libc::setlocale(category, locale) }
+    let name = unsafe { libc::setlocale(category, locale) };
+    if !name.is_null() && (category == libc::LC_ALL || category == libc::LC_CTYPE) {
+        // SAFETY: takes no argument.
+        let max = unsafe { plain::__ctype_get_mb_cur_max() };
+        MB_CUR_MAX.store(max as c_int, Ordering::Relaxed);
+    }
+    name
 }
+
+/// Darwin's `int __mb_cur_max`, the global `MB_CUR_MAX` read before it became
+/// a function. Old headers still inline a load of it, so it has to follow the
+/// global locale the way libSystem's does; 1 is the C locale's answer.
+static MB_CUR_MAX: AtomicI32 = AtomicI32::new(1);
 
 /// `locale_t newlocale(int mask, const char *name, locale_t base)`.
 ///
@@ -733,6 +745,84 @@ pub unsafe extern "C" fn mb_cur_max_l(loc: libc::locale_t) -> c_int {
     unsafe { plain::__ctype_get_mb_cur_max() as c_int }
 }
 
+/// `int ___mb_cur_max(void)`, which Darwin's `MB_CUR_MAX` expands to.
+///
+/// # Safety
+///
+/// Takes nothing; `unsafe` only to match the table's shape.
+pub unsafe extern "C" fn mb_cur_max() -> c_int {
+    // SAFETY: takes no argument.
+    unsafe { plain::__ctype_get_mb_cur_max() as c_int }
+}
+
+/// `void __collate_lookup_l(const wchar_t *, int *len, int *prim, int *sec,
+/// locale_t)`: the collation weights of the element starting at `t`.
+///
+/// A private libSystem entry that Apple's bash calls for `[[=c=]]`, comparing
+/// only the primary weights of two characters.
+///
+/// FIXME (ACCURACY): glibc publishes no per-character weights, so every
+/// character is its own primary weight - what Darwin answers in the C locale.
+/// In a real locale Darwin would also put `e` and e-acute in one class.
+///
+/// # Safety
+///
+/// `t` points at a readable `wchar_t` and the three outputs are writable.
+pub unsafe extern "C" fn collate_lookup_l(
+    t: *const u32,
+    len: *mut c_int,
+    prim: *mut c_int,
+    sec: *mut c_int,
+    _loc: libc::locale_t,
+) {
+    // SAFETY: the caller's obligation.
+    unsafe {
+        *len = 1;
+        *prim = *t as c_int;
+        *sec = 0;
+    }
+}
+
+/// `void __collate_lookup(const unsigned char *, int *len, int *prim, int *sec)`:
+/// [`collate_lookup_l`] for a multibyte string in the current locale, with
+/// `len` in bytes.
+///
+/// # Safety
+///
+/// `t` is NUL-terminated and the three outputs are writable.
+pub unsafe extern "C" fn collate_lookup(
+    t: *const c_char,
+    len: *mut c_int,
+    prim: *mut c_int,
+    sec: *mut c_int,
+) {
+    let mut wc: c_int = 0;
+    let mut state = [0u8; 128];
+    // SAFETY: at most MB_LEN_MAX bytes of a NUL-terminated string, which mbrtowc
+    // stops reading at the NUL; `state` is a zeroed conversion state.
+    let n = unsafe { plain::mbrtowc(&mut wc, t, 16, state.as_mut_ptr().cast()) };
+    // SAFETY: the caller's obligation.
+    unsafe {
+        *sec = 0;
+        match n {
+            // An invalid or truncated sequence: Darwin reports no element.
+            n if n >= usize::MAX - 1 => {
+                *len = 0;
+                *prim = 0;
+            }
+            // The NUL itself is one byte long.
+            0 => {
+                *len = 1;
+                *prim = 0;
+            }
+            n => {
+                *len = n as c_int;
+                *prim = wc;
+            }
+        }
+    }
+}
+
 // Two pairs are the same function under two names: Darwin's `<ctype.h>` inlines
 // `tolower_l` to `__tolower_l`, and a guest compiled against that header imports
 // the underscored one.
@@ -754,6 +844,9 @@ exports::exports! {
         "wcwidth_l" => wcwidth_l,
         "localeconv_l" => localeconv_l,
         "__mb_cur_max_l" | "___mb_cur_max_l" => mb_cur_max_l,
+        "___mb_cur_max" => mb_cur_max,
+        "__collate_lookup" => collate_lookup,
+        "__collate_lookup_l" => collate_lookup_l,
         "tolower_l" | "__tolower_l" | "___tolower_l" => tolower_l,
         "toupper_l" | "__toupper_l" | "___toupper_l" => toupper_l,
         "__maskrune" | "___maskrune" => maskrune,
@@ -776,6 +869,9 @@ exports::exports! {
         // The Mach-O underscore, put back: the guest imports
         // `__DefaultRuneLocale`.
         "__DefaultRuneLocale" => default_rune_locale(),
+    }
+    constants {
+        "__mb_cur_max" => MB_CUR_MAX.as_ptr() as usize as u64,
     }
 }
 

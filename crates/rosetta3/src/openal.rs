@@ -20,7 +20,11 @@ pub fn provider() -> LazyDylib {
     for name in &INSTALL_PATHS[1..] {
         lib.alias(name);
     }
-    lib.flat(interposed());
+    // Flat, so every import of every guest passes through here; opening the
+    // library for one that is not its own would bring up the host driver in a
+    // guest that never uses it.
+    lib.flat(interposed())
+        .claims(|symbol| symbol.strip_prefix('_').is_some_and(is_openal));
     lib
 }
 

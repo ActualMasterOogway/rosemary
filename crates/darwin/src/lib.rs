@@ -27,6 +27,7 @@ use std::ffi::CString;
 #[cfg(not(target_os = "macos"))]
 pub mod acl;
 mod atomics;
+pub mod attrlist;
 pub mod backtrace;
 pub mod bsd;
 pub mod callback;
@@ -106,6 +107,25 @@ pub mod wait;
 mod wait_word;
 pub mod xattr;
 pub mod xlocale;
+
+/// The environment a guest's `main` receives as `envp`, as `NAME=VALUE`.
+///
+/// Off Darwin that is [`env`]'s block, corrected for the prefix; on Darwin the
+/// guest shares this process's environment.
+pub fn guest_environment() -> Vec<CString> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        env::entries()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        // Bytes, not text: a value is an arbitrary byte string.
+        std::env::vars_os()
+            .filter_map(|(k, v)| CString::new([k.as_bytes(), b"=", v.as_bytes()].concat()).ok())
+            .collect()
+    }
+}
 
 /// Strip the leading underscore a Mach-O symbol carries.
 pub fn c_name(symbol: &str) -> &str {
@@ -353,6 +373,8 @@ static MODULES: &[exports::Module] = &[
     fts::MODULE,
     #[cfg(not(target_os = "macos"))]
     humanize::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    attrlist::MODULE,
     #[cfg(not(target_os = "macos"))]
     langinfo::MODULE,
     #[cfg(not(target_os = "macos"))]

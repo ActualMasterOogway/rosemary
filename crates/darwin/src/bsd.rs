@@ -448,8 +448,73 @@ pub extern "C" fn issetugid() -> c_int {
     secure as c_int
 }
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    /// glibc's and musl's real name for `sigsetjmp`, which their headers make a
+    /// macro.
+    fn __sigsetjmp(env: *mut c_void, savemask: c_int) -> c_int;
+}
+
+/// `int sigsetjmp(sigjmp_buf, int savemask)`, as a tail jump to the host's.
+///
+/// A jump rather than a call: `sigsetjmp` records its caller's frame, and a
+/// wrapper frame would be gone by the time `siglongjmp` returns into it. The
+/// host's own `siglongjmp` is the other half, and reads only what this wrote.
+///
+/// The buffers are compatible in size, which is the whole question: glibc
+/// writes 80 bytes on x86-64 (registers, the saved-mask flag, and the 8-byte
+/// kernel mask) into Darwin's 152, and 192 on arm64 into Darwin's 196.
+#[cfg(target_os = "linux")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn sigsetjmp(_env: *mut c_void, _savemask: c_int) -> c_int {
+    #[cfg(target_arch = "x86_64")]
+    core::arch::naked_asm!("jmp {}", sym __sigsetjmp);
+    #[cfg(target_arch = "aarch64")]
+    core::arch::naked_asm!("b {}", sym __sigsetjmp);
+}
+
+/// `csops` operations, from `<sys/codesign.h>`.
+const CS_OPS_STATUS: u32 = 0;
+
+/// `int csops(pid_t, unsigned int ops, void *useraddr, size_t usersize)`
+///
+/// Only `CS_OPS_STATUS` of this process, answered with no flags: nothing here
+/// is code-signed, and a Mac reports an unsigned process the same way. Apple's
+/// bash asks to learn whether it runs under the installer's restrictions.
+///
+/// # Safety
+///
+/// `useraddr` is writable for `usersize` bytes.
+pub unsafe extern "C" fn csops(
+    pid: libc::pid_t,
+    ops: u32,
+    useraddr: *mut c_void,
+    usersize: usize,
+) -> c_int {
+    // SAFETY: takes nothing.
+    if pid != 0 && pid != unsafe { libc::getpid() } {
+        crate::errno::set(libc::ESRCH);
+        return -1;
+    }
+    if ops != CS_OPS_STATUS {
+        crate::errno::set(libc::ENOTSUP);
+        return -1;
+    }
+    // The kernel's own check: the flags word and nothing else.
+    if useraddr.is_null() || usersize != size_of::<u32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's obligation, checked to be four bytes.
+    unsafe { useraddr.cast::<u32>().write_unaligned(0) };
+    0
+}
+
 exports::exports! {
     functions {
+        #[cfg(target_os = "linux")]
+        "sigsetjmp" => sigsetjmp,
+        "csops" => csops,
         "__atomic_load" => atomic_load,
         "__atomic_store" => atomic_store,
         "atexit" => atexit,
@@ -468,6 +533,37 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's `sigsetjmp` must fit in a buffer the size of Darwin's. Only
+    /// the first return is exercised: Rust has no `returns_twice`, so a test
+    /// that `siglongjmp`s back into its own frame would be undefined.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sigsetjmp_fits_a_darwin_sized_buffer() {
+        #[cfg(target_arch = "x86_64")]
+        const DARWIN: usize = 38 * 4;
+        #[cfg(target_arch = "aarch64")]
+        const DARWIN: usize = 49 * 4;
+        #[repr(C, align(16))]
+        struct Buf([u8; DARWIN + 64]);
+        let mut buf = Buf([0xaa; DARWIN + 64]);
+        // SAFETY: a live buffer; the environment is never jumped to.
+        let rc = unsafe { sigsetjmp(buf.0.as_mut_ptr().cast(), 1) };
+        assert_eq!(rc, 0);
+        assert!(buf.0[..DARWIN].iter().any(|b| *b != 0xaa));
+        assert!(buf.0[DARWIN..].iter().all(|b| *b == 0xaa));
+    }
+
+    #[test]
+    fn csops_reports_an_unsigned_process() {
+        let mut flags = u32::MAX;
+        // SAFETY: a live four-byte local.
+        let rc = unsafe { csops(0, CS_OPS_STATUS, (&raw mut flags).cast(), 4) };
+        assert_eq!((rc, flags), (0, 0));
+        // SAFETY: as above.
+        let rc = unsafe { csops(0, 99, (&raw mut flags).cast(), 4) };
+        assert_eq!(rc, -1);
+    }
 
     #[test]
     fn generic_atomics_copy_the_whole_value() {

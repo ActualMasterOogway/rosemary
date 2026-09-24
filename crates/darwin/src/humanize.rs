@@ -1,8 +1,9 @@
-//! Sizes for people: libutil's `humanize_number` and libc's `getbsize`.
+//! Sizes for people: libutil's `humanize_number` and `expand_number`, and
+//! libc's `getbsize`.
 //!
-//! Both BSD's, and neither in glibc. Ported from Apple's `libutil/
-//! humanize_number.c` and `gen/FreeBSD/getbsize.c`; `ls -h` and `ls -s` are
-//! the callers that turn up.
+//! All BSD's, and none in glibc. Ported from Apple's `libutil/
+//! humanize_number.c`, `libutil/expand_number.c` and `gen/FreeBSD/getbsize.c`;
+//! `ls -h`, `ls -s` and `du -t` are the callers that turn up.
 
 #![cfg(not(target_os = "macos"))]
 
@@ -176,6 +177,63 @@ pub unsafe extern "C" fn humanize_number(
     }
 }
 
+/// `expand_number`'s answer, or the errno it fails with.
+fn expand(buf: &CStr) -> Result<u64, c_int> {
+    let mut end: *mut c_char = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated string and a live out-pointer. `strtoimax` with
+    // base 0, as Apple's does, so `0x10k` is a size too.
+    let number = unsafe { libc::strtoll(buf.as_ptr(), &mut end, 0) };
+    if std::ptr::eq(end, buf.as_ptr()) {
+        return Err(libc::EINVAL);
+    }
+    // SAFETY: `strtoll` leaves `end` inside the string, at worst on its NUL.
+    let unit = unsafe { *end } as u8;
+    if unit == 0 {
+        return Ok(number as u64);
+    }
+    // Each step past `b` is a shift by ten; only the first unit character
+    // counts, so `10kb` is ten kilobytes.
+    let Some(shifts) = b"bkmgtpe"
+        .iter()
+        .position(|u| *u == unit.to_ascii_lowercase())
+    else {
+        return Err(libc::EINVAL);
+    };
+    let mut number = number;
+    for _ in 0..shifts {
+        let shifted = number.wrapping_shl(10);
+        if (number < 0 && shifted > number) || (number >= 0 && shifted < number) {
+            return Err(libc::ERANGE);
+        }
+        number = shifted;
+    }
+    Ok(number as u64)
+}
+
+/// `int expand_number(const char *buf, uint64_t *num)`
+///
+/// # Safety
+///
+/// `buf` is NUL-terminated and `num` is writable.
+pub unsafe extern "C" fn expand_number(buf: *const c_char, num: *mut u64) -> c_int {
+    if buf.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's obligation.
+    match expand(unsafe { CStr::from_ptr(buf) }) {
+        Ok(n) => {
+            // SAFETY: the caller's obligation.
+            unsafe { *num = n };
+            0
+        }
+        Err(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
+    }
+}
+
 unsafe extern "C" {
     fn warnx(format: *const c_char, ...);
 }
@@ -282,6 +340,7 @@ pub unsafe extern "C" fn getbsize(headerlenp: *mut c_int, blocksizep: *mut c_lon
 exports::exports! {
     functions {
         "humanize_number" => humanize_number,
+        "expand_number" => expand_number,
         "getbsize" => getbsize,
     }
 }
@@ -320,6 +379,19 @@ mod tests {
     #[test]
     fn a_buffer_too_small_for_one_digit_is_refused() {
         assert_eq!(humanize(2, 5, "B", 0, 0), Humanized::Invalid);
+    }
+
+    #[test]
+    fn expand_number_reads_a_unit_suffix() {
+        assert_eq!(expand(c"512"), Ok(512));
+        assert_eq!(expand(c"10k"), Ok(10 * 1024));
+        assert_eq!(expand(c"10KB"), Ok(10 * 1024));
+        assert_eq!(expand(c"3M"), Ok(3 << 20));
+        assert_eq!(expand(c"0x10g"), Ok(16 << 30));
+        assert_eq!(expand(c"7b"), Ok(7));
+        assert_eq!(expand(c"k"), Err(libc::EINVAL));
+        assert_eq!(expand(c"5q"), Err(libc::EINVAL));
+        assert_eq!(expand(c"9e"), Err(libc::ERANGE));
     }
 
     #[test]

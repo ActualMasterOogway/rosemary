@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// Top-level MIB identifiers.
 pub const CTL_KERN: i32 = 1;
 pub const CTL_HW: i32 = 6;
+pub const CTL_USER: i32 = 8;
 
 /// `CTL_KERN` second-level identifiers, for the keys answered here.
 pub const KERN_OSTYPE: i32 = 1;
@@ -32,6 +33,9 @@ pub const KERN_VERSION: i32 = 4;
 pub const KERN_HOSTNAME: i32 = 10;
 pub const KERN_ARGMAX: i32 = 8;
 pub const KERN_OSVERSION: i32 = 65;
+
+/// `CTL_USER` second-level identifiers.
+pub const USER_CS_PATH: i32 = 1;
 
 /// `CTL_HW` second-level identifiers.
 pub const HW_MACHINE: i32 = 1;
@@ -160,6 +164,9 @@ fn host_value(mib: &[i32]) -> Option<Value> {
         [CTL_HW, HW_PAGESIZE] => Some(Value::U32(page_size())),
         [CTL_HW, HW_CACHELINE] => Some(Value::U32(128)),
         [CTL_HW, HW_MEMSIZE] => Some(Value::U64(memsize())),
+        // `_PATH_STDPATH`: where a Darwin userland keeps its utilities, which
+        // is also where a prefix's base puts them. `whereis` searches it.
+        [CTL_USER, USER_CS_PATH] => Some(Value::Str("/usr/bin:/bin:/usr/sbin:/sbin".to_string())),
         _ => None,
     }
 }
@@ -407,6 +414,7 @@ const BY_NAME: &[(&str, &[i32])] = &[
     ("hw.pagesize", &[CTL_HW, HW_PAGESIZE]),
     ("hw.cachelinesize", &[CTL_HW, HW_CACHELINE]),
     ("hw.memsize", &[CTL_HW, HW_MEMSIZE]),
+    ("user.cs_path", &[CTL_USER, USER_CS_PATH]),
 ];
 
 /// String-only keys, which have no MIB and are reachable by name alone.
@@ -742,6 +750,14 @@ mod tests {
             bytes.pop();
         }
         String::from_utf8(bytes).ok()
+    }
+
+    #[test]
+    fn user_cs_path_is_the_darwin_standard_path() {
+        assert_eq!(
+            ask_str(&[CTL_USER, USER_CS_PATH]).as_deref(),
+            Some("/usr/bin:/bin:/usr/sbin:/sbin")
+        );
     }
 
     /// The same answer on both hosts, which is the property that makes a Linux run

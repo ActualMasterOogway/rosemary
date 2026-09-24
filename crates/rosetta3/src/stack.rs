@@ -116,18 +116,13 @@ impl GuestStack {
             .space
             .as_mut()
             .expect("argument material is only laid out on a stack this runtime reserved");
-        // Bytes, not text. A process argument or environment value is an
-        // arbitrary byte string on both platforms - Crashpad passes its crash
-        // handler annotations read straight out of `sysctl` - and converting
-        // one through `String` either loses bytes or refuses to run.
-        let env: Vec<CString> = std::env::vars_os()
-            .filter_map(|(k, v)| {
-                let mut entry = k.as_bytes().to_vec();
-                entry.push(b'=');
-                entry.extend_from_slice(v.as_bytes());
-                CString::new(entry).ok()
-            })
-            .collect();
+        // The guest's environment, not this process's: they differ in a
+        // prefix, and `envp` has to agree with `getenv`.
+        let env = darwin::guest_environment();
+        // Bytes, not text. A process argument is an arbitrary byte string on
+        // both platforms - Crashpad passes its crash handler annotations read
+        // straight out of `sysctl` - and converting one through `String`
+        // either loses bytes or refuses to run.
         let argv: Vec<CString> = args
             .iter()
             .filter_map(|a| CString::new(a.as_bytes()).ok())

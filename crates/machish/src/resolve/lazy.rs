@@ -24,6 +24,7 @@ pub struct LazyDylib {
     install_name: String,
     aliases: Vec<String>,
     flat: bool,
+    claims: fn(&str) -> bool,
     open: fn() -> bool,
     lookup: fn(&str) -> Option<Resolved>,
     opened: Cell<Option<bool>>,
@@ -40,6 +41,7 @@ impl LazyDylib {
             install_name: install_name.to_string(),
             aliases: Vec::new(),
             flat: false,
+            claims: |_| true,
             open,
             lookup,
             opened: Cell::new(None),
@@ -57,6 +59,14 @@ impl LazyDylib {
     /// [`SyntheticDylib::flat`](crate::resolve::SyntheticDylib::flat).
     pub fn flat(&mut self, flat: bool) -> &mut Self {
         self.flat = flat;
+        self
+    }
+
+    /// Only names `claims` accepts are this library's; any other is declined
+    /// without opening it. A flat library needs this, or it is opened by the
+    /// first import of any kind that passes through it.
+    pub fn claims(&mut self, claims: fn(&str) -> bool) -> &mut Self {
+        self.claims = claims;
         self
     }
 
@@ -87,7 +97,7 @@ impl SymbolProvider for LazyDylib {
         if let Some(hit) = self.cache.borrow().get(sym.name) {
             return *hit;
         }
-        if !self.ensure_open() {
+        if !(self.claims)(sym.name) || !self.ensure_open() {
             return None;
         }
         let found = (self.lookup)(sym.name);
@@ -137,5 +147,15 @@ mod tests {
         let lib = LazyDylib::new("<test>", open_fails, lookup);
         assert_eq!(lib.resolve(&sym("_present")), None);
         assert_eq!(lib.opened(), Some(false));
+    }
+
+    #[test]
+    fn a_name_the_library_does_not_claim_leaves_it_closed() {
+        let mut lib = LazyDylib::new("<test>", open_ok, lookup);
+        lib.flat(true).claims(|name| name.starts_with("_pre"));
+        assert_eq!(lib.resolve(&sym("_write")), None);
+        assert_eq!(lib.opened(), None);
+        assert_eq!(lib.resolve(&sym("_present")).map(|r| r.addr), Some(0x1234));
+        assert_eq!(lib.opened(), Some(true));
     }
 }

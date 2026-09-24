@@ -141,6 +141,14 @@ pub fn environ_slot() -> *mut *mut *mut c_char {
     std::ptr::addr_of!(ENVIRON) as *mut *mut *mut c_char
 }
 
+/// The guest's environment as `NAME=VALUE` strings: what a new guest's `main`
+/// is handed as `envp`. It has to be this block and not the host's, or a
+/// program that reads `envp` - bash builds its variables from it - sees a
+/// different `PATH` than one that calls `getenv`.
+pub fn entries() -> Vec<CString> {
+    block().iter().map(|entry| (*entry).to_owned()).collect()
+}
+
 /// The index of `name` in `entries`, comparing up to the `=`.
 fn position(entries: &[&'static CStr], name: &[u8]) -> Option<usize> {
     entries.iter().position(|entry| {

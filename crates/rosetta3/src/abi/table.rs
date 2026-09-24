@@ -1376,6 +1376,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // neither side reads the structure behind it. That is what makes the family
     // passthrough rather than the [`crate::cxxlib`] problem again.
     sig!("___mb_cur_max_l", I32, P),
+    sig!("___mb_cur_max", I32),
+    // Private libSystem collation lookups that Apple's bash declares itself.
+    sig!("__collate_lookup", V, P, P, P, P),
+    sig!("__collate_lookup_l", V, P, P, P, P, P),
     sig!("___tolower_l", I32, I32, P),
     sig!("___toupper_l", I32, I32, P),
     sig!("__assert_rtn", V, P, P, I32, P),
@@ -1778,6 +1782,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getenv", P, P),
     sig!("geteuid", U32),
     sig!("getgid", U32),
+    sig!("getgroups", I32, I32, P),
     // ### The passwd and group databases
     //
     // `struct passwd` is five pointers, two 32-bit ids and two `time_t`s;
@@ -1826,6 +1831,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // mach_header_64 *, const char *seg, const char *sect)`.
     sig!("getsectbynamefromheader_64", P, P, P, P),
     sig!("getservbyname", P, P, P),
+    // `struct servent` is four pointer-aligned fields in the same order on
+    // both, so the host's static result reads correctly.
+    sig!("getservent", P),
+    sig!("setservent", V, I32),
+    sig!("endservent", V),
     sig!("getsid", I32, I32),
     sig!("getsockname", I32, I32, P, P),
     sig!("getsockopt", I32, I32, I32, I32, P, P),
@@ -1835,6 +1845,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
     sig!("getentropy", I32, P, U64),
     sig!("getattrlist", I32, P, P, P, U64, U64),
+    sig!("fgetattrlist", I32, I32, P, P, U64, U64),
+    sig!("csops", I32, I32, U32, P, U64),
     // ## OpenGL
     //
     // `GLenum`, `GLuint` and `GLbitfield` are `unsigned int`, `GLint` and `GLsizei`
@@ -2456,6 +2468,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("host_info", I32, U32, I32, P, P),
     sig!("hypot", F64, F64, F64),
     sig!("humanize_number", I32, P, U64, I64, P, I32, I32),
+    sig!("expand_number", I32, P, P),
     sig!("hypotf", F32, F32, F32),
     sig!("iconv", U64, P, P, P, P, P),
     sig!("iconv_close", I32, P),
@@ -2574,6 +2587,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("malloc_zone_statistics", V, P, P),
     sig!("mbrlen_l", U64, P, U64, P, P),
     sig!("mbrtowc", U64, P, P, U64, P),
+    sig!("mbrlen", U64, P, U64, P),
+    sig!("mbsinit", I32, P),
     sig!("mbr_identifier_translate", I32, I32, P, U64, I32, P, P),
     sig!("mbrtowc_l", U64, P, P, U64, P, P),
     sig!("mbsnrtowcs_l", U64, P, P, U64, U64, P, P),
@@ -2880,6 +2895,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("setdomainname", I32, P, I32),
     sig!("setenv", I32, P, P, I32),
     sig!("setgid", I32, U32),
+    sig!("setregid", I32, U32, U32),
+    sig!("setreuid", I32, U32, U32),
     sig!("setgrent", V),
     sig!("setgroups", I32, I32, P),
     sig!("sethostid", V, I64),
@@ -3018,6 +3035,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("tcsetpgrp", I32, I32, I32),
     sig!("tempnam", P, P, P),
     sig!("tgetent", I32, P, P),
+    sig!("tgetflag", I32, P),
+    sig!("tgetnum", I32, P),
     sig!("tgetstr", P, P, P),
     sig!("tgoto", P, P, I32, I32),
     sig!("thread_abort", I32, U32),
