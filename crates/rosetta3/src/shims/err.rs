@@ -49,7 +49,7 @@ fn report(message: Option<Vec<u8>>, suffix: Suffix) {
         // SAFETY: the Darwin-numbered `strerror`, answered with a
         // NUL-terminated string.
         #[cfg(not(target_os = "macos"))]
-        let text_ptr = darwin::string::strerror(errno);
+        let text_ptr = unsafe { darwin::string::strerror(errno) };
         #[cfg(target_os = "macos")]
         let text_ptr = unsafe { libc::strerror(errno) };
         let text = unsafe { std::ffi::CStr::from_ptr(text_ptr) };
