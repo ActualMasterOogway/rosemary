@@ -1,14 +1,8 @@
 //! Prefixes: the Darwin userland a guest runs against, and the namespace that
 //! puts it where the guest looks for it.
 //!
-//! A *prefix* is a directory holding a Darwin filesystem - a verified MiniDarwin
-//! base plus whatever the guest has written since. It is deliberately two
-//! things layered: the base is immutable, content-addressed and shared between
-//! prefixes, and the prefix is the mutable state on top of it. Repair is then
-//! "put the base back", which needs no network.
-//!
-//! [`ns`] is the half every other crate touches: the translation between the
-//! paths a guest speaks and the paths this host has.
+//! A prefix layers mutable guest state over a shared, verified MiniDarwin base.
+//! [`ns`] maps guest paths to host paths. Repair restores the base offline.
 
 mod errno;
 
