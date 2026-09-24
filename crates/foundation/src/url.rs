@@ -522,15 +522,15 @@ mod tests {
     #[test]
     fn host_drops_user_information_port_and_brackets() {
         assert_eq!(
-            super::host_of("https://user:pw@studiomsgbus.rbx.com:443/message?msg0=1"),
-            Some("studiomsgbus.rbx.com".to_string())
+            super::host_of("https://user:pw@messages.example.test:443/message?msg0=1"),
+            Some("messages.example.test".to_string())
         );
         assert_eq!(
             super::host_of("http://[::1]:8080/"),
             Some("::1".to_string())
         );
         assert_eq!(super::host_of("file:///tmp/x"), None);
-        assert_eq!(super::host_of("roblox-studio-auth:/?code=1"), None);
+        assert_eq!(super::host_of("example-studio-auth:/?code=1"), None);
     }
 
     use super::standardized_file_path;

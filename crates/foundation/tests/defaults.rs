@@ -34,7 +34,7 @@ fn argument_domain_enumerates_protocol_string_and_overrides_defaults() {
         "-protocolString",
         "old",
         "-protocolString",
-        "roblox-player:1+launchmode:app",
+        "example-player:1+launchmode:app",
         "-empty",
         "",
         "-trailing",

@@ -1118,11 +1118,11 @@ mod tests {
     fn a_mach_o_spawn_is_repointed_at_this_runtime() {
         let dir = std::env::temp_dir().join(format!("rosetta3-rewrite-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let helper = dir.join("RobloxCrashHandler");
+        let helper = dir.join("ExampleAppCrashHandler");
         std::fs::write(&helper, 0xfeed_facfu32.to_le_bytes()).expect("write");
         let path = CString::new(helper.to_str().unwrap()).unwrap();
 
-        let argv = vec![c"RobloxCrashHandler".to_owned(), c"--pipe=3".to_owned()];
+        let argv = vec![c"ExampleAppCrashHandler".to_owned(), c"--pipe=3".to_owned()];
         let (runtime, rewritten) = rewrite(&path, &path, &argv).expect("a Mach-O is rewritten");
 
         assert_eq!(runtime, rewritten[0], "argv[0] is the runtime itself");

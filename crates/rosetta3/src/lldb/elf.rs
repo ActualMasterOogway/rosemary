@@ -351,7 +351,7 @@ mod tests {
     /// The bound is three orders of magnitude looser than the work takes,
     /// because what it catches is not a slow machine: a writer that searches
     /// the table for each name it is handed spends twelve seconds on a
-    /// *twentieth* of these, and Roblox Studio never finished loading.
+    /// *twentieth* of these, and a large example app never finished loading.
     #[test]
     fn a_large_symbol_table_is_written_in_one_pass() {
         let sections = vec![Section::mapped(
@@ -363,7 +363,7 @@ mod tests {
         )];
         let syms: Vec<Sym> = (0..200_000u64)
             .map(|i| Sym {
-                name: format!("Roblox+{:#x}", i * 16),
+                name: format!("ExampleApp+{:#x}", i * 16),
                 sect: 1,
                 value: 0x1_0000_0000 + i * 16,
             })

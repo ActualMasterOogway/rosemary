@@ -906,12 +906,12 @@ mod tests {
     #[test]
     fn a_url_splits_into_a_host_and_a_path() {
         assert_eq!(
-            split_url("https://www.roblox.com/home?a=1"),
-            ("www.roblox.com".to_string(), "/home".to_string())
+            split_url("https://www.example.com/home?a=1"),
+            ("www.example.com".to_string(), "/home".to_string())
         );
         assert_eq!(
-            split_url("https://roblox.com"),
-            ("roblox.com".to_string(), "/".to_string())
+            split_url("https://example.com"),
+            ("example.com".to_string(), "/".to_string())
         );
         // The port and the userinfo are not part of the match.
         assert_eq!(
@@ -921,32 +921,32 @@ mod tests {
     }
 
     /// The rule that decides whether the session cookie goes back out, and the
-    /// one worth a test: a cookie set for `.roblox.com` must reach
-    /// `www.roblox.com` and must not reach `notroblox.com`.
+    /// one worth a test: a cookie set for `.example.com` must reach
+    /// `www.example.com` and must not reach `notexample.com`.
     #[test]
     fn a_domain_cookie_matches_subdomains_and_nothing_else() {
         let cookie = Cookie {
-            name: ".ROBLOSECURITY".into(),
-            domain: ".roblox.com".into(),
+            name: "SESSIONID".into(),
+            domain: ".example.com".into(),
             path: "/".into(),
             ..Cookie::default()
         };
-        assert!(cookie.matches("roblox.com", "/"));
-        assert!(cookie.matches("www.roblox.com", "/home"));
-        assert!(!cookie.matches("notroblox.com", "/"));
-        assert!(!cookie.matches("roblox.com.evil.test", "/"));
+        assert!(cookie.matches("example.com", "/"));
+        assert!(cookie.matches("www.example.com", "/home"));
+        assert!(!cookie.matches("notexample.com", "/"));
+        assert!(!cookie.matches("example.com.evil.test", "/"));
     }
 
     #[test]
     fn a_set_cookie_header_carries_its_attributes() {
         let cookie = parse_set_cookie(
-            ".ROBLOSECURITY=TOKEN; Domain=.roblox.com; Path=/; Secure; Max-Age=3600",
-            "www.roblox.com",
+            "SESSIONID=TOKEN; Domain=.example.com; Path=/; Secure; Max-Age=3600",
+            "www.example.com",
         )
         .expect("a cookie");
-        assert_eq!(cookie.name, ".ROBLOSECURITY");
+        assert_eq!(cookie.name, "SESSIONID");
         assert_eq!(cookie.value, "TOKEN");
-        assert_eq!(cookie.domain, "roblox.com");
+        assert_eq!(cookie.domain, "example.com");
         assert!(cookie.secure);
         assert!(cookie.expires.is_some());
     }
@@ -962,13 +962,12 @@ mod tests {
         );
     }
 
-    /// The format `.ROBLOSECURITY` actually arrives in. Getting this wrong is
-    /// the difference between staying signed in and not.
+    /// A persistent session cookie must retain its expiry date.
     #[test]
     fn an_expires_attribute_is_what_persists_the_session_cookie() {
         let cookie = parse_set_cookie(
-            ".ROBLOSECURITY=TOKEN; Domain=.roblox.com; Path=/; Expires=Fri, 01 Jan 2100 00:00:00 GMT; Secure",
-            "www.roblox.com",
+            "SESSIONID=TOKEN; Domain=.example.com; Path=/; Expires=Fri, 01 Jan 2100 00:00:00 GMT; Secure",
+            "www.example.com",
         )
         .expect("a cookie");
         assert_eq!(cookie.expires, Some(4_102_444_800));
@@ -980,9 +979,9 @@ mod tests {
     fn a_traced_header_shows_its_attributes_and_not_its_value() {
         assert_eq!(
             attributes(
-                ".ROBLOSECURITY=SECRET; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
+                "SESSIONID=SECRET; domain=.example.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
             ),
-            ".ROBLOSECURITY=<21 bytes>; domain=.roblox.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
+            "SESSIONID=<6 bytes>; domain=.example.com; expires=Fri, 01 Jan 2100 00:00:00 GMT"
         );
     }
 
@@ -1001,8 +1000,7 @@ mod tests {
     }
 
     /// The three spellings RFC 6265 admits, all of the same instant. The dashed
-    /// one is what `auth.roblox.com` sends and the reason the session cookie was
-    /// never written.
+    /// one is a valid dashed date spelling.
     #[test]
     fn every_spelling_of_a_cookie_date_reads_the_same() {
         let expected = Some(2_734_534_036);
@@ -1039,8 +1037,8 @@ mod tests {
     /// A header with no `Domain` belongs to the host that sent it.
     #[test]
     fn a_set_cookie_without_a_domain_takes_the_hosts() {
-        let cookie = parse_set_cookie("a=b", "www.roblox.com").expect("a cookie");
-        assert_eq!(cookie.domain, "www.roblox.com");
+        let cookie = parse_set_cookie("a=b", "www.example.com").expect("a cookie");
+        assert_eq!(cookie.domain, "www.example.com");
         assert_eq!(cookie.path, "/");
         assert_eq!(cookie.expires, None);
     }

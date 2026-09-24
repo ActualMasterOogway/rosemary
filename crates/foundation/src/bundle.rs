@@ -61,7 +61,7 @@ pub struct Layout {
 /// fallback is what a case-insensitive volume gives away for free: a Mac's HFS+
 /// or APFS opens `Contents/PlugIns` on a bundle that ships `Contents/Plugins`
 /// without anyone noticing the difference, so a bundle built and tested only on
-/// a Mac may have the name in any case at all - Roblox Studio ships `Plugins`.
+/// a Mac may have the name in any case at all - an example app ships `Plugins`.
 /// On ext4 those are two different directories and the exact name finds nothing,
 /// which is a Qt application with no platform plugin and no way to open a
 /// window.

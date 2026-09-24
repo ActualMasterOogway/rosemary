@@ -153,7 +153,7 @@ unsafe fn cookie_object(api: &gtk::Api, cookie: Ptr) -> Id {
 ///
 /// Foundation keeps a cookie's domain without its leading dot, which to
 /// libsoup is a host-only cookie. The dot is put back, so a cookie Studio
-/// stored for `roblox.com` is sent to `www.roblox.com` as the domain cookie it
+/// stored for `example.com` is sent to `www.example.com` as the domain cookie it
 /// was.
 ///
 /// # Safety

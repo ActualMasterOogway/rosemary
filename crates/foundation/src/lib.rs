@@ -508,7 +508,7 @@ mod tests {
                 objc::sel::get("init"),
             );
             let key = string::from_str("deeplink");
-            let value = string::from_str("roblox://experiences/start");
+            let value = string::from_str("example-player://experiences/start");
             send2(dictionary, objc::sel::get("setObject:forKey:"), value, key);
             assert_eq!(count(dictionary, objc::sel::get("count")), 1);
             assert_eq!(
@@ -566,10 +566,10 @@ mod tests {
             let array = send1(
                 class(c"NSArray"),
                 objc::sel::get("arrayWithObject:"),
-                string::from_str("roblox://experiences/start"),
+                string::from_str("example-player://experiences/start"),
             );
             let text = send0(array, objc::sel::get("description"));
-            assert_eq!(string::bytes(text), b"(\n    roblox://experiences/start\n)");
+            assert_eq!(string::bytes(text), b"(\n    example-player://experiences/start\n)");
         }
     }
 

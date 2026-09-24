@@ -325,7 +325,7 @@ mod tests {
         crate::bootstrap();
         let class = objc::class::lookup(c"NSURLComponents").unwrap();
         let source = corefoundation::url::new(
-            "https://studiomsgbus.rbx.com/message?msg0=%7B%22a%22%3A1%7D&flag&x=a+b#frag",
+            "https://messages.example.test/message?msg0=%7B%22a%22%3A1%7D&flag&x=a+b#frag",
         ) as Id;
         // SAFETY: direct calls with the Objective-C signatures installed above.
         unsafe {

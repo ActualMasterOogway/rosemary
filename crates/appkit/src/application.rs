@@ -938,12 +938,12 @@ mod tests {
         crate::bootstrap();
         foundation::processinfo::set_arguments(
             &[
-                "roblox://not-argv-zero",
+                "example-player://not-argv-zero",
                 "-protocolString",
-                "roblox://experiences/start?placeId=1",
+                "example-player://experiences/start?id=1",
                 "--place",
                 "/Users/me/a:file",
-                "roblox-player:1+launchmode:play",
+                "example-player:1+launchmode:play",
                 "x:",
                 "a:b",
             ]
@@ -952,8 +952,8 @@ mod tests {
         assert_eq!(
             launch_urls(),
             [
-                "roblox://experiences/start?placeId=1",
-                "roblox-player:1+launchmode:play",
+                "example-player://experiences/start?id=1",
+                "example-player:1+launchmode:play",
             ]
         );
         foundation::processinfo::set_arguments(&["guest".into()]);
@@ -1025,7 +1025,7 @@ mod tests {
             &[
                 "guest",
                 "-protocolString",
-                "roblox://experiences/start?placeId=1",
+                "example-player://experiences/start?id=1",
             ]
             .map(Into::into),
         );
@@ -1035,7 +1035,7 @@ mod tests {
 
         assert_eq!(
             *SEEN.lock().expect("no panic"),
-            ["will", "roblox://experiences/start?placeId=1", "did"]
+            ["will", "example-player://experiences/start?id=1", "did"]
         );
     }
 

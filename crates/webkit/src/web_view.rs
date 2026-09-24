@@ -722,7 +722,7 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
         // Accelerated compositing schedules rendering updates from the frame
         // clock of the window the widget is in, and this widget is in none:
         // `requestAnimationFrame` would never fire, and a page that animates
-        // something into view - Roblox's Quick Sign In dialog - never shows it.
+        // something into view - a modal dialog - never shows it.
         // Without it WebKit schedules updates itself.
         (api.webkit_settings_set_enable_write_console_messages_to_stdout)(
             settings,
@@ -1716,15 +1716,15 @@ mod tests {
 
     #[test]
     fn a_security_origin_is_the_scheme_host_and_explicit_port() {
-        let origin = SecurityOrigin::of("HTTPS://User@WWW.Roblox.com:8443/login?x=1");
+        let origin = SecurityOrigin::of("HTTPS://User@WWW.Example.com:8443/login?x=1");
         assert_eq!(
             (origin.protocol.as_str(), origin.host.as_str(), origin.port),
-            ("https", "www.roblox.com", 8443)
+            ("https", "www.example.com", 8443)
         );
-        let origin = SecurityOrigin::of("https://studiomsgbus.rbx.com/message?msg0=%7B%7D");
+        let origin = SecurityOrigin::of("https://messages.example.test/message?msg0=%7B%7D");
         assert_eq!(
             (origin.host.as_str(), origin.port),
-            ("studiomsgbus.rbx.com", 0)
+            ("messages.example.test", 0)
         );
     }
 

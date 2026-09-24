@@ -130,8 +130,8 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
 /// program assumes exist (`foundation::paths`), and it creates them under the
 /// guest's home. A guest told a *different* home here would build its `Library`
 /// somewhere the runtime never prepared, and every path the two of them built
-/// would disagree - which is exactly what `$HOME` used to do, putting Roblox's
-/// data in `<prefix>/root/home/user/Library` beside the `/Users/user/Library`
+/// would disagree - which is exactly what `$HOME` used to do, putting the
+/// program's data in `<prefix>/root/home/user/Library` beside the `/Users/user/Library`
 /// nothing would ever look in again.
 ///
 /// Another user's home is a host path, so it is given the guest spelling that

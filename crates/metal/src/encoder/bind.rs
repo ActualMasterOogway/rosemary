@@ -560,7 +560,7 @@ impl Encoder {
     /// tracks which resource a later encoder reads, so one full barrier
     /// between encoders is what keeps the order Metal promises.
     ///
-    /// It is not what makes a frame slow: removing it entirely takes the Roblox
+    /// It is not what makes a frame slow: removing it entirely takes an app's
     /// home page from 6.65 ms of device time a frame to 6.45 ms.
     pub(super) fn barrier(&self) {
         let command = self.command();
