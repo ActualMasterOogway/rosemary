@@ -430,7 +430,6 @@ fn apply(format: Id) {
                 ),
             },
 
-            // ## Carried, and deliberately not asked for
             //
             // Each of these describes a choice SDL has already made, or a
             // renderer selection that means nothing when there is one driver.

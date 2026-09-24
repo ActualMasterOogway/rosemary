@@ -1,14 +1,8 @@
 //! `NSAlert`, which is reported rather than shown.
 //!
-//! Nothing in this tree draws a modal dialog: a window here is a surface the
-//! guest renders into itself, and an alert is AppKit's own controls all the way
-//! down. So the alert is written to stderr, where the text a program was trying
-//! to put in front of a person is at least in front of whoever is running it.
-//!
-//! `-runModal` answers the *declining* button whenever there is one to decline
-//! with, for the reason `NSRunAlertPanel` does: a dialog this runtime never
-//! displayed cannot be reported as one the user agreed to. An alert with a
-//! single button has no such choice, and its one button is the answer.
+//! Alerts are written to stderr because this runtime cannot draw AppKit controls.
+//! `-runModal` returns the declining button, if present, to avoid implying consent
+//! to a dialog the user never saw.
 
 use std::ffi::{CString, c_void};
 
