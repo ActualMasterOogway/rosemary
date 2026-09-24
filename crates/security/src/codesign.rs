@@ -1,27 +1,10 @@
 //! The code-signing half of the Security framework, on a host with no code
 //! signatures.
 //!
-//! A program asks these three questions in a row: make a requirement out of a
-//! string ("anchor apple generic and identifier com.example.game"), get a
-//! handle on my own running code, and check the one against the other. On a Mac
-//! that is how a program decides whether it is the copy it was shipped as.
-//!
-//! There is no code-signing machinery here: nothing checked the guest's
-//! signature on the way in, and no certificate on this host chains to Apple's
-//! anchor. So the check cannot be *performed*, and the two answers available
-//! are both wrong in different directions. `errSecCSUnsigned` - the truthful
-//! one about this host - is what a program reads as "this copy has been
-//! tampered with", and it puts up that alert and stops; a binary the user
-//! bought and did not modify is then refused for a check nobody ran.
-//!
-//! So the check succeeds, and **says on stderr that it verified nothing**. That
-//! is the line that keeps this from being a silent lie: the guest is told its
-//! own code is intact - which, for the unmodified binary this tree loads, it
-//! is - and the person running it is told the signature was never examined.
-//!
-//! The first two calls do succeed, because they are questions this tree *can*
-//! answer: a requirement is the text it was made from, and the running code is
-//! this process.
+//! Requirements retain their text and the running code names this process.
+//! Signature checks succeed but warn on stderr that no signature was verified;
+//! returning `errSecCSUnsigned` would make guests treat unchecked code as
+//! tampered with.
 //!
 //! FIXME (ACCURACY): Implement actual code signing checks!
 
