@@ -1,14 +1,3 @@
-//! `<libproc.h>`, which is how a Mac program asks about a process without Mach.
-//!
-//! Only the two flavours anything has needed: the list of open descriptors,
-//! which a program pairs with `getrlimit(RLIMIT_NOFILE)` to see how close to
-//! the limit it is running, and the task's memory and CPU totals.
-//!
-//! There is no host symbol to fall back on - libproc is Darwin's - so an
-//! unbound `proc_pidinfo` is a call to address zero. Every other flavour is
-//! refused the way libproc refuses one it cannot answer: zero bytes returned
-//! and `errno` set, which callers already handle.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_int, c_void};
@@ -16,7 +5,6 @@ use std::ffi::{c_int, c_void};
 const PROC_PIDLISTFDS: c_int = 1;
 const PROC_PIDTASKINFO: c_int = 4;
 
-/// `struct proc_fdinfo`: a descriptor number and what kind of object it is.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ProcFdInfo {
@@ -29,7 +17,6 @@ const FDTYPE_SOCKET: u32 = 2;
 const FDTYPE_KQUEUE: u32 = 5;
 const FDTYPE_PIPE: u32 = 6;
 
-/// `struct proc_taskinfo`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ProcTaskInfo {
@@ -58,11 +45,7 @@ const _: () = {
     assert!(size_of::<ProcTaskInfo>() == 96);
 };
 
-/// This process's open descriptors, and what each one is.
-///
-/// The kind is read from where `/proc/self/fd/N` points: this host names a
-/// socket and a pipe in the link text, and everything else is a file as far as
-/// a caller counting descriptors is concerned.
+#[cfg(not(target_os = "freebsd"))]
 fn open_descriptors() -> Vec<ProcFdInfo> {
     let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
         return Vec::new();
@@ -86,7 +69,92 @@ fn open_descriptors() -> Vec<ProcFdInfo> {
     fds
 }
 
-/// The page counts `/proc/self/statm` reports, in bytes.
+#[cfg(target_os = "freebsd")]
+fn open_descriptors() -> Result<Vec<ProcFdInfo>, i32> {
+    let bytes = freebsd_proc_sysctl(libc::KERN_PROC_FILEDESC, unsafe { libc::getpid() })?;
+    parse_freebsd_descriptors(&bytes)
+}
+
+#[cfg(any(test, target_os = "freebsd"))]
+fn parse_freebsd_descriptors(bytes: &[u8]) -> Result<Vec<ProcFdInfo>, i32> {
+    let mut fds = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let header = bytes.get(offset..offset + 12).ok_or(libc::EINVAL)?;
+        let record_size = i32::from_ne_bytes(header[0..4].try_into().unwrap());
+        let kind = i32::from_ne_bytes(header[4..8].try_into().unwrap());
+        let fd = i32::from_ne_bytes(header[8..12].try_into().unwrap());
+        if record_size < 12 || record_size as usize > bytes.len() - offset {
+            return Err(libc::EINVAL);
+        }
+        // The sysctl also includes pseudo descriptors for cwd, root, etc.
+        if fd >= 0 {
+            // KF_TYPE_* values from FreeBSD's <sys/user.h>.
+            let kind = match kind {
+                2 => FDTYPE_SOCKET,
+                3 | 4 => FDTYPE_PIPE,
+                5 => FDTYPE_KQUEUE,
+                _ => FDTYPE_VNODE,
+            };
+            fds.push(ProcFdInfo { fd, kind });
+        }
+        offset += record_size as usize;
+    }
+    fds.sort_by_key(|entry| entry.fd);
+    Ok(fds)
+}
+
+#[cfg(target_os = "freebsd")]
+fn freebsd_proc_sysctl(flavor: c_int, pid: c_int) -> Result<Vec<u8>, i32> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, flavor, pid];
+    let mut needed = 0usize;
+    // SAFETY: the MIB and output length are valid; a null output asks for size.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            std::ptr::null_mut(),
+            &raw mut needed,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    // The descriptor table and command line may grow between the two calls.
+    for _ in 0..4 {
+        let mut bytes = vec![0u8; needed.saturating_add(4096)];
+        let mut length = bytes.len();
+        // SAFETY: `bytes` is writable for `length` bytes, and MIB is valid.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as u32,
+                bytes.as_mut_ptr().cast(),
+                &raw mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0
+        {
+            bytes.truncate(length);
+            return Ok(bytes);
+        }
+        let error = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        if error != libc::ENOMEM {
+            return Err(error);
+        }
+        needed = length.max(bytes.len().saturating_mul(2));
+    }
+    Err(libc::ENOMEM)
+}
+
+#[cfg(target_os = "linux")]
 fn footprint() -> (u64, u64) {
     // SAFETY: `sysconf` reads a static system parameter and takes no pointer.
     let page = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u64;
@@ -102,15 +170,42 @@ fn footprint() -> (u64, u64) {
     )
 }
 
-/// `int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer,
-/// int buffersize)`
-///
-/// Returns the number of **bytes** written, which is what a caller divides by
-/// the entry size to get a count. Zero is the failure, with `errno` saying why.
-///
-/// # Safety
-///
-/// `buffer` is null or writable for `size` bytes.
+#[cfg(target_os = "freebsd")]
+fn task_info() -> Result<ProcTaskInfo, i32> {
+    let bytes = freebsd_proc_sysctl(libc::KERN_PROC_PID, unsafe { libc::getpid() })?;
+    if bytes.len() < size_of::<libc::kinfo_proc>() {
+        return Err(libc::EINVAL);
+    }
+    // SAFETY: the sysctl returned at least one complete `kinfo_proc`.
+    let proc = unsafe { bytes.as_ptr().cast::<libc::kinfo_proc>().read_unaligned() };
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: `getrusage` writes a complete `rusage` on success.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    // SAFETY: the call above initialized the structure.
+    let usage = unsafe { usage.assume_init() };
+    let nanos = |time: libc::timeval| {
+        (time.tv_sec as u64).saturating_mul(1_000_000_000)
+            + (time.tv_usec as u64).saturating_mul(1_000)
+    };
+    // SAFETY: `sysconf` reads a static system parameter.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    Ok(ProcTaskInfo {
+        virtual_size: proc.ki_size as u64,
+        resident_size: (proc.ki_rssize as u64).saturating_mul(page_size),
+        total_user: nanos(usage.ru_utime),
+        total_system: nanos(usage.ru_stime),
+        faults: usage.ru_minflt as i32,
+        pageins: usage.ru_majflt as i32,
+        context_switches: (usage.ru_nvcsw + usage.ru_nivcsw) as i32,
+        threadnum: proc.ki_numthreads,
+        ..ProcTaskInfo::default()
+    })
+}
+
 pub unsafe extern "C" fn proc_pidinfo(
     pid: c_int,
     flavor: c_int,
@@ -118,10 +213,7 @@ pub unsafe extern "C" fn proc_pidinfo(
     buffer: *mut c_void,
     size: c_int,
 ) -> c_int {
-    // SAFETY: takes no argument and cannot fail.
     if pid != 0 && pid != unsafe { libc::getpid() } {
-        // Everything below reads `/proc/self`. Answering about another process
-        // with this one's figures is the failure this crate refuses elsewhere.
         crate::errno::set(libc::ESRCH);
         return 0;
     }
@@ -131,10 +223,17 @@ pub unsafe extern "C" fn proc_pidinfo(
     }
     match flavor {
         PROC_PIDLISTFDS => {
+            #[cfg(not(target_os = "freebsd"))]
             let fds = open_descriptors();
+            #[cfg(target_os = "freebsd")]
+            let fds = match open_descriptors() {
+                Ok(fds) => fds,
+                Err(error) => {
+                    crate::errno::set(error);
+                    return 0;
+                }
+            };
             let wanted = (fds.len() * size_of::<ProcFdInfo>()) as c_int;
-            // A null buffer is the size enquiry libproc documents, and it is
-            // how a caller sizes the allocation it is about to make.
             if buffer.is_null() {
                 return wanted;
             }
@@ -155,19 +254,27 @@ pub unsafe extern "C" fn proc_pidinfo(
                 crate::errno::set(libc::ENOMEM);
                 return 0;
             }
+            #[cfg(not(target_os = "freebsd"))]
             let (virtual_size, resident_size) = footprint();
+            #[cfg(not(target_os = "freebsd"))]
             let info = ProcTaskInfo {
                 virtual_size,
                 resident_size,
                 threadnum: threads(),
                 ..ProcTaskInfo::default()
             };
+            #[cfg(target_os = "freebsd")]
+            let info = match task_info() {
+                Ok(info) => info,
+                Err(error) => {
+                    crate::errno::set(error);
+                    return 0;
+                }
+            };
             // SAFETY: the caller's buffer has room for the structure.
             unsafe { buffer.cast::<ProcTaskInfo>().write_unaligned(info) };
             wanted
         }
-        // As libproc does for a flavour it has no answer for: nothing written,
-        // and a caller that reads the return value sees it.
         _ => {
             crate::errno::set(libc::EINVAL);
             0
@@ -175,29 +282,28 @@ pub unsafe extern "C" fn proc_pidinfo(
     }
 }
 
-/// `int proc_name(int pid, void *buffer, uint32_t buffersize)`
-///
-/// The process's name, NUL-terminated; the length is returned, zero on a
-/// failure. Qt's `QLockFile` asks it whether a lock file's owner is still the
-/// program that wrote it, and removes the lock when it is not.
-///
-/// A process this runtime runs is named for its guest rather than for
-/// `rosetta3`, which is what the guest would see on a Mac.
-///
-/// # Safety
-///
-/// `buffer` is null or writable for `size` bytes.
 pub unsafe extern "C" fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -> c_int {
+    #[cfg(target_os = "linux")]
     let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
         crate::errno::set(libc::ESRCH);
         return 0;
+    };
+    #[cfg(target_os = "freebsd")]
+    let cmdline = match freebsd_proc_sysctl(libc::KERN_PROC_ARGS, pid) {
+        Ok(cmdline) => cmdline,
+        Err(error) => {
+            crate::errno::set(error);
+            return 0;
+        }
     };
     let Some(name) = process_name(&cmdline) else {
         crate::errno::set(libc::ESRCH);
         return 0;
     };
+    // FIXME (PORTABILITY): may be different on other systems
+    const MAXCOMLEN: usize = 16;
     // `p_name` is 2 * MAXCOMLEN bytes.
-    let name = &name.as_bytes()[..name.len().min(32)];
+    let name = &name.as_bytes()[..name.len().min(MAXCOMLEN * 2)];
     if buffer.is_null() || (size as usize) <= name.len() {
         crate::errno::set(libc::EINVAL);
         return 0;
@@ -210,8 +316,6 @@ pub unsafe extern "C" fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -
     name.len() as c_int
 }
 
-/// The name a process's NUL-separated command line gives it: the file name
-/// of its executable, or of its guest when that executable is `rosetta3 run`.
 fn process_name(cmdline: &[u8]) -> Option<String> {
     let arguments: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
     let base = |argument: &[u8]| {
@@ -231,6 +335,7 @@ fn process_name(cmdline: &[u8]) -> Option<String> {
 }
 
 /// How many threads this process is running.
+#[cfg(target_os = "linux")]
 fn threads() -> i32 {
     std::fs::read_dir("/proc/self/task").map_or(1, |entries| entries.count().max(1) as i32)
 }
@@ -245,6 +350,26 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn freebsd_descriptor_records_skip_pseudo_fds_and_use_record_lengths() {
+        let mut bytes = Vec::new();
+        for (length, kind, fd) in [(16i32, 1i32, -1i32), (24, 2, 7), (16, 3, 4)] {
+            bytes.extend_from_slice(&length.to_ne_bytes());
+            bytes.extend_from_slice(&kind.to_ne_bytes());
+            bytes.extend_from_slice(&fd.to_ne_bytes());
+            bytes.resize(bytes.len() + length as usize - 12, 0);
+        }
+        let fds = parse_freebsd_descriptors(&bytes).unwrap();
+        assert_eq!(fds.iter().map(|entry| entry.fd).collect::<Vec<_>>(), [4, 7]);
+        assert_eq!(fds[0].kind, FDTYPE_PIPE);
+        assert_eq!(fds[1].kind, FDTYPE_SOCKET);
+        bytes[16..20].copy_from_slice(&100i32.to_ne_bytes());
+        assert!(matches!(
+            parse_freebsd_descriptors(&bytes),
+            Err(libc::EINVAL)
+        ));
+    }
+
+    #[test]
     fn a_guest_is_named_for_its_executable_not_the_runtime() {
         assert_eq!(
             process_name(b"/x/rosetta3\0run\0--emulated\0/A.app/Contents/MacOS/Studio\0-p\0"),
@@ -258,8 +383,6 @@ mod tests {
 
     use super::*;
 
-    /// The call this exists for: how many descriptors are open, which is the
-    /// return value divided by the entry size.
     #[test]
     fn the_descriptor_list_counts_what_this_process_has_open() {
         let mut fds = [ProcFdInfo::default(); 256];
@@ -271,22 +394,13 @@ mod tests {
         assert!(open >= 3, "at least the three standard descriptors");
         assert!(fds[..open].iter().all(|entry| entry.kind != 0));
 
-        // And a null buffer is the size enquiry rather than a failure. Only
-        // that: the two calls are separate samples of a table other threads are
-        // opening and closing descriptors in, so an enquiry that came back
-        // *smaller* than the listing above is a descriptor that was closed
-        // between them and not a bug in either.
-        // SAFETY: a null buffer is what this checks.
         let wanted = unsafe { proc_pidinfo(0, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
         assert!(wanted > 0 && wanted % size_of::<ProcFdInfo>() as c_int == 0);
     }
 
-    /// A buffer that holds fewer entries than are open is filled to its own
-    /// size, not past it.
     #[test]
     fn a_short_buffer_is_filled_to_its_own_length() {
         let mut fds = [ProcFdInfo::default(); 2];
-        // SAFETY: a buffer this test sized, described honestly.
         let bytes = unsafe { proc_pidinfo(0, PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), 16) };
         assert_eq!(bytes, 16);
     }
@@ -294,7 +408,6 @@ mod tests {
     #[test]
     fn the_task_flavour_reports_this_processs_memory() {
         let mut info = ProcTaskInfo::default();
-        // SAFETY: a live structure, described honestly.
         let bytes = unsafe {
             proc_pidinfo(
                 0,
@@ -314,7 +427,6 @@ mod tests {
     fn another_process_and_an_unknown_flavour_are_refused() {
         let mut info = ProcTaskInfo::default();
         let mut ask = |pid, flavor| {
-            // SAFETY: a live structure, described honestly.
             unsafe {
                 proc_pidinfo(
                     pid,
