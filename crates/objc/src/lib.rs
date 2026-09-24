@@ -2,33 +2,17 @@
 
 //! An Objective-C runtime.
 //!
-//! The guest's classes are Apple's objc4 ABI whatever host it runs on, and
-//! `crates/rosetta3/src/objc` already knows how to replay them into a runtime
-//! through libobjc's *public C API*. So this crate reimplements that API rather
-//! than inventing one: everything above it then works unchanged against either
-//! this runtime or Apple's, and can be tested against both on a Mac.
+//! Implements the public libobjc API for guest classes with Apple's objc4 ABI.
+//! Symbols are exposed through [`symbol`] so this runtime can coexist with Apple's.
 //!
-//! Nothing here is `#[no_mangle]`. The C spellings exist only as strings in
-//! [`symbol`], so this runtime can be linked into a process that already has
-//! Apple's - which is how it gets tested at all.
-//!
-//! Two invariants the rest of the runtime depends on, neither of which the C API
-//! spells out:
+//! Dispatch relies on two pointer identity guarantees:
 //!
 //! * `class_getMethodImplementation` returns the resolved `IMP` itself, and its
-//!   value changes exactly when the resolution does. `rosetta3`'s dispatch
-//!   re-probes it on every cached send to notice swizzling; a stable
-//!   per-`(class, sel)` forwarding trampoline would freeze the probe and keep
-//!   stale plans alive.
+//!   value changes when resolution changes, allowing dispatch to detect swizzling.
 //! * `method_getImplementation` returns the *exact* pointer `class_addMethod`
-//!   was given. `rosetta3`'s dispatch compares it against its own thunks to tell
-//!   a guest method from a host one; any wrapping turns every guest method into
-//!   a host target and routes it through the encoding decoder, which is
-//!   precisely what the guest path exists to avoid.
+//!   was given, allowing dispatch to distinguish guest thunks from host methods.
 //!
-//! Deliberate divergences from Apple's runtime, both of which simplify the
-//! above: a selector is a pointer to its interned name, and there are no tagged
-//! pointers, so `object_getClass` is always a load of the first word.
+//! Selectors point to interned names. There are no tagged pointers.
 
 pub mod allocator;
 pub mod api;
