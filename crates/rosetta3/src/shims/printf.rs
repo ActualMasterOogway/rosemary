@@ -692,7 +692,7 @@ fn host_stderr() -> *mut libc::FILE {
     darwin::stdio::stderr()
 }
 
-fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
+pub(crate) fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
     if stream.is_null() || bytes.is_empty() {
         return;
     }
@@ -813,7 +813,7 @@ pub fn snprintf_chk(
 
 /// Write `out` to `dst`, truncated to `limit` bytes including the terminator, and leave
 /// the length the whole rendering would have had in `rax`.
-fn format_from_list(
+pub(crate) fn format_from_list(
     symbol: &str,
     ctx: &RegisterContext,
     mem: &mut dyn GuestMemory,
@@ -955,7 +955,7 @@ fn store_bounded(
 
 /// Read the format string at `fmt_ptr` and render it, with `fixed_int` integer
 /// registers already spoken for by named parameters.
-fn format_from(
+pub(crate) fn format_from(
     symbol: &str,
     ctx: &RegisterContext,
     mem: &dyn GuestMemory,

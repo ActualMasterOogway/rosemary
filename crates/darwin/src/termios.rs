@@ -257,10 +257,57 @@ unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termios) 
     unsafe { libc::tcsetattr(fd, action, &host) }
 }
 
+// The speed accessors, which on Darwin are plain field accesses on its own
+// structure. The host's would read and write its own layout's offsets inside
+// the guest's - glibc's `cfsetispeed` rewrites `c_cflag`, which is the word
+// where Darwin keeps `c_oflag` - so they are answered here from the fields
+// `tcgetattr` filled in and `tcsetattr` translates.
+
+/// `speed_t cfgetispeed(const struct termios *)`
+unsafe extern "C" fn cfgetispeed(t: *const Termios) -> u64 {
+    // SAFETY: the caller's Darwin `struct termios`.
+    unsafe { (*t).c_ispeed }
+}
+
+/// `speed_t cfgetospeed(const struct termios *)`
+unsafe extern "C" fn cfgetospeed(t: *const Termios) -> u64 {
+    // SAFETY: as above.
+    unsafe { (*t).c_ospeed }
+}
+
+/// `int cfsetispeed(struct termios *, speed_t)`: Darwin accepts any value.
+unsafe extern "C" fn cfsetispeed(t: *mut Termios, speed: u64) -> c_int {
+    // SAFETY: as above.
+    unsafe { (*t).c_ispeed = speed };
+    0
+}
+
+/// `int cfsetospeed(struct termios *, speed_t)`
+unsafe extern "C" fn cfsetospeed(t: *mut Termios, speed: u64) -> c_int {
+    // SAFETY: as above.
+    unsafe { (*t).c_ospeed = speed };
+    0
+}
+
+/// `int cfsetspeed(struct termios *, speed_t)`
+unsafe extern "C" fn cfsetspeed(t: *mut Termios, speed: u64) -> c_int {
+    // SAFETY: as above.
+    unsafe {
+        (*t).c_ispeed = speed;
+        (*t).c_ospeed = speed;
+    }
+    0
+}
+
 exports::exports! {
     functions {
         "tcgetattr" => tcgetattr,
         "tcsetattr" => tcsetattr,
+        "cfgetispeed" => cfgetispeed,
+        "cfgetospeed" => cfgetospeed,
+        "cfsetispeed" => cfsetispeed,
+        "cfsetospeed" => cfsetospeed,
+        "cfsetspeed" => cfsetspeed,
     }
 }
 
@@ -270,8 +317,39 @@ mod tests {
 
     #[test]
     fn every_terminal_entry_is_published() {
-        for name in ["tcgetattr", "tcsetattr"] {
+        for name in [
+            "tcgetattr",
+            "tcsetattr",
+            "cfgetispeed",
+            "cfgetospeed",
+            "cfsetispeed",
+            "cfsetospeed",
+            "cfsetspeed",
+        ] {
             assert!(symbol(name).is_some(), "{name}");
         }
+    }
+
+    /// The speeds are the Darwin structure's own fields, and setting one
+    /// leaves every other word of it alone.
+    #[test]
+    fn speeds_live_in_darwins_fields() {
+        let mut t = Termios {
+            c_iflag: 1,
+            c_oflag: 2,
+            c_cflag: 3,
+            c_lflag: 4,
+            c_cc: [0; 20],
+            c_ispeed: 0,
+            c_ospeed: 0,
+        };
+        // SAFETY: a structure this test owns.
+        unsafe {
+            assert_eq!(cfsetispeed(&mut t, 38400), 0);
+            assert_eq!(cfsetospeed(&mut t, 9600), 0);
+            assert_eq!(cfgetispeed(&t), 38400);
+            assert_eq!(cfgetospeed(&t), 9600);
+        }
+        assert_eq!((t.c_iflag, t.c_oflag, t.c_cflag, t.c_lflag), (1, 2, 3, 4));
     }
 }

@@ -537,6 +537,9 @@ pub fn provider() -> SyntheticDylib {
     // Flat, for the same reason the rest of the runtime's shims are: which
     // library an image thinks `objc_msgSend` comes from is not the question.
     lib.flat(true);
+    // But it is the runtime, so a prefix's own libobjc is never loaded beside it.
+    lib.alias("/usr/lib/libobjc.A.dylib")
+        .alias("/usr/lib/libobjc.dylib");
     let names = RUNTIME
         .iter()
         .map(|r| r.name)

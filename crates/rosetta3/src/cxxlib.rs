@@ -322,9 +322,14 @@ pub fn bind_objc_exceptions_to_the_vendored_cxxabi<M: machish::memory::Regions>(
 }
 
 /// The source every link in this crate uses: vendored libc++ in front of the
-/// filesystem.
-pub fn source(flavor: Flavor) -> VendoredCxx<machish::namespace::FsDylibSource> {
-    VendoredCxx::new(machish::namespace::FsDylibSource::new(), flavor)
+/// base's userland libraries (see [`crate::userland`]), in front of the filesystem.
+pub fn source(
+    flavor: Flavor,
+) -> VendoredCxx<crate::userland::BaseLibraries<machish::namespace::FsDylibSource>> {
+    VendoredCxx::new(
+        crate::userland::BaseLibraries::new(machish::namespace::FsDylibSource::new(), flavor),
+        flavor,
+    )
 }
 
 #[cfg(test)]

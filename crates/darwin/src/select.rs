@@ -102,16 +102,85 @@ unsafe extern "C" fn pselect(
     }
 }
 
+/// Darwin's `FD_SETSIZE`.
+const FD_SETSIZE: c_int = 1024;
+
+/// Whether `fd_set` lies on the calling thread's stack.
+///
+/// Unknown off Linux, and answered "yes": the check exists to stop a write
+/// past a fixed-size set, and a stack set is where that write does damage.
+fn on_this_stack(fd_set: *const c_void) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the calling thread's own attributes, read into a local and
+        // destroyed afterwards.
+        unsafe {
+            let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+            if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+                return true;
+            }
+            let mut base: *mut c_void = std::ptr::null_mut();
+            let mut size = 0usize;
+            let got = libc::pthread_attr_getstack(&attr, &mut base, &mut size);
+            libc::pthread_attr_destroy(&mut attr);
+            if got != 0 {
+                return true;
+            }
+            let (lo, hi) = (base as usize, base as usize + size);
+            let (start, end) = (fd_set as usize, fd_set as usize + 128);
+            start >= lo && end <= hi
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = fd_set;
+        true
+    }
+}
+
+/// `int __darwin_check_fd_set_overflow(int, const void *, int)`
+///
+/// What Darwin's `FD_SET`, `FD_CLR` and `FD_ISSET` ask before touching a set:
+/// zero means leave it alone. Ported from xnu's libsyscall, less the fault
+/// report it files first.
+pub extern "C" fn check_fd_set_overflow(
+    n: c_int,
+    fd_set: *const c_void,
+    unlimited_select: c_int,
+) -> c_int {
+    if n < 0 {
+        return 0;
+    }
+    if n >= FD_SETSIZE && unlimited_select == 0 && on_this_stack(fd_set) {
+        return 0;
+    }
+    1
+}
+
 exports::exports! {
     functions {
         "select" => select,
         "pselect" => pselect,
+        "__darwin_check_fd_set_overflow" => check_fd_set_overflow,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fd_set_checks_refuse_negatives_and_stack_overflows_only() {
+        let set = [0u8; 128];
+        let heap = vec![0u8; 128];
+        assert_eq!(check_fd_set_overflow(-1, set.as_ptr().cast(), 0), 0);
+        assert_eq!(check_fd_set_overflow(3, set.as_ptr().cast(), 0), 1);
+        assert_eq!(check_fd_set_overflow(2000, set.as_ptr().cast(), 0), 0);
+        assert_eq!(check_fd_set_overflow(2000, set.as_ptr().cast(), 1), 1);
+        #[cfg(target_os = "linux")]
+        assert_eq!(check_fd_set_overflow(2000, heap.as_ptr().cast(), 0), 1);
+        let _ = heap;
+    }
 
     /// What makes the sets a passthrough: two different declarations over the
     /// same bytes, with the descriptor in the same bit of the same byte.

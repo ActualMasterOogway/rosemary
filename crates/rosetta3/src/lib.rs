@@ -74,6 +74,7 @@ pub mod tls;
 pub mod trace;
 pub mod trampoline;
 pub mod unwind;
+pub mod userland;
 pub mod vm;
 
 pub fn darwin_name(symbol: &str) -> &str {

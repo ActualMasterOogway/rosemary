@@ -146,7 +146,7 @@ impl<S: MachSpec + 'static> Loader<S> {
         source: &mut D,
         providers: &[&dyn SymbolProvider],
     ) -> Result<LinkReport> {
-        let collected = self.collect(root, root_path, source)?;
+        let collected = self.collect(root, root_path, source, providers)?;
         let mapped = self.map_all(&collected, mem)?;
         self.bind_all(&collected, &mapped, mem, providers)
     }
@@ -162,6 +162,7 @@ impl<S: MachSpec + 'static> Loader<S> {
         root: &[u8],
         root_path: &str,
         source: &mut D,
+        providers: &[&dyn SymbolProvider],
     ) -> Result<Vec<Collected>> {
         let root_obj = MachObject::parse_any(root, self.spec)?;
         root_obj.check_not_encrypted()?;
@@ -215,6 +216,12 @@ impl<S: MachSpec + 'static> Loader<S> {
                 let candidates = expand(&install_name, &ctx);
 
                 if visited.iter().any(|v| v == &install_name) {
+                    continue;
+                }
+                // A library a provider stands in for is already loaded, as far
+                // as its dependents can tell; fetching the real one as well
+                // would put two of it in the namespace, and the image's would win.
+                if providers.iter().any(|p| p.stands_for(&install_name)) {
                     continue;
                 }
                 let request = DylibRequest {

@@ -172,21 +172,21 @@ unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
     unsafe { crate::env::host_spelling(envp) }
 }
 
-/// The path an exec should actually open, for a path the guest named.
+/// The host path an exec of the guest's `given` opens.
 ///
-/// The prefix's spelling when there is a file there, and the path as given
-/// otherwise. Both are needed: a guest naming `/usr/bin/foo` means the
-/// prefix's, and the runtime also exec's host binaries by their own host path -
-/// which is what a `PATH` search answers - and those are not in it.
+/// Through the namespace like every other file call, retried with the
+/// case-insensitive reading when nothing is there - and never the path as
+/// given. A host program is reachable at `/Volumes/Host` like any other host
+/// file; a guest naming `/usr/bin/foo` means the prefix's, and being handed
+/// this machine's instead is a different program with the same name. See
+/// `docs/prefixes.md`.
 fn exec_path(given: &CStr) -> CString {
     let host = prefix::ns::to_host(given);
-    match host
-        .to_str()
-        .is_ok_and(|p| std::path::Path::new(p).exists())
-    {
-        true => host.into_owned(),
-        false => given.to_owned(),
+    // SAFETY: a NUL-terminated path, and `access` only reads it.
+    if unsafe { libc::access(host.as_ptr(), libc::F_OK) } == 0 {
+        return host.into_owned();
     }
+    prefix::ns::fold(&host).unwrap_or_else(|| host.into_owned())
 }
 
 fn is_mach_o(path: &CStr) -> bool {
@@ -262,6 +262,97 @@ fn rewrite(path: &CStr, on_disk: &CStr, argv: &[CString]) -> Option<(CString, Ve
     Some((runtime, rewritten))
 }
 
+/// Darwin's `_PATH_BSHELL`, which `execvp` hands a script with no `#!` line.
+const BSHELL: &CStr = c"/bin/sh";
+
+/// What an exec of the guest's `path` really runs.
+struct Launch {
+    /// The host path to execute.
+    program: CString,
+    /// The argument vector, or `None` to pass the guest's own.
+    argv: Option<Vec<CString>>,
+    /// Whether `program` is this runtime, which wants the host spelling of
+    /// the environment - see [`runtime_environ`].
+    runtime: bool,
+}
+
+/// The `#!` line of the file at the host path `on_disk`: the interpreter as
+/// the script spells it, and the one optional argument.
+///
+/// Read here rather than left to the kernel, because the interpreter is a
+/// guest path - `#!/bin/sh` inside a prefix means the prefix's - and it may
+/// be a Mach-O the kernel cannot run.
+fn interpreter(on_disk: &CStr) -> Option<(CString, Option<CString>)> {
+    use std::io::Read;
+    let mut head = [0u8; 512];
+    let mut file = std::fs::File::open(on_disk.to_str().ok()?).ok()?;
+    let n = file.read(&mut head).ok()?;
+    let line = head[..n].strip_prefix(b"#!")?;
+    let line = &line[..line.iter().position(|&b| b == b'\n')?];
+    let is_space = |b: &u8| *b == b' ' || *b == b'\t';
+    let start = line.iter().position(|b| !is_space(b))?;
+    let line = &line[start..];
+    let end = line.iter().position(is_space).unwrap_or(line.len());
+    let program = CString::new(&line[..end]).ok()?;
+    // Everything after the interpreter is one argument, as both kernels have it.
+    let rest = line[end..].trim_ascii();
+    let argument = match rest.is_empty() {
+        true => None,
+        false => Some(CString::new(rest).ok()?),
+    };
+    Some((program, argument))
+}
+
+/// Plan the exec of `path` with `argv`: this runtime for a Mach-O, the
+/// translated interpreter for a script, the translated file otherwise.
+fn launch(path: &CStr, argv: &[CString]) -> Launch {
+    let on_disk = exec_path(path);
+    if let Some((runtime, rewritten)) = rewrite(path, &on_disk, argv) {
+        return Launch {
+            program: runtime,
+            argv: Some(rewritten),
+            runtime: true,
+        };
+    }
+    let Some((program, argument)) = interpreter(&on_disk) else {
+        return Launch {
+            program: on_disk,
+            argv: None,
+            runtime: false,
+        };
+    };
+    // `interpreter [argument] script args...`, with the script named the way
+    // the guest named it, so an interpreter that is a guest translates it itself.
+    let mut script_argv = vec![program.clone()];
+    script_argv.extend(argument);
+    let script_at = script_argv.len();
+    script_argv.push(path.to_owned());
+    script_argv.extend(argv.iter().skip(1).cloned());
+    let program_on_disk = exec_path(&program);
+    if let Some((runtime, rewritten)) = rewrite(&program, &program_on_disk, &script_argv) {
+        return Launch {
+            program: runtime,
+            argv: Some(rewritten),
+            runtime: true,
+        };
+    }
+    // A host interpreter reads the script from this host's filesystem.
+    script_argv[script_at] = on_disk;
+    Launch {
+        program: program_on_disk,
+        argv: Some(script_argv),
+        runtime: false,
+    }
+}
+
+/// What `execvp` retries a file the kernel will not execute with:
+/// `sh path args...`, as Darwin's does.
+fn shell_argv(path: &CStr, argv: &[CString]) -> Vec<CString> {
+    let mut out = vec![c"sh".to_owned(), path.to_owned()];
+    out.extend(argv.iter().skip(1).cloned());
+    out
+}
+
 /// Borrow a `Vec<CString>` as the null-terminated `char *const *` an exec wants.
 fn as_argv(strings: &[CString]) -> Vec<*const c_char> {
     let mut raw: Vec<*const c_char> = strings.iter().map(|s| s.as_ptr()).collect();
@@ -289,20 +380,32 @@ pub unsafe extern "C" fn execve(
     }
     // SAFETY: the caller's guarantee.
     let (given, arguments) = unsafe { (CStr::from_ptr(path), argv_of(argv)) };
-    let on_disk = exec_path(given);
-    let Some((runtime, rewritten)) = rewrite(given, &on_disk, &arguments) else {
-        // SAFETY: not a Mach-O, so the host's own `execve` is the right call and the
-        // caller's arguments are already in the shape it wants.
-        return unsafe { libc::execve(on_disk.as_ptr(), argv, envp) };
+    let plan = launch(given, &arguments);
+    let raw = plan.argv.as_deref().map(as_argv);
+    let argv = raw.as_ref().map_or(argv, |raw| raw.as_ptr());
+    let environment = match plan.runtime {
+        // SAFETY: the caller's obligation for `envp`.
+        true => Some(unsafe { runtime_environ(envp) }),
+        false => None,
     };
-    let raw = as_argv(&rewritten);
-    // SAFETY: the caller's obligation for `envp`.
-    let environment = unsafe { runtime_environ(envp) };
-    let environment = as_argv(&environment);
-    // SAFETY: `runtime` and every string in `rewritten` and `environment`
-    // outlive the call, and both arrays are null-terminated. On success this
-    // does not return.
-    unsafe { libc::execve(runtime.as_ptr(), raw.as_ptr(), environment.as_ptr()) }
+    let environment = environment.as_deref().map(as_argv);
+    let envp = environment.as_ref().map_or(envp, |e| e.as_ptr());
+    // SAFETY: every string and array outlives the call, and each array is
+    // null-terminated. On success this does not return.
+    unsafe { libc::execve(plan.program.as_ptr(), argv, envp) }
+}
+
+/// `pid_t vfork(void)`, as `fork`, which POSIX allows.
+///
+/// A `vfork` child borrows the parent's memory and stack until it execs. Here
+/// the child runs this runtime's own code before the exec - the Mach-O rewrite
+/// in [`execve`] allocates - and, emulated, the recompiler's too, all of it on
+/// the parent's stack and heap. A copy costs a little and cannot corrupt the
+/// parent.
+pub extern "C" fn vfork() -> libc::pid_t {
+    // SAFETY: `fork` takes nothing; the caller handles both returns, as it
+    // would `vfork`'s.
+    unsafe { libc::fork() }
 }
 
 /// `int execv(const char *path, char *const argv[])`.
@@ -317,6 +420,10 @@ pub unsafe extern "C" fn execv(path: *const c_char, argv: *const *const c_char) 
 
 /// `int execvp(const char *file, char *const argv[])`, which searches `PATH`.
 ///
+/// The guest's `PATH`, searched in the guest's namespace - the host's own
+/// `execvp` would search this process's `PATH` on this host's disk. A file
+/// the kernel will not execute is handed to `/bin/sh`, as Darwin's does.
+///
 /// # Safety
 ///
 /// As [`execve`].
@@ -327,32 +434,71 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
     }
     // SAFETY: the caller's guarantee.
     let name = unsafe { CStr::from_ptr(file) };
-    match search_path(name) {
-        // Resolved to a Mach-O, so it has to go through the rewrite; the host's
-        // `execvp` would find the same file and fail to execute it.
-        Some(found) if is_mach_o(&exec_path(&found)) => {
-            // SAFETY: `found` outlives the call, and the caller's guarantee for argv.
-            unsafe { execve(found.as_ptr(), argv, environ()) }
+    let found = match search_path(name) {
+        Ok(found) => found,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
         }
-        // SAFETY: not a Mach-O; the host's own search is the right one.
-        _ => unsafe { libc::execvp(file, argv) },
+    };
+    // SAFETY: `found` outlives the call, and the caller's guarantee for argv.
+    let rc = unsafe { execve(found.as_ptr(), argv, environ()) };
+    if crate::errno::get() != libc::ENOEXEC {
+        return rc;
     }
+    // SAFETY: the caller's guarantee.
+    let shell = shell_argv(&found, &unsafe { argv_of(argv) });
+    let shell = as_argv(&shell);
+    // SAFETY: as above.
+    unsafe { execve(BSHELL.as_ptr(), shell.as_ptr(), environ()) }
 }
 
-/// `PATH`'s answer for `name`, or `None` if the name is already a path.
-fn search_path(name: &CStr) -> Option<CString> {
-    let text = name.to_str().ok()?;
-    if text.contains('/') {
-        return CString::new(text).ok();
+/// The guest's `PATH`, or Darwin's `_PATH_DEFPATH` when it has none.
+fn guest_path_variable() -> String {
+    #[cfg(not(target_os = "macos"))]
+    // SAFETY: a literal name; the answer is null or the guest's own string.
+    let value = unsafe {
+        let p = crate::env::getenv(c"PATH".as_ptr());
+        (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+    };
+    #[cfg(target_os = "macos")]
+    let value = std::env::var("PATH").ok();
+    value.unwrap_or_else(|| "/usr/bin:/bin".to_string())
+}
+
+/// `PATH`'s answer for `name`, as the guest spells it, or the error an exec
+/// of it reports: `ENOENT` for nothing there, `EACCES` for something there
+/// that may not be executed. A name with a slash in it is its own answer.
+fn search_path(name: &CStr) -> Result<CString, c_int> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = name.to_bytes();
+    if bytes.is_empty() {
+        return Err(libc::ENOENT);
     }
-    let path = std::env::var("PATH").ok()?;
-    for directory in path.split(':') {
-        let candidate = format!("{}/{text}", directory.trim_end_matches('/'));
-        if std::fs::metadata(&candidate).is_ok() {
-            return CString::new(candidate).ok();
+    if bytes.contains(&b'/') {
+        return Ok(name.to_owned());
+    }
+    let mut error = libc::ENOENT;
+    for directory in guest_path_variable().split(':') {
+        // An empty entry is the current directory.
+        let directory = if directory.is_empty() { "." } else { directory };
+        let mut candidate = directory.trim_end_matches('/').as_bytes().to_vec();
+        candidate.push(b'/');
+        candidate.extend_from_slice(bytes);
+        let Ok(candidate) = CString::new(candidate) else {
+            continue;
+        };
+        let on_disk = exec_path(&candidate);
+        let Ok(meta) = std::fs::metadata(std::ffi::OsStr::from_bytes(on_disk.as_bytes())) else {
+            continue;
+        };
+        // SAFETY: a NUL-terminated path, and `access` only reads it.
+        if meta.is_file() && unsafe { libc::access(on_disk.as_ptr(), libc::X_OK) } == 0 {
+            return Ok(candidate);
         }
+        error = libc::EACCES;
     }
-    None
+    Err(error)
 }
 
 /// This process's environment, as the exec family's implicit third argument.
@@ -391,10 +537,13 @@ impl FileActions {
                         let Ok(oflag) = crate::fcntl::flags_to_host(*oflag) else {
                             return None;
                         };
+                        // A guest path the child opens: translated here, as
+                        // nothing in the child will.
+                        let host_path = prefix::ns::to_host(path);
                         libc::posix_spawn_file_actions_addopen(
                             &mut host.0,
                             *fd,
-                            path.as_ptr(),
+                            host_path.as_ptr(),
                             oflag,
                             *mode,
                         )
@@ -405,7 +554,8 @@ impl FileActions {
                     Action::Close(fd) => libc::posix_spawn_file_actions_addclose(&mut host.0, *fd),
                     #[cfg(not(target_os = "macos"))]
                     Action::Chdir(path) => {
-                        posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
+                        let host_path = prefix::ns::to_host(path);
+                        posix_spawn_file_actions_addchdir_np(&mut host.0, host_path.as_ptr())
                     }
                     #[cfg(not(target_os = "macos"))]
                     Action::Fchdir(fd) => posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd),
@@ -594,40 +744,27 @@ pub unsafe extern "C" fn posix_spawn(
         .map(|a| &a.0 as *const _)
         .unwrap_or(std::ptr::null());
 
-    let on_disk = exec_path(given);
-    match rewrite(given, &on_disk, &arguments) {
-        None => {
-            // SAFETY: not a Mach-O, so the host runs it directly; the objects are
-            // this module's translations and outlive the call.
-            unsafe {
-                libc::posix_spawn(
-                    pid,
-                    path,
-                    actions_ptr,
-                    attr_ptr,
-                    argv as *const *mut c_char,
-                    envp as *const *mut c_char,
-                )
-            }
-        }
-        Some((runtime, rewritten)) => {
-            let raw = as_argv(&rewritten);
-            // SAFETY: the caller's obligation for `envp`.
-            let environment = unsafe { runtime_environ(envp) };
-            let environment = as_argv(&environment);
-            // SAFETY: as above, and `runtime`, `raw` and `environment` outlive
-            // the call.
-            unsafe {
-                libc::posix_spawn(
-                    pid,
-                    runtime.as_ptr(),
-                    actions_ptr,
-                    attr_ptr,
-                    raw.as_ptr() as *const *mut c_char,
-                    environment.as_ptr() as *const *mut c_char,
-                )
-            }
-        }
+    let plan = launch(given, &arguments);
+    let raw = plan.argv.as_deref().map(as_argv);
+    let argv = raw.as_ref().map_or(argv, |raw| raw.as_ptr());
+    let environment = match plan.runtime {
+        // SAFETY: the caller's obligation for `envp`.
+        true => Some(unsafe { runtime_environ(envp) }),
+        false => None,
+    };
+    let environment = environment.as_deref().map(as_argv);
+    let envp = environment.as_ref().map_or(envp, |e| e.as_ptr());
+    // SAFETY: the objects are this module's translations, and every string
+    // and array outlives the call.
+    unsafe {
+        libc::posix_spawn(
+            pid,
+            plan.program.as_ptr(),
+            actions_ptr,
+            attr_ptr,
+            argv as *const *mut c_char,
+            envp as *const *mut c_char,
+        )
     }
 }
 
@@ -649,12 +786,32 @@ pub unsafe extern "C" fn posix_spawnp(
     }
     // SAFETY: the caller's guarantee.
     let name = unsafe { CStr::from_ptr(file) };
-    // Resolved here so the Mach-O test has a real file to read. A name that resolves
-    // to nothing is left to the host, which reports it.
-    let resolved = search_path(name);
-    let path = resolved.as_deref().unwrap_or(name);
-    // SAFETY: `path` outlives the call, and the caller's guarantee for the rest.
-    unsafe { posix_spawn(pid, path.as_ptr(), file_actions, attrp, argv, envp) }
+    // The guest's `PATH` in the guest's namespace, as for [`execvp`].
+    let found = match search_path(name) {
+        Ok(found) => found,
+        Err(errno) => return errno,
+    };
+    // SAFETY: `found` outlives the call, and the caller's guarantee for the rest.
+    let rc = unsafe { posix_spawn(pid, found.as_ptr(), file_actions, attrp, argv, envp) };
+    if rc != libc::ENOEXEC {
+        return rc;
+    }
+    // A file the kernel will not execute is a script for `/bin/sh`, as
+    // Darwin's `posix_spawnp` has it.
+    // SAFETY: the caller's guarantee.
+    let shell = shell_argv(&found, &unsafe { argv_of(argv) });
+    let shell = as_argv(&shell);
+    // SAFETY: as above.
+    unsafe {
+        posix_spawn(
+            pid,
+            BSHELL.as_ptr(),
+            file_actions,
+            attrp,
+            shell.as_ptr(),
+            envp,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -889,6 +1046,7 @@ exports::exports! {}
 exports::exports! {
     functions {
         "execv" => execv,
+        "vfork" => vfork,
         "execve" => execve,
         "execvp" => execvp,
         "posix_spawn" => posix_spawn,
@@ -961,6 +1119,89 @@ mod tests {
         assert_eq!(rewritten.len(), 4, "the guest's argv[0] is not passed on");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn scratch(test: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rosetta3-{test}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn c_path(p: &std::path::Path) -> CString {
+        CString::new(p.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_shebang_line_names_an_interpreter_and_one_argument() {
+        let dir = scratch("shebang");
+        let script = dir.join("script");
+        std::fs::write(&script, b"#!  /bin/sh -e -x\necho hi\n").unwrap();
+        let bare = dir.join("bare");
+        std::fs::write(&bare, b"#!/usr/local/bin/ash\n").unwrap();
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"echo hi\n").unwrap();
+
+        assert_eq!(
+            interpreter(&c_path(&script)),
+            Some((c"/bin/sh".to_owned(), Some(c"-e -x".to_owned())))
+        );
+        assert_eq!(
+            interpreter(&c_path(&bare)),
+            Some((c"/usr/local/bin/ash".to_owned(), None))
+        );
+        assert_eq!(interpreter(&c_path(&plain)), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A script's interpreter is resolved the way the script's own path is:
+    /// a host program runs it directly, a Mach-O runs it through this runtime.
+    #[test]
+    fn a_script_runs_under_its_translated_interpreter() {
+        let dir = scratch("script");
+        let script = dir.join("script");
+        std::fs::write(&script, b"#!/bin/sh -e\ntrue\n").unwrap();
+        let argv = [c"script".to_owned(), c"one".to_owned()];
+
+        let plan = launch(&c_path(&script), &argv);
+        assert!(!plan.runtime);
+        assert_eq!(plan.program, c"/bin/sh".to_owned());
+        assert_eq!(
+            plan.argv.unwrap(),
+            [
+                c"/bin/sh".to_owned(),
+                c"-e".to_owned(),
+                c_path(&script),
+                c"one".to_owned()
+            ]
+        );
+
+        let shell = dir.join("macho-shell");
+        std::fs::write(&shell, 0xfeed_facfu32.to_le_bytes()).unwrap();
+        let guest_script = dir.join("guest-script");
+        std::fs::write(&guest_script, format!("#!{}\n", shell.display())).unwrap();
+        let plan = launch(&c_path(&guest_script), &argv);
+        assert!(
+            plan.runtime,
+            "a Mach-O interpreter runs through this runtime"
+        );
+        let rewritten = plan.argv.unwrap();
+        assert_eq!(rewritten[1], c"run".to_owned());
+        assert_eq!(rewritten[2], c_path(&shell));
+        assert_eq!(rewritten[3], c_path(&guest_script));
+        assert_eq!(rewritten[4], c"one".to_owned());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_search_answers_with_the_guest_spelling_or_an_error() {
+        let found = search_path(c"sh").expect("a shell on PATH");
+        assert!(found.to_bytes().ends_with(b"/sh"));
+        assert_eq!(search_path(c"./anything"), Ok(c"./anything".to_owned()));
+        assert_eq!(
+            search_path(c"no-such-program-anywhere-rosetta3"),
+            Err(libc::ENOENT)
+        );
+        assert_eq!(search_path(c""), Err(libc::ENOENT));
     }
 
     /// Anything that is not a Mach-O is left entirely alone.

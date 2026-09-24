@@ -612,6 +612,54 @@ pub unsafe extern "C" fn maskrune(c: c_int, mask: u64) -> c_int {
     (runetype(c) & mask as u32) as c_int
 }
 
+/// `wctype_t wctype(const char *property)`
+///
+/// On Darwin a `wctype_t` *is* a rune-type mask: `<wctype.h>` inlines
+/// `iswctype(wc, t)` to `__maskrune(wc, t)`, so the answer has to be the
+/// `_CTYPE_*` bits for the class and not the host's opaque handle. Apple's
+/// table, the BSD extensions included; an unknown name is zero.
+///
+/// # Safety
+///
+/// `property` is NUL-terminated.
+pub unsafe extern "C" fn wctype(property: *const c_char) -> u64 {
+    const IDEOGRAM: u32 = 0x0008_0000;
+    const SPECIAL: u32 = 0x0010_0000;
+    const PHONOGRAM: u32 = 0x0020_0000;
+    if property.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's obligation.
+    let name = unsafe { std::ffi::CStr::from_ptr(property) }.to_bytes();
+    let mask = match name {
+        b"alnum" => ctype::ALPHA | ctype::DIGIT,
+        b"alpha" => ctype::ALPHA,
+        b"blank" => ctype::BLANK,
+        b"cntrl" => ctype::CONTROL,
+        b"digit" => ctype::DIGIT,
+        b"graph" => ctype::GRAPH,
+        b"lower" => ctype::LOWER,
+        b"print" => ctype::PRINT,
+        b"punct" => ctype::PUNCT,
+        b"space" => ctype::SPACE,
+        b"upper" => ctype::UPPER,
+        b"xdigit" => ctype::XDIGIT,
+        b"ideogram" => IDEOGRAM,
+        b"special" => SPECIAL,
+        b"phonogram" => PHONOGRAM,
+        b"rune" => 0xffff_ff00,
+        _ => 0,
+    };
+    mask as u64
+}
+
+/// `int iswctype(wint_t wc, wctype_t charclass)`, the out-of-line form of
+/// what the header inlines.
+pub unsafe extern "C" fn iswctype(wc: c_uint, charclass: u64) -> c_int {
+    // SAFETY: touches no memory.
+    (unsafe { maskrune(wc as c_int, charclass) } != 0) as c_int
+}
+
 /// `int __maskrune_l(__darwin_ct_rune_t, unsigned long, locale_t)`
 ///
 /// # Safety
@@ -709,6 +757,8 @@ exports::exports! {
         "tolower_l" | "__tolower_l" | "___tolower_l" => tolower_l,
         "toupper_l" | "__toupper_l" | "___toupper_l" => toupper_l,
         "__maskrune" | "___maskrune" => maskrune,
+        "wctype" => wctype,
+        "iswctype" => iswctype,
         "__maskrune_l" | "___maskrune_l" => maskrune_l,
         "strtol_l" => strtol_l,
         "strtoll_l" => strtoll_l,

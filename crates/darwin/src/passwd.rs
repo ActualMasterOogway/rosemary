@@ -14,7 +14,7 @@
 #![cfg(not(target_os = "macos"))]
 
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_int};
 
 /// Darwin's `struct passwd`, from `<pwd.h>`.
 ///
@@ -58,14 +58,13 @@ thread_local! {
     static ANSWER: RefCell<Answer> = RefCell::new(Answer::default());
 }
 
-/// A host `struct passwd` as Darwin's, in this thread's storage.
+/// A host entry's strings, in [`Passwd`]'s order: name, password, class,
+/// gecos, home, shell.
 ///
 /// # Safety
 ///
 /// `host` is a live `struct passwd` this process's libc returned.
-unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
-    // SAFETY: the caller's guarantee.
-    let host = unsafe { &*host };
+unsafe fn strings_of(host: &libc::passwd) -> [CString; 6] {
     // SAFETY: each is a NUL-terminated string libc owns, or null.
     let text = |p: *const c_char| unsafe {
         match p.is_null() {
@@ -73,8 +72,7 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
             false => CString::from(CStr::from_ptr(p)),
         }
     };
-
-    let strings = vec![
+    [
         text(host.pw_name),
         text(host.pw_passwd),
         // Darwin has a login class and this host has none. Empty is the honest
@@ -83,9 +81,12 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
         text(host.pw_gecos),
         home_of(host),
         text(host.pw_shell),
-    ];
-    let at = |i: usize| strings[i].as_ptr().cast_mut();
-    let guest = Passwd {
+    ]
+}
+
+/// A [`Passwd`] over `host`'s ids and six strings at `at(i)`.
+fn entry(host: &libc::passwd, at: impl Fn(usize) -> *mut c_char) -> Passwd {
+    Passwd {
         name: at(0),
         passwd: at(1),
         uid: host.pw_uid,
@@ -96,12 +97,25 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
         dir: at(4),
         shell: at(5),
         expire: 0,
-    };
+    }
+}
+
+/// A host `struct passwd` as Darwin's, in this thread's storage.
+///
+/// # Safety
+///
+/// `host` is a live `struct passwd` this process's libc returned.
+unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
+    // SAFETY: the caller's guarantee.
+    let host = unsafe { &*host };
+    // SAFETY: as above.
+    let strings = unsafe { strings_of(host) };
+    let guest = entry(host, |i| strings[i].as_ptr().cast_mut());
     ANSWER.with(|slot| {
         let mut slot = slot.borrow_mut();
         slot.entry = Some(Box::new(Entry {
             guest,
-            _strings: strings,
+            _strings: strings.into(),
         }));
         slot.entry
             .as_mut()
@@ -217,20 +231,233 @@ pub fn home(user: Option<&CStr>) -> Option<CString> {
     (!home.as_bytes().is_empty()).then_some(home)
 }
 
-/// The reentrant pair are **not** here, deliberately.
+/// The host's reentrant lookup, into a buffer of its own that grows until
+/// the entry fits.
 ///
-/// `getpwuid_r` fills a `struct passwd` the *caller* supplies out of a buffer
-/// the caller sized, so honouring it means writing Darwin's layout into the
-/// guest's object and packing the strings into the guest's buffer - which is a
-/// different piece of work from this one, and one nothing has needed yet.
-/// Passing them through would write glibc's layout into a Darwin structure,
-/// which is the bug this module was written for.
-pub const REFUSED: &[&str] = &["getpwuid_r", "getpwnam_r"];
+/// `Ok(None)` is "no such user", which the reentrant calls report as success
+/// with a null result.
+fn lookup_r(
+    ask: impl Fn(*mut libc::passwd, *mut c_char, usize, *mut *mut libc::passwd) -> c_int,
+) -> Result<Option<[CString; 6]>, c_int> {
+    let mut size = 1024;
+    loop {
+        let mut buf = vec![0 as c_char; size];
+        // SAFETY: a zeroed `struct passwd` is what the host fills.
+        let mut host: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        match ask(&mut host, buf.as_mut_ptr(), buf.len(), &mut result) {
+            libc::ERANGE if size < 1 << 20 => size *= 4,
+            0 if result.is_null() => return Ok(None),
+            // SAFETY: the host filled `host`, whose strings point into `buf`,
+            // which is still alive.
+            0 => return Ok(Some(unsafe { strings_of(&host) })),
+            error => return Err(error),
+        }
+    }
+}
+
+/// Pack an answer into the caller's `pwd` and `buf`, Darwin's way.
+///
+/// # Safety
+///
+/// `pwd` is a writable Darwin `struct passwd`, `buf` is writable for `size`
+/// bytes, and `result` is writable.
+unsafe fn fill_r(
+    answer: Result<Option<[CString; 6]>, c_int>,
+    host_ids: impl Fn() -> Option<(u32, u32)>,
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut Passwd,
+) -> c_int {
+    // SAFETY: the caller's obligation.
+    unsafe { *result = std::ptr::null_mut() };
+    let strings = match answer {
+        Ok(Some(strings)) => strings,
+        Ok(None) => return 0,
+        Err(error) => return error,
+    };
+    let Some((uid, gid)) = host_ids() else {
+        return 0;
+    };
+    let needed: usize = strings.iter().map(|s| s.as_bytes_with_nul().len()).sum();
+    if needed > size {
+        return libc::ERANGE;
+    }
+    let mut offsets = [0usize; 6];
+    let mut at = 0;
+    for (i, text) in strings.iter().enumerate() {
+        let bytes = text.as_bytes_with_nul();
+        // SAFETY: `needed <= size`, so every copy lands inside `buf`.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().cast(), buf.add(at), bytes.len()) };
+        offsets[i] = at;
+        at += bytes.len();
+    }
+    // SAFETY: a zeroed host entry carries only the ids `entry` reads.
+    let mut ids: libc::passwd = unsafe { std::mem::zeroed() };
+    ids.pw_uid = uid;
+    ids.pw_gid = gid;
+    // SAFETY: the caller's obligation, and offsets inside `buf`.
+    unsafe {
+        *pwd = entry(&ids, |i| buf.add(offsets[i]));
+        *result = pwd;
+    }
+    0
+}
+
+/// The uid and gid of the entry `ask` finds, for [`fill_r`].
+fn ids_of(ask: impl Fn() -> *mut libc::passwd) -> Option<(u32, u32)> {
+    let host = ask();
+    // SAFETY: libc's own entry, read immediately.
+    (!host.is_null()).then(|| unsafe { ((*host).pw_uid, (*host).pw_gid) })
+}
+
+/// `int getpwuid_r(uid_t, struct passwd *, char *, size_t, struct passwd **)`
+///
+/// The caller's structure is filled in Darwin's layout and its buffer holds
+/// the strings, which is the whole reason this is not the host's own.
+///
+/// # Safety
+///
+/// As [`fill_r`].
+pub unsafe extern "C" fn getpwuid_r(
+    uid: u32,
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut Passwd,
+) -> c_int {
+    // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
+    let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwuid_r(uid, h, b, n, r) });
+    // SAFETY: the caller's obligation.
+    unsafe {
+        fill_r(
+            answer,
+            || ids_of(|| libc::getpwuid(uid)),
+            pwd,
+            buf,
+            size,
+            result,
+        )
+    }
+}
+
+/// `int getpwnam_r(const char *, struct passwd *, char *, size_t, struct passwd **)`
+///
+/// # Safety
+///
+/// `name` is NUL-terminated, and as [`fill_r`].
+pub unsafe extern "C" fn getpwnam_r(
+    name: *const c_char,
+    pwd: *mut Passwd,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut Passwd,
+) -> c_int {
+    if name.is_null() {
+        return libc::EINVAL;
+    }
+    // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
+    let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwnam_r(name, h, b, n, r) });
+    // SAFETY: the caller's obligation.
+    unsafe {
+        fill_r(
+            answer,
+            || ids_of(|| libc::getpwnam(name)),
+            pwd,
+            buf,
+            size,
+            result,
+        )
+    }
+}
+
+/// Names by id, kept for the life of the process: `user_from_uid` hands out a
+/// pointer the caller never frees and may hold, as BSD's cache does.
+static NAMES: std::sync::Mutex<Option<std::collections::HashMap<(bool, u32), &'static CStr>>> =
+    std::sync::Mutex::new(None);
+
+/// The cached name for a user (`group == false`) or group id.
+fn cached_name(
+    group: bool,
+    id: u32,
+    lookup: impl FnOnce() -> Option<CString>,
+) -> Option<&'static CStr> {
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let names = names.get_or_insert_with(Default::default);
+    if let Some(name) = names.get(&(group, id)) {
+        return Some(name);
+    }
+    let name: &'static CStr = Box::leak(lookup()?.into_boxed_c_str());
+    names.insert((group, id), name);
+    Some(name)
+}
+
+/// What BSD's pwcache answers for an id nothing names: null when asked to, or
+/// the number itself.
+fn unnamed(id: u32, nothing: c_int) -> *const c_char {
+    match nothing {
+        0 => cached_number(id),
+        _ => std::ptr::null(),
+    }
+}
+
+fn cached_number(id: u32) -> *const c_char {
+    static NUMBERS: std::sync::Mutex<Option<std::collections::HashMap<u32, &'static CStr>>> =
+        std::sync::Mutex::new(None);
+    let mut numbers = NUMBERS.lock().unwrap_or_else(|e| e.into_inner());
+    let numbers = numbers.get_or_insert_with(Default::default);
+    numbers
+        .entry(id)
+        .or_insert_with(|| {
+            Box::leak(
+                CString::new(id.to_string())
+                    .unwrap_or_default()
+                    .into_boxed_c_str(),
+            )
+        })
+        .as_ptr()
+}
+
+/// `const char *user_from_uid(uid_t uid, int nouser)`
+pub extern "C" fn user_from_uid(uid: u32, nouser: c_int) -> *const c_char {
+    let name = cached_name(false, uid, || {
+        // SAFETY: a scalar, answered with libc's own entry or null.
+        let host = unsafe { libc::getpwuid(uid) };
+        // SAFETY: libc's own NUL-terminated name.
+        (!host.is_null()).then(|| unsafe { CString::from(CStr::from_ptr((*host).pw_name)) })
+    });
+    match name {
+        Some(name) => name.as_ptr(),
+        None => unnamed(uid, nouser),
+    }
+}
+
+/// `const char *group_from_gid(gid_t gid, int nogroup)`
+///
+/// `struct group` agrees between the two platforms, but only the name crosses
+/// here anyway.
+pub extern "C" fn group_from_gid(gid: u32, nogroup: c_int) -> *const c_char {
+    let name = cached_name(true, gid, || {
+        // SAFETY: a scalar, answered with libc's own entry or null.
+        let host = unsafe { libc::getgrgid(gid) };
+        // SAFETY: libc's own NUL-terminated name.
+        (!host.is_null()).then(|| unsafe { CString::from(CStr::from_ptr((*host).gr_name)) })
+    });
+    match name {
+        Some(name) => name.as_ptr(),
+        None => unnamed(gid, nogroup),
+    }
+}
 
 exports::exports! {
     functions {
         "getpwuid" => getpwuid,
         "getpwnam" => getpwnam,
+        "getpwuid_r" => getpwuid_r,
+        "getpwnam_r" => getpwnam_r,
+        "user_from_uid" => user_from_uid,
+        "group_from_gid" => group_from_gid,
     }
 }
 
@@ -271,6 +498,49 @@ mod tests {
             assert!(!CStr::from_ptr((*entry).name).to_bytes().is_empty());
             assert!((*entry).dir.as_ref().is_some());
             assert!(!(*entry).class.is_null(), "empty, never null");
+        }
+    }
+
+    /// The reentrant form packs Darwin's layout into the caller's buffer, and
+    /// says so when the buffer is too small.
+    #[test]
+    fn getpwuid_r_fills_the_callers_structure_from_its_buffer() {
+        // SAFETY: a zeroed Darwin entry, a buffer and a result slot of this
+        // test's own.
+        unsafe {
+            let uid = libc::getuid();
+            let mut pwd: Passwd = std::mem::zeroed();
+            let mut buf = vec![0 as c_char; 4096];
+            let mut result: *mut Passwd = std::ptr::null_mut();
+            let rc = getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result);
+            assert_eq!(rc, 0);
+            assert_eq!(result, &raw mut pwd);
+            assert_eq!(pwd.uid, uid);
+            let range = buf.as_ptr() as usize..buf.as_ptr() as usize + buf.len();
+            assert!(range.contains(&(pwd.name as usize)));
+            assert!(range.contains(&(pwd.dir as usize)));
+            assert!(!CStr::from_ptr(pwd.name).to_bytes().is_empty());
+
+            let mut tiny = [0 as c_char; 2];
+            let rc = getpwuid_r(uid, &mut pwd, tiny.as_mut_ptr(), tiny.len(), &mut result);
+            assert_eq!(rc, libc::ERANGE);
+            assert!(result.is_null());
+        }
+    }
+
+    #[test]
+    fn names_by_id_fall_back_to_the_number_or_null() {
+        // SAFETY: this process's own uid, and pointers the cache keeps alive.
+        unsafe {
+            let me = CStr::from_ptr(user_from_uid(libc::getuid(), 0));
+            assert!(!me.to_bytes().is_empty());
+            let nobody = u32::MAX - 7;
+            assert_eq!(
+                CStr::from_ptr(user_from_uid(nobody, 0)).to_str(),
+                Ok("4294967288")
+            );
+            assert!(user_from_uid(nobody, 1).is_null());
+            assert!(group_from_gid(nobody, 1).is_null());
         }
     }
 }

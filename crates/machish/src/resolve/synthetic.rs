@@ -99,9 +99,11 @@ impl SyntheticDylib {
 
 impl SymbolProvider for SyntheticDylib {
     fn provides(&self, install_name: &str) -> bool {
-        self.flat
-            || self.install_name == install_name
-            || self.aliases.iter().any(|a| a == install_name)
+        self.flat || self.stands_for(install_name)
+    }
+
+    fn stands_for(&self, install_name: &str) -> bool {
+        self.install_name == install_name || self.aliases.iter().any(|a| a == install_name)
     }
 
     fn resolve(&self, sym: &SymbolRef<'_>) -> Option<Resolved> {

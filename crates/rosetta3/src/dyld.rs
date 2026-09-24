@@ -1087,11 +1087,15 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     // for `readdir` on Linux would otherwise get glibc's, whose `struct dirent`
     // is not the one the guest was compiled against; `darwin::symbol` refuses a
     // divergent name by the same list the loader binds against.
-    let addr = match crate::shims::openat::host_substitute(name) {
-        Some(wrapper) => wrapper,
-        None => darwin::symbol(name)?,
-    };
+    let addr = system_symbol(name)?;
     Some(remember_native_symbol(addr, name, None))
+}
+
+/// What libSystem answers `name` with: the global search's host half, and the
+/// handle [`crate::frameworks`] registers for `dlopen("/usr/lib/libSystem.B.dylib")`,
+/// which must agree with it.
+pub fn system_symbol(name: &str) -> Option<u64> {
+    crate::shims::openat::host_substitute(name).or_else(|| darwin::symbol(name))
 }
 
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.

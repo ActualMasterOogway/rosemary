@@ -68,7 +68,7 @@ const _: () = {
 /// it is left zero rather than filled from `st_ctime`, because a guest comparing
 /// the two to decide whether a file was replaced would get "yes" every time from
 /// a copy of the change time.
-fn from_host(host: &libc::stat) -> Stat {
+pub(crate) fn from_host(host: &libc::stat) -> Stat {
     Stat {
         dev: host.st_dev as i32,
         mode: host.st_mode as u16,
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn lstat(path: *const c_char, out: *mut Stat) -> c_int {
 /// # Safety
 ///
 /// As [`stat`].
-unsafe fn at_path(path: *const c_char, out: *mut Stat, symlink: bool) -> c_int {
+pub(crate) unsafe fn at_path(path: *const c_char, out: *mut Stat, symlink: bool) -> c_int {
     with_fallback(path, |path| {
         // SAFETY: a zeroed `struct stat` is what the host is asked to fill.
         let mut host: libc::stat = unsafe { std::mem::zeroed() };
@@ -484,6 +484,63 @@ pub unsafe extern "C" fn openat(
 /// Darwin spells `AT_FDCWD` as `-2`; Linux spells it as `-100`.
 const DARWIN_AT_FDCWD: c_int = -2;
 
+/// Darwin's `AT_EACCESS` and `AT_SYMLINK_NOFOLLOW`, which are Linux's `0x200`
+/// and `0x100`.
+const DARWIN_AT_EACCESS: c_int = 0x10;
+const DARWIN_AT_SYMLINK_NOFOLLOW: c_int = 0x20;
+
+/// `int faccessat(int fd, const char *path, int mode, int flag)`
+///
+/// Passed through, Darwin's `AT_FDCWD` is a descriptor number the host has
+/// never heard of and every relative lookup fails with `EBADF`. The access
+/// modes agree; the directory, the flags and the path are translated.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `dirfd` is either a directory
+/// descriptor or Darwin's `AT_FDCWD`.
+pub unsafe extern "C" fn faccessat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flag: c_int,
+) -> c_int {
+    let known = DARWIN_AT_EACCESS | DARWIN_AT_SYMLINK_NOFOLLOW;
+    if flag & !known != 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let mut host_flag = 0;
+    if flag & DARWIN_AT_EACCESS != 0 {
+        host_flag |= libc::AT_EACCESS;
+    }
+    if flag & DARWIN_AT_SYMLINK_NOFOLLOW != 0 {
+        host_flag |= libc::AT_SYMLINK_NOFOLLOW;
+    }
+    let dirfd = match dirfd {
+        DARWIN_AT_FDCWD => libc::AT_FDCWD,
+        fd => fd,
+    };
+    let ask = |path| {
+        // SAFETY: the caller's obligation.
+        let rc = unsafe { libc::faccessat(dirfd, path, mode, host_flag) };
+        (rc, rc == 0)
+    };
+    if path.is_null() {
+        return ask(path).0;
+    }
+    // SAFETY: non-null, and a `const char *` is NUL-terminated by contract.
+    let host = prefix::ns::to_host_at(dirfd, unsafe { CStr::from_ptr(path) });
+    let (result, ok) = ask(host.as_ptr());
+    if ok || crate::errno::get() != libc::ENOENT {
+        return result;
+    }
+    let Some(found) = prefix::ns::fold_at(dirfd, &host) else {
+        return result;
+    };
+    ask(found.as_ptr()).0
+}
+
 /// Translate a Darwin `O_` word, refusing bits whose semantics cannot be kept.
 fn open_flags(flags: c_int) -> Option<c_int> {
     match crate::fcntl::flags_to_host(flags) {
@@ -653,6 +710,7 @@ exports::exports! {
         "statfs" | "statfs$INODE64" => statfs,
         "fstatfs" | "fstatfs$INODE64" => fstatfs,
         "access" => access,
+        "faccessat" => faccessat,
         "realpath" => realpath,
         "readlink" => readlink,
         "fopen" | "fopen$UNIX2003" => fopen,

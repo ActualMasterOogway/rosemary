@@ -73,6 +73,17 @@ pub trait SymbolProvider {
     /// legitimately stands for several names.
     fn provides(&self, install_name: &str) -> bool;
 
+    /// Whether this provider **is** the image called `install_name`, so a
+    /// dependency on it is already satisfied and the loader fetches nothing.
+    ///
+    /// Stricter than [`provides`](Self::provides), which a flat provider answers
+    /// for every name: standing in for a library is a claim about its whole
+    /// surface, and a flat provider that happens to define `_strlen` has not
+    /// made one.
+    fn stands_for(&self, _install_name: &str) -> bool {
+        false
+    }
+
     /// The address `sym` names, or `None` if this provider does not define it.
     fn resolve(&self, sym: &SymbolRef<'_>) -> Option<Resolved>;
 

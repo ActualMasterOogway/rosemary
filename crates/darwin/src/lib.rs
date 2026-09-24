@@ -24,6 +24,8 @@
 
 use std::ffi::CString;
 
+#[cfg(not(target_os = "macos"))]
+pub mod acl;
 mod atomics;
 pub mod backtrace;
 pub mod bsd;
@@ -40,26 +42,37 @@ pub mod divergent;
 pub mod env;
 pub mod errno;
 pub mod fcntl;
+pub mod fmtcheck;
 #[cfg(not(target_os = "macos"))]
 pub mod fortify;
 pub mod fs;
 #[cfg(not(target_os = "macos"))]
+pub mod fts;
+#[cfg(not(target_os = "macos"))]
 pub mod glob;
 pub mod heap;
+#[cfg(not(target_os = "macos"))]
+pub mod humanize;
 pub mod idle;
 pub mod ioctl;
 pub mod kqueue;
+#[cfg(not(target_os = "macos"))]
+pub mod langinfo;
 pub mod libproc;
 pub mod locale;
 pub mod mach;
 pub mod malloc;
 pub mod math;
+#[cfg(not(target_os = "macos"))]
+pub mod modes;
 pub mod net;
 mod oslog;
 pub mod passthrough;
 pub mod passwd;
 pub mod poll;
 pub mod printf_l;
+#[cfg(not(target_os = "macos"))]
+pub mod progname;
 pub mod pthread;
 pub mod random;
 pub mod regex;
@@ -73,6 +86,8 @@ pub mod spawn;
 pub mod stackprobe;
 pub mod stat;
 pub mod stdio;
+#[cfg(target_os = "linux")]
+pub mod stream;
 pub mod strict;
 pub mod string;
 pub mod sysctl;
@@ -83,7 +98,11 @@ pub mod tls;
 pub mod translation;
 pub mod ulock;
 pub mod uuid;
+#[cfg(not(target_os = "macos"))]
+pub mod vis;
 pub mod vmmap;
+#[cfg(not(target_os = "macos"))]
+pub mod wait;
 mod wait_word;
 pub mod xattr;
 pub mod xlocale;
@@ -326,6 +345,26 @@ static MODULES: &[exports::Module] = &[
     printf_l::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     resolv::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    acl::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    fmtcheck::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    fts::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    humanize::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    langinfo::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    modes::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    progname::MODULE,
+    #[cfg(target_os = "linux")]
+    stream::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    vis::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    wait::MODULE,
 ];
 
 /// `pthread` as a row, written out because it has no table to generate one.
@@ -387,9 +426,45 @@ pub fn is_implemented(symbol: &str) -> bool {
 /// rather than a placeholder.
 pub const SHIMMED_ABOVE: &[&str] = &["__sincosf_stret", "__sincos_stret", "__divdc3", "__mulsc3"];
 
+/// The install names this crate stands in for: libSystem, the libraries it
+/// re-exports, and the older names a Mac keeps as links to it.
+///
+/// Claiming them is what keeps a prefix's own x86-64 libSystem out of a link
+/// that loads guest libraries depending on it - see `rosetta3::userland`.
+/// `/usr/lib/system/libunwind.dylib` is absent on purpose: the runtime supplies
+/// a vendored unwinder under that name, and a claim here would skip it.
+pub const LIBSYSTEM: &[&str] = &[
+    "/usr/lib/libSystem.B.dylib",
+    "/usr/lib/libSystem.dylib",
+    "/usr/lib/libc.dylib",
+    "/usr/lib/libm.dylib",
+    "/usr/lib/libdl.dylib",
+    "/usr/lib/libpthread.dylib",
+    "/usr/lib/libinfo.dylib",
+    "/usr/lib/libpoll.dylib",
+    "/usr/lib/libproc.dylib",
+    "/usr/lib/libdbm.dylib",
+    "/usr/lib/librpcsvc.dylib",
+    "/usr/lib/libgcc_s.1.dylib",
+    "/usr/lib/libutil.dylib",
+    "/usr/lib/libutil1.0.dylib",
+    "/usr/lib/system/libcompiler_rt.dylib",
+    "/usr/lib/system/libmacho.dylib",
+    "/usr/lib/system/libsystem_blocks.dylib",
+    "/usr/lib/system/libsystem_c.dylib",
+    "/usr/lib/system/libsystem_collections.dylib",
+    "/usr/lib/system/libsystem_kernel.dylib",
+    "/usr/lib/system/libsystem_malloc.dylib",
+    "/usr/lib/system/libsystem_platform.dylib",
+    "/usr/lib/system/libsystem_pthread.dylib",
+];
+
 pub fn provider() -> machish::resolve::SyntheticDylib {
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
+    for name in LIBSYSTEM {
+        lib.alias(name);
+    }
     // Every definition goes through the null guard: a slot holding zero is
     // worse than an unbound import, which is at least refused by name at the
     // call rather than jumping to address zero.

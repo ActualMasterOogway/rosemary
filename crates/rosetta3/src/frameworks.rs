@@ -266,6 +266,24 @@ fn register_dlopen_names() {
     }
     register_opengl_framework();
     register_openal_framework();
+    register_system_libraries();
+}
+
+/// libSystem and libobjc, which this runtime is.
+///
+/// A prefix's base has real copies of both on disk, so without a handle here
+/// `dyld::resolve_path` would find the file and map Apple's libSystem into a
+/// guest that is already bound to `darwin` - two C libraries, one heap each.
+fn register_system_libraries() {
+    crate::dyld::register_synthetic(darwin::LIBSYSTEM, crate::dyld::system_symbol);
+    crate::dyld::register_synthetic(
+        &["/usr/lib/libobjc.A.dylib", "/usr/lib/libobjc.dylib"],
+        objc_symbol,
+    );
+}
+
+fn objc_symbol(name: &str) -> Option<u64> {
+    symbol(name).or_else(|| crate::objc::host::symbol(name))
 }
 
 /// `OpenGL.framework`, as a handle over the GL library SDL is using.

@@ -25,6 +25,17 @@ static GUEST_ARGV: AtomicPtr<*mut c_char> = AtomicPtr::new(std::ptr::null_mut())
 pub fn set_process_args(argc: u64, argv: u64) {
     GUEST_ARGC.store(argc as i32, Ordering::Relaxed);
     GUEST_ARGV.store(argv as usize as *mut *mut c_char, Ordering::Relaxed);
+    // And the process's name, which the host's `warn` and `err` print.
+    #[cfg(not(target_os = "macos"))]
+    if argc > 0 && argv != 0 {
+        // SAFETY: the vector just laid out on the guest's stack, whose first
+        // entry is a NUL-terminated string in this address space.
+        let argv0 = unsafe { *(argv as usize as *const *const c_char) };
+        if !argv0.is_null() {
+            // SAFETY: as above.
+            darwin::progname::set(unsafe { std::ffi::CStr::from_ptr(argv0) });
+        }
+    }
 }
 
 /// `int *_NSGetArgc(void)`.

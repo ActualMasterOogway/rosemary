@@ -101,10 +101,10 @@ pub fn install() {
         // SAFETY: a NUL-terminated service name and a live local for the port.
         let rc = unsafe { bootstrap_check_in(BOOTSTRAP_PORT, SERVICE.as_ptr().cast(), &mut port) };
         if rc != KERN_SUCCESS {
-            eprintln!(
-                "rosetta3: steam: could not publish the Steam IPC service ({rc}); a guest \
-                 that asks for Steam will be told it is not running"
-            );
+            // eprintln!(
+            //     "rosetta3: steam: could not publish the Steam IPC service ({rc}); a guest \
+            //      that asks for Steam will be told it is not running"
+            // );
             return;
         }
         std::thread::Builder::new()

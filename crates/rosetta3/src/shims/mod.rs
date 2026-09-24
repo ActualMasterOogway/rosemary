@@ -29,6 +29,7 @@ pub mod corefoundation;
 /// is refused by name rather than gated out.
 pub mod coregraphics;
 pub mod curl;
+pub mod err;
 pub(crate) mod host;
 pub mod intdiv;
 pub mod ioctl;
@@ -178,6 +179,7 @@ pub fn dispatch(
         _ => {
             if let Some(f) = foundation_variadic(name)
                 .or_else(|| math::shim_for(name))
+                .or_else(|| err::shim_for(name))
                 .or_else(|| intdiv::shim_for(name))
                 .or_else(|| process::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
@@ -207,6 +209,7 @@ pub fn dispatch(
 pub fn is_shimmed(symbol: &str) -> bool {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     if math::shim_for(name).is_some()
+        || err::shim_for(name).is_some()
         || intdiv::shim_for(name).is_some()
         || process::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()

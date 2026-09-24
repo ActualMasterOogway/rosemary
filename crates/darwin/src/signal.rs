@@ -374,6 +374,63 @@ fn is_sentinel(handler: u64) -> bool {
     handler == 0 || handler == 1 || handler as i64 == -1
 }
 
+/// One more than the highest host signal number a handler can be installed for.
+const HOST_SIGNALS: usize = 65;
+
+/// The guest's handler for each host signal, entered through [`deliver`].
+///
+/// Keyed by the *host's* number because that is what the kernel hands
+/// [`deliver`]. Written before the host disposition is changed, so a signal
+/// that arrives in between finds the handler it is about to be sent to.
+static GUEST_HANDLERS: [core::sync::atomic::AtomicU64; HOST_SIGNALS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; HOST_SIGNALS];
+
+/// Whether each handler above takes `SA_SIGINFO`'s three arguments.
+static GUEST_SIGINFO: [core::sync::atomic::AtomicBool; HOST_SIGNALS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; HOST_SIGNALS];
+
+/// Darwin's `SA_SIGINFO`.
+const DARWIN_SA_SIGINFO: u32 = 0x0040;
+
+/// What the kernel enters for every guest handler.
+///
+/// The guest was compiled against Darwin's numbering, and the kernel speaks
+/// this host's: a `SIGUSR1` handler entered with 10 is being told `SIGBUS`,
+/// and a shell's `trap` records the wrong signal and never runs. So the number
+/// is translated here, and the guest's handler is called with Darwin's.
+///
+/// Async-signal-safe: two atomic loads and a table walk.
+extern "C" fn deliver(host: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    let Some(slot) = usize::try_from(host).ok().filter(|s| *s < HOST_SIGNALS) else {
+        return;
+    };
+    let handler = GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire);
+    if is_sentinel(handler) {
+        return;
+    }
+    let darwin = signal_from_host(host).unwrap_or(host);
+    if GUEST_SIGINFO[slot].load(core::sync::atomic::Ordering::Acquire) {
+        // SAFETY: installed by [`sigaction`] as a three-argument handler; the
+        // two pointers are the kernel's, passed on as they came.
+        unsafe {
+            let handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
+                core::mem::transmute(handler as usize);
+            handler(darwin, info, context);
+        }
+    } else {
+        // SAFETY: installed by [`sigaction`] or [`signal`] as a one-argument
+        // handler.
+        unsafe {
+            let handler: extern "C" fn(libc::c_int) = core::mem::transmute(handler as usize);
+            handler(darwin);
+        }
+    }
+}
+
+fn delivers(host_handler: libc::sighandler_t) -> bool {
+    host_handler == deliver as *const () as usize as libc::sighandler_t
+}
+
 /// `sigaction`, with Darwin's signal number, flags and mask on the outside and
 /// the host's `struct sigaction` on the inside.
 ///
@@ -412,9 +469,24 @@ pub unsafe fn sigaction(
     // SAFETY: as above.
     let mut host_old: libc::sigaction = unsafe { core::mem::zeroed() };
 
+    // What the guest last installed through [`deliver`], for reporting `old`.
+    let slot = signum as usize;
+    let previous_handler = GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire);
+    let previous_siginfo = GUEST_SIGINFO[slot].load(core::sync::atomic::Ordering::Acquire);
+
     if let Some(act) = act {
-        host_act.sa_sigaction = act.handler as usize as libc::sighandler_t;
         host_act.sa_flags = flags_to_host(act.flags);
+        if is_sentinel(act.handler) {
+            host_act.sa_sigaction = act.handler as usize as libc::sighandler_t;
+        } else {
+            GUEST_SIGINFO[slot].store(
+                act.flags & DARWIN_SA_SIGINFO != 0,
+                core::sync::atomic::Ordering::Release,
+            );
+            GUEST_HANDLERS[slot].store(act.handler, core::sync::atomic::Ordering::Release);
+            host_act.sa_sigaction = deliver as *const () as usize as libc::sighandler_t;
+            host_act.sa_flags |= libc::SA_SIGINFO;
+        }
         // SAFETY: `sa_mask` is a `sigset_t` being emptied before bits are added.
         unsafe { libc::sigemptyset(&mut host_act.sa_mask) };
         for darwin_bit in 1..=31 {
@@ -443,7 +515,14 @@ pub unsafe fn sigaction(
     if rc == 0
         && let Some(old) = old
     {
-        let handler = host_old.sa_sigaction as u64;
+        let through_us = delivers(host_old.sa_sigaction);
+        let handler = match through_us {
+            true => previous_handler,
+            false => host_old.sa_sigaction as u64,
+        };
+        if through_us && !previous_siginfo {
+            host_old.sa_flags &= !libc::SA_SIGINFO;
+        }
         let mut mask = 0u32;
         for darwin_bit in 1..=31 {
             let Some(host_bit) = signal_to_host(darwin_bit) else {
@@ -487,8 +566,24 @@ pub unsafe fn signal(darwin_signum: i32, handler: u64) -> u64 {
         });
         return previous.handler;
     }
-    // SAFETY: the caller's obligation.
-    unsafe { libc::signal(signum, handler as usize as libc::sighandler_t) as u64 }
+    let slot = signum as usize;
+    let installed = match is_sentinel(handler) {
+        true => handler as usize as libc::sighandler_t,
+        false => deliver as *const () as usize as libc::sighandler_t,
+    };
+    let previous = match is_sentinel(handler) {
+        true => GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire),
+        false => {
+            GUEST_SIGINFO[slot].store(false, core::sync::atomic::Ordering::Release);
+            GUEST_HANDLERS[slot].swap(handler, core::sync::atomic::Ordering::AcqRel)
+        }
+    };
+    // SAFETY: the caller's obligation, or [`deliver`].
+    let old = unsafe { libc::signal(signum, installed) };
+    match delivers(old) {
+        true => previous,
+        false => old as u64,
+    }
 }
 
 /// This host's signal number as Darwin's, for a report handed back to the guest.
@@ -1188,6 +1283,49 @@ pub mod entry {
         }
     }
 
+    /// Darwin's `sys_signame`: each signal's lowercase name, indexed by
+    /// Darwin's numbering, which is not this host's.
+    #[repr(transparent)]
+    pub struct SignalNames([*const std::ffi::c_char; 32]);
+
+    // SAFETY: pointers to string literals, and the table is never written.
+    unsafe impl Sync for SignalNames {}
+
+    pub static SYS_SIGNAME: SignalNames = SignalNames([
+        c"Signal 0".as_ptr(),
+        c"hup".as_ptr(),
+        c"int".as_ptr(),
+        c"quit".as_ptr(),
+        c"ill".as_ptr(),
+        c"trap".as_ptr(),
+        c"abrt".as_ptr(),
+        c"emt".as_ptr(),
+        c"fpe".as_ptr(),
+        c"kill".as_ptr(),
+        c"bus".as_ptr(),
+        c"segv".as_ptr(),
+        c"sys".as_ptr(),
+        c"pipe".as_ptr(),
+        c"alrm".as_ptr(),
+        c"term".as_ptr(),
+        c"urg".as_ptr(),
+        c"stop".as_ptr(),
+        c"tstp".as_ptr(),
+        c"cont".as_ptr(),
+        c"chld".as_ptr(),
+        c"ttin".as_ptr(),
+        c"ttou".as_ptr(),
+        c"io".as_ptr(),
+        c"xcpu".as_ptr(),
+        c"xfsz".as_ptr(),
+        c"vtalrm".as_ptr(),
+        c"prof".as_ptr(),
+        c"winch".as_ptr(),
+        c"info".as_ptr(),
+        c"usr1".as_ptr(),
+        c"usr2".as_ptr(),
+    ]);
+
     exports::exports! {
         functions {
             "signal" => signal_,
@@ -1207,6 +1345,10 @@ pub mod entry {
             "sigismember" => sigismember_,
             "strsignal" => strsignal_,
             "psignal" => psignal_,
+        }
+        constants {
+            // Data: the guest indexes the array at this address.
+            "sys_signame" => &raw const SYS_SIGNAME as u64,
         }
     }
 
@@ -1615,6 +1757,46 @@ mod disposition_tests {
                 *bit,
                 "SA_{name} did not round trip"
             );
+        }
+    }
+
+    static HEARD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+    extern "C" fn record(signum: libc::c_int) {
+        HEARD.store(signum, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A guest handler is told Darwin's number, not the kernel's, and reading
+    /// the disposition back names the guest's handler rather than the
+    /// translator in front of it.
+    #[test]
+    fn a_guest_handler_is_entered_with_darwins_signal_number() {
+        let darwin_usr1 = signum::SIGUSR1;
+        let host_usr1 = signal_to_host(darwin_usr1).unwrap();
+        let act = Disposition {
+            handler: record as *const () as usize as u64,
+            mask: 0,
+            flags: 0,
+        };
+        // SAFETY: a handler of this test's own for a signal nothing else uses.
+        unsafe {
+            assert_eq!(sigaction(darwin_usr1, Some(act), None), 0);
+            libc::raise(host_usr1);
+        }
+        assert_eq!(HEARD.load(std::sync::atomic::Ordering::SeqCst), darwin_usr1);
+
+        let mut back = Disposition::default();
+        // SAFETY: a query, and then the default put back.
+        unsafe {
+            assert_eq!(sigaction(darwin_usr1, None, Some(&mut back)), 0);
+            assert_eq!(back.handler, record as *const () as usize as u64);
+            assert_eq!(
+                back.flags & DARWIN_SA_SIGINFO,
+                0,
+                "the translator's flag is not reported"
+            );
+            let previous = signal(darwin_usr1, 0);
+            assert_eq!(previous, record as *const () as usize as u64);
         }
     }
 }

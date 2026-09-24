@@ -365,6 +365,89 @@ pub unsafe extern "C" fn atomic_store(
     atomic_after(_model);
 }
 
+/// `void *reallocf(void *ptr, size_t size)`
+///
+/// `realloc` that frees the block when it fails, so a caller writing
+/// `p = reallocf(p, n)` does not leak it. Through the host's allocator, which
+/// is the one the guest's own `realloc` import reaches - see
+/// `crate::passthrough`.
+///
+/// # Safety
+///
+/// As `realloc`.
+pub unsafe extern "C" fn reallocf(ptr: *mut c_void, size: usize) -> *mut c_void {
+    // SAFETY: the caller's obligation.
+    unsafe {
+        let grown = libc::realloc(ptr, size);
+        if grown.is_null() && !ptr.is_null() && size != 0 {
+            libc::free(ptr);
+        }
+        grown
+    }
+}
+
+/// `long long strtonum(const char *, long long, long long, const char **)`
+///
+/// OpenBSD's, as Apple ships it: a whole-string decimal parse bounded by
+/// `minval` and `maxval`, with the reason for a failure as a constant string.
+/// `errno` is left as it was on success.
+///
+/// # Safety
+///
+/// `numstr` is NUL-terminated and `errstrp` is null or writable.
+pub unsafe extern "C" fn strtonum(
+    numstr: *const c_char,
+    minval: i64,
+    maxval: i64,
+    errstrp: *mut *const c_char,
+) -> i64 {
+    let saved = crate::errno::get();
+    crate::errno::set(0);
+    let mut value = 0;
+    let error: Option<(&'static CStr, c_int)> = if minval > maxval || numstr.is_null() {
+        Some((c"invalid", libc::EINVAL))
+    } else {
+        let mut end: *mut c_char = std::ptr::null_mut();
+        // SAFETY: the caller's string, and a local for the end pointer.
+        value = unsafe { libc::strtoll(numstr, &mut end, 10) };
+        let range = crate::errno::get() == libc::ERANGE;
+        // SAFETY: `strtoll` leaves `end` inside the string.
+        if end.cast_const() == numstr || unsafe { *end } != 0 {
+            Some((c"invalid", libc::EINVAL))
+        } else if (value == i64::MIN && range) || value < minval {
+            Some((c"too small", libc::ERANGE))
+        } else if (value == i64::MAX && range) || value > maxval {
+            Some((c"too large", libc::ERANGE))
+        } else {
+            None
+        }
+    };
+    let (text, errno) = match error {
+        Some((text, errno)) => (text.as_ptr(), errno),
+        None => (std::ptr::null(), saved),
+    };
+    if !errstrp.is_null() {
+        // SAFETY: the caller's obligation.
+        unsafe { *errstrp = text };
+    }
+    crate::errno::set(errno);
+    if error.is_some() { 0 } else { value }
+}
+
+/// `int issetugid(void)`
+///
+/// Whether the process was made set-id at `exec`, which this host's loader
+/// records as `AT_SECURE`.
+pub extern "C" fn issetugid() -> c_int {
+    #[cfg(target_os = "linux")]
+    // SAFETY: reads the auxiliary vector, which is always present.
+    let secure = unsafe { libc::getauxval(libc::AT_SECURE) } != 0;
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: four calls that take nothing and cannot fail.
+    let secure = unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() };
+    secure as c_int
+}
+
 exports::exports! {
     functions {
         "__atomic_load" => atomic_load,
@@ -375,6 +458,9 @@ exports::exports! {
         "__assert_rtn" => assert_rtn,
         "srandomdev" => srandomdev,
         "memset_s" => memset_s,
+        "reallocf" => reallocf,
+        "strtonum" => strtonum,
+        "issetugid" => issetugid,
         "sys_icache_invalidate" => sys_icache_invalidate,
     }
 }
@@ -433,6 +519,37 @@ mod tests {
             unsafe { memset_s(core::ptr::null_mut(), 0, 0, 0) },
             libc::EINVAL
         );
+    }
+
+    #[test]
+    fn strtonum_bounds_and_explains_its_answer() {
+        let mut why: *const c_char = std::ptr::null();
+        // SAFETY: literal strings and a local for the reason.
+        unsafe {
+            assert_eq!(strtonum(c"42".as_ptr(), 0, 100, &mut why), 42);
+            assert!(why.is_null());
+            assert_eq!(strtonum(c"420".as_ptr(), 0, 100, &mut why), 0);
+            assert_eq!(CStr::from_ptr(why), c"too large");
+            assert_eq!(crate::errno::get(), libc::ERANGE);
+            assert_eq!(strtonum(c"-1".as_ptr(), 0, 100, &mut why), 0);
+            assert_eq!(CStr::from_ptr(why), c"too small");
+            assert_eq!(strtonum(c"4x".as_ptr(), 0, 100, &mut why), 0);
+            assert_eq!(CStr::from_ptr(why), c"invalid");
+            assert_eq!(crate::errno::get(), libc::EINVAL);
+        }
+    }
+
+    #[test]
+    fn reallocf_grows_and_a_test_process_is_not_setuid() {
+        // SAFETY: a fresh block, grown and then freed once.
+        unsafe {
+            let p = reallocf(std::ptr::null_mut(), 8);
+            assert!(!p.is_null());
+            let p = reallocf(p, 4096);
+            assert!(!p.is_null());
+            libc::free(p);
+        }
+        assert_eq!(issetugid(), 0);
     }
 
     /// Seeding twice from the kernel gives two different sequences, which is the

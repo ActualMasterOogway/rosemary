@@ -22,6 +22,18 @@ pub fn request(request: u64) -> Option<libc::Ioctl> {
         0x8004_667e => libc::FIONBIO,
         0x2000_6601 => libc::FIOCLEX,
         0x2000_6602 => libc::FIONCLEX,
+        // The job-control and controlling-terminal requests, whose payloads are
+        // an `int` process group, an `int` count or one `char` on both. A shell
+        // and libedit ask `TIOCGPGRP` before they touch the terminal, and take a
+        // refusal as "not a terminal".
+        0x4004_7477 => libc::TIOCGPGRP,
+        0x8004_7476 => libc::TIOCSPGRP,
+        0x4004_7473 => libc::TIOCOUTQ,
+        0x8001_7472 => libc::TIOCSTI,
+        0x2000_7461 => libc::TIOCSCTTY,
+        0x2000_7471 => libc::TIOCNOTTY,
+        0x2000_740d => libc::TIOCEXCL,
+        0x2000_740e => libc::TIOCNXCL,
         _ => return None,
     })
 }
@@ -50,5 +62,19 @@ pub unsafe extern "C" fn ioctl(fd: libc::c_int, guest_request: u64, arg: usize) 
 exports::exports! {
     functions {
         "ioctl" => ioctl,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// libedit's "do I own this terminal" question has to reach the kernel.
+    #[test]
+    fn job_control_requests_are_translated() {
+        assert_eq!(request(0x4004_7477), Some(libc::TIOCGPGRP));
+        assert_eq!(request(0x8004_7476), Some(libc::TIOCSPGRP));
+        assert_eq!(request(0x4008_7468), Some(libc::TIOCGWINSZ));
+        assert_eq!(request(0xdead_beef), None);
     }
 }
