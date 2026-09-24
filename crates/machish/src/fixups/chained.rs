@@ -7,9 +7,7 @@ use crate::raw::{View, Word};
 use crate::spec::MachSpec;
 use crate::spec::constants as c;
 
-/// Ceiling on links followed in one page's chain. Every 64-bit format advances
-/// by at least four bytes per link, so a 16 KiB page holds at most 4096 - this
-/// is a wide margin that still turns a corrupt `next` into an error.
+/// Cap corrupt chains well above the 4096 links possible in a 16 KiB page.
 const MAX_CHAIN_LINKS: usize = 1 << 16;
 
 /// Ceiling on the import table, which is `uint32`-counted on disk.
@@ -36,10 +34,7 @@ impl<S: MachSpec> FixupDecoder<S> for ChainedFixups {
             return Ok(());
         };
 
-        // Narrow to the command's own extent up front, so every offset inside
-        // is checked against the structure rather than against the file: a
-        // `starts_offset` pointing into `__TEXT` is then a parse error instead
-        // of a successful read of unrelated bytes.
+        // Validate offsets against the fixups command, not the entire file.
         let header = obj
             .view()
             .subview(range.start, range.end - range.start, "chained fixups")?;
@@ -107,12 +102,7 @@ fn decode_segment<'a, S: MachSpec>(
     imports: &ImportTable<'a>,
     out: &mut Vec<Fixup<'a>>,
 ) -> Result<()> {
-    // `dyld_chained_starts_in_segment` is
-    //   u32 size; u16 page_size; u16 pointer_format; u64 segment_offset;
-    //   u32 max_valid_pointer; u16 page_count; u16 page_start[page_count];
-    // so `page_count` is at +20 and the array at +22. Reading `page_count` from
-    // +16 lands on `max_valid_pointer`, which is zero in every userland image -
-    // giving a page count of zero, an empty decode, and no error at all.
+    // `page_count` is at +20, after the four-byte `max_valid_pointer`.
     let page_size = u64::from(header.u16(at + 4)?);
     let pointer_format = header.u16(at + 6)?;
     let segment_offset = header.u64(at + 8)?;
@@ -124,8 +114,7 @@ fn decode_segment<'a, S: MachSpec>(
         });
     }
     if c::is_arm64e_pointer_format(pointer_format) {
-        // Refused specifically. See the module note: the high bits are a PAC
-        // signature, and decoding them as a target is worse than not decoding.
+        // The high bits carry a PAC signature, not a target address.
         return Err(Error::UnknownFixup {
             format: "arm64e chained pointer (pointer authentication)",
             value: u32::from(pointer_format),
@@ -144,9 +133,7 @@ fn decode_segment<'a, S: MachSpec>(
     let seg = obj.segments.get(seg_index).ok_or(Error::BadLoadCommand {
         why: "chained segment index out of range",
     })?;
-    // `segment_offset` is from the image base, and is authoritative: trusting
-    // the segment's own `vmaddr` instead would desynchronize on any image where
-    // the two disagree, which is exactly the case worth catching.
+    // The fixup's image-relative offset takes precedence over segment `vmaddr`.
     let image_base = obj.preferred_base()?;
     let seg_start = image_base.wrapping_add(segment_offset);
 

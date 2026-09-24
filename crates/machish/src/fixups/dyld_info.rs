@@ -261,15 +261,7 @@ fn run_bind<'a, S: MachSpec>(
             }
             let symbol = SymbolRef {
                 name,
-                // In `weak_bind` the ordinal register is meaningless: a
-                // coalescing bind asks "does any loaded image define this
-                // name", which is a flat question by construction, and `ld`
-                // never emits a `SET_DYLIB_ORDINAL` into that stream. Reading
-                // the register anyway yields the reset value, zero, which is
-                // `BIND_SPECIAL_DYLIB_SELF` - so every weak bind claimed to be
-                // satisfied by the image's own exports, found nothing there,
-                // and zeroed a slot the ordinary bind stream had already
-                // resolved correctly.
+                // Weak coalescing searches all images; its ordinal is unused.
                 library: match kind {
                     BindKind::WeakCoalesce => LibraryRef::WeakLookup,
                     _ => library_ref(obj, ordinal),

@@ -1,19 +1,8 @@
-//! machish - a templatable Mach-O loader and dynamic linker, built for
-//! high-level emulation of macOS binaries.
+//! Mach-O loader and dynamic linker for macOS emulation.
 //!
-//! It is the Mach-O counterpart to [`selfish`](https://github.com/V3L0C1T13S/selfish),
-//! and shares its primary design: that a loader whose every interaction with
-//! memory, symbol resolution, and control transfer goes through a trait can
-//! serve a compatibility layer as readily as it serves native execution.
-//!
-//! Unlike a real dyld, linking here produces a transcript as well as a
-//! result: [`report::LinkReport`] records every binding's slot address, stub
-//! address, source library, and resolved value, which is what an embedder needs
-//! to install native call-site intercepts.
-//!
-//! The core is `no_std` (`alloc` only). The `std` feature adds the host
-//! frontend: an mmap-backed address space, a native executor, filesystem
-//! dylib lookup, and `dlopen`/`dlsym`-based symbol resolution.
+//! Memory, symbol resolution, and execution are supplied through traits.
+//! [`report::LinkReport`] records bindings and stub addresses for call-site
+//! interception. The core uses `no_std`; the `std` feature adds host services.
 
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
