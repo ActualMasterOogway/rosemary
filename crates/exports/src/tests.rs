@@ -1,9 +1,4 @@
-//! The guards every module used to carry a copy of, kept once.
-//!
-//! Twenty-one modules had an `every_listed_name_resolves` of their own, because
-//! their name list and their `match` were separate declarations. Here the two
-//! come from one table, so the property is checked once against this fixture
-//! rather than once per module against each.
+//! Export table invariants, checked once for the shared table format.
 
 use crate::{Exports, Module, NonNull, Recording};
 
