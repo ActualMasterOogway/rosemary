@@ -108,7 +108,6 @@ const P: T = T::Pointer;
 
 /// The runtime surface a guest reaches, **sorted by name**.
 pub(super) static RUNTIME: &[Runtime] = &[
-    // ## Making a class at runtime
     //
     // The other direction of [`crate::objc::register`]. That pass replays the
     // classes a guest *declared* in its `__objc_data`; these three are a guest
@@ -125,7 +124,6 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // Terraria reaches all three: Mono's Objective-C bridge builds an
     // `NSApplication` delegate class at start-up rather than declaring one.
     rtcb!([0], [2], "class_addMethod", U8, P, P, P, P),
-    // ## `@property` metadata
     //
     // Not methods and not ivars: a name and an attribute string beside them,
     // read only by code introspecting a class it did not write - which is
@@ -160,7 +158,6 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "class_isMetaClass", U8, P),
     rtc!([0], "class_replaceProperty", V, P, P, P, I32),
     rtc!([0], "class_respondsToSelector", U8, P, P),
-    // ## Ivars, reflectively
     //
     // A guest that reads an ivar through `object_getIvar` rather than through a
     // compiled displacement is asking the *host* runtime where the ivar is, and
@@ -180,7 +177,6 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rt!("objc_autoreleasePoolPop", V, P),
     rt!("objc_autoreleasePoolPush", P),
     rtc!([0], "objc_autoreleaseReturnValue", P, P),
-    // ## `__weak`, which is a side table and not a pointer
     //
     // These four are the whole of ARC's weak-reference support that SDL3's Cocoa
     // backend imports, and passthrough is right for a reason worth stating: a
@@ -204,7 +200,6 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // translated as well as the result.
     rtc!([0] -> true, "objc_getClass", P, P),
     rtc!([] -> true, "objc_getMetaClass", P, P),
-    // ## The synthesized `@property` accessors
     //
     // A `@synthesize`d property does not compile to a load and a store. For
     // anything `atomic` or `copy`, clang emits a call to one of these, which the
@@ -292,7 +287,6 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rt!("property_copyAttributeList", P, P, P),
     rt!("property_getAttributes", P, P),
     rt!("property_getName", P, P),
-    // ## The one entry that returns a struct
     //
     // `struct objc_method_description protocol_getMethodDescription(Protocol *,
     // SEL, BOOL isRequiredMethod, BOOL isInstanceMethod)` - two pointers, `{SEL

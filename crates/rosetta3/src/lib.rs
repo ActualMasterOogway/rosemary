@@ -17,27 +17,13 @@
 
 //! Rosetta 3: the driver that joins [`machish`] to [`microlift`].
 //!
-//! [`Vm`] is the loop: lift the region control is about to reach, enter it, service
-//! the exit, repeat. [`region`] decides which bytes a region is, [`cache`] keeps the
-//! translations, [`stack`] is the guest's stack and its process arguments, [`thunk`]
-//! is a native trampoline per guest function pointer handed outward, and [`startup`]
-//! runs the initializers and then `main`.
+//! [`Vm`] lifts and runs guest regions, servicing exits between them. Guest
+//! threads share translations and callback thunks while [`thread`] and [`tls`]
+//! keep their state separate.
 //!
-//! A guest thread is a host thread, so [`thread`] holds the per-thread state (a guest
-//! stack, the live stack pointer, the callback depth) and everything in [`Vm`] is
-//! shared: a translation does not depend on which thread runs it, and a guest pointer
-//! must map to the same thunk for every thread that sees it. [`tls`] answers
-//! `_Thread_local` with a block allocated per thread on first touch.
-//!
-//! Registering an import stops the recompiler following a call out of the guest;
-//! *servicing* one needs a signature, which no Mach-O records. [`abi`] is where that
-//! comes from, and an import with no signature is refused by name rather than guessed
-//! at. [`shims`] holds the calls that cannot be forwarded generically.
-//!
-//! Passthrough is free for anything operating on memory, because memory is shared. It
-//! stops being free for anything operating on a *stack*: the host would save, walk or
-//! restore arm64 frames belonging to the JIT rather than the guest frames the program
-//! means, without faulting. [`jmpbuf`] is that case.
+//! Mach-O records no import signatures. [`abi`] describes supported calls;
+//! unknown signatures are refused. [`shims`] handles calls requiring guest
+//! state. [`jmpbuf`] handles stack operations that cannot use host frames.
 
 pub mod abi;
 pub mod atomic128;
