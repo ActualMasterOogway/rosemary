@@ -586,8 +586,6 @@ impl Harness {
     }
 }
 
-// ------------------------------------------------------------ interfaces
-
 struct Variable {
     pointee: Word,
     location: Option<u32>,
@@ -911,8 +909,6 @@ fn copy_type(
     copied.insert(ty, result);
     Ok(result)
 }
-
-// ---------------------------------------------------------------- report
 
 #[derive(Default)]
 struct Total {
