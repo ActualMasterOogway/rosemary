@@ -88,14 +88,6 @@ impl Default for DepthStencilState {
     }
 }
 
-// --------------------------------------------------------------- textures
-
-// --------------------------------------------------------------- samplers
-
-// --------------------------------------------------------- depth/stencil
-
-// ------------------------------------------------------- vertex descriptor
-
 pub(crate) fn install() {
     let buffer = object::register::<Buffer>(c"R3MTLBuffer");
     methods!(buffer, {

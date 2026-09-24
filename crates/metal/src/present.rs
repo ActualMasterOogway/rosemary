@@ -1,51 +1,13 @@
 //! `CAMetalLayer`'s drawables and how a rendered frame reaches the window.
 //!
-//! Metal presents through a drawable the layer vends. Here a drawable is an
-//! ordinary Vulkan colour image which the game renders into exactly as it
-//! renders into any other texture, and `-presentDrawable:` puts it on the
-//! screen.
+//! Drawables are Vulkan images blitted into the window swapchain by
+//! [`crate::swapchain`]. When presentation is unavailable, SDL receives a
+//! readback; `ROSETTA3_PRESENT_READBACK` forces that path.
 //!
-//! There are two ways it does that. The first is a real one: the layer's view
-//! says which window it is in and where, and the drawable is blitted into
-//! that window's `VkSwapchainKHR` on the device, so the compositor scans out
-//! what the GPU wrote. [`crate::swapchain`] is that path and is where the
-//! interesting parts are.
-//!
-//! The second is the fallback below, kept for everything the first cannot
-//! serve: a host with no `VK_KHR_surface`, a device whose queue cannot
-//! present to the window, or a `CAMetalLayer` in no window this runtime made.
-//! It reads the frame back into a host buffer and blits it through SDL's
-//! window surface, which is a whole frame of copies and is correct for every
-//! guest. `ROSETTA3_PRESENT_READBACK` forces it, which is the only way to
-//! compare the two on one host.
-//!
-//! FIXME (ACCURACY): the fallback blits to the window rather than to the
-//! layer's rectangle of it, so a guest it catches with more than one layer
-//! sees the last one presented, full-window, instead of a composite. It has
-//! no swapchain to composite into and reading every layer back to composite
-//! on the host would cost more than the path it is standing in for. A guest
-//! which reaches it at all has no window this runtime placed, or no surface
-//! at all, so it has nowhere better to put the pixels either.
-//!
-//! Two things about windows are worth recording here.
-//!
-//! A window is created with no graphics API at all, so that a surface can be
-//! made for it whenever one is wanted. SDL will convert an OpenGL window into
-//! a Vulkan one in place, but the conversion changes the flags and the loaded
-//! libraries and not the backend's own state: on Wayland the `EGLSurface` SDL
-//! made with the window survives it, both drivers claim the same
-//! `wl_surface`, and the compositor kills the connection with
-//! `wp_linux_drm_syncobj_manager_v1: surface already exists`. A window with
-//! neither flag has no `EGLSurface` and converts cleanly, which is why
-//! `appkit::window` makes them that way and why nothing has to predict
-//! whether a guest draws with Metal. See `appkit::window::creation_flags`.
-//!
-//! A second presentable surface *inside* one window would need a subsurface,
-//! and SDL has no such thing on any backend: `SDL_CreatePopupWindow` is a
-//! separate OS window everywhere (a child `NSWindow`, a `WS_POPUP` `HWND`, an
-//! override-redirect X11 window, an `xdg_popup` the compositor may dismiss).
-//! Hence one swapchain per window with the view tree composited into it,
-//! which is what AppKit does anyway.
+//! FIXME (ACCURACY): readback fills the whole window, so multiple layers are
+//! not composited. Windows start without a graphics API because switching an
+//! existing OpenGL window to Vulkan can leave a conflicting Wayland surface.
+//! SDL cannot present multiple surfaces inside one window.
 
 use ash::vk;
 use objc::object::Id;

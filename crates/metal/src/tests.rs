@@ -567,8 +567,6 @@ unsafe fn dispatch(encoder: Id, groups: u64) {
     unsafe { call(encoder, sel, size, one) };
 }
 
-// ---------------------------------------------------------- render path
-
 use metal_translate::ir;
 
 /// A vertex/fragment pair built directly in the Metal IR.

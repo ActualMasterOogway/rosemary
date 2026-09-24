@@ -342,8 +342,6 @@ impl CommandBuffer {
     }
 }
 
-// --------------------------------------------------------------- encoders
-
 impl Encoder {}
 
 // A pipeline or depth/stencil state is read at every draw after it is set, so
@@ -353,15 +351,7 @@ impl Encoder {}
 // The binding setters are registered once per stage, with the stage as a
 // const parameter: the generic, vertex and fragment spellings share a body.
 
-// ------------------------------------------------------------- dispatch
-
-// ----------------------------------------------------------------- draw
-
 impl Encoder {}
-
-// ------------------------------------------------------------------ blit
-
-// ------------------------------------------------------------ render pass
 
 impl Default for AttachmentDescriptor {
     fn default() -> Self {
@@ -395,8 +385,6 @@ impl Default for RenderPassDescriptor {
         }
     }
 }
-
-// ------------------------------------- MTLRenderPassDescriptor and encoders
 
 pub(crate) fn install() {
     object::register::<CommandQueue>(c"R3MTLCommandQueue");

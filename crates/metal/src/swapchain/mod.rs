@@ -1,32 +1,11 @@
 //! The window's swapchain, and the compositing a view tree needs on top of it.
 //!
-//! A `CAMetalLayer` is one layer of a window, not the window. AppKit
-//! composites every view's layer into one backing store and the window server
-//! scans that out; a swapchain is that backing store, and this module is the
-//! compositing. A drawable is still an ordinary colour image the guest renders
-//! into, vended from a bounded per-layer ring, and `-presentDrawable:` now
-//! blits it into the window's swapchain image on the device instead of reading
-//! it back through the host.
+//! One swapchain serves each `SDL_Window`. Single-layer windows blit directly
+//! into the acquired image. Multiple layers use a persistent composite because
+//! acquired swapchain images have undefined contents.
 //!
-//! There is one swapchain per window and it is keyed by the `SDL_Window`,
-//! because that is the only identity a surface has. A window with one layer
-//! covering it - which is every game that draws a scene and nothing else - has
-//! its drawable blitted straight into the acquired image. A window with more
-//! than that keeps a composite image of its own: layers blit into the
-//! composite, which is what survives between presentations, and the composite
-//! is blitted into whichever image the presentation engine hands back. A
-//! swapchain image cannot serve as the accumulator, because which one is
-//! acquired next is the presentation engine's choice and its contents are
-//! undefined when it arrives.
-//!
-//! FIXME (ACCURACY): compositing here is a blit per layer, so a layer is
-//! opaque within its frame and stacking order is the order the guest presents
-//! in rather than the view tree's. AppKit blends by the layer's own opacity
-//! and composites back to front. A guest which presents two overlapping
-//! `CAMetalLayer`s in an order that is not their view order sees them in the
-//! wrong order; one which expects a transparent layer to show what is under it
-//! sees it opaque. Neither is reachable from a game that draws its scene into
-//! one layer, which is what this path is measured on.
+//! FIXME (ACCURACY): layers blit opaquely in presentation order, not in view
+//! order with AppKit's opacity blending.
 
 mod present;
 #[cfg(test)]
