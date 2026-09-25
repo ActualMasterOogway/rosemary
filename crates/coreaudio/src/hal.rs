@@ -186,17 +186,14 @@ unsafe fn answer(bytes: &[u8], data: *mut c_void, size: *mut u32) -> i32 {
     if size.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let capacity = unsafe { *size } as usize;
     if !data.is_null() {
         let taken = capacity.min(bytes.len());
         // SAFETY: the caller says `data` is writable for `capacity` bytes.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.cast::<u8>(), taken) };
-        // SAFETY: as above.
         unsafe { *size = taken as u32 };
         return SUCCESS;
     }
-    // SAFETY: as above.
     unsafe { *size = bytes.len() as u32 };
     SUCCESS
 }
@@ -357,20 +354,17 @@ pub unsafe extern "C" fn AudioObjectGetPropertyData(
     if address.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     if !known(object) {
         return BAD_OBJECT;
     }
     match property(object, &address) {
-        // SAFETY: the caller's obligation.
         Some(bytes) => unsafe { answer(&bytes, data, size) },
         None => {
             // The size is zeroed rather than left alone, so a caller that
             // ignores the status reads an empty answer rather than whatever was
             // in its variable before.
             if !size.is_null() {
-                // SAFETY: as above.
                 unsafe { *size = 0 };
             }
             UNKNOWN_PROPERTY
@@ -393,10 +387,8 @@ pub unsafe extern "C" fn AudioObjectGetPropertyDataSize(
     if !size.is_null() {
         // The buffer is null below, so the answer is the full size whatever the
         // caller left in here.
-        // SAFETY: the caller's obligation.
         unsafe { *size = 0 };
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         AudioObjectGetPropertyData(
             object,
@@ -423,7 +415,6 @@ pub unsafe extern "C" fn AudioObjectHasProperty(object: ObjectId, address: *cons
     if address.is_null() || !known(object) {
         return 0;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     u8::from(property(object, &address).is_some())
 }
@@ -442,7 +433,6 @@ pub unsafe extern "C" fn AudioObjectIsPropertySettable(
     if address.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     if !known(object) {
         return BAD_OBJECT;
@@ -451,7 +441,6 @@ pub unsafe extern "C" fn AudioObjectIsPropertySettable(
         return UNKNOWN_PROPERTY;
     }
     if !settable.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { *settable = u8::from(is_settable(object, address.selector)) };
     }
     SUCCESS
@@ -481,7 +470,6 @@ pub unsafe extern "C" fn AudioObjectSetPropertyData(
     if address.is_null() || data.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     if !known(object) {
         return BAD_OBJECT;
@@ -495,7 +483,6 @@ pub unsafe extern "C" fn AudioObjectSetPropertyData(
     if (size as usize) < size_of::<u32>() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation, and the size was just checked.
     let frames = unsafe { *(data as *const u32) };
     BUFFER_FRAMES.store(frames.clamp(64, 4096), std::sync::atomic::Ordering::Relaxed);
     SUCCESS
@@ -523,7 +510,6 @@ pub unsafe extern "C" fn AudioObjectAddPropertyListener(
     if !known(object) {
         return BAD_OBJECT;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     LISTENERS
         .lock()
@@ -551,7 +537,6 @@ pub unsafe extern "C" fn AudioObjectRemovePropertyListener(
     if address.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let address = unsafe { *address };
     let mut listeners = LISTENERS.lock().unwrap_or_else(|e| e.into_inner());
     let before = listeners.len();
@@ -598,7 +583,6 @@ pub unsafe extern "C" fn AudioDeviceCreateIOProcID(
     if out.is_null() {
         return crate::status::PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     unsafe { *out = std::ptr::null_mut() };
     let Some(call) = call else {
         return crate::status::PARAM_ERROR;
@@ -617,7 +601,6 @@ pub unsafe extern "C" fn AudioDeviceCreateIOProcID(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((handle as usize, registration));
-    // SAFETY: the caller's obligation.
     unsafe { *out = handle };
     SUCCESS
 }
@@ -860,7 +843,6 @@ mod tests {
             element: 0,
         };
         let mut size = 4u32;
-        // SAFETY: as above.
         let status = unsafe {
             AudioObjectGetPropertyData(
                 99,
@@ -912,7 +894,6 @@ mod tests {
         );
         // And back, so the order tests run in cannot matter.
         let default = 512u32;
-        // SAFETY: as above.
         unsafe {
             AudioObjectSetPropertyData(
                 OUTPUT_DEVICE,

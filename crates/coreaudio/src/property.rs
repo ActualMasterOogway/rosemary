@@ -1,19 +1,3 @@
-//! `AudioUnitGetProperty` and `AudioUnitSetProperty`.
-//!
-//! A handful of properties, and a name for everything else. A property this
-//! does not know is `kAudioUnitErr_InvalidProperty`, which is the framework's
-//! own answer for one the unit does not have - so a guest that checks gets
-//! told, and one that does not is no worse off than it would be on Apple's.
-//!
-//! Three of them belong to the HAL output unit rather than to an `AudioUnit`
-//! in general - `EnableIO`, `CurrentDevice` and `AudioChannelLayout`. A program
-//! that wants a *particular* output device asks for the `ahal` subtype instead
-//! of `def `, and then configures it through those three before it initializes.
-//! There is one device here and it is always the one that opens, so what they
-//! do is agree or refuse: the answer to "enable input" or "use that other
-//! device" has to be an error, because the alternative is a program configured
-//! for something this runtime will not do and no way for it to find out.
-
 use std::ffi::c_void;
 
 use crate::render::{Callback, Proc};
@@ -93,7 +77,6 @@ unsafe fn layout_channels(data: *const c_void, size: u32) -> Option<u32> {
     if (size as usize) < 3 * size_of::<u32>() {
         return None;
     }
-    // SAFETY: the caller's obligation, and the header was just measured.
     let header = unsafe { std::slice::from_raw_parts(data.cast::<u32>(), 3) };
     let channels = match header[0] {
         USE_DESCRIPTIONS => header[2],
@@ -125,11 +108,9 @@ pub unsafe extern "C" fn AudioUnitSetProperty(
     size: u32,
 ) -> i32 {
     let Some(unit) = crate::unit_for(handle) else {
-        // SAFETY: the caller's obligation, unchanged by the forward.
         return unsafe { crate::foreign::set_property(handle, id, scope, element, data, size) }
             .unwrap_or(INVALID_COMPONENT);
     };
-    // SAFETY: the caller's obligation.
     let status = unsafe { set(&unit, id, scope, element, data, size) };
     crate::trace::say(
         format_args!("set property {id} scope {scope} element {element}"),
@@ -160,7 +141,6 @@ unsafe fn set_on_element(
             if (size as usize) < size_of::<Format>() {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: the caller's obligation, and the size was just checked.
             input.format = unsafe { *(data as *const Format) };
             SUCCESS
         }
@@ -172,7 +152,7 @@ unsafe fn set_on_element(
             // pointer and a cookie.
             let raw = unsafe { *(data as *const [*mut c_void; 2]) };
             input.callback = (!raw[0].is_null()).then(|| Callback {
-                // SAFETY: the caller's obligation - this pointer is host
+                // SAFETY: this pointer is host
                 // callable with the `AURenderCallback` prototype.
                 proc: unsafe { std::mem::transmute::<*mut c_void, Proc>(raw[0]) },
                 ref_con: raw[1],
@@ -230,7 +210,6 @@ unsafe fn set(
         return SUCCESS;
     }
     if unit.kind == crate::Kind::Mixer && scope == scope::INPUT && id != ELEMENT_COUNT {
-        // SAFETY: the caller's obligation.
         return unsafe { set_on_element(&mut unit, id, element, data, size) };
     }
     // A converter's two scopes are two different formats, and it is the only
@@ -239,7 +218,6 @@ unsafe fn set(
         if (size as usize) < size_of::<Format>() {
             return INVALID_PROPERTY_VALUE;
         }
-        // SAFETY: the caller's obligation, and the size was just checked.
         let format = unsafe { *(data as *const Format) };
         match scope {
             scope::INPUT => unit.input_format = format,
@@ -268,7 +246,6 @@ unsafe fn set(
             if size < 4 {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: the caller's obligation, and the size was just checked.
             let count = unsafe { *(data as *const u32) } as usize;
             if count > MAXIMUM_ELEMENTS {
                 return INVALID_PROPERTY_VALUE;
@@ -291,7 +268,6 @@ unsafe fn set(
             if (size as usize) < size_of::<Format>() {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: the caller's obligation, and the size was just checked.
             let format = unsafe { *(data as *const Format) };
             if crate::stream::sdl_spec(&format).is_none() {
                 return FORMAT_NOT_SUPPORTED;
@@ -312,7 +288,7 @@ unsafe fn set(
             // pointer and a cookie.
             let raw = unsafe { *(data as *const [*mut c_void; 2]) };
             unit.callback = (!raw[0].is_null()).then(|| Callback {
-                // SAFETY: the caller's obligation - this pointer is host
+                // SAFETY: this pointer is host
                 // callable with the `AURenderCallback` prototype.
                 proc: unsafe { std::mem::transmute::<*mut c_void, Proc>(raw[0]) },
                 ref_con: raw[1],
@@ -347,7 +323,6 @@ unsafe fn set(
             if size < 4 {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: the caller's obligation, and the size was just checked.
             let enabled = unsafe { *(data as *const u32) } != 0;
             match scope {
                 // This unit is an output, and disabling that leaves a program
@@ -372,7 +347,6 @@ unsafe fn set(
             if size < 4 {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: the caller's obligation, and the size was just checked.
             let device = unsafe { *(data as *const u32) };
             match device == crate::hal::OUTPUT_DEVICE {
                 true => SUCCESS,
@@ -399,7 +373,6 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
     size: *mut u32,
 ) -> i32 {
     let Some(unit) = crate::unit_for(handle) else {
-        // SAFETY: the caller's obligation, unchanged by the forward.
         return unsafe { crate::foreign::get_property(handle, id, scope, element, out, size) }
             .unwrap_or(INVALID_COMPONENT);
     };
@@ -407,12 +380,10 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
         return PARAM_ERROR;
     }
     let unit = unit.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the caller's obligation.
     let capacity = unsafe { *size };
     match id {
         STREAM_FORMAT => {
             let wanted = size_of::<Format>() as u32;
-            // SAFETY: the caller's obligation.
             unsafe { *size = wanted };
             if out.is_null() {
                 // A null `outData` is how a guest asks only for the size.
@@ -426,7 +397,6 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
             SUCCESS
         }
         MAXIMUM_FRAMES_PER_SLICE => {
-            // SAFETY: the caller's obligation.
             unsafe { *size = 4 };
             if out.is_null() {
                 return SUCCESS;
@@ -434,7 +404,6 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
             if capacity < 4 {
                 return INVALID_PROPERTY_VALUE;
             }
-            // SAFETY: as above.
             unsafe { *(out as *mut u32) = MAXIMUM_FRAMES };
             SUCCESS
         }
@@ -445,7 +414,6 @@ pub unsafe extern "C" fn AudioUnitGetProperty(
                 CURRENT_DEVICE => crate::hal::OUTPUT_DEVICE,
                 _ => u32::from(scope == scope::OUTPUT),
             };
-            // SAFETY: the caller's obligation.
             unsafe { *size = 4 };
             if out.is_null() {
                 return SUCCESS;

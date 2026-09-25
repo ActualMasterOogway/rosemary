@@ -1,15 +1,3 @@
-//! Handles this crate did not make.
-//!
-//! There is no `AUGraph` here, so a program that builds one gets the host's -
-//! and its nodes are the host's `AudioUnit`s, reached through the same entry
-//! point names this crate answers. A handle that is not in this crate's table
-//! goes back to the framework that made it. Refusing instead is what leaves a
-//! game whose whole mixer graph is Apple's with no sound and no diagnostic.
-//!
-//! Darwin only, and only while [`forwarding`] is on. Everywhere else this crate
-//! is the only AudioToolbox there is: there is no `AUGraph` to produce a foreign
-//! handle, so nothing here is consulted.
-
 use std::ffi::{CStr, c_void};
 
 /// Whether a foreign handle is handed back to the framework that made it.

@@ -1,17 +1,3 @@
-//! `AudioConverter`, on SDL's audio stream.
-//!
-//! A converter is the one piece of CoreAudio that is pure computation: bytes in
-//! one linear-PCM format in, the same audio in another out, with a sample-rate
-//! change in the middle. `SDL_AudioStream` is exactly that object, so this is a
-//! translation of one interface into another rather than a signal processor:
-//! the resampler is SDL's.
-//!
-//! **A compressed format is refused, not approximated.** Apple's converter also
-//! decodes AAC and the rest; there is no decoder here, and a converter that
-//! accepted `'aac '` and then produced silence would be a program that plays
-//! nothing with nothing in any log. `kAudioConverterErr_FormatNotSupported` is
-//! the answer a caller is written for.
-
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
@@ -90,12 +76,10 @@ pub unsafe extern "C" fn AudioConverterNew(
     if out.is_null() {
         return PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     unsafe { *out = std::ptr::null_mut() };
     if source.is_null() || destination.is_null() {
         return PARAM_ERROR;
     }
-    // SAFETY: the caller's obligation.
     let (source, destination) = unsafe { (*source, *destination) };
     let (Some(from), Some(to)) = (sdl_spec(&source), sdl_spec(&destination)) else {
         return FORMAT_NOT_SUPPORTED;
@@ -115,7 +99,6 @@ pub unsafe extern "C" fn AudioConverterNew(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((handle as usize, converter));
-    // SAFETY: the caller's obligation.
     unsafe { *out = handle };
     SUCCESS
 }
@@ -138,7 +121,6 @@ pub unsafe extern "C" fn AudioConverterNewSpecific(
     _classes: *const c_void,
     out: *mut *mut c_void,
 ) -> i32 {
-    // SAFETY: the caller's obligation.
     unsafe { AudioConverterNew(source, destination, out) }
 }
 
@@ -218,20 +200,16 @@ pub unsafe extern "C" fn AudioConverterGetProperty(
     }
     let converter = converter.lock().unwrap_or_else(|e| e.into_inner());
     let Some(bytes) = property(&converter, id) else {
-        // SAFETY: the caller's obligation.
         unsafe { *size = 0 };
         return PROPERTY_NOT_SUPPORTED;
     };
-    // SAFETY: the caller's obligation.
     let capacity = unsafe { *size } as usize;
     if !data.is_null() {
         let taken = capacity.min(bytes.len());
         // SAFETY: the caller says `data` is writable for `capacity` bytes.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.cast::<u8>(), taken) };
-        // SAFETY: as above.
         unsafe { *size = taken as u32 };
     } else {
-        // SAFETY: as above.
         unsafe { *size = bytes.len() as u32 };
     }
     SUCCESS
@@ -255,13 +233,11 @@ pub unsafe extern "C" fn AudioConverterGetPropertyInfo(
     let converter = converter.lock().unwrap_or_else(|e| e.into_inner());
     let found = property(&converter, id);
     if !size.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { *size = found.as_ref().map_or(0, |b| b.len() as u32) };
     }
     if !writable.is_null() {
         // Nothing here is settable after the converter is made: the formats
         // were fixed when SDL's stream was created.
-        // SAFETY: the caller's obligation.
         unsafe { *writable = 0 };
     }
     match found.is_some() {
@@ -335,13 +311,11 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
         return PARAM_ERROR;
     };
     let Some(input) = input else {
-        // SAFETY: the caller's obligation.
         unsafe { *packets = 0 };
         return PARAM_ERROR;
     };
     let mut converter = converter.lock().unwrap_or_else(|e| e.into_inner());
 
-    // SAFETY: the caller's obligation.
     let out = unsafe { &mut *output };
     let destination = converter.destination;
     let channels = destination.channels_per_frame.max(1) as usize;
@@ -354,19 +328,16 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
     };
     let plane_frame = destination.bytes_per_frame.max(1) as usize;
     if out.count == 0 || out.count as usize > MAX_BUFFERS || planes == 0 {
-        // SAFETY: as above.
         unsafe { *packets = 0 };
         return PARAM_ERROR;
     }
     if out.buffers[..planes].iter().any(|b| b.data.is_null()) {
-        // SAFETY: as above.
         unsafe { *packets = 0 };
         return PARAM_ERROR;
     }
 
     // In frames, which for linear PCM is also in packets: every buffer has to
     // hold the whole of what is produced, so the smallest of them is the room.
-    // SAFETY: the caller's obligation.
     let mut room = unsafe { *packets } as usize;
     for buffer in &out.buffers[..planes] {
         room = room.min(buffer.byte_size as usize / plane_frame);
@@ -413,7 +384,6 @@ pub unsafe extern "C" fn AudioConverterFillComplexBuffer(
         buffer.byte_size = (frames * plane_frame) as u32;
     }
 
-    // SAFETY: the caller's obligation.
     unsafe { *packets = frames as u32 };
     SUCCESS
 }
@@ -499,7 +469,6 @@ fn feed(converter: &mut Converter, input: InputProc, input_data: *mut c_void) ->
         frames = frames.min(buffer.byte_size as usize / plane_frame);
     }
     if frames == 0 {
-        // SAFETY: as above.
         unsafe { sdl3::audio::flush(converter.stream) };
         return false;
     }

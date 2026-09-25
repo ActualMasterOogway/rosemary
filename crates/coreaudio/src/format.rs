@@ -1,14 +1,3 @@
-//! `AudioFormatGetProperty`, for the queries that are arithmetic.
-//!
-//! Most of this API is a codec database - which encoders exist, what bit rates
-//! they take, what an AAC packet decodes to - and none of that is here. What is
-//! here is the part a caller uses on the linear-PCM path: filling in the
-//! derived fields of an `AudioStreamBasicDescription` it half filled in itself,
-//! which every program does before handing one to an output unit.
-//!
-//! Everything else answers `kAudioFormatUnknownFormatError` with a size of
-//! zero, which is what Apple's answers for a format it has no codec for.
-
 use std::ffi::c_void;
 
 use crate::status::{PARAM_ERROR, SUCCESS};
@@ -76,7 +65,6 @@ pub unsafe extern "C" fn AudioFormatGetProperty(
         return PARAM_ERROR;
     }
     if property != FORMAT_INFO {
-        // SAFETY: the caller's obligation.
         unsafe { *size = 0 };
         return UNKNOWN_FORMAT;
     }
@@ -85,22 +73,18 @@ pub unsafe extern "C" fn AudioFormatGetProperty(
     // usually passes the same address for both.
     let source = match (specifier.is_null(), data.is_null()) {
         (false, _) if specifier_size as usize >= size_of::<Format>() => specifier as *const Format,
-        // SAFETY: the caller's obligation.
         (true, false) if unsafe { *size } as usize >= size_of::<Format>() => data as *const Format,
         _ => {
-            // SAFETY: as above.
             unsafe { *size = 0 };
             return PARAM_ERROR;
         }
     };
     // SAFETY: checked above to be readable for a whole description.
     let Some(format) = completed(unsafe { *source }) else {
-        // SAFETY: as above.
         unsafe { *size = 0 };
         return UNKNOWN_FORMAT;
     };
     if data.is_null() {
-        // SAFETY: as above.
         unsafe { *size = size_of::<Format>() as u32 };
         return SUCCESS;
     }

@@ -1,12 +1,3 @@
-//! `ROSETTA3_TRACE_AUDIO`: name every property a program sets on its output
-//! unit, and every one this HAL was asked for and does not have.
-//!
-//! A program that cannot open its output says so in one line of its own log and
-//! nothing about which call failed. There are twelve of them in a typical
-//! bring-up, they all return an `OSStatus` the program throws away, and the
-//! only one that matters is the first non-zero - which is exactly what this
-//! prints.
-
 use static_init::dynamic;
 
 #[inline]

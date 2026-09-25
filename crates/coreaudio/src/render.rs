@@ -1,10 +1,3 @@
-//! Pulling the guest's render callback, on SDL's audio thread.
-//!
-//! The `AudioBufferList` and the `AudioTimeStamp` are built here because the
-//! callback's whole interface is those two structures: a guest reads
-//! `mNumberBuffers` and writes through `mData`, and gets the frame it is filling
-//! from `mSampleTime`. Both layouts are ABI.
-
 use std::ffi::c_void;
 
 use static_init::dynamic;

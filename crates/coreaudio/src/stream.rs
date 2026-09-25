@@ -1,5 +1,3 @@
-//! The stream format a guest sets, and the SDL device it becomes.
-
 use std::ffi::c_void;
 
 use crate::Unit;

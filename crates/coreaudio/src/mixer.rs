@@ -1,16 +1,3 @@
-//! The mixer unit: many inputs in, one stream out.
-//!
-//! A game that places sounds in space builds a graph whose middle is a mixer -
-//! `kAudioUnitSubType_3DMixer` and its relatives - with one input element per
-//! voice. Each element has a format and a render callback of its own, and the
-//! mixer is pulled by whatever it is connected to, which is the output unit.
-//!
-//! What the 3D mixer does that a plain one does not is *position*: azimuth,
-//! elevation and distance per element, which Apple's turns into a filter and a
-//! pan. This one pans and attenuates and does no filtering, because a game that
-//! gets the direction and the loudness right sounds placed, and one that gets
-//! silence sounds broken.
-
 use crate::render::Callback;
 use crate::stream::Format;
 

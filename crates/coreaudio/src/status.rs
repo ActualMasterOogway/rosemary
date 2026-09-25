@@ -1,9 +1,3 @@
-//! `OSStatus` values, as the framework's headers define them.
-//!
-//! A guest checks these by number and branches on them, so they are the
-//! interface: an invented one is a program taking the wrong path for a reason
-//! nothing can name.
-
 /// `noErr`.
 pub const SUCCESS: i32 = 0;
 /// `paramErr`.

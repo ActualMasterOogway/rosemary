@@ -1,10 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-
-//! `AudioUnit` output, over SDL3.
-//!
-//! Only output units are available. SDL's audio thread pulls frames directly
-//! from the guest render callback and converts the requested format for the
-//! device. Unsupported input formats return `kAudioUnitErr_FormatNotSupported`.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -193,7 +187,6 @@ pub unsafe extern "C" fn AudioComponentFindNext(
     if !after.is_null() || description.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     let wanted = unsafe { *description };
     if describes_default_output(&wanted) {
         return output_component();
@@ -245,7 +238,6 @@ pub unsafe extern "C" fn AudioComponentInstanceNew(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((handle as usize, unit));
-    // SAFETY: the caller's obligation.
     unsafe { *out = handle };
     SUCCESS
 }
@@ -427,7 +419,6 @@ pub unsafe extern "C" fn AudioUnitRender(
             flags: 1 | 2,
             ..render::TimeStamp::default()
         },
-        // SAFETY: the caller's obligation.
         false => unsafe { *timestamp },
     };
     let mut action = 0u32;
@@ -703,12 +694,10 @@ mod tests {
             kind: fourcc(b"aumx"),
             ..output
         };
-        // SAFETY: as above.
         assert!(unsafe { AudioComponentFindNext(std::ptr::null_mut(), &mixer) }.is_null());
 
         // And "the next one after this" is nothing, which is how a guest's
         // enumeration loop terminates.
-        // SAFETY: as above.
         assert!(unsafe { AudioComponentFindNext(output_component(), &output) }.is_null());
     }
 
@@ -745,7 +734,6 @@ mod tests {
     #[test]
     fn starting_an_uninitialised_unit_says_so() {
         let mut handle = std::ptr::null_mut();
-        // SAFETY: as above.
         unsafe {
             AudioComponentInstanceNew(output_component(), &mut handle);
             assert_eq!(AudioOutputUnitStart(handle), UNINITIALIZED);
