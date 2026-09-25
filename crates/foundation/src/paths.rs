@@ -1,10 +1,3 @@
-//! `NSSearchPathForDirectoriesInDomains` and the two directory functions beside
-//! it, which is how a program finds where to write.
-//!
-//! Answered from `$HOME` rather than from the host's own Foundation: under
-//! `ROSETTA3_OBJC=builtin` the array and its strings have to be objects of this
-//! runtime, and Apple's would be a foreign structure read as a native one.
-
 use objc::object::Id;
 
 /// The directory a search-path constant names, relative to a domain's root.

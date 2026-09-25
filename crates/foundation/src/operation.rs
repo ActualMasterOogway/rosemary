@@ -1,21 +1,3 @@
-//! `NSOperation`, `NSBlockOperation` and `NSOperationQueue`.
-//!
-//! The reason this exists is `+[NSOperationQueue mainQueue]`: a program that
-//! does work on a thread of its own gets back to the main one through it, and a
-//! nil queue makes `-addOperationWithBlock:` a message to nil - the block is
-//! never run, and nothing says so. The main queue here is a run loop source on
-//! the main loop, so its operations run where a Cocoa program expects them to
-//! and in the same turn as a timer that was due at the same moment.
-//!
-//! Any other queue is a small thread pool. `maxConcurrentOperationCount` is
-//! honoured, because a serial queue is a program's way of saying two operations
-//! must not overlap - a pool that ignored it would be a data race the program
-//! took steps to avoid.
-//!
-//! Dependencies (`-addDependency:`) and KVO on `isFinished` are absent rather
-//! than stubbed: a queue that accepted a dependency and ignored it would run
-//! work in an order the program forbade.
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -92,7 +74,6 @@ fn operation_class() -> &'static Class {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn operation<'a>(object: Id) -> Option<&'a mut Operation> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents(object, operation_class()) }
 }
 
@@ -170,12 +151,10 @@ unsafe extern "C" fn start(receiver: Id, _sel: Sel) {
 /// one, is `void (id, SEL)`.
 unsafe fn send_void(receiver: Id, name: &str) {
     let sel = objc::sel::get(name);
-    // SAFETY: the caller's obligation.
     let Some(method) = (unsafe { objc::object::class_of(receiver) }).and_then(|c| c.method(sel))
     else {
         return;
     };
-    // SAFETY: as above.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(method.implementation());
         f(receiver, sel);
@@ -408,7 +387,6 @@ fn queue_class() -> &'static Class {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn queue(object: Id) -> Option<Arc<Queue>> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents::<Handle>(object, queue_class()) }.map(|handle| Arc::clone(&handle.0))
 }
 
@@ -723,7 +701,6 @@ unsafe extern "C" fn set_name(receiver: Id, _sel: Sel, value: Id) {
 unsafe extern "C" fn queue_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an instance of a class registered for `Arc<Queue>`.
     unsafe { boxed::fill(receiver, Handle(new_queue(false))) };
-    // SAFETY: as above.
     if let Some(state) = unsafe { queue(receiver) } {
         state.object.set(receiver as usize).ok();
     }
@@ -987,7 +964,6 @@ mod tests {
 
         static SEEN: AtomicUsize = AtomicUsize::new(0);
         unsafe extern "C" fn record(_block: Id) {
-            // SAFETY: as above.
             let queue =
                 unsafe { current_queue(std::ptr::null_mut(), objc::sel::get("currentQueue")) };
             SEEN.store(queue as usize, Ordering::SeqCst);

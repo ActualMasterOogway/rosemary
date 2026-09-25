@@ -1,11 +1,3 @@
-//! `NSThread`, as far as detaching one.
-//!
-//! A detached thread is a real host thread, so a guest method reached this way
-//! runs the same way one reached through `pthread_create` does. The class stays
-//! otherwise abstract: a thread *object* would have to answer for a thread this
-//! module does not own - the main one, and every one a guest made itself - and
-//! there is nothing here that could.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc::object::Id;

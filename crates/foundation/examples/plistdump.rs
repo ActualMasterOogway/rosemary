@@ -1,4 +1,3 @@
-//! Print a property list, for checking this crate's reader against `plutil`.
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: plistdump <file>");

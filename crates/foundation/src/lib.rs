@@ -169,12 +169,9 @@ pub(crate) unsafe fn real_of(value: objc::object::Id) -> Option<f64> {
 /// must return `T`.
 unsafe fn send_scalar<T>(receiver: objc::object::Id, name: &str) -> Option<T> {
     let sel = objc::sel::get(name);
-    // SAFETY: the caller's obligation.
     let method = unsafe { objc::object::class_of(receiver) }?.method(sel)?;
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel) -> T =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     Some(unsafe { f(receiver, sel) })
 }
 
@@ -556,7 +553,10 @@ mod tests {
                 string::from_str("example-player://experiences/start"),
             );
             let text = send0(array, objc::sel::get("description"));
-            assert_eq!(string::bytes(text), b"(\n    example-player://experiences/start\n)");
+            assert_eq!(
+                string::bytes(text),
+                b"(\n    example-player://experiences/start\n)"
+            );
         }
     }
 

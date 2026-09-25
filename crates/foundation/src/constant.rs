@@ -1,24 +1,3 @@
-//! The `NSNumber`s the compiler lays out in the image.
-//!
-//! `@(9.25)` with a constant operand is not a message: clang emits a static
-//! object into `__objc_doubleobj` whose first word is a bound
-//! `_OBJC_CLASS_$_NSConstantDoubleNumber` and whose remaining words are the
-//! value. The same trick `__NSCFConstantString` uses, and the same consequence -
-//! the layout is not a choice, and the object becomes live the moment that one
-//! data symbol is bound.
-//!
-//! Three of them, and their shapes differ:
-//!
-//! ```text
-//! NSConstantDoubleNumber   { isa; double value; }                 16 bytes
-//! NSConstantFloatNumber    { isa; float value; /* padding */ }     16 bytes
-//! NSConstantIntegerNumber  { isa; const char *encoding; long long value; }  24 bytes
-//! ```
-//!
-//! The integer one carries its own type encoding because `@(5)` and `@(5L)` and
-//! `@('c')` are all integers of different widths and `-objCType` has to say
-//! which.
-
 use std::ffi::c_char;
 
 use objc::class::Class;
@@ -52,17 +31,14 @@ struct ConstantInteger {
 ///
 /// `receiver` must be an instance of the class the methods below are installed on.
 unsafe fn double_of(receiver: Id) -> f64 {
-    // SAFETY: the caller's obligation.
     unsafe { (*(receiver as *const ConstantDouble)).value }
 }
 
 unsafe fn float_of(receiver: Id) -> f32 {
-    // SAFETY: the caller's obligation.
     unsafe { (*(receiver as *const ConstantFloat)).value }
 }
 
 unsafe fn integer_of(receiver: Id) -> i64 {
-    // SAFETY: the caller's obligation.
     unsafe { (*(receiver as *const ConstantInteger)).value }
 }
 

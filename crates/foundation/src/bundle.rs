@@ -1,16 +1,3 @@
-//! `NSBundle`: where the program's own files are.
-//!
-//! This is the module that retires `rosetta3::bundle`'s re-exec. That hack
-//! exists because the *host's* `NSBundle` answers about the running process, so
-//! the only way to make it name the guest's `.app` was to become a process
-//! inside one. Here `NSBundle` is ours, so it is simply told - see [`set_main`].
-//!
-//! The layout is recognised by *shape* rather than by name, exactly as
-//! `rosetta3::bundle::enclosing` does it: an executable whose parent is `MacOS`,
-//! whose grandparent is `Contents`, and whose `Contents/Info.plist` is a file.
-//! A directory called `Foo.app` with none of that inside is not a bundle, and a
-//! bundle whose directory is called something else still is.
-
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -318,7 +305,7 @@ pub mod cf {
         kind: Id,
         subdirectory: Id,
     ) -> Id {
-        // SAFETY: the caller's obligation - each is an `NSString` or nil.
+        // SAFETY: each is an `NSString` or nil.
         let (name, kind, subdirectory) = unsafe {
             (
                 crate::string::bytes(name),
@@ -421,7 +408,7 @@ pub mod cf {
 
     /// `CFArrayRef CFBundleCopyPreferredLocalizationsFromArray(CFArrayRef)`.
     unsafe extern "C" fn CFBundleCopyPreferredLocalizationsFromArray(localizations: Id) -> Id {
-        // SAFETY: the caller's obligation - a CFArray or null.
+        // SAFETY: a CFArray or null.
         let Some(array) =
             (unsafe { corefoundation::collections::array(localizations as CFTypeRef) })
         else {
@@ -525,7 +512,7 @@ pub mod cf {
     /// is a bundle this runtime has not loaded, and a null says so where an
     /// invented one would answer questions about the wrong directory.
     unsafe extern "C" fn CFBundleCreate(_allocator: *const std::ffi::c_void, url: Id) -> Id {
-        // SAFETY: the caller's obligation - a `CFURL` or null.
+        // SAFETY: a `CFURL` or null.
         let Some(url) = (unsafe { corefoundation::url::as_url(url as CFTypeRef) }) else {
             return std::ptr::null_mut();
         };
@@ -788,7 +775,7 @@ pub(crate) mod class {
         if receiver.is_null() {
             return None;
         }
-        // SAFETY: the caller's obligation - every `NSBundle` is a `Body`.
+        // SAFETY: every `NSBundle` is a `Body`.
         let layout = unsafe { (*(receiver as *const Body)).layout };
         match layout.is_null() {
             // SAFETY: the pointer was leaked by `bundle_with_path`.
@@ -811,7 +798,6 @@ pub(crate) mod class {
     ///
     /// As [`layout_of`].
     unsafe fn info(receiver: Id, key: &str) -> Id {
-        // SAFETY: the caller's obligation.
         match unsafe { layout_of(receiver) }.and_then(|b| b.info_string(key)) {
             Some(text) => autoreleased(text),
             None => std::ptr::null_mut(),
@@ -878,7 +864,6 @@ pub(crate) mod class {
     }
 
     unsafe extern "C" fn resource_url(receiver: Id, _sel: Sel) -> Id {
-        // SAFETY: as above.
         url(unsafe { layout_of(receiver) }.map(|b| b.resources.clone()))
     }
 

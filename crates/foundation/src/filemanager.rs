@@ -1,18 +1,3 @@
-//! `NSFileManager`, over `std::fs`.
-//!
-//! Everything here answers about the *host's* filesystem, because that is the
-//! one the guest's files are on. A guest names them its own way, so every path
-//! argument goes through [`path_of`] first and `-fileExistsAtPath:` then asks
-//! the same question the guest's own `stat` would - which reaches the same
-//! translation. See `docs/prefixes.md`.
-//!
-//! The error out-parameters are written as nil rather than as an `NSError`.
-//! There is no `NSError` in this tree, and a method that reported failure
-//! *without* filling one in would be indistinguishable from one that succeeded
-//! to a caller checking the error rather than the return value - so the return
-//! value is always the truth, and a caller that dereferences the error on
-//! failure is refused by name at the send rather than handed something invented.
-
 use corefoundation::base::CFTypeRef;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -44,7 +29,6 @@ unsafe extern "C" fn default_manager(class: Id, _sel: Sel) -> Id {
 ///
 /// `path` must be null or an `NSString`.
 unsafe fn path_of(path: Id) -> Option<std::path::PathBuf> {
-    // SAFETY: the caller's obligation.
     let guest = String::from_utf8(unsafe { crate::string::bytes(path) }).ok()?;
     // The guest named it, so it is opened at this host's spelling. Every caller
     // below asks the filesystem something; none hands the string back, so the
@@ -59,7 +43,6 @@ unsafe fn path_of(path: Id) -> Option<std::path::PathBuf> {
 /// `slot` must be null or writable.
 unsafe fn no_error(slot: *mut Id) {
     if !slot.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { *slot = std::ptr::null_mut() };
     }
 }
@@ -172,7 +155,6 @@ unsafe extern "C" fn move_item(_receiver: Id, _sel: Sel, from: Id, to: Id, error
 ///
 /// `url` is null or an `NSURL`.
 unsafe fn at_url<T>(url: Id, absent: T, with: impl FnOnce(Id) -> T) -> T {
-    // SAFETY: the caller's obligation.
     let Some(path) =
         (unsafe { corefoundation::url::as_url(url as CFTypeRef) }).and_then(|u| u.file_path())
     else {
@@ -202,7 +184,6 @@ unsafe extern "C" fn create_directory_at_url(
 }
 
 unsafe extern "C" fn remove_item_at_url(receiver: Id, sel: Sel, url: Id, error: *mut Id) -> u8 {
-    // SAFETY: as above.
     unsafe { at_url(url, 0, |path| remove_item(receiver, sel, path, error)) }
 }
 
@@ -228,7 +209,6 @@ unsafe extern "C" fn copy_item_at_url(
     to: Id,
     error: *mut Id,
 ) -> u8 {
-    // SAFETY: as above.
     unsafe {
         at_url(from, 0, |from| {
             at_url(to, 0, |to| copy_item(receiver, sel, from, to, error))
@@ -273,7 +253,6 @@ unsafe extern "C" fn get_relationship(
     item: Id,
     error: *mut Id,
 ) -> u8 {
-    // SAFETY: the caller's obligation.
     unsafe { no_error(error) };
     if relationship.is_null() {
         return 0;
@@ -284,7 +263,6 @@ unsafe extern "C" fn get_relationship(
     else {
         return 0;
     };
-    // SAFETY: as above.
     let Some(item) =
         (unsafe { corefoundation::url::as_url(item as CFTypeRef) }).and_then(|u| u.file_path())
     else {
@@ -350,7 +328,6 @@ unsafe extern "C" fn url_for_directory(
     create: u8,
     error: *mut Id,
 ) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe { no_error(error) };
     let Some(path) = crate::paths::directory_paths(directory, domain)
         .into_iter()

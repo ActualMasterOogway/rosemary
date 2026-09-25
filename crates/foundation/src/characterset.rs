@@ -1,5 +1,3 @@
-//! `NSCharacterSet` values used by URL percent encoding.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

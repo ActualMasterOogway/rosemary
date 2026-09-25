@@ -1,5 +1,3 @@
-//! The mutable URL builder `NSURLComponents`.
-
 use corefoundation::base::CFTypeRef;
 use objc::class::Class;
 use objc::object::Id;

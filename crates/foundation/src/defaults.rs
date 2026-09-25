@@ -1,17 +1,3 @@
-//! `NSUserDefaults`, persisted across launches.
-//!
-//! Unbound, the class binds to zero and
-//! `[[NSUserDefaults standardUserDefaults] objectForKey:]` is a message to nil
-//! that answers nil - so every setting reads back as absent and every write
-//! goes nowhere. That is survivable and never faults, which is exactly what
-//! makes it expensive: a program that stores whether it has shown its first-run
-//! screen shows it every launch, and nothing anywhere says why.
-//!
-//! Values are stored as strings, with the type recorded alongside, because the
-//! four accessors a caller uses - `-objectForKey:`, `-stringForKey:`,
-//! `-boolForKey:`, `-integerForKey:` - are four readings of one stored value
-//! and Apple's convert between them freely.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -57,10 +43,8 @@ fn argument_values() -> BTreeMap<String, String> {
 ///
 /// `receiver` is one of our defaults objects; `key` is null or an NSString.
 unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
-    // SAFETY: the caller's obligation.
     let key = unsafe { key_text(key) }?;
     argument_values().remove(&key).or_else(|| {
-        // SAFETY: the caller's obligation.
         values()
             .get(&format!("{}{key}", unsafe { prefix(receiver) }))
             .cloned()
@@ -125,7 +109,6 @@ unsafe fn prefix(receiver: Id) -> String {
     if receiver.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     let suite = unsafe { (*(receiver as *const Defaults)).suite };
     if suite.is_null() {
         return String::new();
@@ -141,9 +124,7 @@ unsafe fn prefix(receiver: Id) -> String {
 /// `receiver` is an `NSUserDefaults` this module made; `key` is null or an
 /// `NSString`.
 unsafe fn scoped(receiver: Id, key: Id) -> Option<String> {
-    // SAFETY: the caller's obligation.
     let key = unsafe { key_text(key) }?;
-    // SAFETY: as above.
     Some(format!("{}{key}", unsafe { prefix(receiver) }))
 }
 
@@ -192,7 +173,6 @@ unsafe fn key_text(key: Id) -> Option<String> {
     if key.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let bytes = unsafe { crate::string::bytes(key) };
     let text = String::from_utf8_lossy(&bytes).into_owned();
     (!text.is_empty()).then_some(text)

@@ -1,15 +1,3 @@
-//! `NSException`: the object an `@throw` carries.
-//!
-//! The class exists whether or not anything raises one, because
-//! `_OBJC_EHTYPE_$_NSException` is built from it - see `rosetta3::objcexc`. A
-//! guest's `@catch (NSException *e)` names that symbol, and an unresolved one
-//! binds to zero, which the LSDA reads as `catch (...)`.
-//!
-//! `+raise:format:` is not here. Raising means throwing, and a throw out of an
-//! `extern "C"` method implementation is the failure `objc::fail!` exists to
-//! avoid - so a guest that asks for one is refused by name at the send rather
-//! than handed an object it will never see again.
-
 use std::ffi::c_void;
 
 use objc::object::Id;
@@ -31,7 +19,6 @@ pub const INSTANCE_SIZE: usize = size_of::<Exception>();
 ///
 /// `receiver` must be an `NSException` this module made.
 unsafe fn exception_of<'a>(receiver: Id) -> Option<&'a Exception> {
-    // SAFETY: the caller's obligation.
     let is_exception = unsafe { objc::object::class_of(receiver) }.is_some_and(|c| {
         objc::class::lookup(c"NSException").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
     });
@@ -45,12 +32,10 @@ unsafe extern "C" fn name(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn reason(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     unsafe { exception_of(receiver) }.map_or(std::ptr::null_mut(), |e| e.reason)
 }
 
 unsafe extern "C" fn user_info(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     unsafe { exception_of(receiver) }.map_or(std::ptr::null_mut(), |e| e.user_info)
 }
 

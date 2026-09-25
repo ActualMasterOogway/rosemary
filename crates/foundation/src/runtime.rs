@@ -1,13 +1,3 @@
-//! Foundation's spellings of four Objective-C runtime questions, and `-className`.
-//!
-//! `NSSelectorFromString` and `NSClassFromString` are what a program uses when
-//! the name it is acting on is data - a selector read from a nib, a class
-//! chosen by a feature flag - and their inverses are how it reports one. The
-//! runtime underneath is `objc`; this crate owns the `NSString` at each end.
-//!
-//! `-className` is here for the same reason: it is an `NSObject` method that
-//! answers with an `NSString`, and `objc` has no string to answer with.
-
 #![allow(non_snake_case)]
 
 use objc::object::Id;
@@ -34,7 +24,6 @@ unsafe fn text(string: Id) -> Option<String> {
     if string.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let bytes = unsafe { crate::string::bytes(string) };
     String::from_utf8(bytes).ok()
 }

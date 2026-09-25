@@ -1,9 +1,3 @@
-//! `CFNumberFormatter`, `CFDateFormatter` and `CFCalendar`.
-//!
-//! Number formatting uses English separators. Month and weekday names are
-//! available only for English locales; other locales receive nil so callers
-//! can use their own locale data. [`cf::CFDateFormatterGetFormat`] returns LDML
-//! skeletons.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -84,7 +78,6 @@ fn make<T>(class: &'static Class, contents: T) -> CFTypeRef {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn contents<'a, T>(object: CFTypeRef, class: &'static Class) -> Option<&'a mut T> {
-    // SAFETY: the caller's obligation.
     if !unsafe { corefoundation::base::is_kind_of(object, class) } {
         return None;
     }
@@ -469,7 +462,6 @@ pub mod cf {
         key: CFTypeRef,
         value: CFTypeRef,
     ) {
-        // SAFETY: the caller's obligation.
         let Some(format) =
             (unsafe { super::contents::<NumberFormat>(formatter, super::number_class()) })
         else {
@@ -480,7 +472,6 @@ pub mod cf {
         if key.as_slice() != CURRENCY_SYMBOL.as_bytes() {
             return;
         }
-        // SAFETY: as above.
         let text = unsafe { crate::string::bytes(value as Id) };
         format.currency_symbol = String::from_utf8(text).ok();
     }
@@ -496,7 +487,6 @@ pub mod cf {
         formatter: CFTypeRef,
         number: CFTypeRef,
     ) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         let Some(format) =
             (unsafe { super::contents::<NumberFormat>(formatter, super::number_class()) })
         else {
@@ -524,7 +514,6 @@ pub mod cf {
         kind: i32,
         value: *const std::ffi::c_void,
     ) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         let Some(format) =
             (unsafe { super::contents::<NumberFormat>(formatter, super::number_class()) })
         else {
@@ -575,7 +564,6 @@ pub mod cf {
     ///
     /// `formatter` is null or an object this runtime allocated.
     unsafe extern "C" fn CFDateFormatterGetFormat(formatter: CFTypeRef) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         let Some(format) =
             (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
         else {
@@ -597,7 +585,6 @@ pub mod cf {
         formatter: CFTypeRef,
         date: CFTypeRef,
     ) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         let Some(format) =
             (unsafe { super::contents::<DateFormat>(formatter, super::date_class()) })
         else {
@@ -623,7 +610,6 @@ pub mod cf {
         formatter: CFTypeRef,
         key: CFTypeRef,
     ) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         if unsafe { super::contents::<DateFormat>(formatter, super::date_class()) }.is_none() {
             return std::ptr::null();
         }
@@ -679,7 +665,6 @@ pub mod cf {
             Calendar {
                 first_weekday: super::first_weekday(&crate::locale::country_code()),
                 identifier: corefoundation::string::from_bytes(b"gregorian", false),
-                // SAFETY: takes nothing and hands back a zone it owns.
                 timezone: unsafe { corefoundation::timezone::copy_system() },
             },
         )
@@ -699,7 +684,6 @@ pub mod cf {
         _allocator: CFTypeRef,
         identifier: CFTypeRef,
     ) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         let Some(text) = (unsafe { corefoundation::string::as_string(identifier) }) else {
             return std::ptr::null();
         };
@@ -715,7 +699,6 @@ pub mod cf {
             Calendar {
                 first_weekday: super::first_weekday(&crate::locale::country_code()),
                 identifier: objc::arc::retain(identifier as Id) as CFTypeRef,
-                // SAFETY: takes nothing and hands back a zone it owns.
                 timezone: unsafe { corefoundation::timezone::copy_system() },
             },
         )
@@ -727,7 +710,6 @@ pub mod cf {
     ///
     /// `calendar` is null or an object this runtime allocated.
     unsafe extern "C" fn CFCalendarGetIdentifier(calendar: CFTypeRef) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
             Some(calendar) => calendar.identifier,
             None => std::ptr::null(),
@@ -740,7 +722,6 @@ pub mod cf {
     ///
     /// As [`CFCalendarGetIdentifier`].
     unsafe extern "C" fn CFCalendarCopyTimeZone(calendar: CFTypeRef) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
             Some(calendar) => objc::arc::retain(calendar.timezone as Id) as CFTypeRef,
             None => std::ptr::null(),
@@ -753,7 +734,6 @@ pub mod cf {
     ///
     /// As [`CFCalendarGetIdentifier`]; `timezone` is null or a time zone.
     unsafe extern "C" fn CFCalendarSetTimeZone(calendar: CFTypeRef, timezone: CFTypeRef) {
-        // SAFETY: the caller's obligation.
         let Some(calendar) =
             (unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) })
         else {
@@ -774,7 +754,6 @@ pub mod cf {
     ///
     /// `calendar` is null or an object this runtime allocated.
     unsafe extern "C" fn CFCalendarGetFirstWeekday(calendar: CFTypeRef) -> CFIndex {
-        // SAFETY: the caller's obligation.
         match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
             Some(calendar) => calendar.first_weekday,
             None => 1,
@@ -824,11 +803,10 @@ pub mod cf {
             b'H' => i32::from(date.hour),
             b'm' => i32::from(date.minute),
             b's' => date.second as i32,
-            // SAFETY: the caller's obligation - null or a time zone.
+            // SAFETY: null or a time zone.
             b'E' => unsafe {
                 corefoundation::calendar::absolute_time_get_day_of_week(at, timezone) % 7 + 1
             },
-            // SAFETY: as above.
             b'D' => unsafe {
                 corefoundation::calendar::absolute_time_get_day_of_year(at, timezone)
             },
@@ -839,7 +817,6 @@ pub mod cf {
     /// The zone a calendar places its dates in.
     #[cfg(not(target_vendor = "apple"))]
     unsafe fn zone_of(calendar: CFTypeRef) -> CFTypeRef {
-        // SAFETY: the caller's obligation.
         match unsafe { super::contents::<Calendar>(calendar, super::calendar_class()) } {
             Some(calendar) => calendar.timezone,
             None => std::ptr::null(),
@@ -889,7 +866,6 @@ pub mod cf {
         out6: *mut i32,
         out7: *mut i32,
     ) -> u8 {
-        // SAFETY: the caller's obligation.
         let Some(wanted) = (unsafe { components(description) }) else {
             return 0;
         };
@@ -900,7 +876,7 @@ pub mod cf {
                 wanted.len()
             );
         }
-        // SAFETY: the caller's obligation - a calendar this runtime made.
+        // SAFETY: a calendar this runtime made.
         let timezone = unsafe { zone_of(calendar) };
         // SAFETY: null or a time zone this tree made.
         let date =
@@ -945,7 +921,6 @@ pub mod cf {
         in6: i32,
         in7: i32,
     ) -> u8 {
-        // SAFETY: the caller's obligation.
         let Some(wanted) = (unsafe { components(description) }) else {
             return 0;
         };
@@ -987,7 +962,7 @@ pub mod cf {
                 ),
             }
         }
-        // SAFETY: the caller's obligation - a calendar this runtime made.
+        // SAFETY: a calendar this runtime made.
         let timezone = unsafe { zone_of(calendar) };
         // SAFETY: null or a time zone this tree made; `at` is writable.
         unsafe {

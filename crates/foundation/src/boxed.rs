@@ -1,10 +1,3 @@
-//! An object whose body is one boxed Rust value.
-//!
-//! The shape a class wants when its state is a Rust type rather than a CF one:
-//! an `isa`, a `Box` behind it, and a `-dealloc` that frees the box. Registered
-//! here rather than per module so that the free is written once - a class that
-//! forgets it leaks every instance, and nothing about the object says so.
-
 use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -65,7 +58,6 @@ pub unsafe fn fill<T>(object: Id, contents: T) {
     if object.is_null() {
         return;
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         let body = object as *mut Body<T>;
         if (*body).contents.is_null() {
@@ -78,7 +70,6 @@ pub unsafe fn fill<T>(object: Id, contents: T) {
 ///
 /// `object` must be null or an object this runtime allocated.
 pub unsafe fn contents<'a, T>(object: Id, class: &'static Class) -> Option<&'a mut T> {
-    // SAFETY: the caller's obligation.
     if !unsafe { corefoundation::base::is_kind_of(object as CFTypeRef, class) } {
         return None;
     }

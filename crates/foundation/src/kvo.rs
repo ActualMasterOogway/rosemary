@@ -1,25 +1,3 @@
-//! Key-value observing: `-addObserver:forKeyPath:options:context:`.
-//!
-//! The half of key-value observing that can be built here. A registration is
-//! recorded, and a notification is delivered when something **announces** a change
-//! with `-willChangeValueForKey:`/`-didChangeValueForKey:`. What does not exist is
-//! Apple's *automatic* notification, where the runtime rewrites a class's setters
-//! so that `-setFoo:` notifies without the class asking - that needs a subclass
-//! synthesised per observed class and a setter replaced on it, and no program in
-//! this tree has needed it.
-//!
-//! So the line is: a property changed through `will`/`did` notifies its observers,
-//! and a property changed by writing an ivar does not. That is the same line
-//! Apple's own documentation draws for a class that declares
-//! `+automaticallyNotifiesObserversForKey:` false, and a caller on the wrong side
-//! of it sees a value that is correct when read and an observer that did not fire.
-//!
-//! Registration is still worth accepting on its own: `-addObserver:...` with no
-//! implementation is an abort on the first observer a program installs, which is
-//! during startup - AppKit's appearance is observed that way - where a
-//! registration that never fires is a program that runs and does not follow a
-//! change nothing here can make anyway.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -99,7 +77,6 @@ fn change_dictionary(new: Option<Id>) -> Id {
 /// Every argument is null or a live object.
 unsafe fn notify(observer: Id, key_path: &[u8], observed: Id, change: Id, context: usize) {
     let sel = objc::sel::get("observeValueForKeyPath:ofObject:change:context:");
-    // SAFETY: the caller's obligation.
     let Some(method) = (unsafe { objc::object::class_of(observer) }).and_then(|c| c.method(sel))
     else {
         // An observer with no callback is a program that registered and does not
@@ -124,7 +101,6 @@ unsafe fn notify(observer: Id, key_path: &[u8], observed: Id, change: Id, contex
 /// `object` is null or a live object.
 unsafe fn current(object: Id, key_path: &[u8]) -> Option<Id> {
     let sel = objc::sel::get("valueForKeyPath:");
-    // SAFETY: the caller's obligation.
     let method = (unsafe { objc::object::class_of(object) })?.method(sel)?;
     let path = crate::string::from_str(&String::from_utf8_lossy(key_path));
     // SAFETY: `-valueForKeyPath:` is `id (id, SEL, NSString *)`.
@@ -149,7 +125,6 @@ unsafe extern "C" fn add_observer(
     options: usize,
     context: usize,
 ) {
-    // SAFETY: the caller's obligation.
     let path = unsafe { crate::string::bytes(key_path) };
     observations()
         .lock()
@@ -182,7 +157,6 @@ unsafe extern "C" fn add_observer(
 ///
 /// As [`add_observer`].
 unsafe extern "C" fn remove_observer(receiver: Id, _sel: Sel, observer: Id, key_path: Id) {
-    // SAFETY: the caller's obligation.
     let path = unsafe { crate::string::bytes(key_path) };
     observations()
         .lock()
@@ -204,7 +178,6 @@ unsafe extern "C" fn remove_observer_with_context(
     key_path: Id,
     context: usize,
 ) {
-    // SAFETY: the caller's obligation.
     let path = unsafe { crate::string::bytes(key_path) };
     observations()
         .lock()
@@ -227,7 +200,6 @@ unsafe extern "C" fn will_change(_receiver: Id, _sel: Sel, _key: Id) {}
 ///
 /// As [`add_observer`].
 unsafe extern "C" fn did_change(receiver: Id, _sel: Sel, key: Id) {
-    // SAFETY: the caller's obligation.
     let key = unsafe { crate::string::bytes(key) };
     // Copied out from under the lock: an observer's callback is guest code and may
     // add or remove a registration, which would deadlock a held lock and would at

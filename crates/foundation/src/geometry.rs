@@ -1,13 +1,3 @@
-//! `NSValue`, and the three aggregates a Cocoa program passes by value.
-//!
-//! `NSRect` is thirty-two bytes and crosses the ABI seam through a hidden return
-//! buffer on x86-64 and in `v0`-`v3` on arm64; `NSPoint` is two SSE eightbytes on
-//! one side and a two-member homogeneous float aggregate on the other; `NSRange`
-//! is two integer eightbytes and agrees. They are declared here as the C structs
-//! they are, so the compiler applies each host's own rule and `rosetta3`'s
-//! marshaller has a real shape to convert to - rather than four loose doubles
-//! this crate would have to reassemble by hand and get wrong on one host.
-
 use std::ffi::{CStr, CString, c_char};
 
 use objc::class::Class;
@@ -97,7 +87,6 @@ fn make(bytes: &[u8], encoding: &CStr) -> Id {
 /// `receiver` must be null or an object this runtime allocated.
 unsafe fn boxed<'a>(receiver: Id) -> Option<&'a Boxed> {
     let class = objc::class::lookup(c"NSValue")?;
-    // SAFETY: the caller's obligation.
     if !unsafe { objc::object::class_of(receiver) }
         .is_some_and(|c| c.chain().any(|k| std::ptr::eq(k, class)))
     {
@@ -117,7 +106,6 @@ unsafe fn boxed<'a>(receiver: Id) -> Option<&'a Boxed> {
 ///
 /// As [`boxed`], and `T` must be plain data.
 unsafe fn unbox<T: Default + Copy>(receiver: Id) -> T {
-    // SAFETY: the caller's obligation.
     let Some(boxed) = (unsafe { boxed(receiver) }) else {
         return T::default();
     };
@@ -229,17 +217,14 @@ unsafe extern "C" fn point_value(receiver: Id, _sel: Sel) -> NSPoint {
 }
 
 unsafe extern "C" fn size_value(receiver: Id, _sel: Sel) -> NSSize {
-    // SAFETY: as above.
     unsafe { unbox(receiver) }
 }
 
 unsafe extern "C" fn rect_value(receiver: Id, _sel: Sel) -> NSRect {
-    // SAFETY: as above.
     unsafe { unbox(receiver) }
 }
 
 unsafe extern "C" fn range_value(receiver: Id, _sel: Sel) -> NSRange {
-    // SAFETY: as above.
     unsafe { unbox(receiver) }
 }
 
@@ -266,7 +251,6 @@ pub(crate) fn box_range(value: NSRange) -> Id {
 ///
 /// `value` must be null or an object this runtime allocated.
 pub(crate) unsafe fn unbox_bytes(value: Id) -> Option<Vec<u8>> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed(value) }.map(|b| b.bytes.clone())
 }
 

@@ -1,9 +1,3 @@
-//! `NSAutoreleasePool`, which is the old spelling of `@autoreleasepool`.
-//!
-//! Still very much in use: `libYoYoGamepad` and every GameMaker runner allocate
-//! one per frame. The object holds the token [`objc::arc::pool_push`] returned,
-//! and `-drain` or `-release` pops it.
-
 use std::ffi::c_void;
 
 use objc::class::Class;

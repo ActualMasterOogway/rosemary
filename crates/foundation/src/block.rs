@@ -1,10 +1,3 @@
-//! Holding a block past the call that passed it.
-//!
-//! A block a guest writes inline lives on the caller's stack, so anything that
-//! runs one later - a queued operation, a completion handler - has to copy it to
-//! the heap first. The copy itself is `objc::block`, this tree's libclosure;
-//! what is here is calling one, which nothing else has needed to spell out.
-
 use objc::object::Id;
 
 /// Byte offset of `invoke` in a `Block_layout`: `isa`, `flags`, `reserved`.
@@ -23,7 +16,7 @@ unsafe fn invoke(block: Id) -> Option<usize> {
     if block.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation - `invoke` is the third word. Under the
+    // SAFETY: `invoke` is the third word. Under the
     // emulated backend the pointer found there is already a thunk, because the
     // method's `@?` encoding had `rosetta3::shims::block` rewrite it on the way
     // in.
@@ -37,11 +30,9 @@ unsafe fn invoke(block: Id) -> Option<usize> {
 ///
 /// `block` must be null or a block literal of that prototype.
 pub(crate) unsafe fn call(block: Id) {
-    // SAFETY: the caller's obligation.
     let Some(invoke) = (unsafe { invoke(block) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe {
         let f: unsafe extern "C" fn(Id) = std::mem::transmute(invoke);
         f(block);
@@ -54,11 +45,9 @@ pub(crate) unsafe fn call(block: Id) {
 ///
 /// `block` must be null or a block literal of that prototype.
 pub(crate) unsafe fn call_with(block: Id, argument: Id) {
-    // SAFETY: the caller's obligation.
     let Some(invoke) = (unsafe { invoke(block) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe {
         let f: unsafe extern "C" fn(Id, Id) = std::mem::transmute(invoke);
         f(block, argument);

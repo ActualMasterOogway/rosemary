@@ -1,16 +1,3 @@
-//! `NSLocale`, from the environment.
-//!
-//! The host's answer is the POSIX locale a guest's own `setlocale` would see -
-//! `LC_ALL`, then `LC_MESSAGES`, then `LANG` - because that is the one answer
-//! both hosts have. macOS's real `NSLocale` reads `AppleLanguages` out of the
-//! user's defaults, which is a preferences database this tree does not have; a
-//! program asking for a language wants to know which strings to load, and the
-//! environment says that on either host.
-//!
-//! The keys are published as data as well as answered, because
-//! `NSLocaleCountryCode` is a `NSString *` **variable**: unresolved it binds to
-//! zero and the guest's `objectForKey:` argument is address zero.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -275,7 +262,7 @@ pub mod cf {
     /// `NSLocaleLanguageCode` are naming one string, so they cannot disagree.
     /// A `Get` again, so the value is interned.
     unsafe extern "C" fn CFLocaleGetValue(_locale: Id, key: Id) -> Id {
-        // SAFETY: the caller's obligation - an `NSString`, or nil.
+        // SAFETY: an `NSString`, or nil.
         let key = unsafe { crate::string::bytes(key) };
         if key.as_slice() == b"kCFLocaleUsesMetricSystem" {
             return corefoundation::collections::boolean(super::uses_metric()) as Id;
@@ -352,7 +339,6 @@ mod tests {
         // SAFETY: the address of `CFLocaleGetSystem`, which takes no argument
         // and returns an object.
         let system: unsafe extern "C" fn() -> Id = unsafe { std::mem::transmute(address as usize) };
-        // SAFETY: as above.
         let (first, second) = unsafe { (system(), system()) };
         assert!(!first.is_null());
         assert_eq!(first, second, "a Get answers with one object");

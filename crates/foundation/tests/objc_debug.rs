@@ -1,5 +1,3 @@
-//! The Objective-C hardening mode around a real framework object.
-
 use std::ffi::c_void;
 
 const CHILD: &str = "ROSETTA3_FOUNDATION_OBJC_DEBUG_CHILD";

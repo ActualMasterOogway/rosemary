@@ -1,18 +1,3 @@
-//! `NSURLSession` and the classes a request goes through, on a Rust HTTP stack.
-//!
-//! The transport is `ureq` over rustls rather than the host's CFNetwork, because
-//! this has to work off Darwin as well: forwarding to Apple's would tie a guest's
-//! networking to the one platform, and under `ROSETTA3_OBJC=builtin` the request
-//! and response objects it would be handed are this runtime's rather than its
-//! own. The trust roots come with rustls for the same reason - a platform
-//! certificate store is a second thing to be missing on a host that has none.
-//!
-//! What is here is the shape a program actually uses: build a request, run it,
-//! get back data, a status and headers. Caching, credentials, redirect policy
-//! and background sessions are absent rather than stubbed, so a guest that needs
-//! one is refused by selector instead of quietly getting a session that ignores
-//! it.
-
 use std::sync::OnceLock;
 
 use objc::class::Class;
@@ -89,7 +74,6 @@ fn immutable_request_class() -> &'static Class {
 ///
 /// `receiver` must be null or an object this runtime allocated.
 unsafe fn request_of<'a>(receiver: Id) -> Option<&'a mut Request> {
-    // SAFETY: the caller's obligation.
     unsafe { contents(receiver, immutable_request_class()) }
 }
 
@@ -152,7 +136,6 @@ pub struct RequestParts {
 ///
 /// `request` must be null or an object this runtime allocated.
 pub unsafe fn request_parts(request: Id) -> Option<RequestParts> {
-    // SAFETY: the caller's obligation.
     let request = unsafe { request_of(request) }?;
     Some(RequestParts {
         url: request.url.clone(),
@@ -317,7 +300,6 @@ fn response_class() -> &'static Class {
 /// `receiver` must be null or an object this runtime allocated.
 unsafe fn response_of<'a>(receiver: Id) -> Option<&'a mut Response> {
     let base = objc::class::lookup(c"NSURLResponse").expect("registered by `response_class`");
-    // SAFETY: the caller's obligation.
     unsafe { contents(receiver, base) }
 }
 
@@ -504,7 +486,7 @@ unsafe fn call_completion(block: Id, data: Id, response: Id, error: Id) {
     if block.is_null() {
         return;
     }
-    // SAFETY: the caller's obligation - a block literal, whose `invoke` is the
+    // SAFETY: a block literal, whose `invoke` is the
     // third word. Under the emulated backend the pointer found there is already
     // a thunk, because the method's `@?` encoding had `rosetta3::shims::block`
     // rewrite it on the way in.
@@ -687,7 +669,6 @@ unsafe fn text(string: Id) -> String {
     if string.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     String::from_utf8_lossy(&unsafe { crate::string::bytes(string) }).into_owned()
 }
 

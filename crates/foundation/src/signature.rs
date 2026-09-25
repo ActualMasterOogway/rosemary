@@ -1,11 +1,3 @@
-//! `NSMethodSignature`, and `-methodSignatureForSelector:` on `NSObject`.
-//!
-//! A signature is a method's type encoding split into one type per slot. A
-//! program asks for one to find out whether a message exists and what it
-//! returns - Qt's windows do, before deciding whether to forward - so the
-//! answer has to be nil for a selector the receiver lacks and a real object
-//! otherwise. Nothing here builds an `NSInvocation`.
-
 use std::ffi::{CStr, CString, c_char, c_void};
 
 use objc::object::Id;

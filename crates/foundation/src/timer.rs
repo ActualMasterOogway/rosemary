@@ -1,22 +1,3 @@
-//! `NSDate`, `NSTimer` and `NSRunLoop`.
-//!
-//! The three together are how a Cocoa program that is not driven by a display
-//! link gets a frame: it schedules a repeating timer on the current run loop and
-//! returns. Deltarune does both - a `CVDisplayLink` *and* an `NSTimer` - and
-//! until this module existed the timer half was a message to nil.
-//!
-//! That is worth dwelling on, because it is the quietest failure this tree has.
-//! An unresolved *function* import is refused by name at the call; an unresolved
-//! **data** import binds to zero and faults on the next instruction. An
-//! unresolved `_OBJC_CLASS_$_` bind is nil, and a message to nil is *silence* -
-//! `[NSTimer scheduledTimerWithTimeInterval:...]` returned nil, the delegate
-//! stored nil, and the program sat there having done nothing wrong.
-//!
-//! A timer here is a `corefoundation::runloop::Timer` with an Objective-C shell
-//! on it, so a program that schedules one and a program that uses
-//! `CFRunLoopTimer` are serviced by the same loop and cannot disagree about the
-//! order things fire in.
-
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -370,7 +351,6 @@ struct MainThreadPerform {
 /// `context` must be a `Box<MainThreadPerform>` made by
 /// [`perform_on_main_thread`] and consumed exactly once.
 unsafe extern "C" fn run_main_thread_perform(context: *mut c_void) {
-    // SAFETY: the caller's guarantee.
     let perform = unsafe { Box::from_raw(context.cast::<MainThreadPerform>()) };
     // Resolve here, on the main thread. Besides matching normal message
     // delivery, this lets a method installed after submission be the one run.
@@ -694,7 +674,6 @@ mod tests {
 
         // SAFETY: `-invalidate` is `void (id, SEL)`.
         unsafe { invalidate(timer, objc::sel::get("invalidate")) };
-        // SAFETY: as above.
         assert_eq!(unsafe { is_valid(timer, objc::sel::get("isValid")) }, 0);
         let after = REPEATED.load(Ordering::SeqCst);
         for _ in 0..5 {

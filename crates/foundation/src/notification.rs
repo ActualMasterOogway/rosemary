@@ -1,15 +1,3 @@
-//! `NSNotification` and `NSNotificationCenter`.
-//!
-//! Here rather than in AppKit because a notification is Foundation's, but the
-//! reason it exists now is AppKit's: `applicationWillFinishLaunching:` takes
-//! one, and a delegate that reads `-object` from a fabricated argument would
-//! read whatever was in the register.
-//!
-//! The observer table is a vector scanned linearly, for the same reason
-//! `CFDictionary` is: what a program registers is a handful of entries, and a
-//! hash index beside it is the fix when one shows up in a profile rather than
-//! now.
-
 use std::ffi::c_void;
 
 use objc::class::Class;
@@ -259,7 +247,6 @@ fn post_to_callbacks(center: Id, name: &str, object: *const c_void, user_info: I
 ///
 /// `observer` must be live and `selector` must name a method taking one object.
 unsafe fn send_notification(observer: Id, selector: Sel, notification: Id) {
-    // SAFETY: the caller's obligation.
     let Some(method) =
         (unsafe { objc::object::class_of(observer) }).and_then(|c| c.method(selector))
     else {
@@ -271,13 +258,11 @@ unsafe fn send_notification(observer: Id, selector: Sel, notification: Id) {
              selector it registered"
         );
     };
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(Id, Sel, Id) = unsafe {
         std::mem::transmute::<*const c_void, unsafe extern "C" fn(Id, Sel, Id)>(
             method.implementation(),
         )
     };
-    // SAFETY: as above.
     unsafe { f(observer, selector, notification) };
 }
 
@@ -488,7 +473,6 @@ unsafe fn text_of(string: Id) -> String {
     if string.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     String::from_utf8_lossy(&unsafe { crate::string::bytes(string) }).into_owned()
 }
 

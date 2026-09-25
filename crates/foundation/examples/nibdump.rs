@@ -1,9 +1,3 @@
-//! Print a keyed archive's object table, for reading a nib before writing the
-//! code that instantiates it.
-//!
-//! One line per entry, with the class the archive recorded and the keys it
-//! carries, because what a nib contains is exactly the queue of classes
-//! `appkit::nib` has to be able to build or refuse.
 use foundation::plist::Value;
 use foundation::unarchiver::{Archive, Uid};
 

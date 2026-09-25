@@ -1,9 +1,3 @@
-//! The immutable, attribute-free part of `NSAttributedString`.
-//!
-//! Text input clients return attributed substrings even when they do not use
-//! attributes. Keeping the string is enough for callers that measure the
-//! returned segment, and is materially different from returning `nil`.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

@@ -1,15 +1,3 @@
-//! `NSProcessInfo`, which is what a program asks about the machine it is on.
-//!
-//! An unbound `_OBJC_CLASS_$_NSProcessInfo` is the expensive kind of gap rather
-//! than a fault: `+processInfo` on a nil class is nil, every message after it is
-//! nil, and a *struct*-returning one is zeroed. So a program that gates on
-//! `-operatingSystemVersion` is told it is on **macOS 0.0.0** and takes whatever
-//! branch that implies, with nothing anywhere saying a class was missing.
-//!
-//! The version comes from `darwin::sysctl`, not from a constant here: a guest
-//! that reads `kern.osrelease` and one that sends `-operatingSystemVersion` are
-//! asking the same question, and two derivations would let them disagree.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -247,7 +235,6 @@ unsafe extern "C" fn system_uptime(_receiver: Id, _sel: Sel) -> f64 {
     let clock = libc::CLOCK_BOOTTIME;
     #[cfg(target_os = "macos")]
     let clock = libc::CLOCK_MONOTONIC;
-    // SAFETY: as above.
     if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
         return 0.0;
     }

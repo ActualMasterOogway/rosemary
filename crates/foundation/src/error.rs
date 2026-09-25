@@ -1,9 +1,3 @@
-//! `NSError`, as the three things a caller reads off one.
-//!
-//! Built here rather than by a guest: every `NSError` in this tree is one this
-//! runtime hands *out* through an `NSError **` out-parameter, so there is no
-//! `-initWithDomain:code:userInfo:` and nothing that would need one.
-
 use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -59,7 +53,6 @@ unsafe fn contents<'a>(receiver: Id) -> Option<&'a Contents> {
     if receiver.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         let body = receiver as *const Body;
         (!(*body).contents.is_null()).then(|| &*(*body).contents)
@@ -75,12 +68,10 @@ unsafe extern "C" fn domain(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn code(receiver: Id, _sel: Sel) -> i64 {
-    // SAFETY: as above.
     unsafe { contents(receiver) }.map_or(0, |c| c.code)
 }
 
 unsafe extern "C" fn localized_description(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     match unsafe { contents(receiver) } {
         Some(c) => autoreleased(&c.description),
         None => std::ptr::null_mut(),

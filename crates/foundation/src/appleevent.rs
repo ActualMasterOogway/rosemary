@@ -1,22 +1,3 @@
-//! `NSAppleEventManager` and `NSAppleEventDescriptor`.
-//!
-//! An unbound `_OBJC_CLASS_$_NSAppleEventManager` is the quiet kind of gap:
-//! `[[NSAppleEventManager sharedAppleEventManager] setEventHandler:...]` is a
-//! message to nil, which registers nothing and says nothing, and the program
-//! runs on believing it will be told about the URL it was opened with.
-//!
-//! Nothing outside this process can send an Apple Event to it - there is no
-//! LaunchServices here and no Mach port anyone could address - so the events
-//! that reach [`dispatch`] are the ones this runtime raises itself. AppKit
-//! raises `aevt`/`oapp` at launch, which is the one every application receives
-//! on a real Mac, and a handler for it is the difference between a program that
-//! opens its untitled document and one that opens nothing.
-//!
-//! A descriptor's payload is stored the way an `AEDesc` stores it - a
-//! four-character type and the bytes for it, in the machine's byte order - so
-//! that `-descriptorType` and `-data` answer what a guest that reads them
-//! itself would have gotten from Apple's.
-
 use std::ffi::c_void;
 
 use objc::class::Class;
@@ -145,7 +126,6 @@ fn autoreleased(desc: Desc) -> Id {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn desc_of<'a>(object: Id) -> Option<&'a mut Desc> {
-    // SAFETY: the caller's obligation.
     if !unsafe {
         corefoundation::base::is_kind_of(
             object as corefoundation::base::CFTypeRef,
@@ -225,7 +205,6 @@ pub fn event(event_class: u32, event_id: u32) -> Id {
 ///
 /// Both must be descriptors this module made.
 pub unsafe fn set_param(event: Id, keyword: u32, value: Id) {
-    // SAFETY: the caller's obligation.
     unsafe { set_keyed(event, keyword, value, Slot::Param) };
 }
 
@@ -240,7 +219,6 @@ enum Slot {
 ///
 /// `receiver` and `value` must be null or objects this runtime allocated.
 unsafe fn set_keyed(receiver: Id, keyword: u32, value: Id, slot: Slot) {
-    // SAFETY: the caller's obligation.
     let Some(desc) = (unsafe { desc_of(receiver) }) else {
         return;
     };
@@ -265,7 +243,6 @@ unsafe fn set_keyed(receiver: Id, keyword: u32, value: Id, slot: Slot) {
 ///
 /// `receiver` must be null or an object this runtime allocated.
 unsafe fn keyed(receiver: Id, keyword: u32, slot: Slot) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(desc) = (unsafe { desc_of(receiver) }) else {
         return std::ptr::null_mut();
     };
@@ -374,7 +351,6 @@ unsafe extern "C" fn descriptor_with_string(_class: Id, _sel: Sel, value: Id) ->
 unsafe fn text_bytes(string: Id) -> Vec<u8> {
     match string.is_null() {
         true => Vec::new(),
-        // SAFETY: the caller's obligation.
         false => unsafe { crate::string::bytes(string) },
     }
 }
@@ -905,7 +881,6 @@ fn tracing() -> bool {
 ///
 /// `event` must be a descriptor this module made.
 pub unsafe fn dispatch(event: Id) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(desc) = (unsafe { desc_of(event) }) else {
         return std::ptr::null_mut();
     };
@@ -949,7 +924,6 @@ pub fn raise(event_class: u32, event_id: u32) {
 ///
 /// `handler` must be live and `selector` must name a method taking two objects.
 unsafe fn call_handler(handler: Id, selector: Sel, event: Id, reply: Id) {
-    // SAFETY: the caller's obligation.
     let Some(method) =
         (unsafe { objc::object::class_of(handler) }).and_then(|c| c.method(selector))
     else {
@@ -962,13 +936,11 @@ unsafe fn call_handler(handler: Id, selector: Sel, event: Id, reply: Id) {
             selector_name(selector)
         );
     };
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(Id, Sel, Id, Id) = unsafe {
         std::mem::transmute::<*const c_void, unsafe extern "C" fn(Id, Sel, Id, Id)>(
             method.implementation(),
         )
     };
-    // SAFETY: as above.
     unsafe { f(handler, selector, event, reply) };
 }
 
@@ -1130,7 +1102,6 @@ mod tests {
         let e = event(INTERNET_EVENT_CLASS, GET_URL);
         // SAFETY: two descriptors this call made.
         unsafe { set_param(e, KEY_DIRECT_OBJECT, string("r3://open")) };
-        // SAFETY: as above.
         let reply = unsafe { dispatch(e) };
         assert!(!reply.is_null());
 

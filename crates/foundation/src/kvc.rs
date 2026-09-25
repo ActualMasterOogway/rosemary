@@ -1,5 +1,3 @@
-//! Key-value coding: `-setValue:forKey:` and `-valueForKey:`.
-
 use std::ffi::{CStr, CString};
 
 use objc::class::Class;
@@ -117,7 +115,7 @@ fn setter_name(key: &str) -> String {
 ///
 /// `bytes` must be a value of `shape`.
 unsafe fn box_value(shape: Shape, bytes: &[u8]) -> Id {
-    // SAFETY: the caller's obligation - `bytes` is at least as wide as `shape`.
+    // SAFETY: `bytes` is at least as wide as `shape`.
     unsafe {
         match shape {
             Shape::Object => *(bytes.as_ptr() as *const Id),
@@ -144,7 +142,6 @@ unsafe fn box_value(shape: Shape, bytes: &[u8]) -> Id {
 ///
 /// `value` must be null or an object this runtime allocated.
 unsafe fn unbox_value(shape: Shape, value: Id) -> Option<Vec<u8>> {
-    // SAFETY: the caller's obligation.
     unsafe {
         Some(match shape {
             Shape::Object => (value as usize).to_le_bytes().to_vec(),
@@ -176,11 +173,9 @@ unsafe fn call_setter(
     // the only way the argument lands where the callee looks for it.
     macro_rules! call {
         ($ty:ty) => {{
-            // SAFETY: the caller's obligation.
             let f: unsafe extern "C" fn(Id, Sel, $ty) = unsafe { std::mem::transmute(imp) };
             // SAFETY: `bytes` is a value of this type, as just checked.
             let value = unsafe { *(bytes.as_ptr() as *const $ty) };
-            // SAFETY: as above.
             unsafe { f(receiver, sel, value) }
         }};
     }
@@ -208,9 +203,7 @@ unsafe fn call_setter(
 unsafe fn call_getter(imp: *const std::ffi::c_void, receiver: Id, sel: Sel, shape: Shape) -> Id {
     macro_rules! call {
         ($ty:ty) => {{
-            // SAFETY: the caller's obligation.
             let f: unsafe extern "C" fn(Id, Sel) -> $ty = unsafe { std::mem::transmute(imp) };
-            // SAFETY: as above.
             let value = unsafe { f(receiver, sel) };
             // SAFETY: `value` is a live value of this type.
             unsafe {
@@ -285,7 +278,6 @@ unsafe extern "C" fn set_value_for_key(receiver: Id, _sel: Sel, value: Id, key: 
             objc::fail!(
                 "-[{} setValue:forKey:@\"{key}\"]: a {} is not a {shape:?}",
                 class.name_str(),
-                // SAFETY: as above.
                 unsafe { objc::object::class_of(value) }.map_or("nil", |c| c.name_str())
             );
         };

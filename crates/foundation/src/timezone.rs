@@ -1,12 +1,3 @@
-//! `NSTimeZone`'s two class methods, over the host's zoneinfo database.
-//!
-//! The object itself is `corefoundation`'s, because `CFTimeZoneCopySystem` is
-//! answered during startup and is underneath this crate. What is here is the
-//! Objective-C spelling a guest reaches for: `+systemTimeZone`, and the list of
-//! names `+timeZoneWithName:` accepts, which is the *host's* list rather than a
-//! table baked in here - a guest that offers the user a zone and then sets `TZ`
-//! from it must offer names the host can actually resolve.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -89,7 +80,6 @@ fn known_names() -> Vec<String> {
 
 /// `+[NSTimeZone systemTimeZone]`, autoreleased as a `+` method's result is.
 unsafe extern "C" fn system_time_zone(_class: Id, _sel: Sel) -> Id {
-    // SAFETY: takes no argument and returns a fresh timezone.
     let zone = unsafe { corefoundation::timezone::copy_system() };
     // SAFETY: the reference `copy_system` handed over.
     unsafe { corefoundation::api::CFAutorelease(zone) as Id }

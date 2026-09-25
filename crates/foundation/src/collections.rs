@@ -1,12 +1,3 @@
-//! `NSArray`, `NSDictionary`, `NSData` and `NSNumber`, on the storage
-//! [`corefoundation::collections`] already holds.
-//!
-//! The mutable spellings are here too. A `__NSCFArray` descends from
-//! `NSMutableArray` whether or not it was created mutable - it has to, or a
-//! guest's `isKindOfClass:` disagrees with the object it is holding - so
-//! mutability is a field, and mutating an immutable collection is refused *by
-//! name* rather than quietly allowed.
-
 use corefoundation::api;
 use corefoundation::base::CFTypeRef;
 use corefoundation::callbacks::Policy;
@@ -65,7 +56,6 @@ unsafe extern "C" fn first_object(receiver: Id, sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn last_object(receiver: Id, sel: Sel) -> Id {
-    // SAFETY: as above.
     unsafe {
         match count(receiver, sel) {
             0 => std::ptr::null_mut(),
@@ -280,7 +270,6 @@ unsafe fn describe(object: Id) -> Vec<u8> {
         return b"(null)".to_vec();
     }
     let sel = objc::sel::get("description");
-    // SAFETY: the caller's obligation.
     let described = (unsafe { objc::object::class_of(object) })
         .and_then(|class| class.method(sel))
         .map(|_| {
@@ -296,7 +285,6 @@ unsafe fn describe(object: Id) -> Vec<u8> {
         // SAFETY: a string this object just answered with.
         Some(described) => unsafe { crate::string::bytes(described) },
         None => {
-            // SAFETY: the caller's obligation.
             let name = (unsafe { objc::object::class_of(object) })
                 // SAFETY: a realized class names itself with a live C string.
                 .map(|class| unsafe { std::ffi::CStr::from_ptr(class.name()) })
@@ -510,7 +498,6 @@ unsafe fn enumerate(state: *mut FastEnumerationState, values: &mut [CFTypeRef]) 
     if state.is_null() {
         return 0;
     }
-    // SAFETY: the caller's obligation.
     let state = unsafe { &mut *state };
     if state.state != 0 {
         return 0;
@@ -818,7 +805,6 @@ unsafe extern "C" fn init_mutable_array_with_capacity(
     sel: Sel,
     _capacity: usize,
 ) -> Id {
-    // SAFETY: the caller's obligation, forwarded.
     unsafe { init_mutable_array(receiver, sel) }
 }
 
@@ -843,7 +829,6 @@ unsafe extern "C" fn init_mutable_dictionary_with_capacity(
     sel: Sel,
     _capacity: usize,
 ) -> Id {
-    // SAFETY: the caller's obligation, forwarded.
     unsafe { init_mutable_dictionary(receiver, sel) }
 }
 

@@ -1,8 +1,3 @@
-//! `NSNull`, and the `NSValue` shell above `NSNumber`.
-//!
-//! `NSNull` is a singleton with no state at all, and its whole job is to be a
-//! placeholder a collection can hold where `nil` would end an argument list.
-
 use std::ffi::c_void;
 
 use objc::object::Id;

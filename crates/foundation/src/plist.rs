@@ -1,18 +1,3 @@
-//! Reading a property list.
-//!
-//! Needed before anything else in a bundle can be answered: `Info.plist` is what
-//! says which class is the principal one and which nib is the main one, and a
-//! `.app` whose `Info.plist` cannot be read is a `.app` with no identity at all.
-//!
-//! Both spellings a `.app` uses are here. The binary one is what Xcode writes
-//! and what Deltarune has; the XML one is what a hand-edited plist still looks
-//! like, and reading only the first would fail on the second with nothing to say
-//! why.
-//!
-//! Not a general plist library: what is decoded is what a bundle and a nib are
-//! made of. A type nobody has needed is [`Value::Unsupported`] with its marker
-//! in it, which is a name a reader can report rather than a silent `nil`.
-
 use std::collections::BTreeMap;
 
 /// One value in a property list.

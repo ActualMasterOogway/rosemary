@@ -1,9 +1,3 @@
-//! `NSString`, on the storage [`corefoundation::string`] already holds.
-//!
-//! Every method here is the Objective-C spelling of a CoreFoundation call that
-//! already works, which is the whole of what toll-free bridging is: one object,
-//! two vocabularies.
-
 use std::ffi::{CStr, c_char};
 
 use corefoundation::api;
@@ -59,7 +53,6 @@ pub fn cf_encoding(ns: usize) -> u32 {
 ///
 /// `receiver` must be null or an object this runtime allocated.
 pub unsafe fn bytes(receiver: Id) -> Vec<u8> {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::string::as_string(receiver as CFTypeRef) }
         .map(|s| s.utf8())
         .unwrap_or_default()
@@ -116,7 +109,6 @@ unsafe extern "C" fn character_at_index(receiver: Id, _sel: Sel, index: usize) -
 unsafe extern "C" fn append_string(receiver: Id, _sel: Sel, other: Id) -> Id {
     // SAFETY: two `NSString`s, or nil.
     let mut joined = unsafe { bytes(receiver) };
-    // SAFETY: as above.
     joined.extend_from_slice(&unsafe { bytes(other) });
     let s = corefoundation::string::from_bytes(&joined, false);
     // SAFETY: a fresh object.
@@ -158,7 +150,6 @@ unsafe extern "C" fn string_with_characters(
     chars: *const u16,
     count: usize,
 ) -> Id {
-    // SAFETY: the caller's obligation.
     let string = unsafe {
         api::CFStringCreateWithCharacters(
             std::ptr::null(),
@@ -179,7 +170,6 @@ unsafe extern "C" fn string_with_cstring_encoding(
     cstr: *const c_char,
     ns: usize,
 ) -> Id {
-    // SAFETY: as above.
     unsafe {
         let s = api::CFStringCreateWithCString(std::ptr::null(), cstr, cf_encoding(ns));
         api::CFAutorelease(s) as Id
@@ -364,7 +354,6 @@ unsafe extern "C" fn init_with_cstring_encoding(
     cstr: *const c_char,
     ns: usize,
 ) -> Id {
-    // SAFETY: as above.
     unsafe {
         objc::arc::release(receiver);
         api::CFStringCreateWithCString(std::ptr::null(), cstr, cf_encoding(ns)) as Id
@@ -430,7 +419,6 @@ unsafe extern "C" fn data_using_encoding_lossy(
     ns: usize,
     _lossy: bool,
 ) -> Id {
-    // SAFETY: as above.
     unsafe { data_using_encoding(receiver, sel, ns) }
 }
 
@@ -471,11 +459,9 @@ pub fn from_cstr(text: &CStr) -> Id {
 ///
 /// `receiver` must be null or an object this runtime allocated.
 unsafe fn replace(receiver: Id, selector: &str, bytes: &[u8]) {
-    // SAFETY: the caller's obligation.
     if unsafe { corefoundation::string::set_bytes(receiver as CFTypeRef, bytes) } {
         return;
     }
-    // SAFETY: as above.
     let class = unsafe { objc::object::class_of(receiver) };
     objc::fail!(
         "-[{} {selector}]: the string was not created mutable",
@@ -486,9 +472,7 @@ unsafe fn replace(receiver: Id, selector: &str, bytes: &[u8]) {
 unsafe extern "C" fn append_string_in_place(receiver: Id, _sel: Sel, other: Id) {
     // SAFETY: two `NSString`s, or nil.
     let mut joined = unsafe { bytes(receiver) };
-    // SAFETY: as above.
     joined.extend_from_slice(&unsafe { bytes(other) });
-    // SAFETY: as above.
     unsafe { replace(receiver, "appendString:", &joined) };
 }
 
@@ -496,16 +480,13 @@ unsafe extern "C" fn append_string_in_place(receiver: Id, _sel: Sel, other: Id) 
 unsafe extern "C" fn append_format(receiver: Id, _sel: Sel, format: Id) {
     // SAFETY: two `NSString`s, or nil.
     let mut joined = unsafe { bytes(receiver) };
-    // SAFETY: as above.
     joined.extend_from_slice(&unescape_rendered(&unsafe { bytes(format) }));
-    // SAFETY: as above.
     unsafe { replace(receiver, "appendFormat:", &joined) };
 }
 
 unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, other: Id) {
     // SAFETY: two `NSString`s, or nil.
     let bytes = unsafe { bytes(other) };
-    // SAFETY: as above.
     unsafe { replace(receiver, "setString:", &bytes) };
 }
 
@@ -666,10 +647,7 @@ unsafe extern "C" fn trimming_characters(receiver: Id, _sel: Sel, set: Id) -> Id
         .unwrap_or(original.len());
     let end = original
         .iter()
-        .rposition(|byte| {
-            // SAFETY: as above.
-            !unsafe { crate::characterset::contains(set, *byte) }
-        })
+        .rposition(|byte| !unsafe { crate::characterset::contains(set, *byte) })
         .map_or(start, |index| index + 1);
     slice(&original, start, end)
 }

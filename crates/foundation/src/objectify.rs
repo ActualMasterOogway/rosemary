@@ -1,16 +1,3 @@
-//! A parsed property list as Foundation objects.
-//!
-//! [`crate::plist`] reads a file into a [`Value`] tree, which is Rust's. A guest
-//! asking for `-[NSBundle infoDictionary]` wants the same tree as `NSDictionary`,
-//! `NSString` and `NSNumber`, and this is the one conversion between them.
-//!
-//! Total, deliberately. Every variant is either converted or **refused by name**:
-//! a converter that skipped what it could not represent would hand a guest a
-//! dictionary missing a key, which is indistinguishable from a plist that never
-//! had it. That was the reason `-infoDictionary` was refused outright before
-//! this module existed, and it is the reason the two arms at the bottom abort
-//! rather than returning nil.
-
 use corefoundation::base::CFTypeRef;
 use objc::object::Id;
 

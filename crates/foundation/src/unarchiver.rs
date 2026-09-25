@@ -1,19 +1,3 @@
-//! Reading an `NSKeyedArchiver` archive.
-//!
-//! A nib is one of these: `bplist00` on the outside, with `$objects` a flat
-//! table and every reference into it a `CF$UID`. So [`crate::plist`] already
-//! reads the file, and what is left is the indirection - which is what this
-//! module is.
-//!
-//! Deliberately not a decoder that hands back a tree. A nib's object graph has
-//! cycles in it: an `NSNibOutletConnector` names a source, and the source's own
-//! connection list names the connector back. A tree walk would not terminate, so
-//! references stay [`Uid`]s and the caller follows them when it means to.
-//!
-//! Nothing here builds an object. Turning an entry into an instance needs a
-//! class and a runtime, which is `appkit::nib`'s business; this module only says
-//! what the file contains.
-
 use std::collections::BTreeMap;
 
 use crate::plist::{self, Value};

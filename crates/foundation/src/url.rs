@@ -1,6 +1,3 @@
-//! `NSURL`'s methods. The object itself is `corefoundation::url`, because
-//! `CFURLRef` is `NSURL *` and the storage cannot be two things.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -12,7 +9,6 @@ use crate::define::{class_methods, methods};
 ///
 /// `receiver` must be null or an object this runtime allocated.
 pub unsafe fn text_of(receiver: Id) -> Option<String> {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
         .map(|u| u.text.clone())
 }
@@ -199,7 +195,6 @@ fn autoreleased(text: &str) -> Id {
 ///
 /// `receiver` is null or an `NSURL`.
 unsafe fn file_path_of(receiver: Id) -> Option<String> {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }?.file_path()
 }
 
@@ -284,7 +279,6 @@ unsafe extern "C" fn url_by_appending_path_component_is_directory(
     name: Id,
     directory: u8,
 ) -> Id {
-    // SAFETY: as above.
     let (Some(base), bytes) = (unsafe { file_path_of(receiver) }, unsafe {
         crate::string::bytes(name)
     }) else {
@@ -300,7 +294,6 @@ unsafe extern "C" fn url_by_appending_path_component_is_directory(
 }
 
 unsafe extern "C" fn url_by_appending_path_extension(receiver: Id, _sel: Sel, extension: Id) -> Id {
-    // SAFETY: as above.
     let (Some(base), bytes) = (unsafe { file_path_of(receiver) }, unsafe {
         crate::string::bytes(extension)
     }) else {

@@ -1,5 +1,3 @@
-//! `NSHTTPCookie` and `NSHTTPCookieStorage`, persisted across launches.
-
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -179,7 +177,6 @@ unsafe fn cookie_of<'a>(object: Id) -> Option<&'a Cookie> {
     if object.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let payload = unsafe { (*(object as *const CookieObject)).cookie };
     (!payload.is_null()).then(|| unsafe { &*payload })
 }
@@ -200,7 +197,6 @@ fn make_cookie(cookie: Cookie) -> Id {
 ///
 /// `object` must be null or an `NSString`.
 unsafe fn text(object: Id) -> String {
-    // SAFETY: the caller's obligation.
     String::from_utf8_lossy(&unsafe { crate::string::bytes(object) }).into_owned()
 }
 
@@ -298,7 +294,6 @@ unsafe extern "C" fn cookie_with_properties(_class: Id, _sel: Sel, properties: I
     let discard = unsafe { flag(object(&["NSHTTPCookieDiscard", "Discard", "discard"])) };
     let expires = match discard {
         true => None,
-        // SAFETY: as above.
         false => unsafe { expiry(object(&["NSHTTPCookieExpires", "Expires", "expires"])) },
     };
     make_cookie(Cookie {
@@ -324,12 +319,10 @@ unsafe fn origin_host(value: Id) -> String {
     if value.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     if unsafe { corefoundation::string::as_string(value as CFTypeRef) }.is_some() {
         // SAFETY: an `NSString`.
         return split_url(&unsafe { text(value) }).0;
     }
-    // SAFETY: the caller's obligation.
     if unsafe { corefoundation::url::as_url(value as CFTypeRef) }.is_some() {
         // SAFETY: an `NSURL`, which answers `-absoluteString`.
         return unsafe { host_and_path(value) }.0;
@@ -351,7 +344,6 @@ unsafe fn flag(value: Id) -> bool {
     if value as CFTypeRef == corefoundation::collections::boolean(true) {
         return true;
     }
-    // SAFETY: the caller's obligation.
     if let Some(number) = unsafe { corefoundation::collections::number(value as CFTypeRef) } {
         return number.as_i64() != 0;
     }
@@ -543,22 +535,18 @@ unsafe extern "C" fn cookie_name(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn cookie_value(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     autoreleased(unsafe { cookie_of(receiver) }.map_or("", |c| c.value.as_str()))
 }
 
 unsafe extern "C" fn cookie_domain(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     autoreleased(unsafe { cookie_of(receiver) }.map_or("", |c| c.domain.as_str()))
 }
 
 unsafe extern "C" fn cookie_path(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     autoreleased(unsafe { cookie_of(receiver) }.map_or("/", |c| c.path.as_str()))
 }
 
 unsafe extern "C" fn cookie_is_secure(receiver: Id, _sel: Sel) -> u8 {
-    // SAFETY: as above.
     u8::from(unsafe { cookie_of(receiver) }.is_some_and(|c| c.secure))
 }
 
@@ -574,7 +562,6 @@ unsafe extern "C" fn cookie_expires_date(receiver: Id, _sel: Sel) -> Id {
 /// `-isSessionOnly`, which is what "has no expiry" means to a caller deciding
 /// whether the cookie is worth keeping.
 unsafe extern "C" fn cookie_is_session_only(receiver: Id, _sel: Sel) -> u8 {
-    // SAFETY: as above.
     u8::from(unsafe { cookie_of(receiver) }.is_none_or(|c| c.expires.is_none()))
 }
 
@@ -765,7 +752,6 @@ unsafe extern "C" fn set_cookie(_receiver: Id, _sel: Sel, cookie: Id) {
 }
 
 unsafe extern "C" fn delete_cookie(_receiver: Id, _sel: Sel, cookie: Id) {
-    // SAFETY: as above.
     let Some(cookie) = (unsafe { cookie_of(cookie) }) else {
         return;
     };
