@@ -214,6 +214,9 @@ fn trace_views() {
 
 pub(crate) fn deliver(event: sdl3::video::Event) {
     use sdl3::video::Event;
+    if crate::dialog::deliver(&event) {
+        return;
+    }
     match event {
         // A quit is the whole application, and is the one event that is not
         // about a window: it is what a program's `-applicationShouldTerminate:`

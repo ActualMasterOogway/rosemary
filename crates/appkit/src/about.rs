@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use objc::object::Id;
 use objc::sel::Sel;
@@ -110,13 +111,20 @@ unsafe fn about(options: Id) -> About {
     }
 }
 
+/// The open About panel's window, so ordering it front again raises it
+/// rather than opening a second, as AppKit's single panel does.
+static OPEN: AtomicU32 = AtomicU32::new(0);
+
 /// `-orderFrontStandardAboutPanelWithOptions:`.
 ///
-/// Shown as an alert with the application's icon, which blocks where AppKit's
-/// panel does not: an About panel that waits to be dismissed costs the program
-/// nothing it could observe beyond the time. The icon option is not read; the
-/// application's own icon is shown.
+/// Shown as a modeless alert with the application's icon: the method returns
+/// at once and the program goes on running, as with AppKit's panel. The icon
+/// option is not read; the application's own icon is shown.
 pub(crate) unsafe extern "C" fn order_front_with_options(_receiver: Id, _sel: Sel, options: Id) {
+    let open = OPEN.load(Ordering::Acquire);
+    if open != 0 && crate::dialog::raise(open) {
+        return;
+    }
     // SAFETY: the guest passes a dictionary or nil.
     let about = unsafe { about(options) };
     let request = crate::dialog::Request {
@@ -127,8 +135,9 @@ pub(crate) unsafe extern "C" fn order_front_with_options(_receiver: Id, _sel: Se
         cancel: None,
         application_icon: true,
     };
-    if crate::dialog::run(&request).is_none() {
-        eprintln!("rosetta3: appkit: could not show the About panel");
+    match crate::dialog::show(&request, |_| OPEN.store(0, Ordering::Release)) {
+        Some(id) => OPEN.store(id, Ordering::Release),
+        None => eprintln!("rosetta3: appkit: could not show the About panel"),
     }
 }
 
