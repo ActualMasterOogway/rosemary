@@ -4,11 +4,6 @@
     non_snake_case
 )]
 
-//! The ForceFeedback C API, implemented with SDL3's portable two-motor rumble.
-//!
-//! Effects remain API objects, but playback reduces them to SDL's two-motor
-//! rumble with a duration.
-
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
