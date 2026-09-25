@@ -237,6 +237,7 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             }
             post(window, window::WILL_CLOSE);
         }
+        Event::WindowHitTest { window } => crate::decor::hit_test_pressed(window),
         Event::WindowState { window } => {
             let object = object_for(window);
             if !object.is_null()

@@ -188,6 +188,10 @@ pub struct Pixels {
     pub pixels: Vec<u8>,
     /// Changes whenever the pixels do.
     pub generation: u64,
+    /// The radius of the window's rounded corners in pixels, or 0 for square
+    /// ones. The top corners are already cut out of `pixels`; the bottom ones
+    /// are the presenter's to cut.
+    pub radius: f32,
 }
 
 /// Keyed by SDL window address, for whichever thread presents it.
@@ -219,6 +223,8 @@ struct HitMap {
     drag_bottom: f32,
     controls: Vec<Rect>,
     resizable: bool,
+    /// The window's `wl_surface`, on Wayland.
+    surface: usize,
 }
 
 static HIT_MAPS: Mutex<Option<HashMap<usize, HitMap>>> = Mutex::new(None);
@@ -240,7 +246,11 @@ unsafe extern "C" fn hit_test(
     let Some(map) = maps.as_ref().and_then(|maps| maps.get(&(window as usize))) else {
         return R::Normal;
     };
-    let (x, y) = (point.x as f32, point.y as f32);
+    classify(map, window, point.x as f32, point.y as f32)
+}
+
+fn classify(map: &HitMap, window: sdl3::Window, x: f32, y: f32) -> sdl3::video::HitTestResult {
+    use sdl3::video::HitTestResult as R;
     let maximized = sdl3::video::window_flags(window) & sdl3::video::flags::MAXIMIZED != 0;
     if map.resizable && !maximized {
         let left = x < RESIZE_EDGE;
@@ -266,6 +276,158 @@ unsafe extern "C" fn hit_test(
     R::Normal
 }
 
+/// SDL windows a presenter shows opaque whatever their alpha, whose corners
+/// therefore stay square.
+static OPAQUE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// `sdl` is presented through a path that ignores alpha from now on. Its
+/// corners are drawn square: cut out, they would show black.
+pub fn presented_opaque(sdl: sdl3::Window) {
+    let mut opaque = OPAQUE.lock().unwrap_or_else(|e| e.into_inner());
+    if !opaque.contains(&(sdl as usize)) {
+        opaque.push(sdl as usize);
+    }
+}
+
+/// Drop everything kept for an SDL window that is being destroyed: its
+/// presenter goes with it, and its address may be reused.
+pub(crate) fn destroyed(sdl: sdl3::Window) {
+    forget_sdl(sdl);
+    OPAQUE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|opaque| *opaque != sdl as usize);
+}
+
+/// Whether a decorated window's corners are rounded: it has to be see-through
+/// where they are cut, and a maximized window fills its space edge to edge.
+fn rounds(sdl: sdl3::Window) -> bool {
+    let flags = sdl3::video::window_flags(sdl);
+    flags & sdl3::video::flags::TRANSPARENT != 0
+        && flags & (sdl3::video::flags::MAXIMIZED | sdl3::video::flags::FULLSCREEN) == 0
+        && !OPAQUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(sdl as usize))
+}
+
+/// The last press on a titlebar outside its controls, which the window
+/// manager took for a drag, as (SDL window, x, y, milliseconds).
+static LAST_TITLEBAR_PRESS: Mutex<Option<(usize, f32, f32, u64)>> = Mutex::new(None);
+
+/// SDL's defaults for what makes two presses one double click.
+const DOUBLE_CLICK_MILLISECONDS: u64 = 500;
+const DOUBLE_CLICK_RADIUS: f32 = 32.0;
+
+/// A press the window manager was handed at `x`, `y` of `sdl`; true when it
+/// is the second of a double click, which zooms the window as a Mac's
+/// titlebar does.
+fn titlebar_pressed(sdl: sdl3::Window, x: f32, y: f32, time: u64) -> bool {
+    let draggable = HIT_MAPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|maps| maps.get(&(sdl as usize)))
+        .is_some_and(|map| classify(map, sdl, x, y) == sdl3::video::HitTestResult::Draggable);
+    let mut last = LAST_TITLEBAR_PRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let double = draggable
+        && last.is_some_and(|(window, last_x, last_y, last_time)| {
+            window == sdl as usize
+                && time.wrapping_sub(last_time) <= DOUBLE_CLICK_MILLISECONDS
+                && (x - last_x).hypot(y - last_y) <= DOUBLE_CLICK_RADIUS
+        });
+    *last = match draggable && !double {
+        true => Some((sdl as usize, x, y, time)),
+        false => None,
+    };
+    double
+}
+
+fn zoom(sdl: sdl3::Window) {
+    let window = crate::event::object_for(sdl3::video::window_id(sdl));
+    if !window.is_null() {
+        send(window, "zoom:");
+    }
+}
+
+/// SDL reported a press its hit test gave the window manager, which only X11
+/// does; the pointer has not moved since.
+pub(crate) fn hit_test_pressed(id: u32) {
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let window = crate::event::object_for(id);
+    let Some((x, y, _)) = sdl3::video::mouse_state() else {
+        return;
+    };
+    if window.is_null() {
+        return;
+    }
+    // SAFETY: a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    let time = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    if titlebar_pressed(sdl, x, y, time) {
+        zoom(sdl);
+    }
+}
+
+/// A double click on a titlebar whose zoom waits for the compositor to
+/// finish the move its second press began, as (SDL window, when).
+static PENDING_ZOOM: Mutex<Option<(usize, std::time::Instant)>> = Mutex::new(None);
+
+/// How long after a double click the move it began may take to end for the
+/// zoom still to happen. Longer, and the second press was the start of a drag.
+const PENDING_ZOOM_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The pointer events a Wayland compositor delivered since the last pump. SDL
+/// never reports a press on a titlebar, so they are watched for separately.
+///
+/// The second press of a double click has already started an interactive
+/// move by the time it is seen here, and a compositor asked to maximize a
+/// window it is moving resizes it without maximizing it. So the zoom waits
+/// for the move to end: the release, or the pointer coming back.
+fn wayland_pointer_events() {
+    use sdl3::wayland::PointerEvent;
+    let sdl_for = |surface: usize| {
+        HIT_MAPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|maps| {
+                maps.iter()
+                    .find(|(_, map)| map.surface == surface)
+                    .map(|(sdl, _)| *sdl)
+            })
+    };
+    let mut pending = PENDING_ZOOM.lock().unwrap_or_else(|e| e.into_inner());
+    for event in sdl3::wayland::take_events() {
+        match event {
+            PointerEvent::Press {
+                surface,
+                x,
+                y,
+                time,
+            } => {
+                *pending = sdl_for(surface).and_then(|sdl| {
+                    titlebar_pressed(sdl as sdl3::Window, x, y, u64::from(time))
+                        .then(|| (sdl, std::time::Instant::now()))
+                });
+            }
+            PointerEvent::Release | PointerEvent::Enter { .. } => {
+                if let Some((sdl, since)) = pending.take()
+                    && since.elapsed() <= PENDING_ZOOM_LIMIT
+                {
+                    zoom(sdl as sdl3::Window);
+                }
+            }
+        }
+    }
+    if pending.is_some_and(|(_, since)| since.elapsed() > PENDING_ZOOM_LIMIT) {
+        *pending = None;
+    }
+}
+
 /// One decorated window's chrome, as last painted.
 struct Chrome {
     sdl: usize,
@@ -279,6 +441,7 @@ struct Chrome {
     hover: Option<(Row, Part)>,
     pressed: Option<(Row, Part)>,
     dark: bool,
+    rounded: bool,
     generation: u64,
 }
 
@@ -360,6 +523,7 @@ fn models(config: Config, facts: &Facts, window: Id) -> (Option<Bar>, Option<Bar
 /// composed.
 pub(crate) fn pump() {
     let config = config();
+    wayland_pointer_events();
     if follow_system_theme() {
         repaint_menus();
     }
@@ -387,6 +551,7 @@ pub(crate) fn pump() {
             false => 1.0,
         };
         let inset = titlebar_height + strip_height;
+        let rounded = config.decorations == Decorations::Client && rounds(sdl);
         let size = (
             pixel_width.max(1) as u32,
             (inset * scale).round().max(1.0) as u32,
@@ -403,6 +568,7 @@ pub(crate) fn pump() {
             let unchanged = existing.is_some_and(|c| {
                 c.sdl == sdl as usize
                     && c.dark == dark
+                    && c.rounded == rounded
                     && c.size == size
                     && c.titlebar == titlebar
                     && c.strip == strip
@@ -434,6 +600,19 @@ pub(crate) fn pump() {
                     bar.paint(&mut canvas, &strip_layout, theme);
                 }
             }
+            let radius = match rounded {
+                true => theme.window_corner_radius * scale,
+                false => 0.0,
+            };
+            chrome::corners::clip(
+                &mut pixels,
+                size.0 as usize,
+                size.1 as usize,
+                size.0 as usize * 4,
+                radius,
+                true,
+                false,
+            );
             let generation = existing.map_or(1, |c| c.generation + 1);
             let controls: Vec<Rect> = titlebar_layout
                 .parts
@@ -454,6 +633,7 @@ pub(crate) fn pump() {
                     hover,
                     pressed,
                     dark,
+                    rounded,
                     generation,
                 },
             );
@@ -463,6 +643,7 @@ pub(crate) fn pump() {
                     height: size.1,
                     pixels,
                     generation,
+                    radius,
                 },
                 controls,
             ))
@@ -476,12 +657,17 @@ pub(crate) fn pump() {
             .get_or_insert_with(HashMap::new)
             .insert(sdl as usize, Arc::new(pixels));
         if config.decorations == Decorations::Client {
+            let wayland = sdl3::video::wayland_surface(sdl);
+            if let Some((display, _)) = wayland {
+                sdl3::wayland::watch(display);
+            }
             let map = HitMap {
                 width: width as f32,
                 height: height as f32,
                 drag_bottom: inset,
                 controls,
                 resizable: facts.resizable,
+                surface: wayland.map_or(0, |(_, surface)| surface as usize),
             };
             let fresh = HIT_MAPS
                 .lock()
@@ -1279,6 +1465,7 @@ mod tests {
                     drag_bottom: 28.0,
                     controls: vec![Rect::new(8.0, 8.0, 12.0, 12.0)],
                     resizable: true,
+                    surface: 0,
                 },
             );
         let at = |x, y| {

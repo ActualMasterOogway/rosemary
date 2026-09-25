@@ -3,6 +3,7 @@
 //! A small, host-side layer - geometry, a software painter, text, a theme and
 //! a few views.
 
+pub mod corners;
 pub mod fonts;
 pub mod geometry;
 pub mod menu;

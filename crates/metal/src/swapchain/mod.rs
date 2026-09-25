@@ -193,6 +193,9 @@ fn present_impl(
         match Swapchain::create(gpu, frame.window, extent) {
             Ok(swapchain) => {
                 gpu::milestone("window swapchain");
+                // Blits carry the guest's alpha through untouched, so there
+                // is no making the chrome's corners see-through here.
+                appkit::decor::presented_opaque(frame.window);
                 slot.insert(swapchain);
             }
             Err(reason) => {

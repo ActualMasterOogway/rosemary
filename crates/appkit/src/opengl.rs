@@ -1474,6 +1474,10 @@ mod chrome_blit {
     const TEXTURE_MIN_FILTER: u32 = 0x2801;
     const TEXTURE_MAG_FILTER: u32 = 0x2800;
     const FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+    const SCISSOR_BOX: u32 = 0x0C10;
+    const COLOR_CLEAR_VALUE: u32 = 0x0C22;
+    const COLOR_WRITEMASK: u32 = 0x0C23;
+    const RASTERIZER_DISCARD: u32 = 0x8C89;
 
     #[allow(non_snake_case)]
     struct Gl {
@@ -1492,6 +1496,12 @@ mod chrome_blit {
         FramebufferTexture2D: unsafe extern "C" fn(u32, u32, u32, u32, i32),
         CheckFramebufferStatus: unsafe extern "C" fn(u32) -> u32,
         BlitFramebuffer: unsafe extern "C" fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32),
+        GetBooleanv: unsafe extern "C" fn(u32, *mut u8),
+        GetFloatv: unsafe extern "C" fn(u32, *mut f32),
+        ColorMask: unsafe extern "C" fn(u8, u8, u8, u8),
+        ClearColor: unsafe extern "C" fn(f32, f32, f32, f32),
+        Clear: unsafe extern "C" fn(u32),
+        Scissor: unsafe extern "C" fn(i32, i32, i32, i32),
     }
 
     impl Gl {
@@ -1518,6 +1528,12 @@ mod chrome_blit {
                 FramebufferTexture2D: get(c"glFramebufferTexture2D")?,
                 CheckFramebufferStatus: get(c"glCheckFramebufferStatus")?,
                 BlitFramebuffer: get(c"glBlitFramebuffer")?,
+                GetBooleanv: get(c"glGetBooleanv")?,
+                GetFloatv: get(c"glGetFloatv")?,
+                ColorMask: get(c"glColorMask")?,
+                ClearColor: get(c"glClearColor")?,
+                Clear: get(c"glClear")?,
+                Scissor: get(c"glScissor")?,
             })
         }
     }
@@ -1592,14 +1608,17 @@ mod chrome_blit {
 
     /// Draw `window`'s chrome into the current context's default framebuffer.
     pub(super) fn draw(window: sdl3::Window) {
-        let Some(chrome) = crate::decor::pixels(window) else {
-            return;
-        };
-        let context = sdl3::video::gl_current_context();
-        if context.is_null() || chrome.width == 0 || chrome.height == 0 {
+        let transparent = sdl3::video::window_flags(window) & sdl3::video::flags::TRANSPARENT != 0;
+        let chrome =
+            crate::decor::pixels(window).filter(|chrome| chrome.width != 0 && chrome.height != 0);
+        if chrome.is_none() && !transparent {
             return;
         }
-        let Some((_, height)) = sdl3::video::window_size_in_pixels(window) else {
+        let context = sdl3::video::gl_current_context();
+        if context.is_null() {
+            return;
+        }
+        let Some((width, height)) = sdl3::video::window_size_in_pixels(window) else {
             return;
         };
         static GL: std::sync::OnceLock<Option<Gl>> = std::sync::OnceLock::new();
@@ -1607,7 +1626,81 @@ mod chrome_blit {
             return;
         };
         // SAFETY: a current context, and entry points of its GL.
-        unsafe { blit(gl, context as usize, &chrome, height) };
+        unsafe {
+            if transparent {
+                let top = chrome.as_ref().map_or(0, |chrome| chrome.height as i32);
+                let radius = chrome.as_ref().map_or(0.0, |chrome| chrome.radius);
+                seal(gl, width, height, top, radius);
+            }
+            if let Some(chrome) = &chrome {
+                blit(gl, context as usize, chrome, height);
+            }
+        }
+    }
+
+    /// Give the content below the chrome's `top` rows full alpha, and clear
+    /// the bottom corners outside a rounding of `radius` pixels.
+    ///
+    /// SDL gives a transparent window's surface an alpha channel, and the
+    /// compositor shows it - but a Mac's window never shows its GL content's
+    /// alpha, and a guest writes there whatever its blending leaves. The
+    /// corners are cut whole pixels at a time: a clear cannot blend.
+    unsafe fn seal(gl: &Gl, width: i32, height: i32, top: i32, radius: f32) {
+        let get = |name| {
+            let mut value = [0i32; 4];
+            // SAFETY: a query of at most four values into a local.
+            unsafe { (gl.GetIntegerv)(name, value.as_mut_ptr()) };
+            value
+        };
+        // SAFETY: the current context; every piece of state changed is put
+        // back.
+        unsafe {
+            let draw = get(DRAW_FRAMEBUFFER_BINDING)[0];
+            let scissor_box = get(SCISSOR_BOX);
+            let mut mask = [0u8; 4];
+            (gl.GetBooleanv)(COLOR_WRITEMASK, mask.as_mut_ptr());
+            let mut clear = [0f32; 4];
+            (gl.GetFloatv)(COLOR_CLEAR_VALUE, clear.as_mut_ptr());
+            let scissor = (gl.IsEnabled)(SCISSOR_TEST) != 0;
+            let discard = (gl.IsEnabled)(RASTERIZER_DISCARD) != 0;
+
+            (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, 0);
+            (gl.Enable)(SCISSOR_TEST);
+            (gl.Disable)(RASTERIZER_DISCARD);
+            (gl.ColorMask)(0, 0, 0, 1);
+            (gl.ClearColor)(0.0, 0.0, 0.0, 1.0);
+            (gl.Scissor)(0, 0, width, (height - top).max(0));
+            (gl.Clear)(COLOR_BUFFER_BIT);
+            if radius > 0.0 {
+                (gl.ColorMask)(1, 1, 1, 1);
+                (gl.ClearColor)(0.0, 0.0, 0.0, 0.0);
+                // GL's first row is the bottom one, which is the corner's
+                // edge.
+                for (row, span) in chrome::corners::outside(radius).into_iter().enumerate() {
+                    let span = (span as i32).min(width / 2);
+                    (gl.Scissor)(0, row as i32, span, 1);
+                    (gl.Clear)(COLOR_BUFFER_BIT);
+                    (gl.Scissor)(width - span, row as i32, span, 1);
+                    (gl.Clear)(COLOR_BUFFER_BIT);
+                }
+            }
+
+            (gl.ClearColor)(clear[0], clear[1], clear[2], clear[3]);
+            (gl.ColorMask)(mask[0], mask[1], mask[2], mask[3]);
+            (gl.Scissor)(
+                scissor_box[0],
+                scissor_box[1],
+                scissor_box[2],
+                scissor_box[3],
+            );
+            if !scissor {
+                (gl.Disable)(SCISSOR_TEST);
+            }
+            if discard {
+                (gl.Enable)(RASTERIZER_DISCARD);
+            }
+            (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, draw as u32);
+        }
     }
 
     unsafe fn blit(gl: &Gl, context: usize, chrome: &crate::decor::Pixels, window_height: i32) {

@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 pub mod keycodes;
 pub mod mouse;
+pub mod wayland;
 
 pub mod init {
     pub const VIDEO: u32 = 0x0000_0020;
@@ -192,6 +193,7 @@ struct Api {
     SDL_GL_DestroyContext: Option<unsafe extern "C" fn(GlContext) -> bool>,
     SDL_GL_MakeCurrent: Option<unsafe extern "C" fn(Window, GlContext) -> bool>,
     SDL_GL_GetCurrentContext: Option<unsafe extern "C" fn() -> GlContext>,
+    SDL_GL_GetCurrentWindow: Option<unsafe extern "C" fn() -> Window>,
     SDL_GL_SwapWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GL_SetAttribute: Option<unsafe extern "C" fn(c_int, c_int) -> bool>,
     SDL_GL_SetSwapInterval: Option<unsafe extern "C" fn(c_int) -> bool>,
@@ -231,6 +233,10 @@ struct Api {
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
     SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetSystemTheme: Option<unsafe extern "C" fn() -> c_int>,
+    SDL_GetCurrentVideoDriver: Option<unsafe extern "C" fn() -> *const c_char>,
+    SDL_GetWindowProperties: Option<unsafe extern "C" fn(Window) -> PropertiesId>,
+    SDL_GetPointerProperty:
+        Option<unsafe extern "C" fn(PropertiesId, *const c_char, *mut c_void) -> *mut c_void>,
 
     SDL_OpenAudioDeviceStream: Option<
         unsafe extern "C" fn(
@@ -406,6 +412,7 @@ fn api() -> Option<&'static Api> {
             SDL_GL_DestroyContext,
             SDL_GL_MakeCurrent,
             SDL_GL_GetCurrentContext,
+            SDL_GL_GetCurrentWindow,
             SDL_GL_SwapWindow,
             SDL_GL_SetAttribute,
             SDL_GL_SetSwapInterval,
@@ -439,6 +446,9 @@ fn api() -> Option<&'static Api> {
             SDL_GetModState,
             SDL_SetHint,
             SDL_GetSystemTheme,
+            SDL_GetCurrentVideoDriver,
+            SDL_GetWindowProperties,
+            SDL_GetPointerProperty,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
             SDL_PutAudioStreamData,
@@ -1371,6 +1381,7 @@ pub mod video {
         pub const TOOLTIP: u64 = 0x0004_0000;
         pub const POPUP_MENU: u64 = 0x0008_0000;
         pub const VULKAN: u64 = 0x1000_0000;
+        pub const TRANSPARENT: u64 = 0x4000_0000;
         pub const NOT_FOCUSABLE: u64 = 0x0000_0000_8000_0000;
     }
 
@@ -1424,6 +1435,7 @@ pub mod video {
         pub const WINDOW_FOCUS_GAINED: u32 = 0x20e;
         pub const WINDOW_FOCUS_LOST: u32 = 0x20f;
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
+        pub const WINDOW_HIT_TEST: u32 = 0x211;
         pub const WINDOW_DISPLAY_SCALE_CHANGED: u32 = 0x214;
         pub const WINDOW_ENTER_FULLSCREEN: u32 = 0x217;
         pub const WINDOW_LEAVE_FULLSCREEN: u32 = 0x218;
@@ -1581,6 +1593,11 @@ pub mod video {
             window: u32,
             entered: bool,
         },
+        /// A press the hit test gave to the window manager. Only X11 reports
+        /// it; Wayland's is seen through [`crate::wayland`].
+        WindowHitTest {
+            window: u32,
+        },
         /// Minimized, maximized, restored, or in or out of fullscreen: read
         /// [`window_flags`] for which.
         WindowState {
@@ -1674,6 +1691,10 @@ pub mod video {
                 event_type::WINDOW_CLOSE_REQUESTED => {
                     let e: WindowEvent = decode(&raw);
                     Event::WindowClosed { window: e.window }
+                }
+                event_type::WINDOW_HIT_TEST => {
+                    let e: WindowEvent = decode(&raw);
+                    Event::WindowHitTest { window: e.window }
                 }
                 event_type::WINDOW_FOCUS_GAINED | event_type::WINDOW_FOCUS_LOST => {
                     let e: WindowEvent = decode(&raw);
@@ -1865,7 +1886,35 @@ pub mod video {
     /// `body` is called only when SDL has a surface for the window; its
     /// return value says whether anything was drawn and so whether the
     /// surface is worth presenting.
+    ///
+    /// The calling thread's GL context is kept; see [`keep_gl_context`].
     pub fn present_window(window: Window, body: impl FnOnce(&Presentation) -> bool) -> bool {
+        keep_gl_context(|| present_window_surface(window, body))
+    }
+
+    /// Run `f`, then put back the calling thread's GL context if SDL changed
+    /// it - including back to none.
+    ///
+    /// A window surface may be backed by a renderer of SDL's own, whose GL
+    /// context SDL makes current to draw and again to destroy, and leaves
+    /// current (or leaves none) afterwards. The thread's context is usually a
+    /// guest's, and its next GL call would otherwise land where none of its
+    /// objects exist.
+    fn keep_gl_context<T>(f: impl FnOnce() -> T) -> T {
+        let context = gl_current_context();
+        let window = match api().and_then(|a| a.SDL_GL_GetCurrentWindow) {
+            // SAFETY: takes nothing.
+            Some(f) => unsafe { f() },
+            None => std::ptr::null_mut(),
+        };
+        let result = f();
+        if gl_current_context() != context {
+            gl_make_current(window, context);
+        }
+        result
+    }
+
+    fn present_window_surface(window: Window, body: impl FnOnce(&Presentation) -> bool) -> bool {
         let Some(api) = api() else {
             return false;
         };
@@ -1983,12 +2032,13 @@ pub mod video {
         unsafe { f(window, &area, cursor) }
     }
 
+    /// The calling thread's GL context is kept; see [`keep_gl_context`].
     pub fn destroy_window(window: Window) {
         let Some(f) = api().and_then(|a| a.SDL_DestroyWindow) else {
             return;
         };
         // SAFETY: a window this crate created.
-        unsafe { f(window) };
+        keep_gl_context(|| unsafe { f(window) });
     }
 
     pub fn set_window_title(window: Window, title: &CStr) -> bool {
@@ -2812,6 +2862,40 @@ pub mod video {
         };
         // SAFETY: two NUL-terminated strings.
         unsafe { f(name.as_ptr(), value.as_ptr()) }
+    }
+
+    /// Whether SDL's video driver is Wayland's.
+    pub fn is_wayland() -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_GetCurrentVideoDriver) else {
+            return false;
+        };
+        // SAFETY: takes nothing; the answer is null or a static string.
+        let name = unsafe { f() };
+        // SAFETY: a NUL-terminated string SDL keeps for the process.
+        !name.is_null() && unsafe { CStr::from_ptr(name) } == c"wayland"
+    }
+
+    /// A window's `wl_display` and `wl_surface`, on Wayland.
+    pub fn wayland_surface(window: Window) -> Option<(*mut c_void, *mut c_void)> {
+        let api = api()?;
+        let (props, get) = (api.SDL_GetWindowProperties?, api.SDL_GetPointerProperty?);
+        // SAFETY: a window from SDL, and property names SDL documents.
+        let (display, surface) = unsafe {
+            let id = props(window);
+            (
+                get(
+                    id,
+                    c"SDL.window.wayland.display".as_ptr(),
+                    std::ptr::null_mut(),
+                ),
+                get(
+                    id,
+                    c"SDL.window.wayland.surface".as_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        };
+        (!display.is_null() && !surface.is_null()).then_some((display, surface))
     }
 
     /// `SDL_SystemTheme`.

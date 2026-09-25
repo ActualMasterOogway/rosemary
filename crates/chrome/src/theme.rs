@@ -9,6 +9,8 @@ pub struct Theme {
 
     pub titlebar_height: f32,
     pub strip_height: f32,
+    /// The radius of a titled window's corners.
+    pub window_corner_radius: f32,
     pub titlebar_top: Color,
     pub titlebar_bottom: Color,
     pub titlebar_inactive: Color,
@@ -58,6 +60,7 @@ impl Theme {
             dark: false,
             titlebar_height: 28.0,
             strip_height: 24.0,
+            window_corner_radius: 10.0,
             titlebar_top: Color::rgb(0xEE, 0xEE, 0xEE),
             titlebar_bottom: Color::rgb(0xE4, 0xE4, 0xE4),
             titlebar_inactive: Color::rgb(0xF6, 0xF6, 0xF6),

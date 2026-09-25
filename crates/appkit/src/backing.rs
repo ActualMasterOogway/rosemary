@@ -829,6 +829,8 @@ fn present_dirty() {
         if crate::window::draws_with_opengl(window) {
             continue;
         }
+        let transparent = sdl3::video::window_flags(window) & sdl3::video::flags::TRANSPARENT != 0;
+        let chrome = crate::decor::pixels(window).filter(|_| transparent);
         sdl3::video::present_window(window, |surface| {
             let rows = store.height.min(surface.height.max(0) as u32) as usize;
             let columns = store.width.min(surface.width.max(0) as u32) as usize;
@@ -843,8 +845,36 @@ fn present_dirty() {
                     )
                 };
             }
+            if transparent && rows > 0 && columns > 0 {
+                // SAFETY: SDL reported `pitch` bytes per row for `height` rows.
+                let pixels = unsafe {
+                    std::slice::from_raw_parts_mut(surface.pixels, surface.pitch as usize * rows)
+                };
+                let pitch = surface.pitch as usize;
+                let chrome_rows = chrome.as_ref().map_or(0, |chrome| chrome.height as usize);
+                make_opaque(pixels, columns, rows, pitch, chrome_rows);
+                if let Some(chrome) = chrome.as_ref().filter(|chrome| chrome.radius > 0.0) {
+                    chrome::corners::clip(pixels, columns, rows, pitch, chrome.radius, false, true);
+                }
+            }
             rows > 0 && columns > 0
         });
+    }
+}
+
+/// Give every pixel from row `from` down full alpha.
+///
+/// A window with room for rounded corners shows its alpha, which a Mac's
+/// window content never does: what no view drew is transparent in the
+/// store, and there it would be a hole through to the desktop. Premultiplied
+/// pixels given full alpha are as if drawn over black, which is what an
+/// opaque window shows for them too.
+fn make_opaque(pixels: &mut [u8], width: usize, height: usize, pitch: usize, from: usize) {
+    for row in from..height {
+        let start = row * pitch;
+        for pixel in pixels[start..start + width * 4].as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
     }
 }
 

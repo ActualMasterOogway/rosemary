@@ -296,7 +296,7 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
 /// Destroy an SDL window, telling everything keyed on it first.
 fn destroy_sdl_window(sdl: sdl3::Window) {
     crate::backing::forget_window(sdl);
-    crate::decor::forget_sdl(sdl);
+    crate::decor::destroyed(sdl);
     for hook in DESTROY_HOOKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -624,6 +624,12 @@ fn creation_flags(style_mask: usize, api: Api) -> u64 {
     }
     if style_mask & style::TITLED == 0 || draws_own_titlebar() {
         flags |= sdl3::video::flags::BORDERLESS;
+    }
+    // Room for the chrome's rounded corners. Only on Wayland: an X11 window
+    // with alpha needs a compositing manager to be anything but black there,
+    // and its GL and Vulkan visuals would pass the guest's alpha through.
+    if style_mask & style::TITLED != 0 && draws_own_titlebar() && sdl3::video::is_wayland() {
+        flags |= sdl3::video::flags::TRANSPARENT;
     }
     flags
 }
