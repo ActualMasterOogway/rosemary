@@ -1401,6 +1401,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Served by [`crate::dyld::entry`] under both backends.
     sig!("_dyld_image_count", U32),
     sig!("_dyld_get_image_header", P, U32),
+    sig!("_NSGetMachExecuteHeader", P),
     sig!("_dyld_get_image_vmaddr_slide", U64, U32),
     sig!("_dyld_image_containing_address", P, P),
     cbsig!([0], "_dyld_register_func_for_add_image", V, P),
