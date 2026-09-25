@@ -1,8 +1,3 @@
-//! `AUGraph`, over the `AudioUnit` output in `coreaudio`.
-//!
-//! Graphs track units and bus connections; the units process audio. Mixer and
-//! effect nodes have no implementation and are reported by [`AUGraphOpen`].
-
 use std::ffi::c_void;
 use std::sync::Mutex;
 
