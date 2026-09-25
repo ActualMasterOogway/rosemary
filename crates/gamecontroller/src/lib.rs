@@ -360,7 +360,6 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
     }
     // SAFETY: `gamepad` was just opened and remains live in the controller.
     let name = unsafe { sdl3::gamepad_name(gamepad) };
-    // SAFETY: as above.
     let properties = unsafe { sdl3::gamepad_properties(gamepad) };
     let vendor_name = foundation::string::from_str(&name);
     // SAFETY: the same live gamepad handle used for its name and properties.
