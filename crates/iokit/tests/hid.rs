@@ -1,13 +1,3 @@
-//! A device this process invents, read the way a guest reads one.
-//!
-//! What this would falsify: that `libYoYoGamepad`'s sequence works at all -
-//! make a manager, hand it matching criteria, schedule it on a run loop, and be
-//! called back per device and per element. Every step here is the guest's, done
-//! from Rust so a failure lands in one place rather than four.
-//!
-//! Deterministic and headless: the device is `SDL_AttachVirtualJoystick`'s, so
-//! this needs no hardware and runs in a container.
-
 use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -286,7 +276,6 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     }
 
     // The element tree, walked the way a guest walks it.
-    // SAFETY: as above.
     unsafe {
         let elements = api::IOHIDDeviceCopyMatchingElements(device, std::ptr::null(), 0);
         let count = cf::CFArrayGetCount(elements);

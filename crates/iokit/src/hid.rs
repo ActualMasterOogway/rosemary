@@ -125,7 +125,6 @@ impl Device {
                 sdl3::version(joystick),
             )
         };
-        // SAFETY: as above.
         let (axes, buttons, hats) = unsafe {
             (
                 sdl3::axes(joystick),
@@ -466,7 +465,6 @@ impl Device {
         match element.source {
             // SAFETY: a joystick this device opened and has not closed.
             Source::Axis(i) => unsafe { sdl3::axis(self.joystick, i) as i64 },
-            // SAFETY: as above.
             Source::Button(i) => unsafe { sdl3::button(self.joystick, i) as i64 },
             Source::GamepadAxis(i, invert) => unsafe {
                 let value = sdl3::gamepad_axis(self.gamepad as sdl3::Gamepad, i) as i64;
@@ -475,7 +473,6 @@ impl Device {
             Source::GamepadButton(i) => unsafe {
                 sdl3::gamepad_button(self.gamepad as sdl3::Gamepad, i) as i64
             },
-            // SAFETY: as above.
             Source::Hat(i) => hat_to_direction(unsafe { sdl3::hat(self.joystick, i) }),
             Source::Collection => 0,
         }

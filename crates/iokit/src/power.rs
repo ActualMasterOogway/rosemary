@@ -1,18 +1,3 @@
-//! `IOPowerSources`, answered as a machine running on wall power.
-//!
-//! There is no battery to describe here and no `IOPMPowerSource` to ask, so the
-//! list of power sources is empty. That is not a stand-in: it is what
-//! `IOPSCopyPowerSourcesList` returns on a Mac mini, and a program that reads
-//! it gets "no battery", which is true.
-//!
-//! The blob is the reason this is a module rather than three functions
-//! returning null. `IOPSCopyPowerSourcesInfo` hands back an opaque `CFTypeRef`
-//! whose only documented use is to be passed to the other two calls, and every
-//! caller passes it on without checking it - so null does not reach a
-//! diagnostic, it reaches `CFArrayGetCount(NULL)` one call later. An empty
-//! dictionary is a real object that survives the retain, the pass and the
-//! release.
-
 #![allow(non_snake_case)]
 
 use corefoundation::base::CFTypeRef;

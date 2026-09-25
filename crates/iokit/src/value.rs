@@ -58,7 +58,6 @@ pub fn release(value: CFTypeRef) {
 ///
 /// `value` must be null or a pointer [`new`] produced and not yet released.
 pub unsafe fn borrow<'a>(value: CFTypeRef) -> Option<&'a Value> {
-    // SAFETY: the caller's obligation.
     (!value.is_null()).then(|| unsafe { &*(value as *const Value) })
 }
 
@@ -69,10 +68,7 @@ pub unsafe fn borrow<'a>(value: CFTypeRef) -> Option<&'a Value> {
 /// As [`borrow`], and the device must still be open - which it is for the
 /// duration of the callback the value was made for.
 pub unsafe fn device<'a>(value: &Value) -> Option<&'a Device> {
-    (value.device != 0).then(|| {
-        // SAFETY: the caller's obligation.
-        unsafe { &*(value.device as *const Device) }
-    })
+    (value.device != 0).then(|| unsafe { &*(value.device as *const Device) })
 }
 
 /// An `IOHIDElementRef`: which device, and which of its elements.
@@ -97,7 +93,6 @@ pub unsafe fn element<'a>(handle: *const c_void) -> Option<(&'a Device, u32)> {
     if handle.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let reference = unsafe { &*(handle as *const ElementRef) };
     if reference.device.is_null() {
         return None;

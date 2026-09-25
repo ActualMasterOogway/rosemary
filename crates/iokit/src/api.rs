@@ -51,7 +51,6 @@ unsafe fn manager<'a>(manager: CFTypeRef) -> Option<&'a Manager> {
 ///
 /// `device` must be null or an `IOHIDDeviceRef` this module handed out.
 unsafe fn device<'a>(device: CFTypeRef) -> Option<&'a Device> {
-    // SAFETY: the caller's obligation.
     (!device.is_null()).then(|| unsafe { &*(device as *const Device) })
 }
 
@@ -82,7 +81,6 @@ pub unsafe extern "C" fn IOHIDDeviceCreate(_allocator: CFTypeRef, service: u32) 
 }
 
 pub unsafe extern "C" fn IOHIDManagerOpen(manager: CFTypeRef, _options: u32) -> IOReturn {
-    // SAFETY: the caller's obligation.
     let result = match unsafe { self::manager(manager) }.is_some_and(|m| m.open()) {
         true => SUCCESS,
         false => ERROR,
@@ -94,7 +92,6 @@ pub unsafe extern "C" fn IOHIDManagerOpen(manager: CFTypeRef, _options: u32) -> 
 }
 
 pub unsafe extern "C" fn IOHIDManagerClose(manager: CFTypeRef, _options: u32) -> IOReturn {
-    // SAFETY: the caller's obligation.
     if let Some(m) = unsafe { self::manager(manager) } {
         m.close();
     }
@@ -123,17 +120,13 @@ pub unsafe extern "C" fn IOHIDValueGetTypeID() -> CFTypeID {
 ///
 /// `dictionary` must be null or a `CFDictionaryRef`.
 unsafe fn criterion_of(dictionary: CFTypeRef) -> Criterion {
-    // SAFETY: the caller's obligation.
     unsafe fn number_for(dictionary: CFTypeRef, key: &std::ffi::CStr) -> Option<u32> {
         let name = corefoundation::string::from_bytes(key.to_bytes(), false);
         // SAFETY: the caller's obligation, and a string this call just made.
         let found = unsafe { cf::CFDictionaryGetValue(dictionary, name) };
-        // SAFETY: as above.
         unsafe { cf::CFRelease(name) };
-        // SAFETY: as above.
         unsafe { collections::number(found) }.map(|n| n.as_i64() as u32)
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         Criterion {
             page: number_for(dictionary, c"DeviceUsagePage"),
@@ -145,14 +138,12 @@ unsafe fn criterion_of(dictionary: CFTypeRef) -> Criterion {
 }
 
 pub unsafe extern "C" fn IOHIDManagerSetDeviceMatching(manager: CFTypeRef, matching: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let Some(m) = (unsafe { self::manager(manager) }) else {
         return;
     };
     // Null means "match everything", which is what an empty criteria list is.
     let criteria = match matching.is_null() {
         true => Vec::new(),
-        // SAFETY: as above.
         false => vec![unsafe { criterion_of(matching) }],
     };
     m.set_criteria(criteria);
@@ -162,7 +153,6 @@ pub unsafe extern "C" fn IOHIDManagerSetDeviceMatchingMultiple(
     manager: CFTypeRef,
     matching: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(m) = (unsafe { self::manager(manager) }) else {
         return;
     };
@@ -170,9 +160,7 @@ pub unsafe extern "C" fn IOHIDManagerSetDeviceMatchingMultiple(
     let count = unsafe { cf::CFArrayGetCount(matching) };
     let mut criteria = Vec::new();
     for i in 0..count {
-        // SAFETY: as above.
         let entry = unsafe { cf::CFArrayGetValueAtIndex(matching, i) };
-        // SAFETY: as above.
         criteria.push(unsafe { criterion_of(entry) });
     }
     m.set_criteria(criteria);
@@ -183,7 +171,6 @@ pub unsafe extern "C" fn IOHIDManagerRegisterDeviceMatchingCallback(
     callback: Option<DeviceCallback>,
     context: *mut c_void,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(m) = unsafe { self::manager(manager) } {
         m.set_matched(callback, context as usize);
     }
@@ -194,7 +181,6 @@ pub unsafe extern "C" fn IOHIDManagerRegisterDeviceRemovalCallback(
     callback: Option<DeviceCallback>,
     context: *mut c_void,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(m) = unsafe { self::manager(manager) } {
         m.set_removed(callback, context as usize);
     }
@@ -205,7 +191,6 @@ pub unsafe extern "C" fn IOHIDManagerRegisterInputValueCallback(
     callback: Option<ValueCallback>,
     context: *mut c_void,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(manager) = unsafe { self::manager(manager) } {
         manager.set_values(callback, context as usize);
     }
@@ -227,7 +212,6 @@ pub unsafe extern "C" fn IOHIDManagerScheduleWithRunLoop(
     run_loop: CFTypeRef,
     mode: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(m) = (unsafe { self::manager(manager) }) else {
         return;
     };
@@ -260,7 +244,6 @@ fn schedule(manager: usize, run_loop: CFTypeRef, mode: CFTypeRef) {
         }
     }
     unsafe extern "C" fn wake(_timer: CFTypeRef, info: *mut c_void) {
-        // SAFETY: as above.
         if let Some(m) = unsafe { (info as *const Manager).as_ref() } {
             m.poll();
         }
@@ -313,7 +296,6 @@ fn schedule(manager: usize, run_loop: CFTypeRef, mode: CFTypeRef) {
 /// `SDL_GetJoystickGUID` would be the wrong direction: that string is *made
 /// from* these numbers.
 pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { self::device(device) }) else {
         return std::ptr::null();
     };
@@ -380,7 +362,6 @@ pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRe
         b"bInterfaceNumber" => number(0),
         b"Product" | b"Manufacturer" => {
             let s = corefoundation::string::from_bytes(d.name.as_bytes(), false);
-            // SAFETY: as above.
             unsafe { cf::CFAutorelease(s) }
         }
         // A key this runtime does not answer is null, which is what a real
@@ -399,7 +380,6 @@ pub unsafe extern "C" fn IOHIDDeviceCopyMatchingElements(
     _matching: CFTypeRef,
     _options: u32,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { self::device(device) }) else {
         return std::ptr::null();
     };
@@ -470,7 +450,7 @@ macro_rules! element_field {
     ($(#[$meta:meta])* $name:ident, $ty:ty, $read:expr, $default:expr) => {
         $(#[$meta])*
         pub unsafe extern "C" fn $name(element: *const c_void) -> $ty {
-            // SAFETY: the caller's obligation - an `IOHIDElementRef` this
+            // SAFETY: an `IOHIDElementRef` this
             // module handed out, whose device is still open.
             match unsafe { value::element(element) }
                 .and_then(|(device, cookie)| device.element(cookie))
@@ -501,7 +481,6 @@ element_field!(/// The highest.
 /// element - which is the shape a guest walking from the top expects, and the
 /// shape a real gamepad's report descriptor mostly has.
 pub unsafe extern "C" fn IOHIDElementGetChildren(element: *const c_void) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some((device, cookie)) = (unsafe { value::element(element) }) else {
         return std::ptr::null();
     };
@@ -518,12 +497,11 @@ pub unsafe extern "C" fn IOHIDElementGetChildren(element: *const c_void) -> CFTy
 }
 
 pub unsafe extern "C" fn IOHIDValueGetElement(v: CFTypeRef) -> *const c_void {
-    // SAFETY: the caller's obligation - a value handed to a callback, read
+    // SAFETY: a value handed to a callback, read
     // during that callback.
     let Some(v) = (unsafe { value::borrow(v) }) else {
         return std::ptr::null();
     };
-    // SAFETY: as above.
     match unsafe { value::device(v) } {
         Some(device) => device.handle(v.cookie),
         None => std::ptr::null(),
@@ -531,13 +509,11 @@ pub unsafe extern "C" fn IOHIDValueGetElement(v: CFTypeRef) -> *const c_void {
 }
 
 pub unsafe extern "C" fn IOHIDValueGetIntegerValue(v: CFTypeRef) -> CFIndex {
-    // SAFETY: as above.
     unsafe { value::borrow(v) }.map_or(0, |v| v.integer as CFIndex)
 }
 
 /// The width of the element's value in its HID report.
 pub unsafe extern "C" fn IOHIDValueGetLength(v: CFTypeRef) -> CFIndex {
-    // SAFETY: as above.
     let Some(value) = (unsafe { value::borrow(v) }) else {
         return 0;
     };
@@ -559,7 +535,6 @@ pub unsafe extern "C" fn IOHIDValueGetLength(v: CFTypeRef) -> CFIndex {
 
 /// Unused, but part of the shape: a caller may ask for a scaled reading.
 pub unsafe extern "C" fn IOHIDValueGetScaledValue(v: CFTypeRef, _kind: u32) -> f64 {
-    // SAFETY: as above.
     unsafe { value::borrow(v) }.map_or(0.0, |v| v.integer as f64)
 }
 
@@ -591,7 +566,6 @@ pub fn key_strings() -> Vec<(&'static str, &'static str)> {
 /// Null when no devices have matched, otherwise a retained set of the devices
 /// the manager currently owns.
 pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(manager) = (unsafe { self::manager(manager) }) else {
         return std::ptr::null();
     };
@@ -618,7 +592,6 @@ pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRe
 /// service id. HIDAPI saves it in a path and later gives it to
 /// [`IOHIDDeviceCreate`] to reopen this exact device.
 pub unsafe extern "C" fn IOHIDDeviceGetService(device: CFTypeRef) -> u32 {
-    // SAFETY: the caller's obligation.
     let service = unsafe { self::device(device) }.map_or(0, |device| device.id);
     crate::trace_hid(format_args!("IOHIDDeviceGetService -> {service}"));
     service
@@ -635,7 +608,6 @@ pub unsafe extern "C" fn IOHIDDeviceScheduleWithRunLoop(
     _run_loop: CFTypeRef,
     _mode: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(device) = unsafe { self::device(device) } {
         crate::trace_hid(format_args!(
             "IOHIDDeviceScheduleWithRunLoop id={}",
@@ -660,7 +632,6 @@ pub unsafe extern "C" fn IOHIDDeviceRegisterRemovalCallback(
     callback: Option<RemovalCallback>,
     context: *mut c_void,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(device) = unsafe { self::device(device) } {
         device.set_removal_callback(callback, context as usize);
     }
@@ -739,7 +710,6 @@ pub unsafe extern "C" fn IOHIDDeviceSetReport(
     {
         return ERROR;
     }
-    // SAFETY: the caller's obligation.
     let Some(device) = (unsafe { self::device(device) }) else {
         return ERROR;
     };
@@ -780,7 +750,6 @@ pub unsafe extern "C" fn IOHIDDeviceRegisterInputReportCallback(
     if length < 0 {
         return;
     }
-    // SAFETY: the caller's obligation.
     if let Some(device) = unsafe { self::device(device) } {
         crate::trace_hid(format_args!(
             "IOHIDDeviceRegisterInputReportCallback id={} length={length}",

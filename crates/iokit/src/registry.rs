@@ -1,12 +1,3 @@
-//! A compact IORegistry exposing active SDL HID devices.
-//!
-//! HID devices have one stable synthetic `io_service_t`, their SDL instance
-//! id. This lets clients which enumerate through IORegistry (including HIDAPI)
-//! observe the same device and properties as clients using `IOHIDManager`.
-//! Iterator handles occupy a separate high range so they cannot collide with a
-//! service. Notifications remain intentionally inert: device discovery is
-//! performed when an HID manager is scheduled.
-
 #![allow(non_snake_case)]
 
 use std::collections::{BTreeMap, VecDeque};

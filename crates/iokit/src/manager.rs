@@ -226,7 +226,6 @@ impl Manager {
             device.notify_removed();
             let registered = *self.removed.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(callback) = registered.callback {
-                // SAFETY: as above.
                 unsafe {
                     callback(
                         registered.context as *mut c_void,
