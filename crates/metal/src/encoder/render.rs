@@ -1,5 +1,3 @@
-//! `MTLRenderCommandEncoder`: draws.
-
 use super::*;
 
 pub(super) unsafe extern "C" fn draw_primitives(

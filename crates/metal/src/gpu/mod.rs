@@ -1,15 +1,3 @@
-//! The Vulkan objects underneath Metal's device-level API.
-//!
-//! A `Gpu` is one logical Vulkan device: the queue Metal submits to, the
-//! memory it allocates from, and the caches which keep one Vulkan object per
-//! distinct Metal description. Metal's own object graph lives in `lib.rs`;
-//! nothing here knows about Objective-C.
-//!
-//! The device itself is here; allocation, submission and the recycled
-//! pools are in [`memory`], [`submit`] and [`pools`], with the Metal
-//! format tables in [`format`], the creation-path RAII guards in [`guard`],
-//! and the tracing knobs in [`trace`].
-
 mod format;
 mod guard;
 mod memory;
@@ -561,7 +549,6 @@ impl Gpu {
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
-        // SAFETY: as above.
         let properties = unsafe { instance.get_physical_device_properties(physical) };
 
         let depth_stencil_resolve = resolve_support.map(|support| DepthStencilResolve {

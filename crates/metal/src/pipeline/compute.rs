@@ -1,5 +1,3 @@
-//! `MTLComputePipelineState`.
-
 use super::*;
 
 pub(crate) struct ComputePipeline {
@@ -85,13 +83,11 @@ pub(super) unsafe extern "C" fn compute_pipeline_device(receiver: Id, _sel: Sel)
 }
 
 pub(super) unsafe extern "C" fn compute_pipeline_thread_width(receiver: Id, _sel: Sel) -> u64 {
-    // SAFETY: as above.
     let state = unsafe { object::body::<ComputePipeline>(receiver) };
     u64::from(state.gpu.limits.max_compute_work_group_invocations.min(32))
 }
 
 pub(super) unsafe extern "C" fn compute_pipeline_max_threads(receiver: Id, _sel: Sel) -> u64 {
-    // SAFETY: as above.
     let state = unsafe { object::body::<ComputePipeline>(receiver) };
     u64::from(state.gpu.limits.max_compute_work_group_invocations)
 }
@@ -108,7 +104,6 @@ pub(super) unsafe extern "C" fn compute_pipeline_dealloc(receiver: Id, _sel: Sel
         let variants = std::mem::take(&mut *state.variants.lock().expect("compute pipeline cache"));
         destroy_variants(state.gpu, variants.into_values());
         state.layouts.destroy(state.gpu);
-        // SAFETY: as above.
         unsafe {
             state.gpu.device.destroy_shader_module(
                 std::mem::replace(&mut state.module, vk::ShaderModule::null()),

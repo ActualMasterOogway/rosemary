@@ -1,12 +1,3 @@
-//! The window's swapchain, and the compositing a view tree needs on top of it.
-//!
-//! One swapchain serves each `SDL_Window`. Single-layer windows blit directly
-//! into the acquired image. Multiple layers use a persistent composite because
-//! acquired swapchain images have undefined contents.
-//!
-//! FIXME (ACCURACY): layers blit opaquely in presentation order, not in view
-//! order with AppKit's opacity blending.
-
 mod present;
 #[cfg(test)]
 mod tests;
@@ -422,13 +413,11 @@ impl Swapchain {
             surface_api.get_physical_device_surface_capabilities(self.gpu.physical, self.surface)
         }
         .map_err(|error| format!("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {error:?}"))?;
-        // SAFETY: as above.
         let formats = unsafe {
             surface_api.get_physical_device_surface_formats(self.gpu.physical, self.surface)
         }
         .map_err(|error| format!("vkGetPhysicalDeviceSurfaceFormatsKHR failed: {error:?}"))?;
         let chosen = choose_format(&formats).ok_or("the surface reports no format")?;
-        // SAFETY: as above.
         let present_modes = unsafe {
             surface_api.get_physical_device_surface_present_modes(self.gpu.physical, self.surface)
         }

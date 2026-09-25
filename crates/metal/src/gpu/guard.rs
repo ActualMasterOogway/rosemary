@@ -1,13 +1,3 @@
-//! Small RAII guards for the creation paths.
-//!
-//! Building a Vulkan object is usually several calls, any of which can fail
-//! after the earlier ones have already handed back a handle. Writing the
-//! unwind by hand means an `inspect_err` on every step and a leak as soon as
-//! a step is added in the middle. A [`Guard`] instead owns what has been made
-//! so far and destroys it on the way out of the function unless the caller
-//! [`take`](Guard::take)s it, so the failure path is the default and only the
-//! success path is written.
-
 /// A value destroyed when it is dropped, unless it is taken first.
 pub(crate) struct Guard<T, F: FnOnce(T)> {
     /// `None` only between `take` and the drop which follows it.

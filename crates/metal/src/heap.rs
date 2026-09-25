@@ -1,21 +1,3 @@
-//! The memory a Metal buffer is cut out of.
-//!
-//! Metal buffers are made and thrown away by the thousand: a game which streams
-//! its world in creates gigabytes of them in the second the world arrives. One
-//! `vkAllocateMemory` and one `vkMapMemory` each is what a driver charges most
-//! for, and on a discrete adapter the natural-looking heap - device-local *and*
-//! host-visible - is the small PCI aperture, which such a burst overruns.
-//!
-//! So a buffer is a range of one large block. A block is allocated and mapped
-//! once, and a buffer is a `VkBuffer` bound into it at an offset; freeing a
-//! buffer returns the range to the block. Blocks are never given back to the
-//! driver, because a run which needed the peak once will need it again and the
-//! whole point is not to call the allocator on a hot path.
-//!
-//! An allocation larger than a block gets a block of its own, which is freed
-//! with it: those are render-target-sized and rare, and holding one for the
-//! life of the process would be the leak this module exists to end.
-
 use std::sync::Mutex;
 
 use ash::{Device, vk};

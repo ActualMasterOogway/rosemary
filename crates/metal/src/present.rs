@@ -1,14 +1,3 @@
-//! `CAMetalLayer`'s drawables and how a rendered frame reaches the window.
-//!
-//! Drawables are Vulkan images blitted into the window swapchain by
-//! [`crate::swapchain`]. When presentation is unavailable, SDL receives a
-//! readback; `ROSETTA3_PRESENT_READBACK` forces that path.
-//!
-//! FIXME (ACCURACY): readback fills the whole window, so multiple layers are
-//! not composited. Windows start without a graphics API because switching an
-//! existing OpenGL window to Vulkan can leave a conflicting Wayland surface.
-//! SDL cannot present multiple surfaces inside one window.
-
 use ash::vk;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -299,7 +288,6 @@ unsafe extern "C" fn drawable_texture(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn drawable_layer(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     unsafe { object::body::<Drawable>(receiver) }.layer
 }
 
@@ -657,7 +645,6 @@ fn send_id(receiver: Id, selector: &str) -> Id {
     // SAFETY: an `id (id, SEL)` accessor.
     let call: unsafe extern "C" fn(Id, Sel) -> Id =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel) }
 }
 
@@ -671,7 +658,6 @@ fn send_u64(receiver: Id, selector: &str) -> u64 {
     // SAFETY: an `NSUInteger (id, SEL)` accessor.
     let call: unsafe extern "C" fn(Id, Sel) -> u64 =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel) }
 }
 
@@ -685,7 +671,6 @@ fn send_size(receiver: Id, selector: &str) -> (f64, f64) {
     // SAFETY: a `CGSize (id, SEL)` accessor.
     let call: unsafe extern "C" fn(Id, Sel) -> foundation::geometry::NSSize =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     let size = unsafe { call(receiver, sel) };
     (size.width, size.height)
 }

@@ -1,8 +1,3 @@
-//! Tracing knobs, driven by environment variables.
-//!
-//! Off by default: a game submits thousands of commands a frame, and a
-//! trace which is always on is a trace nobody reads.
-
 use super::*;
 
 /// The process's Vulkan tracing switch, shared with `vulkan.rs`.

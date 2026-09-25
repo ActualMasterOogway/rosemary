@@ -1,12 +1,3 @@
-//! Metal's resources: buffers, textures, samplers and depth/stencil state.
-//!
-//! Each is a real Vulkan object. Metal's descriptors are plain value types
-//! which a game fills in and hands to the device, so they are stored as-is and
-//! read back at creation time.
-//!
-//! One module per Metal object family; `install` stays here because the
-//! Objective-C classes are registered together.
-
 mod buffer;
 mod depth_stencil;
 mod sampler;

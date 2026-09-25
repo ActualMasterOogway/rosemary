@@ -1,5 +1,3 @@
-//! `MTLRenderPipelineDescriptor` and `MTLCompileOptions`.
-
 use super::*;
 
 use crate::object;
@@ -24,7 +22,6 @@ pub(super) unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a render pipeline descriptor of this crate's. This is `-reset`
     // as well as `-init`, and a reset descriptor still owns what it holds.
     unsafe { release_descriptor_contents(receiver, false) };
-    // SAFETY: as above.
     *unsafe { object::body::<RenderPipelineDescriptor>(receiver) } = RenderPipelineDescriptor {
         vertex_function: std::ptr::null_mut(),
         fragment_function: std::ptr::null_mut(),
@@ -49,7 +46,6 @@ pub(super) unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
 ///
 /// `receiver` must be a `MTLRenderPipelineDescriptor` of this crate's.
 unsafe fn release_descriptor_contents(receiver: Id, orphaning: bool) {
-    // SAFETY: the caller's obligation.
     let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
     for slot in [
         &mut descriptor.vertex_function,
@@ -125,7 +121,6 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
             orphan: |element| unsafe { crate::resource::orphan_element::<ColorElement>(element) },
         },
     );
-    // SAFETY: as above.
     unsafe { object::body::<RenderPipelineDescriptor>(receiver) }.color_objects = collection;
     collection
 }

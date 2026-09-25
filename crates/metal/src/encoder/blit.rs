@@ -1,5 +1,3 @@
-//! `MTLBlitCommandEncoder`: copies and mipmap generation.
-
 use super::*;
 
 /// Every parameter of a blit is an `NSUInteger` the guest chose, and `ash`

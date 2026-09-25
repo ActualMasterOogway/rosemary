@@ -1,5 +1,3 @@
-//! The dynamic symbols the loader resolves against this framework.
-
 use super::*;
 
 pub(super) fn devices() -> &'static [usize] {

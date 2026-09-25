@@ -1,5 +1,3 @@
-//! The `set*` selectors every encoder kind shares.
-
 use super::*;
 
 pub(super) unsafe extern "C" fn set_compute_pipeline(receiver: Id, _sel: Sel, pipeline: Id) {
@@ -10,14 +8,12 @@ pub(super) unsafe extern "C" fn set_compute_pipeline(receiver: Id, _sel: Sel, pi
 }
 
 pub(super) unsafe extern "C" fn set_render_pipeline(receiver: Id, _sel: Sel, pipeline: Id) {
-    // SAFETY: as above.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
     encoder.command().retain(pipeline);
     encoder.render_pipeline = pipeline;
 }
 
 pub(super) unsafe extern "C" fn set_depth_stencil_state(receiver: Id, _sel: Sel, state: Id) {
-    // SAFETY: as above.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
     encoder.command().retain(state);
     encoder.depth_state = state;

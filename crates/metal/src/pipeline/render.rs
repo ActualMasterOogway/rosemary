@@ -1,5 +1,3 @@
-//! `MTLRenderPipelineState` and the variants a render pass asks it for.
-
 use super::*;
 use crate::constants::*;
 
@@ -476,7 +474,6 @@ pub(super) unsafe extern "C" fn render_pipeline_dealloc(receiver: Id, _sel: Sel)
             std::mem::replace(&mut state.vertex_module, vk::ShaderModule::null()),
             std::mem::replace(&mut state.fragment_module, vk::ShaderModule::null()),
         ] {
-            // SAFETY: as above.
             unsafe { state.gpu.device.destroy_shader_module(module, None) };
         }
     }

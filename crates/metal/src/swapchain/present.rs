@@ -1,8 +1,3 @@
-//! Choosing a surface configuration, and the blit onto an acquired image.
-//!
-//! None of this touches the swapchain's own state: these are the pure
-//! choices Vulkan asks for and the barriers a presentation blit needs.
-
 use super::*;
 
 /// A surface format to present in.
@@ -132,7 +127,6 @@ pub(super) unsafe fn blit(
     // lands in: a layer whose `drawableSize` disagrees with its view is
     // scaled here rather than rejected, which is what Core Animation does
     // with a layer's `contentsGravity` left at its default.
-    // SAFETY: the caller's obligation.
     unsafe {
         device.cmd_blit_image(
             command_buffer,
@@ -173,7 +167,6 @@ pub(super) unsafe fn barrier(
             base_array_layer: 0,
             layer_count: 1,
         });
-    // SAFETY: the caller's obligation.
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
@@ -202,7 +195,6 @@ pub(super) unsafe fn transition_to_transfer_dst(
     command_buffer: vk::CommandBuffer,
     image: vk::Image,
 ) {
-    // SAFETY: the caller's obligation.
     unsafe {
         barrier(
             device,
@@ -242,7 +234,6 @@ pub(super) unsafe fn prepare_source(
             base_array_layer: 0,
             layer_count: 1,
         });
-    // SAFETY: the caller's obligation.
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
@@ -264,7 +255,6 @@ pub(super) unsafe fn transition_to_present(
     command_buffer: vk::CommandBuffer,
     image: vk::Image,
 ) {
-    // SAFETY: the caller's obligation.
     unsafe {
         barrier(
             device,

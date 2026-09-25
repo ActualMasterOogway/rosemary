@@ -1,5 +1,3 @@
-//! Metal pixel formats as Vulkan ones, and the sizes they imply.
-
 use super::*;
 use crate::constants::{MTL_PIXEL_FORMAT_BGRA8_UNORM, MTL_PIXEL_FORMAT_RGBA8_UNORM};
 

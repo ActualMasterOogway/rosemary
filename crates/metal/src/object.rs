@@ -1,9 +1,3 @@
-//! The Objective-C shape shared by every Metal object this crate vends.
-//!
-//! A Metal object is an `isa` followed by one Rust value. Keeping that pairing
-//! in one place means a new class is a `register`/`make` pair rather than a new
-//! hand-written allocation and field-by-field initialization.
-
 use std::ffi::CStr;
 
 use objc::class::Class;

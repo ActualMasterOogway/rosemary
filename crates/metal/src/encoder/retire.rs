@@ -1,5 +1,3 @@
-//! Retiring a submission once the GPU has finished with it.
-
 use super::*;
 
 /// One owned Objective-C reference represented by its transferable address.

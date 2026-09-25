@@ -1,5 +1,3 @@
-//! `MTLComputeCommandEncoder`: dispatch.
-
 use super::*;
 
 pub(super) unsafe extern "C" fn dispatch_threadgroups(

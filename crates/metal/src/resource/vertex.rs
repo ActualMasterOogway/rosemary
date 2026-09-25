@@ -1,5 +1,3 @@
-//! `MTLVertexDescriptor` and the indexed collections Metal vends it through.
-
 use super::*;
 
 /// `MTLVertexDescriptor`: 31 buffer layouts and 31 attributes, each a small
@@ -75,7 +73,6 @@ pub(crate) trait Element {
 ///
 /// `element` must be an instance of the class declared for this `T`.
 pub(crate) unsafe fn orphan_element<T: Element>(element: Id) {
-    // SAFETY: the caller's obligation.
     *unsafe { object::body::<T>(element) }.owner() = std::ptr::null_mut();
 }
 
@@ -160,7 +157,6 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
             orphan: |element| unsafe { orphan_element::<VertexElement>(element) },
         },
     );
-    // SAFETY: as above.
     let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
     if layout {
         descriptor.layout_objects = collection;

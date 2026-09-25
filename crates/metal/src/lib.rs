@@ -1,14 +1,3 @@
-//! Metal.framework, backed by Vulkan.
-//!
-//! The device boundary, shader libraries and the object graph a game holds
-//! live here; the Vulkan objects underneath them live in `gpu`, and the
-//! resource, pipeline, encoding and presentation halves of the API each have
-//! their own module.
-//!
-//! The Objective-C entry points themselves are grouped by the class they
-//! belong to: [`device`], [`library`], [`constants`], and the dynamic
-//! symbols in [`exports`].
-
 #![allow(non_snake_case)]
 
 mod capture;
@@ -91,7 +80,6 @@ impl Function {
             // outlives every pipeline made from it.
             return Some(unsafe { &*(artifact as *const metal_translate::EntryArtifact) });
         }
-        // SAFETY: the caller's obligation.
         let library = unsafe { object::body::<Library>(self.library) };
         library.translated.entries.get(self.entry)
     }

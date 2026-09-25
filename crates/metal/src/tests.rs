@@ -193,7 +193,6 @@ fn a_translated_library_exposes_its_entry_points() {
         unsafe { corefoundation::api::CFArrayGetCount(names as CFTypeRef) },
         1
     );
-    // SAFETY: as above.
     let name = unsafe { corefoundation::api::CFArrayGetValueAtIndex(names as CFTypeRef, 0) as Id };
     // SAFETY: a library and a name it just reported.
     let function = unsafe { new_function_with_name(library, std::ptr::null(), name) };
@@ -273,7 +272,6 @@ fn a_library_without_function_constants_ignores_the_values() {
             .is_none()
     );
 
-    // SAFETY: as above.
     let missing = unsafe {
         new_function_with_constants(
             library,
@@ -473,7 +471,6 @@ unsafe fn send(receiver: Id, selector: &str) -> Id {
     // SAFETY: the caller guarantees the signature.
     let call: unsafe extern "C" fn(Id, Sel) -> Id =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel) }
 }
 
@@ -489,7 +486,6 @@ unsafe fn send_void(receiver: Id, selector: &str) {
     // SAFETY: the caller guarantees the signature.
     let call: unsafe extern "C" fn(Id, Sel) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel) };
 }
 
@@ -505,7 +501,6 @@ unsafe fn send_double(receiver: Id, selector: &str) -> f64 {
     // SAFETY: the caller guarantees the signature.
     let call: unsafe extern "C" fn(Id, Sel) -> f64 =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel) }
 }
 
@@ -521,7 +516,6 @@ unsafe fn send_with_object(receiver: Id, selector: &str, argument: Id) {
     // SAFETY: the caller guarantees the signature.
     let call: unsafe extern "C" fn(Id, Sel, Id) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel, argument) };
 }
 
@@ -537,7 +531,6 @@ unsafe fn set_buffer_at(encoder: Id, buffer: Id, offset: u64, index: u64) {
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, Id, u64, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(encoder, sel, buffer, offset, index) };
 }
 
@@ -563,7 +556,6 @@ unsafe fn dispatch(encoder: Id, groups: u64) {
         height: 1,
         depth: 1,
     };
-    // SAFETY: as above.
     unsafe { call(encoder, sel, size, one) };
 }
 
@@ -667,7 +659,6 @@ unsafe fn send_number(receiver: Id, selector: &str, value: u64) {
     // SAFETY: the caller guarantees the signature.
     let call: unsafe extern "C" fn(Id, Sel, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel, value) };
 }
 
@@ -683,7 +674,6 @@ unsafe fn element_at(receiver: Id, index: u64) -> Id {
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, u64) -> Id =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(receiver, sel, index) }
 }
 
@@ -1048,7 +1038,6 @@ unsafe fn render_encoder(command: Id, pass: Id) -> Id {
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, Id) -> Id =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(command, sel, pass) }
 }
 
@@ -1064,7 +1053,6 @@ unsafe fn set_buffer_named(encoder: Id, selector: &str, buffer: Id, offset: u64,
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, Id, u64, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(encoder, sel, buffer, offset, index) };
 }
 
@@ -1081,7 +1069,6 @@ unsafe fn draw(encoder: Id, vertices: u64) {
     let call: unsafe extern "C" fn(Id, Sel, u64, u64, u64, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
     // MTLPrimitiveTypeTriangle is 3.
-    // SAFETY: as above.
     unsafe { call(encoder, sel, 3, 0, vertices, 1) };
 }
 
@@ -1111,7 +1098,6 @@ unsafe fn copy_texture_to_buffer(encoder: Id, texture: Id, buffer: Id, size: u64
         u64,
         u64,
     ) = unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe {
         call(
             encoder,
@@ -1145,7 +1131,6 @@ unsafe fn set_bytes_named(encoder: Id, selector: &str, bytes: &[u8], index: u64)
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, *const u8, u64, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { call(encoder, sel, bytes.as_ptr(), bytes.len() as u64, index) };
 }
 
@@ -1182,7 +1167,6 @@ fn recording_cost() {
         )
     };
     let pool = objc::arc::pool_push();
-    // SAFETY: as above.
     let compute = unsafe {
         let start = std::time::Instant::now();
         let command = send(queue, "commandBuffer");

@@ -1,5 +1,3 @@
-//! Per-device retirement of asynchronous Vulkan submissions.
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};

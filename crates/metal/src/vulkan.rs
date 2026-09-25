@@ -1,5 +1,3 @@
-//! The Vulkan lifetime underneath Metal objects.
-
 use std::sync::OnceLock;
 
 use ash::{Entry, Instance, vk};

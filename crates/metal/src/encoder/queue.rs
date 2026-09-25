@@ -1,5 +1,3 @@
-//! `MTLCommandQueue`.
-
 use super::*;
 
 pub(crate) fn new_command_queue(gpu: &'static Gpu, device: Id) -> Id {

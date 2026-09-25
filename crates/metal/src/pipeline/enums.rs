@@ -1,5 +1,3 @@
-//! Metal's pipeline enumerations as Vulkan ones.
-
 use super::*;
 
 pub(crate) fn topology(metal: u64) -> vk::PrimitiveTopology {

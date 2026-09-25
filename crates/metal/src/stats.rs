@@ -1,12 +1,3 @@
-//! Where a frame's time goes.
-//!
-//! A runtime which is slow and a runtime which is doing too much work look the
-//! same from outside, so the counters a frame moves are collected here and
-//! reported once a second under `ROSETTA3_METAL_STATS=1`. Nothing here is on a
-//! path a correct run depends on: every counter is a relaxed atomic and the
-//! report is written by whichever thread presents the frame which crosses the
-//! interval.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 

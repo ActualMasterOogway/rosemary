@@ -1,19 +1,3 @@
-//! `ROSETTA3_PASS_OUT`: the texels every render pass left in its attachments.
-//!
-//! A frame that comes out wrong says only that some pass in it is wrong, and a
-//! frame is twenty-five of them writing half-resolution intermediates nothing
-//! ever presents. The log cannot say which one, and neither can the presented
-//! frame: by then every pass has run. So each pass's attachments are copied
-//! into a host buffer inside the same recording, and written out once the
-//! submission completes.
-//!
-//! Capture is armed by creating a file named `go` in the directory, and stops
-//! after `ROSETTA3_PASS_OUT_COUNT` attachments; a run which captured every pass
-//! of every frame would write gigabytes a second. Texels are written raw, with
-//! the size and the Vulkan format in the file name, because the formats a game
-//! renders into - `A2B10G10R10`, `B10G11R11`, half floats - have no image file
-//! that carries them and decoding belongs outside a hot path.
-
 use crate::gpu::{Gpu, GpuBuffer};
 use ash::vk;
 use static_init::dynamic;

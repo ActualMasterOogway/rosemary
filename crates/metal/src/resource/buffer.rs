@@ -1,5 +1,3 @@
-//! `MTLBuffer`: a Vulkan buffer out of the shared host-visible heap.
-
 use super::*;
 
 /// `ROSETTA3_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its

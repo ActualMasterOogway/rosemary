@@ -1,15 +1,3 @@
-//! Where a command buffer's completion handlers run.
-//!
-//! Metal never calls a completion handler on the thread that committed: it calls
-//! it from the framework's own queue once the work has finished. Games rely on
-//! that. Somee commit a command buffer while holding a renderer lock and takes
-//! the same lock in the handler, which is a plain sequential program on Apple's
-//! Metal and an instant self-deadlock if the handler runs inside `-commit`.
-//!
-//! One thread drains one queue, so handlers still run in submission order - a
-//! stronger promise than Metal's, which orders them only within a command queue,
-//! and one no correct guest can tell apart.
-
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, Once};
 

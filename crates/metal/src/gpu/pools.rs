@@ -116,7 +116,6 @@ impl Gpu {
             return;
         }
         drop(contexts);
-        // SAFETY: as above.
         unsafe {
             self.device.destroy_command_pool(context.pool, None);
             self.device.destroy_fence(context.fence, None);
@@ -181,7 +180,6 @@ impl Gpu {
             return;
         }
         drop(pools);
-        // SAFETY: as above.
         unsafe { self.device.destroy_descriptor_pool(pool, None) };
     }
 

@@ -1,5 +1,3 @@
-//! `MTLDevice`: the entry points a guest makes everything else through.
-
 use super::*;
 
 pub(super) unsafe extern "C" fn new_command_queue(receiver: Id, _sel: Sel) -> Id {
@@ -102,7 +100,6 @@ pub(super) unsafe extern "C" fn new_compute_pipeline(
     }
     let fail = |message: &str| -> Id {
         if !error.is_null() {
-            // SAFETY: as above.
             unsafe {
                 *error = foundation::error::make("MTLComputePipelineErrorDomain", 3, message)
             };
@@ -143,7 +140,6 @@ pub(super) unsafe extern "C" fn new_render_pipeline(
     }
     let fail = |message: &str| -> Id {
         if !error.is_null() {
-            // SAFETY: as above.
             unsafe { *error = foundation::error::make("MTLRenderPipelineErrorDomain", 3, message) };
         }
         gpu::trace(message);
@@ -206,7 +202,6 @@ pub(super) unsafe extern "C" fn name(receiver: Id, _sel: Sel) -> Id {
 }
 
 pub(super) unsafe extern "C" fn registry_id(receiver: Id, _sel: Sel) -> u64 {
-    // SAFETY: as above.
     unsafe { object::body::<Device>(receiver) }.ordinal
 }
 

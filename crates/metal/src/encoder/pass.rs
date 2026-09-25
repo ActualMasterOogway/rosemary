@@ -1,5 +1,3 @@
-//! `MTLRenderPassDescriptor`, and beginning the Vulkan render pass it describes.
-
 use super::*;
 
 /// One `MTLRenderPassAttachmentDescriptor`.
@@ -730,7 +728,6 @@ pub(super) unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: 
     // SAFETY: a render pass descriptor of this crate's. `-init` reaches a fresh
     // one, whose body is zero, and a reused one, which still owns what it holds.
     unsafe { release_pass_contents(receiver, false) };
-    // SAFETY: as above.
     *unsafe { object::body::<RenderPassDescriptor>(receiver) } = RenderPassDescriptor::default();
     receiver
 }
@@ -745,7 +742,6 @@ pub(super) unsafe extern "C" fn render_pass_descriptor_init(receiver: Id, _sel: 
 ///
 /// `receiver` must be a `MTLRenderPassDescriptor` of this crate's.
 pub(super) unsafe fn release_pass_contents(receiver: Id, orphaning: bool) {
-    // SAFETY: the caller's obligation.
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
     let mut attachments: Vec<&mut AttachmentDescriptor> = descriptor.colors.iter_mut().collect();
     attachments.push(&mut descriptor.depth);
@@ -801,7 +797,6 @@ pub(super) unsafe extern "C" fn set_pass_visibility_result_buffer(
     _sel: Sel,
     buffer: Id,
 ) {
-    // SAFETY: as above.
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
     let previous = std::mem::replace(
         &mut descriptor.visibility_result_buffer,
@@ -883,7 +878,6 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
             },
         },
     );
-    // SAFETY: as above.
     unsafe { object::body::<RenderPassDescriptor>(receiver) }.color_objects = collection;
     collection
 }
@@ -912,7 +906,6 @@ pub(super) unsafe extern "C" fn pass_single_attachment(receiver: Id, sel: Sel) -
             },
         },
     );
-    // SAFETY: as above.
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
     if depth {
         descriptor.depth_object = element;

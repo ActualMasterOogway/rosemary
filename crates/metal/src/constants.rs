@@ -1,5 +1,3 @@
-//! `MTLFunctionConstantValues`.
-
 use super::*;
 
 pub(crate) const MTL_PIXEL_FORMAT_INVALID: u64 = 0;
@@ -131,7 +129,6 @@ pub(super) unsafe extern "C" fn set_constants_in_range(
     for offset in 0..length {
         // SAFETY: the guest's array holds `length` values of `data_type`.
         let value = unsafe { values.add(offset as usize * stride) };
-        // SAFETY: as above.
         unsafe { set_constant_at_index(receiver, sel, value, data_type, location + offset) };
     }
 }

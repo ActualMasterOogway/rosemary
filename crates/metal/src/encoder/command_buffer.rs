@@ -1,5 +1,3 @@
-//! `MTLCommandBuffer`: recording, commit, and its handlers.
-
 use super::*;
 
 pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> Id {
@@ -126,28 +124,24 @@ pub(super) unsafe extern "C" fn command_buffer_queue(receiver: Id, _sel: Sel) ->
 }
 
 pub(super) unsafe extern "C" fn command_buffer_status(receiver: Id, _sel: Sel) -> u64 {
-    // SAFETY: as above.
     unsafe { object::body::<CommandBuffer>(receiver) }
         .completion
         .get()
 }
 
 pub(super) unsafe extern "C" fn command_buffer_gpu_start_time(receiver: Id, _sel: Sel) -> f64 {
-    // SAFETY: as above.
     unsafe { object::body::<CommandBuffer>(receiver) }
         .completion
         .gpu_time(false)
 }
 
 pub(super) unsafe extern "C" fn command_buffer_gpu_end_time(receiver: Id, _sel: Sel) -> f64 {
-    // SAFETY: as above.
     unsafe { object::body::<CommandBuffer>(receiver) }
         .completion
         .gpu_time(true)
 }
 
 pub(super) unsafe extern "C" fn add_handler(receiver: Id, sel: Sel, block: Id) {
-    // SAFETY: as above.
     let command = unsafe { object::body::<CommandBuffer>(receiver) };
     // SAFETY: the guest passed a block.
     let retained = unsafe { objc::shorthand::objc_retainBlock(block) };

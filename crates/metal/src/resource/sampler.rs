@@ -1,5 +1,3 @@
-//! `MTLSamplerState` and its descriptor.
-
 use super::*;
 
 pub(crate) struct SamplerState {

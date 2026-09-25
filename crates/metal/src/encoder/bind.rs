@@ -1,5 +1,3 @@
-//! The encoder itself: descriptor binding, pipeline binding, barriers.
-
 use super::*;
 
 pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {

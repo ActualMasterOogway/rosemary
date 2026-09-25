@@ -1,5 +1,3 @@
-//! `MTLTexture` and its descriptor.
-
 use super::*;
 use crate::constants::*;
 
@@ -227,7 +225,6 @@ pub(super) fn descriptor_field(descriptor: &TextureDescriptor, sel: Sel) -> u64 
 }
 
 pub(super) fn set_descriptor_field(descriptor: &mut TextureDescriptor, sel: Sel, value: u64) {
-    // SAFETY: as above.
     match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
         b"setTextureType:" => descriptor.texture_type = value,
         b"setPixelFormat:" => descriptor.pixel_format = value,
@@ -249,7 +246,6 @@ pub(super) unsafe extern "C" fn descriptor_value(receiver: Id, sel: Sel) -> u64 
 }
 
 pub(super) unsafe extern "C" fn set_descriptor_value(receiver: Id, sel: Sel, value: u64) {
-    // SAFETY: as above.
     set_descriptor_field(
         unsafe { object::body::<TextureDescriptor>(receiver) },
         sel,

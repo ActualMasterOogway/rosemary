@@ -1,5 +1,3 @@
-//! `MTLLibrary` and `MTLFunction`, and reporting a library this build cannot translate.
-
 use super::*;
 
 /// `-[MTLDevice newDefaultLibrary]`: the main bundle's `default.metallib`.

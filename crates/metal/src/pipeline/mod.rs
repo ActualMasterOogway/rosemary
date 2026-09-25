@@ -1,11 +1,3 @@
-//! Metal pipeline state, compiled to Vulkan pipelines.
-//!
-//! Metal and Vulkan disagree about what belongs to a pipeline. Metal's compute
-//! threadgroup size is a dispatch parameter, and its depth/stencil, cull and
-//! winding state belong to the encoder; Vulkan bakes all of them into the
-//! pipeline object. Each state object therefore holds the immutable half and
-//! caches a Vulkan pipeline per distinct combination of the rest.
-
 mod compute;
 mod descriptor;
 mod enums;
@@ -61,7 +53,6 @@ impl Layouts {
 /// and render forms because the Vulkan objects are the same shape.
 pub(super) fn destroy_variants(gpu: &Gpu, variants: impl IntoIterator<Item = vk::Pipeline>) {
     for pipeline in variants {
-        // SAFETY: as above.
         unsafe { gpu.device.destroy_pipeline(pipeline, None) };
     }
 }

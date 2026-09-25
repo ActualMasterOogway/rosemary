@@ -1,5 +1,3 @@
-//! `MTLDepthStencilState` and its descriptor.
-
 use super::*;
 
 /// A `MTLDepthStencilDescriptor` and the state a pipeline reads from it.
@@ -39,7 +37,6 @@ pub(super) unsafe extern "C" fn depth_compare(receiver: Id, _sel: Sel) -> u64 {
 }
 
 pub(super) unsafe extern "C" fn set_depth_write(receiver: Id, _sel: Sel, value: u64) {
-    // SAFETY: as above.
     unsafe { object::body::<DepthStencilState>(receiver) }.depth_write = value & 0xff != 0;
 }
 
