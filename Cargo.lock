@@ -1133,6 +1133,7 @@ dependencies = [
  "foundation",
  "metal_translate",
  "objc",
+ "rspirv",
  "sdl3",
  "static_init",
 ]
