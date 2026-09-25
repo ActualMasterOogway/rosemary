@@ -98,6 +98,8 @@ pub mod termios;
 pub mod tls;
 pub mod translation;
 pub mod ulock;
+#[cfg(not(target_os = "macos"))]
+pub mod utmpx;
 pub mod uuid;
 #[cfg(not(target_os = "macos"))]
 pub mod vis;
@@ -387,6 +389,8 @@ static MODULES: &[exports::Module] = &[
     progname::MODULE,
     #[cfg(target_os = "linux")]
     stream::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    utmpx::MODULE,
     #[cfg(not(target_os = "macos"))]
     vis::MODULE,
     #[cfg(not(target_os = "macos"))]

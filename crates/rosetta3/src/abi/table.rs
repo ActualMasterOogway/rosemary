@@ -3096,6 +3096,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("wmemcmp", I32, P, P, U64),
     sig!("write", I64, I32, P, U64),
     sig!("writev", I64, I32, P, I32),
+    sig!("wtmpxname", I32, P),
     sig!("zError", P, I32),
     sig!("zlibVersion", P),
     // Metal symbols
