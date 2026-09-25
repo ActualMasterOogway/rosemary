@@ -1,15 +1,3 @@
-//! Objects some other CoreFoundation made.
-//!
-//! A guest under `ROSETTA3_OBJC=builtin` still gets host objects from the calls
-//! this tree forwards rather than reimplements - a `CGEventRef` is one - and it
-//! releases them through the same `CFRelease` it uses for ours. Reading Apple's
-//! object as one of this runtime's walks a class structure that is not there,
-//! so such a handle goes back to the framework that made it.
-//!
-//! Darwin only, and only while [`forwarding`] is on. Everywhere else this tree
-//! is the only CoreFoundation there is, so a foreign object cannot arise and
-//! nothing here is consulted.
-
 use std::ffi::{CStr, c_void};
 
 use objc::class::Class;

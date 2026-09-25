@@ -1,5 +1,3 @@
-//! The small Disk Arbitration surface used to identify a mounted volume.
-
 use crate::base::CFTypeRef;
 use crate::callbacks::Policy;
 

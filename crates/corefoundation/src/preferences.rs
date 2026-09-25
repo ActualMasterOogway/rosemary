@@ -1,28 +1,3 @@
-//! `CFPreferences`, as a store this process keeps and nothing else reads.
-//!
-//! Preferences on a Mac are a `cfprefsd` question, not a file one: the daemon
-//! owns the domain, several processes may hold it open at once, and a program
-//! that wrote a plist itself would find its own write overwritten. There is no
-//! such daemon here, so the choice is between an in-process store and nothing.
-//!
-//! It is an in-process store, and the reason is what "nothing" costs. An
-//! unimplemented `CFPreferencesCopyAppValue` is an import bound to zero, which
-//! is a crash in whatever asked - and a program asks in its first second, for
-//! a setting it has never written. With a store the same program reads NULL,
-//! which is exactly what it reads on a Mac the first time it runs, and carries
-//! on.
-//!
-//! What it does **not** do is survive the process, and that is worth stating
-//! rather than hiding: a setting written here is read back correctly by the run
-//! that wrote it and is gone at the next launch. The direction matters - a
-//! program that writes a preference and reads it back within the run behaves
-//! normally, and one that relies on a preference outliving the run starts each
-//! time as if freshly installed.
-//!
-//! The domain arguments are honoured. `kCFPreferencesCurrentApplication` and an
-//! explicit bundle identifier are different domains, and a store that folded
-//! them together would let one program's key answer another's.
-
 // The C spellings are the interface, as they are in `api`.
 #![allow(non_snake_case)]
 
@@ -51,7 +26,6 @@ fn store() -> &'static Mutex<HashMap<String, Domain>> {
 ///
 /// `value` is null or an object this runtime allocated.
 unsafe fn text(value: CFTypeRef) -> Option<String> {
-    // SAFETY: the caller's obligation.
     unsafe { crate::string::as_string(value) }
         .map(|s| String::from_utf8_lossy(&s.utf8()).into_owned())
 }
@@ -68,7 +42,6 @@ unsafe fn text(value: CFTypeRef) -> Option<String> {
 ///
 /// `application` is null or a `CFStringRef`.
 unsafe fn domain_of(application: CFTypeRef) -> String {
-    // SAFETY: the caller's obligation.
     unsafe { text(application) }.unwrap_or_else(|| ANY.to_string())
 }
 
@@ -142,7 +115,6 @@ pub unsafe extern "C" fn CFPreferencesCopyAppValue(
     key: CFTypeRef,
     application: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let (Some(key), domain) = (unsafe { text(key) }, unsafe { domain_of(application) }) else {
         return std::ptr::null();
     };
@@ -167,7 +139,6 @@ pub unsafe extern "C" fn CFPreferencesSetAppValue(
     value: CFTypeRef,
     application: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let (Some(key), domain) = (unsafe { text(key) }, unsafe { domain_of(application) }) else {
         return;
     };
@@ -199,7 +170,6 @@ pub unsafe extern "C" fn CFPreferencesCopyValue(
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     unsafe { CFPreferencesCopyAppValue(key, application) }
 }
 
@@ -216,7 +186,6 @@ pub unsafe extern "C" fn CFPreferencesSetValue(
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     unsafe { CFPreferencesSetAppValue(key, value, application) }
 }
 
@@ -235,7 +204,6 @@ pub unsafe extern "C" fn CFPreferencesGetAppBooleanValue(
     application: CFTypeRef,
     exists: *mut u8,
 ) -> u8 {
-    // SAFETY: the caller's obligation.
     let value = unsafe { CFPreferencesCopyAppValue(key, application) };
     // SAFETY: a value this store holds, or null.
     let number = unsafe { crate::collections::number(value) }.map(|n| n.as_i64() != 0);
@@ -261,9 +229,7 @@ pub unsafe extern "C" fn CFPreferencesGetAppIntegerValue(
     application: CFTypeRef,
     exists: *mut u8,
 ) -> i64 {
-    // SAFETY: the caller's obligation.
     let value = unsafe { CFPreferencesCopyAppValue(key, application) };
-    // SAFETY: as above.
     let number = unsafe { crate::collections::number(value) }.map(|n| n.as_i64());
     if !value.is_null() {
         // SAFETY: the reference just handed over.
@@ -294,7 +260,6 @@ pub unsafe extern "C" fn CFPreferencesCopyKeyList(
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let domain = unsafe { domain_of(application) };
     let store = store().lock().unwrap_or_else(|e| e.into_inner());
     let keys: Vec<CFTypeRef> = match store.get(&domain) {
@@ -340,14 +305,12 @@ pub unsafe extern "C" fn CFPreferencesSetMultiple(
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     if let Some(remove) = unsafe { crate::collections::array(keys_to_remove) } {
         for key in remove.values.clone() {
             // SAFETY: a key from the caller's array and the caller's domain.
             unsafe { CFPreferencesSetAppValue(key, std::ptr::null(), application) };
         }
     }
-    // SAFETY: the caller's obligation.
     if let Some(set) = unsafe { crate::collections::dictionary(keys_to_set) } {
         for (key, value) in set.entries.clone() {
             // SAFETY: a pair from the caller's dictionary and the caller's domain.

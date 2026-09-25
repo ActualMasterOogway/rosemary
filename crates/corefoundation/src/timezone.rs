@@ -1,5 +1,3 @@
-//! The small toll-free `CFTimeZone`/`NSTimeZone` object used during startup.
-
 use std::ffi::c_void;
 
 use objc::class::Class;
@@ -75,7 +73,7 @@ pub unsafe extern "C" fn create_with_name(
     name: CFTypeRef,
     _try_abbreviation: u8,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a string or null.
+    // SAFETY: a string or null.
     let Some(name) = (unsafe { crate::string::as_string(name) }) else {
         return std::ptr::null();
     };
@@ -89,7 +87,6 @@ pub unsafe extern "C" fn create_with_name(
 ///
 /// `timezone` is null or an object.
 pub unsafe fn name_of(timezone: CFTypeRef) -> Option<String> {
-    // SAFETY: the caller's obligation.
     if !unsafe { crate::base::is_kind_of(timezone, class()) } {
         return None;
     }
@@ -101,7 +98,7 @@ pub unsafe fn name_of(timezone: CFTypeRef) -> Option<String> {
 }
 
 pub unsafe extern "C" fn get_name(timezone: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a timezone from this runtime.
+    // SAFETY: a timezone from this runtime.
     if !unsafe { crate::base::is_kind_of(timezone, class()) } {
         return std::ptr::null();
     }

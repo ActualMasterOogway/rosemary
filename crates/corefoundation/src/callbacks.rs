@@ -1,12 +1,3 @@
-//! The retain/release/equal callbacks a collection is created with.
-//!
-//! Apple's collections take these as a structure rather than assuming
-//! CoreFoundation semantics, because a `CFArray` is allowed to hold anything -
-//! `malloc`ed structs, integers, file descriptors. A guest that passes
-//! `kCFTypeArrayCallBacks` wants its elements retained; one that passes null
-//! wants them left alone. Both spellings appear in the wild and they mean
-//! different things, so the structure is read rather than assumed.
-
 use std::ffi::c_void;
 
 use crate::base::CFTypeRef;
@@ -39,17 +30,14 @@ unsafe extern "C" fn retain(_allocator: *const c_void, value: CFTypeRef) -> CFTy
 }
 
 unsafe extern "C" fn release(_allocator: *const c_void, value: CFTypeRef) {
-    // SAFETY: as above.
     unsafe { crate::api::CFRelease(value) }
 }
 
 unsafe extern "C" fn equal(a: CFTypeRef, b: CFTypeRef) -> u8 {
-    // SAFETY: as above.
     unsafe { crate::api::CFEqual(a, b) }
 }
 
 unsafe extern "C" fn hash(value: CFTypeRef) -> usize {
-    // SAFETY: as above.
     unsafe { crate::api::CFHash(value) }
 }
 
@@ -117,7 +105,6 @@ impl Policy {
         if p.is_null() {
             return Policy::NONE;
         }
-        // SAFETY: the caller's obligation.
         let c = unsafe { &*p };
         Policy {
             retain: c.retain,
@@ -133,7 +120,6 @@ impl Policy {
         if p.is_null() {
             return Policy::NONE;
         }
-        // SAFETY: the caller's obligation.
         let c = unsafe { &*p };
         Policy {
             retain: c.retain,
@@ -152,14 +138,12 @@ impl Policy {
 
     pub fn release(&self, value: CFTypeRef) {
         if let Some(f) = self.release {
-            // SAFETY: as above.
             unsafe { f(std::ptr::null(), value) };
         }
     }
 
     pub fn equal(&self, a: CFTypeRef, b: CFTypeRef) -> bool {
         match self.equal {
-            // SAFETY: as above.
             Some(f) => unsafe { f(a, b) != 0 },
             None => a == b,
         }

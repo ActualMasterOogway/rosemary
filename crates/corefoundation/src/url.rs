@@ -1,16 +1,3 @@
-//! `CFURL`, which is `NSURL *`.
-//!
-//! A URL is stored as its absolute text and nothing else. The pieces a caller
-//! asks for - the scheme, the file system path - are cut out of that text on
-//! demand rather than kept beside it, so there is no second representation to
-//! disagree with the first. What performs an HTTP request parses the text
-//! properly; see `foundation::urlsession`.
-//!
-//! A file URL is the case that has to round-trip exactly, because a bundle
-//! answers with one and the guest turns it straight back into a path. The path
-//! is percent-encoded on the way in and decoded on the way out, which is what
-//! keeps a directory with a space in its name from re-parsing as two.
-
 use std::ffi::c_void;
 
 use objc::class::Class;
@@ -229,7 +216,6 @@ pub fn new_file_url(path: &str, directory: bool) -> CFTypeRef {
 ///
 /// `url` must be null or an object this runtime allocated.
 pub unsafe fn as_url<'a>(url: CFTypeRef) -> Option<&'a Contents> {
-    // SAFETY: the caller's obligation.
     if !unsafe { crate::base::is_kind_of(url, class()) } {
         return None;
     }

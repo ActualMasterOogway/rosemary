@@ -1,10 +1,3 @@
-//! The lifecycle half of FSEvents.
-//!
-//! A portable host watcher is deliberately not invented here. Clients still
-//! need a stream they can schedule and tear down while startup proceeds; an
-//! inert stream gives them that contract without reporting events that did not
-//! come from Darwin's filesystem service.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 

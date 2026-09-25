@@ -1,18 +1,3 @@
-//! `CFArray`, `CFSet`, `CFDictionary`, `CFNumber` and `CFData`.
-//!
-//! Each is an object of this tree's Objective-C runtime whose body is a
-//! `#[repr(C)]` struct beginning with the `isa`, and whose contents live in a
-//! `Box`ed Rust value hanging off it. Unlike [`crate::string`], no guest lays
-//! one of these out by hand, so the interior is free.
-//!
-//! The dictionary is a vector of pairs searched linearly. That is not an
-//! oversight: the keys are compared with a *callback the caller supplied*, so a
-//! hash table would have to hash through another one and would still fall back
-//! to the callback on collision, and the dictionaries a guest builds here are
-//! IOKit matching criteria and option sets - a handful of entries each. When one
-//! shows up in a profile, the fix is a hash index beside the vector and not a
-//! change of interface.
-
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -80,7 +65,6 @@ fn make<T>(class: &'static Class, contents: T) -> CFTypeRef {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn contents<'a, T>(object: CFTypeRef, class: &'static Class) -> Option<&'a mut T> {
-    // SAFETY: the caller's obligation.
     if !unsafe { crate::base::is_kind_of(object, class) } {
         return None;
     }
@@ -142,7 +126,6 @@ pub fn new_array(values: &[CFTypeRef], policy: Policy, mutable: bool) -> CFTypeR
 ///
 /// As [`contents`].
 pub unsafe fn array<'a>(object: CFTypeRef) -> Option<&'a mut ArrayContents> {
-    // SAFETY: the caller's obligation.
     unsafe { contents(object, array_class()) }
 }
 
@@ -193,7 +176,6 @@ pub fn new_set(values: &[CFTypeRef], policy: Policy) -> CFTypeRef {
 ///
 /// As [`contents`].
 pub unsafe fn set<'a>(object: CFTypeRef) -> Option<&'a mut SetContents> {
-    // SAFETY: the caller's obligation.
     unsafe { contents(object, set_class()) }
 }
 
@@ -270,7 +252,6 @@ pub fn new_dictionary(
 ///
 /// As [`contents`].
 pub unsafe fn dictionary<'a>(object: CFTypeRef) -> Option<&'a mut DictionaryContents> {
-    // SAFETY: the caller's obligation.
     unsafe { contents(object, dictionary_class()) }
 }
 
@@ -450,7 +431,6 @@ pub fn boolean(value: bool) -> CFTypeRef {
 ///
 /// As [`contents`].
 unsafe fn number_body<'a>(object: CFTypeRef) -> Option<&'a mut NumberBody> {
-    // SAFETY: the caller's obligation.
     unsafe {
         contents::<NumberBody>(object, number_class())
             .or_else(|| contents::<NumberBody>(object, boolean_class()))
@@ -497,7 +477,6 @@ fn integer_encoding_type(encoding: u8) -> i32 {
 ///
 /// `object` must be null or an object this runtime allocated or bound.
 unsafe fn constant_number(object: CFTypeRef) -> Option<(Number, i32)> {
-    // SAFETY: the caller's obligation.
     let class = unsafe { crate::base::class_of(object) }?;
     let is = |name: &std::ffi::CStr| {
         objc::class::lookup(name).is_some_and(|k| class.chain().any(|c| std::ptr::eq(c, k)))
@@ -531,10 +510,8 @@ unsafe fn constant_number(object: CFTypeRef) -> Option<(Number, i32)> {
 ///
 /// `object` must be null or an object this runtime allocated or bound.
 pub unsafe fn number_value(object: CFTypeRef) -> Option<(Number, i32)> {
-    // SAFETY: the caller's obligation.
     match unsafe { number_body(object) } {
         Some(body) => Some((body.value, body.kind)),
-        // SAFETY: as above.
         None => unsafe { constant_number(object) },
     }
 }
@@ -545,7 +522,6 @@ pub unsafe fn number_value(object: CFTypeRef) -> Option<(Number, i32)> {
 ///
 /// As [`number_value`].
 pub unsafe fn number(object: CFTypeRef) -> Option<Number> {
-    // SAFETY: the caller's obligation.
     unsafe { number_value(object) }.map(|(value, _)| value)
 }
 
@@ -555,7 +531,6 @@ pub unsafe fn number(object: CFTypeRef) -> Option<Number> {
 ///
 /// As [`number_value`].
 pub unsafe fn number_type(object: CFTypeRef) -> Option<i32> {
-    // SAFETY: the caller's obligation.
     unsafe { number_value(object) }.map(|(_, kind)| kind)
 }
 
@@ -579,7 +554,6 @@ pub fn new_data(bytes: Vec<u8>) -> CFTypeRef {
 ///
 /// As [`contents`].
 pub unsafe fn data<'a>(object: CFTypeRef) -> Option<&'a mut Vec<u8>> {
-    // SAFETY: the caller's obligation.
     unsafe { contents(object, data_class()) }
 }
 

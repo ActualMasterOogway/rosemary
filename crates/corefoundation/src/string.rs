@@ -1,20 +1,3 @@
-//! `CFString`, and the layout the compiler already decided.
-//!
-//! A `@"literal"` in the guest's `__DATA` is four words:
-//!
-//! ```c
-//! struct __builtin_CFString { const void *isa; long flags; const char *str; long length; };
-//! ```
-//!
-//! `isa` is the `___CFConstantStringClassReference` the image imported. So the
-//! layout of a string here is not a choice - it is that structure, and a
-//! constant string becomes a live object of this runtime the moment that one
-//! data symbol is bound. Nothing is copied and nothing is converted; see
-//! [`crate::constant_string_class`].
-//!
-//! Dynamically created strings use the same four words with owned storage, so
-//! every reader below works on either.
-
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::OnceLock;
 
@@ -364,7 +347,6 @@ pub fn type_id_of_strings() -> crate::base::CFTypeID {
 ///
 /// `string` must be null or an object this runtime allocated.
 pub unsafe fn as_string<'a>(string: CFTypeRef) -> Option<&'a CFString> {
-    // SAFETY: the caller's obligation.
     let is_string = unsafe {
         crate::base::is_kind_of(string, class())
             || crate::base::is_kind_of(string, constant_class())
@@ -467,7 +449,6 @@ impl CFString {
 ///
 /// As [`set_bytes`].
 pub unsafe fn set_utf16(string: CFTypeRef, units: &[u16]) -> bool {
-    // SAFETY: the caller's obligation.
     if !unsafe { is_mutable(string) } {
         return false;
     }
@@ -536,7 +517,6 @@ pub fn from_utf16(units: &[u16]) -> CFTypeRef {
     let mut owned = units.to_vec();
     owned.push(0);
     let str = Box::into_raw(owned.into_boxed_slice()) as *const u8;
-    // SAFETY: as above.
     unsafe {
         (*object).flags = OWNED | WIDE;
         (*object).str = str;
@@ -579,7 +559,6 @@ pub fn new_mutable() -> CFTypeRef {
 ///
 /// As [`as_string`].
 pub unsafe fn is_mutable(string: CFTypeRef) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe { as_string(string) }.is_some_and(|s| s.flags & MUTABLE != 0)
 }
 
@@ -593,7 +572,6 @@ pub unsafe fn is_mutable(string: CFTypeRef) -> bool {
 ///
 /// As [`as_string`].
 pub unsafe fn set_bytes(string: CFTypeRef, bytes: &[u8]) -> bool {
-    // SAFETY: the caller's obligation.
     if !unsafe { is_mutable(string) } {
         return false;
     }
@@ -653,7 +631,6 @@ pub fn from_encoded(bytes: &[u8], encoding: u32) -> CFTypeRef {
 ///
 /// `object` must be a `__NSCFString` with no remaining references.
 pub unsafe fn release_storage(object: *mut CFString) {
-    // SAFETY: the caller's obligation.
     let flags = unsafe { (*object).flags };
     if flags & OWNED == 0 {
         return;
@@ -684,6 +661,5 @@ pub unsafe fn release_storage(object: *mut CFString) {
 ///
 /// `p` must be null or NUL-terminated.
 pub unsafe fn cstr_bytes<'a>(p: *const c_char) -> Option<&'a [u8]> {
-    // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes())
 }

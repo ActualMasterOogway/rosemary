@@ -1,5 +1,3 @@
-//! `CFSocket`, backed by nonblocking host `poll` during run-loop turns.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};

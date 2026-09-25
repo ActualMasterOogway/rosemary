@@ -41,7 +41,6 @@ pub fn new(bytes: Bytes) -> CFTypeRef {
 ///
 /// `uuid` must be null or an object this runtime allocated.
 pub unsafe fn bytes_of(uuid: CFTypeRef) -> Option<Bytes> {
-    // SAFETY: the caller's obligation.
     if !unsafe { crate::base::is_kind_of(uuid, class()) } {
         return None;
     }

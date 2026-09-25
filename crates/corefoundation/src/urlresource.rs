@@ -1,24 +1,3 @@
-//! The `CFURL` resource-property API: what a file is, asked through its URL.
-//!
-//! `CFURLCopyResourcePropertyForKey` is how a Mac program asks the questions a
-//! `stat` does not answer - is this hidden, is this directory really a document,
-//! is this file an alias - and Qt asks three of them for *every* file it stats,
-//! from `QFileSystemEngine::fillMetaData`. So these are not a file-dialog nicety:
-//! an unbound key here binds to zero and Qt passes address zero as the key while
-//! listing a directory during startup.
-//!
-//! Where a question has no answer on this host, the property is **absent** rather
-//! than false, and the two are different: `CFURLCopyResourcePropertyForKey`
-//! returning true with a false value says "this file is definitely not hidden",
-//! and returning false says "this volume cannot tell you". A caller that asked
-//! about a flag no filesystem here has is entitled to the second.
-//!
-//! The keys are spelled with their `NSURL` values, because on a Mac they *are*
-//! the `NSURL` constants - `kCFURLIsHiddenKey` and `NSURLIsHiddenKey` are one
-//! symbol with one string behind it, so a guest that reads a property dictionary
-//! with the CoreFoundation key and looks it up with the Foundation one has to
-//! find it.
-
 // The C spellings are the interface.
 #![allow(non_snake_case)]
 
@@ -223,7 +202,6 @@ fn property(path: &std::path::Path, key: &str) -> Option<CFTypeRef> {
 ///
 /// `url` must be null or an object this runtime allocated.
 unsafe fn path_of(url: CFTypeRef) -> Option<std::path::PathBuf> {
-    // SAFETY: the caller's obligation.
     let path = unsafe { crate::url::as_url(url) }?.file_path()?;
     // The guest named it, so every question below is put at this host's
     // spelling. The last component is the same either way, which is what the
@@ -237,7 +215,6 @@ unsafe fn path_of(url: CFTypeRef) -> Option<std::path::PathBuf> {
 ///
 /// As [`path_of`].
 unsafe fn text_of(value: CFTypeRef) -> Option<String> {
-    // SAFETY: the caller's obligation.
     let bytes = unsafe { crate::string::as_string(value) }?.utf8();
     String::from_utf8(bytes).ok()
 }
@@ -266,7 +243,6 @@ pub unsafe extern "C" fn CFURLCopyResourcePropertyForKey(
         // SAFETY: the caller states it is writable.
         unsafe { *out = std::ptr::null() };
     }
-    // SAFETY: the caller's obligation.
     let (Some(path), Some(key)) = (unsafe { path_of(url) }, unsafe { text_of(key) }) else {
         return 0;
     };
@@ -299,7 +275,6 @@ pub unsafe extern "C" fn CFURLCopyResourcePropertiesForKeys(
     keys: CFTypeRef,
     _error: *mut CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(path) = (unsafe { path_of(url) }) else {
         return std::ptr::null();
     };
@@ -377,7 +352,7 @@ pub unsafe extern "C" fn CFURLCreateWithBytes(
     // SAFETY: the caller states the bytes are readable.
     let bytes = unsafe { std::slice::from_raw_parts(buffer, length as usize) };
     let text = String::from_utf8_lossy(bytes).into_owned();
-    // SAFETY: the caller's obligation - a `CFURL` or null.
+    // SAFETY: a `CFURL` or null.
     let base = unsafe { crate::url::as_url(base) };
     match base {
         // Relative to a base only when it is relative: a URL with its own scheme

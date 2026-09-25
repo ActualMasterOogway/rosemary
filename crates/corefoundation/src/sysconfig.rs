@@ -116,7 +116,6 @@ fn target_class() -> &'static Class {
 /// `target` must be null or an object this runtime allocated.
 #[cfg(not(target_os = "macos"))]
 unsafe fn target_state(target: CFTypeRef) -> Option<&'static std::sync::Mutex<TargetState>> {
-    // SAFETY: the caller's obligation.
     if !unsafe { crate::base::is_kind_of(target, target_class()) } {
         return None;
     }
@@ -260,7 +259,7 @@ mod darwin {
         }
         // Checked rather than assumed: reading one of this runtime's objects as
         // Apple's structure is the failure `crate::foreign` exists to stop.
-        // SAFETY: the caller's obligation - null or an object.
+        // SAFETY: null or an object.
         if !unsafe { crate::foreign::is(target) } {
             return 0;
         }
@@ -349,7 +348,7 @@ mod local {
         target: CFTypeRef,
         flags: *mut u32,
     ) -> u8 {
-        // SAFETY: the caller's obligation - null or an object.
+        // SAFETY: null or an object.
         let Some(state) = (unsafe { target_state(target) }) else {
             return 0;
         };
@@ -374,7 +373,6 @@ mod local {
         callback: *const c_void,
         context: *mut c_void,
     ) -> u8 {
-        // SAFETY: the caller's obligation.
         let Some(state) = (unsafe { target_state(target) }) else {
             return 0;
         };
@@ -423,7 +421,6 @@ mod local {
         _loop: CFTypeRef,
         _mode: CFTypeRef,
     ) -> u8 {
-        // SAFETY: the caller's obligation.
         let Some(state) = (unsafe { target_state(target) }) else {
             return 0;
         };
@@ -448,7 +445,6 @@ mod local {
         _loop: CFTypeRef,
         _mode: CFTypeRef,
     ) -> u8 {
-        // SAFETY: the caller's obligation.
         u8::from(unsafe { target_state(target) }.is_some())
     }
 }
@@ -514,7 +510,7 @@ pub unsafe extern "C" fn SCDynamicStoreKeyCreateNetworkGlobalEntity(
     domain: CFTypeRef,
     entity: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null or an object of this runtime's.
+    // SAFETY: null or an object of this runtime's.
     let (Some(domain), Some(entity)) = (unsafe { text_of(domain) }, unsafe { text_of(entity) })
     else {
         return std::ptr::null();
@@ -531,7 +527,6 @@ pub unsafe extern "C" fn SCDynamicStoreKeyCreateNetworkGlobalEntity(
 /// a program reads to find out how it is on the network. Every other key is NULL,
 /// which is what Apple's returns for a key the store does not hold.
 pub unsafe extern "C" fn SCDynamicStoreCopyValue(_store: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(key) = (unsafe { text_of(key) }) else {
         return std::ptr::null();
     };
@@ -602,7 +597,6 @@ pub unsafe extern "C" fn SCNetworkInterfaceGetInterfaceType(_interface: CFTypeRe
 ///
 /// `string` must be null or an object this runtime allocated.
 unsafe fn text_of(string: CFTypeRef) -> Option<Vec<u8>> {
-    // SAFETY: the caller's obligation.
     unsafe { crate::string::as_string(string) }.map(|s| s.utf8())
 }
 

@@ -54,7 +54,7 @@ pub unsafe extern "C" fn CFAllocatorCreate(
 /// is not there.
 #[cfg(target_os = "macos")]
 unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
-    // SAFETY: the caller's obligation - null or an object.
+    // SAFETY: null or an object.
     if !unsafe { crate::foreign::is(object) } {
         return false;
     }
@@ -103,7 +103,6 @@ unsafe fn forwarded(_name: &std::ffi::CStr, object: CFTypeRef) -> bool {
 }
 
 pub unsafe extern "C" fn CFRetain(object: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     if unsafe { forwarded(c"CFRetain", object) } {
         return object;
     }
@@ -111,7 +110,6 @@ pub unsafe extern "C" fn CFRetain(object: CFTypeRef) -> CFTypeRef {
 }
 
 pub unsafe extern "C" fn CFRelease(object: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if unsafe { forwarded(c"CFRelease", object) } {
         return;
     }
@@ -119,7 +117,6 @@ pub unsafe extern "C" fn CFRelease(object: CFTypeRef) {
 }
 
 pub unsafe extern "C" fn CFAutorelease(object: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     if unsafe { forwarded(c"CFAutorelease", object) } {
         return object;
     }
@@ -137,7 +134,7 @@ pub unsafe extern "C" fn CFGetTypeID(object: CFTypeRef) -> CFTypeID {
     if let Some(type_id) = crate::base::opaque_type_id(object) {
         return type_id;
     }
-    // SAFETY: the caller's obligation - an object this runtime allocated.
+    // SAFETY: an object this runtime allocated.
     unsafe { crate::base::class_of(object) }.map_or(0, crate::base::type_id_of)
 }
 
@@ -182,7 +179,7 @@ pub unsafe extern "C" fn CFStringCreateWithCString(
     cstr: *const c_char,
     encoding: u32,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a NUL-terminated string or null.
+    // SAFETY: a NUL-terminated string or null.
     let Some(bytes) = (unsafe { string::cstr_bytes(cstr) }) else {
         return std::ptr::null();
     };
@@ -193,7 +190,7 @@ pub unsafe extern "C" fn CFStringCreateWithFileSystemRepresentation(
     _allocator: CFAllocatorRef,
     path: *const c_char,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a NUL-terminated filesystem path.
+    // SAFETY: a NUL-terminated filesystem path.
     let Some(bytes) = (unsafe { string::cstr_bytes(path) }) else {
         return std::ptr::null();
     };
@@ -212,7 +209,6 @@ pub unsafe extern "C" fn CFStringCreateWithCStringNoCopy(
     encoding: u32,
     _contents_deallocator: CFAllocatorRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     unsafe { CFStringCreateWithCString(allocator, cstr, encoding) }
 }
 
@@ -240,7 +236,6 @@ pub unsafe extern "C" fn CFStringCreateWithCharactersNoCopy(
     count: CFIndex,
     _contents_deallocator: CFAllocatorRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     unsafe { CFStringCreateWithCharacters(allocator, chars, count) }
 }
 
@@ -278,7 +273,6 @@ pub unsafe extern "C" fn CFStringCreateCopy(
     _allocator: CFAllocatorRef,
     original: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(original) }) else {
         return std::ptr::null();
     };
@@ -298,7 +292,7 @@ pub unsafe extern "C" fn CFStringCreateWithSubstring(
     let (Ok(location), Ok(length)) = (usize::try_from(location), usize::try_from(length)) else {
         return std::ptr::null();
     };
-    // SAFETY: the caller's obligation - a live string or null.
+    // SAFETY: a live string or null.
     let Some(source) = (unsafe { string::as_string(source) }) else {
         return std::ptr::null();
     };
@@ -313,12 +307,11 @@ pub unsafe extern "C" fn CFStringCreateWithSubstring(
 }
 
 pub unsafe extern "C" fn CFStringGetLength(s: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { string::as_string(s) }.map_or(0, |s| s.length())
 }
 
 pub unsafe extern "C" fn CFStringGetIntValue(value: CFTypeRef) -> i32 {
-    // SAFETY: the caller's obligation - a string or null.
+    // SAFETY: a string or null.
     let Some(value) = (unsafe { string::as_string(value) }) else {
         return 0;
     };
@@ -333,7 +326,7 @@ pub unsafe extern "C" fn CFStringGetIntValue(value: CFTypeRef) -> i32 {
 }
 
 pub unsafe extern "C" fn CFStringGetDoubleValue(value: CFTypeRef) -> f64 {
-    // SAFETY: the caller's obligation - a string or null.
+    // SAFETY: a string or null.
     let Some(value) = (unsafe { string::as_string(value) }) else {
         return 0.0;
     };
@@ -386,7 +379,6 @@ pub unsafe extern "C" fn CFStringGetCString(
     buffer_size: CFIndex,
     encoding: u32,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return 0;
     };
@@ -432,7 +424,6 @@ pub unsafe extern "C" fn CFStringGetCString(
 /// Null is a legitimate answer and a caller must handle it; one that does not is
 /// broken on Apple's CoreFoundation too.
 pub unsafe extern "C" fn CFStringGetCStringPtr(s: CFTypeRef, encoding: u32) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { string::as_string(s) }.map_or(std::ptr::null(), |s| s.c_string(encoding))
 }
 
@@ -454,7 +445,6 @@ pub unsafe extern "C" fn CFStringGetBytes(
     max_buffer_length: CFIndex,
     used_buffer_length: *mut CFIndex,
 ) -> CFIndex {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return 0;
     };
@@ -554,7 +544,7 @@ pub unsafe extern "C" fn CFStringCreateExternalRepresentation(
     encoding: u32,
     loss_byte: u8,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a string or null.
+    // SAFETY: a string or null.
     let Some(value) = (unsafe { crate::string::as_string(string) }) else {
         return std::ptr::null();
     };
@@ -618,7 +608,6 @@ pub unsafe extern "C" fn CFStringCreateMutableCopy(
     _max_length: CFIndex,
     original: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(original) }) else {
         return std::ptr::null();
     };
@@ -634,25 +623,21 @@ pub unsafe extern "C" fn CFStringCreateMutableCopy(
 ///
 /// `target` is null or an object this runtime allocated.
 unsafe fn append(target: CFTypeRef, tail_utf8: &[u8]) {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { string::as_string(target) }) else {
         return;
     };
     if a.is_wide() {
         let mut units = a.utf16();
         units.extend(String::from_utf8_lossy(tail_utf8).encode_utf16());
-        // SAFETY: as above.
         unsafe { string::set_utf16(target, &units) };
         return;
     }
     let mut joined = a.utf8();
     joined.extend_from_slice(tail_utf8);
-    // SAFETY: as above.
     unsafe { string::set_bytes(target, &joined) };
 }
 
 pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { string::as_string(target) }, unsafe {
         string::as_string(appended)
     }) else {
@@ -663,11 +648,9 @@ pub unsafe extern "C" fn CFStringAppend(target: CFTypeRef, appended: CFTypeRef) 
     if a.is_wide() && b.is_wide() {
         let mut units = a.utf16();
         units.extend_from_slice(&b.utf16());
-        // SAFETY: as above.
         unsafe { string::set_utf16(target, &units) };
         return;
     }
-    // SAFETY: as above.
     unsafe { append(target, &b.utf8()) };
 }
 
@@ -677,7 +660,6 @@ pub unsafe extern "C" fn CFStringInsert(target: CFTypeRef, index: CFIndex, inser
         return;
     };
     // Read the inserted value first because it is allowed to alias `target`.
-    // SAFETY: the caller's obligation.
     let Some(inserted) = (unsafe { string::as_string(inserted) }) else {
         return;
     };
@@ -718,7 +700,7 @@ pub unsafe extern "C" fn CFStringDelete(target: CFTypeRef, location: CFIndex, le
     let (Ok(location), Ok(length)) = (usize::try_from(location), usize::try_from(length)) else {
         return;
     };
-    // SAFETY: the caller's obligation - a live mutable string or null.
+    // SAFETY: a live mutable string or null.
     let Some(value) = (unsafe { string::as_string(target) }) else {
         return;
     };
@@ -752,12 +734,10 @@ pub unsafe extern "C" fn CFStringAppendCString(
     cstr: *const c_char,
     _encoding: u32,
 ) {
-    // SAFETY: the caller's obligation.
-    // SAFETY: the caller's obligation - a NUL-terminated string or null.
+    // SAFETY: a NUL-terminated string or null.
     let Some(bytes) = (unsafe { string::cstr_bytes(cstr) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe { append(target, bytes) };
 }
 
@@ -769,14 +749,12 @@ pub unsafe extern "C" fn CFStringAppendCString(
 /// Apple's gives `U+0130`. Everything else, including the multi-character
 /// mappings such as `ss` to `SS`, is the same answer.
 pub unsafe extern "C" fn CFStringUppercase(target: CFTypeRef, _locale: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     unsafe { recase(target, str::to_uppercase) }
 }
 
 /// `void CFStringLowercase(CFMutableStringRef, CFLocaleRef locale)`, with the
 /// same treatment of the locale as [`CFStringUppercase`].
 pub unsafe extern "C" fn CFStringLowercase(target: CFTypeRef, _locale: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     unsafe { recase(target, str::to_lowercase) }
 }
 
@@ -789,19 +767,16 @@ pub unsafe extern "C" fn CFStringLowercase(target: CFTypeRef, _locale: CFTypeRef
 ///
 /// `target` is null or an object this runtime allocated.
 unsafe fn recase(target: CFTypeRef, map: fn(&str) -> String) {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(target) }) else {
         return;
     };
     if s.is_wide() {
         let mapped = map(&String::from_utf16_lossy(&s.utf16()));
         let units: Vec<u16> = mapped.encode_utf16().collect();
-        // SAFETY: as above.
         unsafe { string::set_utf16(target, &units) };
         return;
     }
     let mapped = map(&String::from_utf8_lossy(&s.utf8()));
-    // SAFETY: as above.
     unsafe { string::set_bytes(target, mapped.as_bytes()) };
 }
 
@@ -811,7 +786,6 @@ unsafe fn recase(target: CFTypeRef, map: fn(&str) -> String) {
 /// no character to answer with, and a caller reading past the length it was
 /// given has already lost track of the string.
 pub unsafe extern "C" fn CFStringGetCharacterAtIndex(s: CFTypeRef, index: CFIndex) -> u16 {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return 0;
     };
@@ -833,7 +807,6 @@ pub unsafe extern "C" fn CFStringGetCharacters(
     range_length: CFIndex,
     buffer: *mut u16,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(s) = (unsafe { string::as_string(s) }) else {
         return;
     };
@@ -858,7 +831,6 @@ pub unsafe extern "C" fn CFStringGetCharacters(
 /// already there, and null rather than a conversion. An 8-bit string's bytes
 /// are not `UniChar`s, so it has none to point at.
 pub unsafe extern "C" fn CFStringGetCharactersPtr(s: CFTypeRef) -> *const u16 {
-    // SAFETY: the caller's obligation.
     unsafe { string::as_string(s) }.map_or(std::ptr::null(), |s| s.characters_ptr())
 }
 
@@ -879,23 +851,19 @@ pub unsafe extern "C" fn CFStringAppendCharacters(
         0 => &[][..],
         _ => unsafe { std::slice::from_raw_parts(chars, count) },
     };
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { string::as_string(target) }) else {
         return;
     };
     if a.is_wide() {
         let mut units = a.utf16();
         units.extend_from_slice(tail);
-        // SAFETY: as above.
         unsafe { string::set_utf16(target, &units) };
         return;
     }
-    // SAFETY: as above.
     unsafe { append(target, String::from_utf16_lossy(tail).as_bytes()) };
 }
 
 pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u64) -> CFIndex {
-    // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe {
         string::as_string(b)
     }) else {
@@ -935,7 +903,7 @@ pub unsafe extern "C" fn CFStringFindWithOptions(
     ) else {
         return 0;
     };
-    // SAFETY: the caller's obligation - live strings or null.
+    // SAFETY: live strings or null.
     let (Some(searched), Some(needle)) = (unsafe { string::as_string(searched) }, unsafe {
         string::as_string(needle)
     }) else {
@@ -1002,7 +970,6 @@ pub unsafe extern "C" fn CFStringCompareWithOptions(
     length: CFIndex,
     options: u64,
 ) -> CFIndex {
-    // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { string::as_string(a) }, unsafe {
         string::as_string(b)
     }) else {
@@ -1056,7 +1023,7 @@ pub unsafe extern "C" fn CFArrayCreate(
         0 => &[][..],
         _ => unsafe { std::slice::from_raw_parts(values, count as usize) },
     };
-    // SAFETY: the caller's obligation - null, or a live callbacks structure.
+    // SAFETY: null, or a live callbacks structure.
     collections::new_array(slice, unsafe { Policy::from_value(callbacks) }, false)
 }
 
@@ -1067,12 +1034,11 @@ pub unsafe extern "C" fn CFArrayCreateMutable(
     _capacity: CFIndex,
     callbacks: *const ValueCallBacks,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null, or a live callbacks structure.
+    // SAFETY: null, or a live callbacks structure.
     collections::new_array(&[], unsafe { Policy::from_value(callbacks) }, true)
 }
 
 pub unsafe extern "C" fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return;
     };
@@ -1109,7 +1075,6 @@ pub unsafe extern "C" fn CFArrayApplyFunction(
     ) else {
         return;
     };
-    // SAFETY: the caller's obligation.
     let Some(values) = (unsafe { collections::array(array) })
         .and_then(|a| a.values.get(start..end).map(ToOwned::to_owned))
     else {
@@ -1122,12 +1087,10 @@ pub unsafe extern "C" fn CFArrayApplyFunction(
 }
 
 pub unsafe extern "C" fn CFArrayGetCount(array: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::array(array) }.map_or(0, |a| a.values.len() as CFIndex)
 }
 
 pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return std::ptr::null();
     };
@@ -1147,7 +1110,6 @@ pub unsafe extern "C" fn CFSetGetTypeID() -> CFTypeID {
 }
 
 pub unsafe extern "C" fn CFSetGetCount(set: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::set(set) }.map_or(0, |set| set.values.len() as CFIndex)
 }
 
@@ -1155,7 +1117,6 @@ pub unsafe extern "C" fn CFSetGetValues(set: CFTypeRef, values: *mut CFTypeRef) 
     if values.is_null() {
         return;
     }
-    // SAFETY: the caller's obligation.
     let Some(set) = (unsafe { collections::set(set) }) else {
         return;
     };
@@ -1213,7 +1174,7 @@ pub unsafe extern "C" fn CFDictionaryCreate(
                 .collect()
         },
     };
-    // SAFETY: the caller's obligation - null, or live callbacks structures.
+    // SAFETY: null, or live callbacks structures.
     unsafe {
         collections::new_dictionary(
             &pairs,
@@ -1232,7 +1193,7 @@ pub unsafe extern "C" fn CFDictionaryCreateMutable(
     key_callbacks: *const KeyCallBacks,
     value_callbacks: *const ValueCallBacks,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null, or live callbacks structures.
+    // SAFETY: null, or live callbacks structures.
     unsafe {
         collections::new_dictionary(
             &[],
@@ -1248,7 +1209,6 @@ pub unsafe extern "C" fn CFDictionarySetValue(
     key: CFTypeRef,
     value: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return;
     };
@@ -1266,7 +1226,6 @@ pub unsafe extern "C" fn CFDictionaryAddValue(
     // Core Foundation documents an existing key as a programming error. This
     // runtime leaves its value alone, which preserves Add rather than turning
     // it into Set in release guests.
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return;
     };
@@ -1277,7 +1236,6 @@ pub unsafe extern "C" fn CFDictionaryAddValue(
 }
 
 pub unsafe extern "C" fn CFDictionaryGetCount(dictionary: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::dictionary(dictionary) }.map_or(0, |d| d.entries.len() as CFIndex)
 }
 
@@ -1292,7 +1250,7 @@ pub unsafe extern "C" fn CFDictionaryApplyFunction(
         return;
     };
     // Snapshot before invoking guest code, which may mutate the dictionary.
-    // SAFETY: the caller's obligation - a dictionary or null.
+    // SAFETY: a dictionary or null.
     let Some(entries) = (unsafe { collections::dictionary(dictionary) })
         .map(|dictionary| dictionary.entries.clone())
     else {
@@ -1305,7 +1263,6 @@ pub unsafe extern "C" fn CFDictionaryApplyFunction(
 }
 
 pub unsafe extern "C" fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return std::ptr::null();
     };
@@ -1318,7 +1275,6 @@ pub unsafe extern "C" fn CFDictionaryGetValueIfPresent(
     key: CFTypeRef,
     value: *mut CFTypeRef,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return 0;
     };
@@ -1333,7 +1289,6 @@ pub unsafe extern "C" fn CFDictionaryGetValueIfPresent(
 }
 
 pub unsafe extern "C" fn CFDictionaryContainsKey(dictionary: CFTypeRef, key: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { collections::dictionary(dictionary) }.is_some_and(|d| d.position(key).is_some())
         as Boolean
 }
@@ -1345,7 +1300,6 @@ pub unsafe extern "C" fn CFDictionaryGetKeysAndValues(
     keys: *mut CFTypeRef,
     values: *mut CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return;
     };
@@ -1413,7 +1367,6 @@ pub unsafe extern "C" fn CFNumberGetValue(
     kind: i32,
     out: *mut c_void,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let (Some(n), Some((width, is_float)), false) = (
         unsafe { collections::number(number) },
         collections::number_shape(kind),
@@ -1444,7 +1397,6 @@ pub unsafe extern "C" fn CFNumberGetValue(
 }
 
 pub unsafe extern "C" fn CFNumberIsFloatType(number: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { collections::number(number) }.is_some_and(|n| n.is_float()) as Boolean
 }
 
@@ -1453,13 +1405,11 @@ pub unsafe extern "C" fn CFNumberIsFloatType(number: CFTypeRef) -> Boolean {
 ///
 /// Zero, which is no type, for anything that is not a number.
 pub unsafe extern "C" fn CFNumberGetType(number: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::number_type(number) }.map_or(0, |kind| kind as CFIndex)
 }
 
 /// The width of the number's canonical type.
 pub unsafe extern "C" fn CFNumberGetByteSize(number: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::number_type(number) }
         .and_then(collections::number_shape)
         .map_or(0, |(width, _)| width as CFIndex)
@@ -1508,7 +1458,7 @@ pub unsafe extern "C" fn CFDataCreateWithBytesNoCopy(
 /// the copy has to be Apple's too. See [`crate::foreign`].
 pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTypeRef) -> CFTypeRef {
     #[cfg(target_os = "macos")]
-    // SAFETY: the caller's obligation - null or an object.
+    // SAFETY: null or an object.
     if unsafe { crate::foreign::is(data) } {
         if !crate::foreign::forwarding() {
             objc::fail!(
@@ -1529,7 +1479,6 @@ pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTyp
     }
     // silence clippy warning on non-macos
     let _ = allocator;
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return std::ptr::null();
     };
@@ -1537,7 +1486,6 @@ pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTyp
 }
 
 pub unsafe extern "C" fn CFDataGetLength(data: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { collections::data(data) }.map_or(0, |d| d.len() as CFIndex)
 }
 
@@ -1579,7 +1527,6 @@ pub unsafe extern "C" fn CFDataGetBytes(
     range_length: CFIndex,
     buffer: *mut u8,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -1622,7 +1569,6 @@ pub unsafe extern "C" fn CFArrayContainsValue(
     range_length: CFIndex,
     value: CFTypeRef,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let Some(contents) = (unsafe { collections::array(array) }) else {
         return 0;
     };
@@ -1651,7 +1597,6 @@ pub unsafe extern "C" fn CFArrayAppendArray(
     range_location: CFIndex,
     range_length: CFIndex,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(source) = (unsafe { collections::array(other) }) else {
         return;
     };
@@ -1674,7 +1619,6 @@ pub unsafe extern "C" fn CFArrayAppendArray(
 
 pub unsafe extern "C" fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8 {
     static EMPTY: u8 = 0;
-    // SAFETY: the caller's obligation.
     unsafe { collections::data(data) }.map_or(std::ptr::null(), |d| match d.is_empty() {
         true => &raw const EMPTY,
         false => d.as_ptr(),
@@ -1741,7 +1685,7 @@ pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> B
     if fs_ref.is_null() {
         return 0;
     }
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     let Some(path) = (unsafe { crate::url::as_url(url) }).and_then(|url| url.file_path()) else {
         return 0;
     };
@@ -1819,7 +1763,7 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPath(
         // different file rather than fail.
         objc::fail!("CFURLCreateWithFileSystemPath: path style {style} is neither POSIX nor HFS");
     }
-    // SAFETY: the caller's obligation - a `CFString` or null.
+    // SAFETY: a `CFString` or null.
     let Some(path) = (unsafe { string::as_string(path) }) else {
         return std::ptr::null();
     };
@@ -1848,7 +1792,7 @@ pub unsafe extern "C" fn CFURLCreateWithFileSystemPathRelativeToBase(
     if style != POSIX_PATH_STYLE {
         objc::fail!("CFURLCreateWithFileSystemPathRelativeToBase: path style {style} is not POSIX");
     }
-    // SAFETY: the caller's obligation - a string and optional URL.
+    // SAFETY: a string and optional URL.
     let Some(path) = (unsafe { string::as_string(path) }) else {
         return std::ptr::null();
     };
@@ -1874,7 +1818,7 @@ pub unsafe extern "C" fn CFURLCreateWithString(
     text: CFTypeRef,
     base: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a string and an optional URL.
+    // SAFETY: a string and an optional URL.
     let Some(text) = (unsafe { string::as_string(text) }) else {
         return std::ptr::null();
     };
@@ -1909,13 +1853,13 @@ pub unsafe extern "C" fn CFURLCreateWithString(
 }
 
 pub unsafe extern "C" fn CFURLGetString(url: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), crate::url::Contents::string)
 }
 
 pub unsafe extern "C" fn CFURLCopyAbsoluteURL(url: CFTypeRef) -> CFTypeRef {
     // URLs are stored absolute after construction, so a copy preserves text.
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     unsafe { crate::url::as_url(url) }.map_or(std::ptr::null(), |url| crate::url::new(&url.text))
 }
 
@@ -1967,7 +1911,7 @@ pub unsafe extern "C" fn CFURLCopyHostName(url: CFTypeRef) -> CFTypeRef {
 }
 
 pub unsafe extern "C" fn CFURLGetPortNumber(url: CFTypeRef) -> i32 {
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     let Some(url) = (unsafe { crate::url::as_url(url) }) else {
         return -1;
     };
@@ -1989,7 +1933,7 @@ pub unsafe extern "C" fn CFURLGetPortNumber(url: CFTypeRef) -> i32 {
 }
 
 pub unsafe extern "C" fn CFURLHasDirectoryPath(url: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     u8::from(unsafe { crate::url::as_url(url) }.is_some_and(|url| {
         url.text
             .split(['?', '#'])
@@ -2004,7 +1948,7 @@ pub unsafe extern "C" fn CFURLCreateCopyAppendingPathComponent(
     component: CFTypeRef,
     directory: Boolean,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a URL and a string from this runtime.
+    // SAFETY: a URL and a string from this runtime.
     let (Some(base), Some(component)) = (unsafe { crate::url::as_url(url) }, unsafe {
         string::as_string(component)
     }) else {
@@ -2028,7 +1972,7 @@ pub unsafe extern "C" fn CFURLCreateCopyDeletingLastPathComponent(
     _allocator: CFAllocatorRef,
     url: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     let Some(url) = (unsafe { crate::url::as_url(url) }) else {
         return std::ptr::null();
     };
@@ -2052,7 +1996,7 @@ pub unsafe extern "C" fn CFURLCreateCopyDeletingPathExtension(
     _allocator: CFAllocatorRef,
     url: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     let Some(url) = (unsafe { crate::url::as_url(url) }) else {
         return std::ptr::null();
     };
@@ -2083,7 +2027,7 @@ pub unsafe extern "C" fn CFURLCreateStringByAddingPercentEscapes(
     if encoding != string::encoding::UTF8 {
         objc::fail!("CFURLCreateStringByAddingPercentEscapes: unsupported encoding {encoding:#x}");
     }
-    // SAFETY: the caller's obligation - strings or null for the two sets.
+    // SAFETY: strings or null for the two sets.
     let Some(original) = (unsafe { string::as_string(original) }) else {
         return std::ptr::null();
     };
@@ -2119,7 +2063,7 @@ unsafe fn replacing_percent_escapes(
     if encoding != string::encoding::UTF8 {
         return std::ptr::null();
     }
-    // SAFETY: the caller's obligation - strings or null.
+    // SAFETY: strings or null.
     let Some(original) = (unsafe { string::as_string(original) }) else {
         return std::ptr::null();
     };
@@ -2178,7 +2122,7 @@ pub unsafe extern "C" fn CFURLCopyFileSystemPath(url: CFTypeRef, style: CFIndex)
     if style != POSIX_PATH_STYLE && style != HFS_PATH_STYLE {
         objc::fail!("CFURLCopyFileSystemPath: path style {style} is neither POSIX nor HFS");
     }
-    // SAFETY: the caller's obligation - a URL or null.
+    // SAFETY: a URL or null.
     let Some(path) = (unsafe { crate::url::as_url(url) }).and_then(|url| url.file_path()) else {
         return std::ptr::null();
     };
@@ -2200,7 +2144,7 @@ pub unsafe extern "C" fn CFURLGetFileSystemRepresentation(
     buffer: *mut u8,
     length: CFIndex,
 ) -> Boolean {
-    // SAFETY: the caller's obligation - a `CFURL` or null.
+    // SAFETY: a `CFURL` or null.
     let Some(url) = (unsafe { crate::url::as_url(url) }) else {
         return 0;
     };
@@ -2243,7 +2187,7 @@ pub unsafe extern "C" fn CFUUIDCreateString(
     _allocator: CFAllocatorRef,
     uuid: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - a `CFUUID` or null.
+    // SAFETY: a `CFUUID` or null.
     let Some(bytes) = (unsafe { crate::uuid::bytes_of(uuid) }) else {
         return std::ptr::null();
     };
@@ -2334,7 +2278,6 @@ unsafe fn borrow<T: 'static>(p: CFTypeRef) -> Option<std::mem::ManuallyDrop<Arc<
     if !runloop::is_noted::<T>(p as usize) {
         return None;
     }
-    // SAFETY: the caller's obligation.
     Some(std::mem::ManuallyDrop::new(unsafe {
         Arc::from_raw(p as *const T)
     }))
@@ -2360,7 +2303,6 @@ pub unsafe extern "C" fn CFRunLoopGetMain() -> CFTypeRef {
 ///
 /// `mode` must be null or a `CFStringRef`.
 unsafe fn mode_name(mode: CFTypeRef) -> String {
-    // SAFETY: the caller's obligation.
     match unsafe { string::as_string(mode) } {
         Some(s) => String::from_utf8_lossy(&s.utf8()).into_owned(),
         // Null is `kCFRunLoopDefaultMode` in every call that takes one.
@@ -2373,7 +2315,7 @@ pub unsafe extern "C" fn CFRunLoopRunInMode(
     seconds: f64,
     return_after_source_handled: Boolean,
 ) -> i32 {
-    // SAFETY: the caller's obligation - a `CFStringRef` or null.
+    // SAFETY: a `CFStringRef` or null.
     let (name, loop_) = unsafe { (mode_name(mode), runloop::current()) };
     loop_.run_in_mode(&name, seconds, return_after_source_handled != 0)
 }
@@ -2384,14 +2326,12 @@ pub unsafe extern "C" fn CFRunLoopRun() {
 }
 
 pub unsafe extern "C" fn CFRunLoopStop(loop_: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(l) = unsafe { borrow::<RunLoop>(loop_) } {
         l.stop();
     }
 }
 
 pub unsafe extern "C" fn CFRunLoopWakeUp(loop_: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(l) = unsafe { borrow::<RunLoop>(loop_) } {
         l.wake();
     }
@@ -2405,7 +2345,7 @@ pub unsafe extern "C" fn CFRunLoopSourceCreate(
     if context.is_null() {
         return std::ptr::null();
     }
-    // SAFETY: the caller's obligation - a live context structure.
+    // SAFETY: a live context structure.
     let context = unsafe { &*context };
     if context.version != 0 {
         // A version-1 source is a mach port, and this runtime has no Mach.
@@ -2463,19 +2403,16 @@ pub struct CFRunLoopObserverContext {
 }
 
 pub unsafe extern "C" fn CFRunLoopObserverInvalidate(observer: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(o) = unsafe { borrow::<runloop::Observer>(observer) } {
         o.invalidate();
     }
 }
 
 pub unsafe extern "C" fn CFRunLoopObserverIsValid(observer: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<runloop::Observer>(observer) }.is_some_and(|o| o.is_valid()) as Boolean
 }
 
 pub unsafe extern "C" fn CFRunLoopObserverGetOrder(observer: CFTypeRef) -> CFIndex {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<runloop::Observer>(observer) }.map_or(0, |o| o.order() as CFIndex)
 }
 
@@ -2484,13 +2421,11 @@ pub unsafe extern "C" fn CFRunLoopAddObserver(
     observer: CFTypeRef,
     mode: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<runloop::Observer>(observer)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.add_observer(&o, &unsafe { mode_name(mode) });
 }
 
@@ -2499,13 +2434,11 @@ pub unsafe extern "C" fn CFRunLoopRemoveObserver(
     observer: CFTypeRef,
     mode: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<runloop::Observer>(observer)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.remove_observer(&o, &unsafe { mode_name(mode) });
 }
 
@@ -2514,59 +2447,49 @@ pub unsafe extern "C" fn CFRunLoopContainsObserver(
     observer: CFTypeRef,
     mode: CFTypeRef,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(o)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<runloop::Observer>(observer)
     }) else {
         return 0;
     };
-    // SAFETY: as above.
     l.contains_observer(&o, &unsafe { mode_name(mode) }) as Boolean
 }
 
 /// `void CFRunLoopAddCommonMode(CFRunLoopRef, CFStringRef)`
 pub unsafe extern "C" fn CFRunLoopAddCommonMode(loop_: CFTypeRef, mode: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let Some(l) = (unsafe { borrow::<RunLoop>(loop_) }) else {
         return;
     };
-    // SAFETY: as above.
     l.add_common_mode(&unsafe { mode_name(mode) });
 }
 
 /// `Boolean CFRunLoopIsWaiting(CFRunLoopRef)`
 pub unsafe extern "C" fn CFRunLoopIsWaiting(loop_: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<RunLoop>(loop_) }.is_some_and(|l| l.is_waiting()) as Boolean
 }
 
 pub unsafe extern "C" fn CFRunLoopSourceSignal(source: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(s) = unsafe { borrow::<Source>(source) } {
         s.signal();
     }
 }
 
 pub unsafe extern "C" fn CFRunLoopSourceInvalidate(source: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(s) = unsafe { borrow::<Source>(source) } {
         s.invalidate();
     }
 }
 
 pub unsafe extern "C" fn CFRunLoopSourceIsValid(source: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<Source>(source) }.is_some_and(|s| s.is_valid()) as Boolean
 }
 
 pub unsafe extern "C" fn CFRunLoopAddSource(loop_: CFTypeRef, source: CFTypeRef, mode: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Source>(source)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.add_source(&s, &unsafe { mode_name(mode) });
 }
 
@@ -2575,13 +2498,11 @@ pub unsafe extern "C" fn CFRunLoopRemoveSource(
     source: CFTypeRef,
     mode: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Source>(source)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.remove_source(&s, &unsafe { mode_name(mode) });
 }
 
@@ -2590,13 +2511,11 @@ pub unsafe extern "C" fn CFRunLoopContainsSource(
     source: CFTypeRef,
     mode: CFTypeRef,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(s)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Source>(source)
     }) else {
         return 0;
     };
-    // SAFETY: as above.
     l.contains_source(&s, &unsafe { mode_name(mode) }) as Boolean
 }
 
@@ -2631,7 +2550,7 @@ pub unsafe extern "C" fn CFRunLoopTimerCreate(
     callback: Option<runloop::TimerCallback>,
     context: *mut CFRunLoopTimerContext,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null, or a live context structure.
+    // SAFETY: null, or a live context structure.
     let info = unsafe { context.as_ref() }.map_or(0, |c| c.info as usize);
     // An interval of zero or less is a one-shot, which is what Apple's does.
     let repeat = (interval > 0.0).then(|| Duration::from_secs_f64(interval.min(1e9)));
@@ -2644,30 +2563,25 @@ pub unsafe extern "C" fn CFRunLoopTimerCreate(
 }
 
 pub unsafe extern "C" fn CFRunLoopAddTimer(loop_: CFTypeRef, timer: CFTypeRef, mode: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(t)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Timer>(timer)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.add_timer(&t, &unsafe { mode_name(mode) });
 }
 
 pub unsafe extern "C" fn CFRunLoopRemoveTimer(loop_: CFTypeRef, timer: CFTypeRef, mode: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let (Some(l), Some(t)) = (unsafe { borrow::<RunLoop>(loop_) }, unsafe {
         borrow::<Timer>(timer)
     }) else {
         return;
     };
-    // SAFETY: as above.
     l.remove_timer(&t, &unsafe { mode_name(mode) });
 }
 
 /// `CFTimeInterval CFRunLoopTimerGetInterval(CFRunLoopTimerRef)`
 pub unsafe extern "C" fn CFRunLoopTimerGetInterval(timer: CFTypeRef) -> f64 {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<Timer>(timer) }.map_or(0.0, |t| t.interval_seconds())
 }
 
@@ -2677,7 +2591,6 @@ pub unsafe extern "C" fn CFRunLoopTimerGetInterval(timer: CFTypeRef) -> f64 {
 /// dispatcher does every time its next deadline moves - cheaper than invalidating
 /// one and creating another, and the reason it is not a courtesy to implement it.
 pub unsafe extern "C" fn CFRunLoopTimerSetNextFireDate(timer: CFTypeRef, fire_date: f64) {
-    // SAFETY: the caller's obligation.
     if let Some(t) = unsafe { borrow::<Timer>(timer) } {
         // `delay_until` is a delay from now, which is the form the creator takes;
         // the timer wants the instant it lands on.
@@ -2686,14 +2599,12 @@ pub unsafe extern "C" fn CFRunLoopTimerSetNextFireDate(timer: CFTypeRef, fire_da
 }
 
 pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     if let Some(t) = unsafe { borrow::<Timer>(timer) } {
         t.invalidate();
     }
 }
 
 pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
-    // SAFETY: the caller's obligation.
     unsafe { borrow::<Timer>(timer) }.is_some_and(|t| t.is_valid()) as Boolean
 }
 
@@ -2709,7 +2620,7 @@ pub unsafe extern "C" fn CFStringReplace(
     range_length: CFIndex,
     replacement: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation - a live mutable string, and a live
+    // SAFETY: a live mutable string, and a live
     // string or null.
     unsafe {
         CFStringDelete(target, range_location, range_length);
@@ -2719,7 +2630,6 @@ pub unsafe extern "C" fn CFStringReplace(
 
 /// `void CFStringReplaceAll(CFMutableStringRef, CFStringRef)`
 pub unsafe extern "C" fn CFStringReplaceAll(target: CFTypeRef, replacement: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let Some(length) = (unsafe { string::as_string(target) }).map(|s| s.length()) else {
         return;
     };
@@ -2756,7 +2666,7 @@ pub unsafe extern "C" fn CFStringFindAndReplace(
         );
     }
     let fold = options & CASE_INSENSITIVE != 0;
-    // SAFETY: the caller's obligation - live strings or null.
+    // SAFETY: live strings or null.
     let (Some(haystack), Some(needle)) = (unsafe { string::as_string(target) }, unsafe {
         string::as_string(find)
     }) else {
@@ -2839,7 +2749,6 @@ fn folded(units: &[u16], fold: bool) -> Vec<u16> {
 pub unsafe extern "C" fn CFStringGetMaximumSizeOfFileSystemRepresentation(
     string: CFTypeRef,
 ) -> CFIndex {
-    // SAFETY: the caller's obligation.
     let Some(value) = (unsafe { string::as_string(string) }) else {
         return 0;
     };
@@ -2860,7 +2769,6 @@ pub unsafe extern "C" fn CFStringGetFileSystemRepresentation(
     buffer: *mut c_char,
     max: CFIndex,
 ) -> Boolean {
-    // SAFETY: the caller's obligation.
     let Some(value) = (unsafe { string::as_string(string) }) else {
         return 0;
     };
@@ -2907,7 +2815,6 @@ pub unsafe extern "C" fn CFArrayCreateCopy(
     _allocator: CFAllocatorRef,
     array: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return std::ptr::null();
     };
@@ -2919,7 +2826,6 @@ pub unsafe extern "C" fn CFArrayInsertValueAtIndex(
     index: CFIndex,
     value: CFTypeRef,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return;
     };
@@ -2936,7 +2842,6 @@ pub unsafe extern "C" fn CFArrayInsertValueAtIndex(
 }
 
 pub unsafe extern "C" fn CFArrayRemoveValueAtIndex(array: CFTypeRef, index: CFIndex) {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return;
     };
@@ -2951,7 +2856,6 @@ pub unsafe extern "C" fn CFArrayRemoveValueAtIndex(array: CFTypeRef, index: CFIn
 }
 
 pub unsafe extern "C" fn CFArrayRemoveAllValues(array: CFTypeRef) {
-    // SAFETY: the caller's obligation.
     let Some(a) = (unsafe { collections::array(array) }) else {
         return;
     };
@@ -2968,7 +2872,6 @@ pub unsafe extern "C" fn CFDictionaryCreateCopy(
     _allocator: CFAllocatorRef,
     dictionary: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return std::ptr::null();
     };
@@ -2983,7 +2886,6 @@ pub unsafe extern "C" fn CFDictionaryCreateMutableCopy(
     _capacity: CFIndex,
     dictionary: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return std::ptr::null();
     };
@@ -2997,7 +2899,6 @@ pub unsafe extern "C" fn CFDictionaryGetCountOfKey(
     dictionary: CFTypeRef,
     key: CFTypeRef,
 ) -> CFIndex {
-    // SAFETY: the caller's obligation.
     let Some(d) = (unsafe { collections::dictionary(dictionary) }) else {
         return 0;
     };
@@ -3011,7 +2912,6 @@ pub unsafe extern "C" fn CFDictionaryGetCountOfKey(
 /// to write through this has asked for length first, and a shared static byte
 /// is the one address that must not be handed out to be written.
 pub unsafe extern "C" fn CFDataGetMutableBytePtr(data: CFTypeRef) -> *mut u8 {
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return std::ptr::null_mut();
     };
@@ -3029,7 +2929,6 @@ pub unsafe extern "C" fn CFDataSetLength(data: CFTypeRef, length: CFIndex) {
     let Ok(length) = usize::try_from(length) else {
         return;
     };
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -3041,7 +2940,6 @@ pub unsafe extern "C" fn CFDataIncreaseLength(data: CFTypeRef, extra: CFIndex) {
     let Ok(extra) = usize::try_from(extra) else {
         return;
     };
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -3066,7 +2964,6 @@ pub unsafe extern "C" fn CFDataAppendBytes(data: CFTypeRef, added: *const u8, le
         0 => &[][..],
         _ => unsafe { std::slice::from_raw_parts(added, length) },
     };
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -3080,7 +2977,6 @@ pub unsafe extern "C" fn CFDataDeleteBytes(
     range_location: CFIndex,
     range_length: CFIndex,
 ) {
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -3126,7 +3022,6 @@ pub unsafe extern "C" fn CFDataReplaceBytes(
         0 => Vec::new(),
         _ => unsafe { std::slice::from_raw_parts(added, added_length) }.to_vec(),
     };
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { collections::data(data) }) else {
         return;
     };
@@ -3144,7 +3039,7 @@ pub struct CFUUIDBytes(pub crate::uuid::Bytes);
 
 /// `CFUUIDBytes CFUUIDGetUUIDBytes(CFUUIDRef)`
 pub unsafe extern "C" fn CFUUIDGetUUIDBytes(uuid: CFTypeRef) -> CFUUIDBytes {
-    // SAFETY: the caller's obligation - a UUID this runtime made, or null.
+    // SAFETY: a UUID this runtime made, or null.
     CFUUIDBytes(unsafe { crate::uuid::bytes_of(uuid) }.unwrap_or([0; 16]))
 }
 

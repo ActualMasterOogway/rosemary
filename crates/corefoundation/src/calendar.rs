@@ -1,17 +1,3 @@
-//! `CFCalendar` and the Gregorian date functions beside it.
-//!
-//! A `CFAbsoluteTime` is seconds since 2001-01-01 00:00:00 UTC. Turning one
-//! into a year, a month and a day is two steps: shift it by the zone's offset
-//! from UTC, then do the civil arithmetic. Neither needs a library - the second
-//! is a closed form - and the first is the one this host can only answer for
-//! the zones it has.
-//!
-//! What is *not* here is any calendar but the Gregorian one. A program that
-//! asks for the Hebrew or Islamic calendar is refused by name - see
-//! `foundation::formatter`'s `CFCalendarCreateWithIdentifier`: they are
-//! different arithmetic, not a different offset, and answering with Gregorian
-//! dates would be a plausible wrong date rather than a failure.
-
 use crate::base::CFTypeRef;
 
 /// `CFAbsoluteTime`: seconds since 2001-01-01 00:00:00 UTC.
@@ -71,7 +57,7 @@ const _: () = {
 ///
 /// `timezone` is null or an object.
 pub unsafe fn offset_seconds(timezone: CFTypeRef, at: CFAbsoluteTime) -> Option<i64> {
-    // SAFETY: the caller's obligation - null or a time zone this tree made.
+    // SAFETY: null or a time zone this tree made.
     let name = match unsafe { crate::timezone::name_of(timezone) } {
         // No zone at all means UTC, which is what CoreFoundation does with a
         // null `CFTimeZoneRef` in these functions.
@@ -129,7 +115,6 @@ pub unsafe extern "C" fn absolute_time_get_gregorian_date(
     at: CFAbsoluteTime,
     timezone: CFTypeRef,
 ) -> GregorianDate {
-    // SAFETY: the caller's obligation.
     let Some(offset) = (unsafe { offset_seconds(timezone, at) }) else {
         return GregorianDate::default();
     };
@@ -170,11 +155,9 @@ pub unsafe extern "C" fn gregorian_date_get_absolute_time(
     // for with the answer rather than before it. Local time is not UTC, so the
     // first reading can be off by an hour across a daylight-saving change; it
     // is corrected by asking again at the time it named.
-    // SAFETY: the caller's obligation.
     let Some(guess) = (unsafe { offset_seconds(timezone, local) }) else {
         return local;
     };
-    // SAFETY: as above.
     let Some(offset) = (unsafe { offset_seconds(timezone, local - guess as f64) }) else {
         return local;
     };
@@ -189,7 +172,6 @@ pub unsafe extern "C" fn absolute_time_get_day_of_week(
     at: CFAbsoluteTime,
     timezone: CFTypeRef,
 ) -> i32 {
-    // SAFETY: the caller's obligation.
     let Some(offset) = (unsafe { offset_seconds(timezone, at) }) else {
         return 0;
     };
@@ -203,7 +185,6 @@ pub unsafe extern "C" fn absolute_time_get_day_of_year(
     at: CFAbsoluteTime,
     timezone: CFTypeRef,
 ) -> i32 {
-    // SAFETY: the caller's obligation.
     let date = unsafe { absolute_time_get_gregorian_date(at, timezone) };
     let day = days_from_civil(
         i64::from(date.year),
@@ -244,7 +225,6 @@ mod tests {
                 second: 0.0,
             }
         );
-        // SAFETY: as above.
         let later = unsafe { absolute_time_get_gregorian_date(760_000_000.25, std::ptr::null()) };
         assert_eq!(later.year, 2025);
         assert!((later.second.fract() - 0.25).abs() < 1e-9);
@@ -281,12 +261,10 @@ mod tests {
             1
         );
         // ...so the day before it was a Sunday.
-        // SAFETY: as above.
         assert_eq!(
             unsafe { absolute_time_get_day_of_week(-1.0, std::ptr::null()) },
             7
         );
-        // SAFETY: as above.
         assert_eq!(
             unsafe { absolute_time_get_day_of_year(0.0, std::ptr::null()) },
             1

@@ -1,16 +1,3 @@
-//! `CFTypeRef`: what every CoreFoundation object has in common.
-//!
-//! A `CFTypeRef` here is an Objective-C object, and `CFRetain` is `objc_retain`.
-//! That is not a convenience - it is the only way toll-free bridging can be
-//! made to work. `CFStringGetLength` is handed `NSString`s and
-//! `-[NSString length]` is sent to `CFStringRef`s, constantly and by code that
-//! knows it is allowed to; a parallel refcount and a parallel object model would
-//! have to be reconciled at every one of those crossings, and would be wrong at
-//! whichever one was forgotten.
-//!
-//! So each CF "type" is a class in [`objc`], each `CFTypeID` is that class, and
-//! the bridge is class identity rather than a conversion.
-
 use std::ffi::c_void;
 
 use objc::class::Class;
@@ -66,7 +53,6 @@ pub fn type_id_of(class: &'static Class) -> CFTypeID {
 ///
 /// `object` must be null or an object this runtime allocated.
 pub unsafe fn class_of(object: CFTypeRef) -> Option<&'static Class> {
-    // SAFETY: the caller's obligation.
     unsafe { objc::object::class_of(object as Id) }
 }
 
@@ -76,7 +62,6 @@ pub unsafe fn class_of(object: CFTypeRef) -> Option<&'static Class> {
 ///
 /// As [`class_of`].
 pub unsafe fn is_kind_of(object: CFTypeRef, class: &'static Class) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe { class_of(object) }.is_some_and(|c| c.chain().any(|k| std::ptr::eq(k, class)))
 }
 

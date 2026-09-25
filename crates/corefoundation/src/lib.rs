@@ -7,11 +7,6 @@
     clippy::not_unsafe_ptr_arg_deref
 )]
 
-//! CoreFoundation, on this tree's own Objective-C runtime.
-//!
-//! CF types are [`objc`] classes, so toll-free bridging preserves object identity.
-//! Unimplemented imports are refused by name instead of given guessed behavior.
-
 pub mod api;
 pub mod base;
 pub mod calendar;
@@ -807,7 +802,6 @@ mod tests {
     #[test]
     fn a_buffer_that_does_not_fit_is_refused() {
         bootstrap();
-        // SAFETY: as above.
         unsafe {
             let s = api::CFStringCreateWithCString(
                 std::ptr::null(),
