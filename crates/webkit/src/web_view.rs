@@ -1,14 +1,3 @@
-//! `WKWebView`, backed by an offscreen `WebKitWebView`.
-//!
-//! The GTK widget is never put in a window. It is given the AppKit view's size
-//! with `gtk_widget_size_allocate`, which is all WebKit needs to lay the page
-//! out and paint it, and its pixels come back as snapshots that are shown over
-//! the view's rectangle as an [`appkit::backing::Overlay`] - the way a
-//! layer-backed subview sits above the views that draw into the window.
-//!
-//! FIXME (PERFORMANCE): a snapshot is a readback of the whole visible page, so
-//! the page is polled a few times a second rather than presented on damage.
-
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -480,7 +469,6 @@ unsafe extern "C" fn decide_policy(gtk: Ptr, decision: Ptr, kind: c_int, data: P
                 },
             );
             let handler = decision_handler(engine, decision, url);
-            // SAFETY: as above.
             unsafe {
                 send!(view.navigation, "webView:decidePolicyForNavigationResponse:decisionHandler:",
                     view.object => Id, object => Id, handler => Id; ())
@@ -673,7 +661,6 @@ fn connect(engine: &Engine, gtk: Ptr, signal: &std::ffi::CStr, handler: *const (
 /// `configuration` must be a configuration, or nil.
 unsafe fn user_agent(configuration: Id) -> String {
     let mut agent = USER_AGENT.to_string();
-    // SAFETY: the caller's obligation.
     if let Some(name) = unsafe { configuration::application_name_of(configuration) } {
         agent.push(' ');
         agent.push_str(&name);
@@ -683,7 +670,6 @@ unsafe fn user_agent(configuration: Id) -> String {
 
 unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     let api = engine.api;
-    // SAFETY: the caller's obligation.
     let controller = unsafe { configuration::controller_of(configuration) };
     // SAFETY: a content controller.
     let manager = unsafe { configuration::manager(controller, engine) };
@@ -704,7 +690,6 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     }
     // SAFETY: the new widget is floating until something sinks it; this owns it.
     unsafe { (api.g_object_ref_sink)(gtk) };
-    // SAFETY: the caller's obligation.
     let agent = unsafe { user_agent(configuration) };
     if engine::tracing() {
         eprintln!("rosetta3: webkit: user agent {agent}");
@@ -936,7 +921,6 @@ pub fn tick(engine: &Engine) {
         let hidden = appkit::view::is_hidden_or_has_hidden_ancestor(object);
         // SAFETY: a live view, registered while it is.
         let window = unsafe { appkit::view::window_of(object) };
-        // SAFETY: as above.
         let frame = unsafe { appkit::view::presentation_frame(object) };
         if engine::tracing() {
             trace_state(id, gtk, hidden, window, frame.as_ref());
@@ -1238,7 +1222,6 @@ unsafe extern "C" fn url(receiver: Id, _sel: Sel) -> Id {
 ///
 /// `value` must be a live `JSCValue`.
 unsafe fn bridge(api: &gtk::Api, value: Ptr) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe {
         if (api.jsc_value_is_undefined)(value) != 0 || (api.jsc_value_is_null)(value) != 0 {
             return std::ptr::null_mut();
@@ -1296,7 +1279,6 @@ unsafe extern "C" fn javascript_ready(source: Ptr, result: Ptr, data: Ptr) {
         }
     }
     if !value.is_null() {
-        // SAFETY: as above.
         unsafe { (api.g_object_unref)(value) };
     }
 }

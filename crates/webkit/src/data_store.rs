@@ -1,6 +1,3 @@
-//! `WKWebsiteDataStore` and its `WKHTTPCookieStore`, over WebKitGTK's network
-//! session and cookie manager.
-
 use std::ffi::c_int;
 
 use corefoundation::base::CFTypeRef;

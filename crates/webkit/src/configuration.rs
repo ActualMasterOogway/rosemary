@@ -1,5 +1,3 @@
-//! `WKWebViewConfiguration` and the objects hung off it.
-
 use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -59,7 +57,6 @@ fn preferences_class() -> &'static Class {
 ///
 /// `object` must be null or an object this runtime allocated.
 unsafe fn configuration<'a>(object: Id) -> Option<&'a mut Configuration> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents(object, configuration_class()) }
 }
 
@@ -67,7 +64,6 @@ unsafe fn configuration<'a>(object: Id) -> Option<&'a mut Configuration> {
 ///
 /// As [`configuration`].
 unsafe fn controller<'a>(object: Id) -> Option<&'a mut Controller> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents(object, controller_class()) }
 }
 
@@ -75,7 +71,6 @@ unsafe fn controller<'a>(object: Id) -> Option<&'a mut Controller> {
 ///
 /// As [`configuration`].
 unsafe fn script<'a>(object: Id) -> Option<&'a mut Script> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents(object, script_class()) }
 }
 
@@ -83,7 +78,6 @@ unsafe fn script<'a>(object: Id) -> Option<&'a mut Script> {
 ///
 /// As [`configuration`].
 pub unsafe fn preferences<'a>(object: Id) -> Option<&'a mut Preferences> {
-    // SAFETY: the caller's obligation.
     unsafe { boxed::contents(object, preferences_class()) }
 }
 
@@ -188,7 +182,6 @@ unsafe extern "C" fn application_name(receiver: Id, _sel: Sel) -> Id {
 ///
 /// `configuration` must be a configuration.
 pub unsafe fn controller_of(configuration: Id) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe { user_content_controller(configuration, objc::sel::get("userContentController")) }
 }
 
@@ -198,7 +191,6 @@ pub unsafe fn controller_of(configuration: Id) -> Id {
 ///
 /// `configuration` must be a configuration.
 pub unsafe fn preferences_of(configuration: Id) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe { preferences_object(configuration, objc::sel::get("preferences")) }
 }
 
@@ -208,7 +200,6 @@ pub unsafe fn preferences_of(configuration: Id) -> Id {
 ///
 /// `object` must be null or an object this runtime allocated.
 pub unsafe fn application_name_of(object: Id) -> Option<String> {
-    // SAFETY: the caller's obligation.
     unsafe { configuration(object) }.and_then(|c| c.application_name.clone())
 }
 
@@ -271,7 +262,6 @@ fn add_input_helper(engine: &Engine, manager: Ptr) {
 ///
 /// `object` must be a content controller.
 pub unsafe fn manager(object: Id, engine: &Engine) -> Ptr {
-    // SAFETY: the caller's obligation.
     let Some(controller) = (unsafe { controller(object) }) else {
         return std::ptr::null_mut();
     };

@@ -1,10 +1,3 @@
-//! WebKit.framework, over WebKitGTK.
-//!
-//! `WKWebView` and the objects around it - configuration, user scripts,
-//! navigation and UI delegates, the cookie store - are backed by an offscreen
-//! WebKitGTK 6.0 view. See [`web_view`] for how its pages reach the window and
-//! [`input`] for how events reach its pages.
-
 use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -158,7 +151,6 @@ mod tests {
     fn standard() -> Id {
         bootstrap();
         let class = objc::class::lookup(c"WebPreferences").expect("WebPreferences");
-        // SAFETY: the class method takes no arguments and returns an object.
         unsafe { send!(objc::class::ptr(class) as Id, "standardPreferences"; Id) }
     }
 

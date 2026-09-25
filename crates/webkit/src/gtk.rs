@@ -1,11 +1,3 @@
-//! WebKitGTK 6.0, loaded at run time.
-//!
-//! Opened with `dlopen` rather than linked, for the reason SDL is: a host
-//! without WebKitGTK still runs every program that never makes a web view, and
-//! one that does gets a view with no content instead of a process that fails to
-//! start. `dlsym` on the library's handle also searches its dependencies, so
-//! GLib, GTK, libsoup and JavaScriptCore resolve through the same handle.
-
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::OnceLock;
 
@@ -202,7 +194,6 @@ unsafe fn entry<T: Copy>(handle: Ptr, name: &str) -> Option<T> {
     if found.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation, and the size was checked.
     Some(unsafe { *(&found as *const Ptr as *const T) })
 }
 
@@ -237,7 +228,6 @@ pub unsafe fn text(text: *const c_char) -> String {
     if text.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     unsafe { CStr::from_ptr(text) }
         .to_string_lossy()
         .into_owned()
@@ -258,7 +248,6 @@ pub unsafe fn take_error(api: &Api, error: *mut GError) -> Option<(c_int, String
     if error.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let taken = unsafe { ((*error).code, text((*error).message)) };
     // SAFETY: as above; the error is not read again.
     unsafe { (api.g_error_free)(error) };

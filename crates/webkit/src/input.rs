@@ -1,24 +1,3 @@
-//! Pointer and keyboard input for a page, delivered as DOM events.
-//!
-//! GTK 4 has no public way to make an input event: a widget receives them only
-//! from its surface, and a view that is never on screen has none. So AppKit's
-//! events are replayed into the page from script, run in a world of its own so
-//! that the page can neither see the helper nor replace it. Hit testing, focus,
-//! text insertion through the editing machinery (`insertText`, which fires the
-//! `beforeinput` and `input` events frameworks listen for), form submission and
-//! scrolling all behave as they would for a person.
-//!
-//! The helper is installed as a user script in its world rather than sent with
-//! each event. WebKitGTK keeps a named world, and the globals scripts leave in
-//! it, only while a user script is registered for it: without one, every
-//! evaluation gets a fresh world, and a release would no longer know which
-//! element was pressed, so no click would ever be dispatched.
-//!
-//! FIXME (ACCURACY): the events are untrusted (`isTrusted` is false), `:hover`
-//! does not follow the pointer, a click does not place the caret inside a text
-//! field, and there is no input method. A page that checks for trusted events -
-//! some captchas do - will not accept them.
-
 /// The script world the helper runs in.
 pub const WORLD: &std::ffi::CStr = c"rosetta3-input";
 

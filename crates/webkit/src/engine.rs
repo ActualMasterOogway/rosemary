@@ -1,8 +1,3 @@
-//! The one WebKitGTK instance, and the turn of its main context.
-//!
-//! GTK calls and callbacks stay on the initialization thread. AppKit's event
-//! pump iterates its main context so WebKit delegates run on that thread.
-
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -159,7 +154,6 @@ impl Block {
         if invoke == 0 {
             return;
         }
-        // SAFETY: as above.
         unsafe {
             let f: unsafe extern "C" fn(Id, Id, Id) = std::mem::transmute(invoke);
             f(self.0 as Id, first, second);
@@ -172,7 +166,6 @@ impl Block {
         if invoke == 0 {
             return;
         }
-        // SAFETY: as above.
         unsafe {
             let f: unsafe extern "C" fn(Id) = std::mem::transmute(invoke);
             f(self.0 as Id);
