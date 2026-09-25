@@ -1,10 +1,4 @@
 #![allow(clippy::manual_dangling_ptr, clippy::missing_safety_doc)]
-
-//! `CVDisplayLink`, on a thread of its own.
-//!
-//! Callbacks run on a dedicated thread. Running them on the main loop can
-//! deadlock guests that wait for the callback while drawing a frame. A callback
-//! that draws with GL must make its context current on this thread.
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -132,7 +126,6 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((handle as usize, link));
-    // SAFETY: the caller's obligation.
     unsafe { *out = handle };
     SUCCESS
 }
@@ -144,7 +137,6 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
 ///
 /// As [`CVDisplayLinkCreateWithCGDisplay`].
 pub unsafe extern "C" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *mut *mut c_void) -> i32 {
-    // SAFETY: the caller's obligation.
     unsafe { CVDisplayLinkCreateWithCGDisplay(0, out) }
 }
 
@@ -162,7 +154,6 @@ pub unsafe extern "C" fn CVDisplayLinkSetOutputCallback(
         return INVALID_ARGUMENT;
     };
     let mut link = link.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the caller's obligation.
     link.callback = (!callback.is_null())
         .then(|| unsafe { std::mem::transmute::<*mut c_void, OutputCallback>(callback) });
     link.context = context;
@@ -376,7 +367,6 @@ mod tests {
         );
         // SAFETY: a link this test made.
         assert_eq!(unsafe { CVDisplayLinkStart(handle) }, SUCCESS);
-        // SAFETY: as above.
         assert_eq!(unsafe { CVDisplayLinkIsRunning(handle) }, 1);
 
         // Nothing is turned here, which is the whole point: this thread does
@@ -399,7 +389,6 @@ mod tests {
 
         // SAFETY: a link this test made.
         assert_eq!(unsafe { CVDisplayLinkStop(handle) }, SUCCESS);
-        // SAFETY: as above.
         assert_eq!(unsafe { CVDisplayLinkIsRunning(handle) }, 0);
 
         // And a stopped link stops: the thread notices the flag within a frame.
