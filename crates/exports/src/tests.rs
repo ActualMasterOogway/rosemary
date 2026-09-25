@@ -1,5 +1,3 @@
-//! Export table invariants, checked once for the shared table format.
-
 use crate::{Exports, Module, NonNull, Recording};
 
 extern "C" fn one() -> u32 {

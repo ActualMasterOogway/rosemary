@@ -1,5 +1,3 @@
-//! The policies that wrap a sink, and the one that records for a test.
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 

@@ -1,20 +1,3 @@
-//! How a module declares the symbols it publishes to a guest, once.
-//!
-//! A module that stands in for part of a Darwin library used to say the same
-//! thing three times: a list of names, a `match` from name to address, and a
-//! loop that walked the list and called the `match` to fill a
-//! `SyntheticDylib`. Nothing made the three agree, and a name added to one and
-//! forgotten in another is invisible - a `dlsym` that answers null for a name
-//! the loader binds, or a published address nothing can reach. Both had
-//! happened by the time this crate was written.
-//!
-//! Here a module writes the table and this crate derives the rest, so the
-//! three views cannot disagree.
-//!
-//! No `machish` by default: the framework crates know nothing about Mach-O and
-//! must not learn, so the loader's library is a sink behind a feature that only
-//! the two crates already building one turn on.
-
 #![no_std]
 
 extern crate alloc;
