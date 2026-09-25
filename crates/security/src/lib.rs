@@ -1,5 +1,3 @@
-//! The part of the Security framework a game reaches: the keychain.
-
 pub mod codesign;
 pub mod keychain;
 

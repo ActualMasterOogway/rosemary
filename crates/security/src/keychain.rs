@@ -1,5 +1,3 @@
-//! `SecItem*`, as a keychain that is a file.
-
 #![allow(non_snake_case)]
 
 use std::collections::BTreeMap;
@@ -147,7 +145,6 @@ unsafe fn attribute(query: CFTypeRef, key: &str) -> Option<String> {
 /// `query` must be null or a `CFDictionary`.
 unsafe fn identity_of(query: CFTypeRef) -> Identity {
     Identity {
-        // SAFETY: the caller's obligation.
         class: unsafe { attribute(query, "class") }.unwrap_or_else(|| "genp".to_string()),
         service: unsafe { attribute(query, "svce") }.unwrap_or_default(),
         account: unsafe { attribute(query, "acct") }.unwrap_or_default(),
@@ -161,7 +158,6 @@ unsafe fn identity_of(query: CFTypeRef) -> Identity {
 /// `query` must be null or a `CFDictionary`.
 unsafe fn value_data(query: CFTypeRef) -> Option<Vec<u8>> {
     let name = foundation::string::from_str("v_Data");
-    // SAFETY: the caller's obligation.
     let value = unsafe { corefoundation::api::CFDictionaryGetValue(query, name as CFTypeRef) };
     // SAFETY: a fresh string this call owns.
     unsafe { corefoundation::api::CFRelease(name as CFTypeRef) };
@@ -199,15 +195,12 @@ pub unsafe extern "C" fn SecItemAdd(attributes: CFTypeRef, result: *mut CFTypeRe
         // Nothing is returned: `kSecReturnData` on an *add* asks for the item
         // back, and this store has nothing to say about it that the caller did
         // not just provide.
-        // SAFETY: the caller's obligation.
         unsafe { result.write(std::ptr::null_mut()) };
     }
     if attributes.is_null() {
         return PARAM;
     }
-    // SAFETY: the caller's obligation.
     let identity = unsafe { identity_of(attributes) };
-    // SAFETY: as above.
     let Some(data) = (unsafe { value_data(attributes) }) else {
         return PARAM;
     };
@@ -233,13 +226,11 @@ pub unsafe extern "C" fn SecItemAdd(attributes: CFTypeRef, result: *mut CFTypeRe
 /// As [`SecItemAdd`].
 pub unsafe extern "C" fn SecItemCopyMatching(query: CFTypeRef, result: *mut CFTypeRef) -> OSStatus {
     if !result.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { result.write(std::ptr::null_mut()) };
     }
     if query.is_null() {
         return PARAM;
     }
-    // SAFETY: the caller's obligation.
     let identity = unsafe { identity_of(query) };
     let Some(data) = items().get(&identity).cloned() else {
         return ITEM_NOT_FOUND;
@@ -264,7 +255,6 @@ pub unsafe extern "C" fn SecItemDelete(query: CFTypeRef) -> OSStatus {
     if query.is_null() {
         return PARAM;
     }
-    // SAFETY: the caller's obligation.
     let identity = unsafe { identity_of(query) };
     let mut items = items();
     if items.remove(&identity).is_none() {
@@ -287,9 +277,7 @@ pub unsafe extern "C" fn SecItemUpdate(query: CFTypeRef, changes: CFTypeRef) -> 
     if query.is_null() || changes.is_null() {
         return PARAM;
     }
-    // SAFETY: the caller's obligation.
     let identity = unsafe { identity_of(query) };
-    // SAFETY: as above.
     let Some(data) = (unsafe { value_data(changes) }) else {
         return PARAM;
     };

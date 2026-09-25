@@ -1,13 +1,3 @@
-//! The code-signing half of the Security framework, on a host with no code
-//! signatures.
-//!
-//! Requirements retain their text and the running code names this process.
-//! Signature checks succeed but warn on stderr that no signature was verified;
-//! returning `errSecCSUnsigned` would make guests treat unchecked code as
-//! tampered with.
-//!
-//! FIXME (ACCURACY): Implement actual code signing checks!
-
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -76,7 +66,6 @@ fn new(description: CFTypeRef) -> CFTypeRef {
 ///
 /// `object` is null or an object this runtime allocated.
 unsafe fn is_ours(object: CFTypeRef) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::base::is_kind_of(object, class()) }
 }
 
@@ -98,7 +87,7 @@ pub unsafe extern "C" fn SecRequirementCreateWithString(
     if requirement.is_null() {
         return PARAM;
     }
-    // SAFETY: the caller's obligation - a string or null.
+    // SAFETY: a string or null.
     if unsafe { corefoundation::string::as_string(text) }.is_none() {
         return PARAM;
     }
@@ -163,7 +152,6 @@ pub unsafe extern "C" fn SecCodeCheckValidity(
     _flags: u32,
     requirement: CFTypeRef,
 ) -> OSStatus {
-    // SAFETY: the caller's obligation.
     if !unsafe { is_ours(code) } {
         return INVALID_OBJECT_REF;
     }
