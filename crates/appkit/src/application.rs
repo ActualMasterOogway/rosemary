@@ -851,6 +851,8 @@ pub(crate) fn install() {
         "hide:" => ignored_sender, c"v24@0:8@16";
         "unhide:" => ignored_sender, c"v24@0:8@16";
         "arrangeInFront:" => ignored_sender, c"v24@0:8@16";
+        "orderFrontStandardAboutPanel:" => crate::about::order_front, c"v24@0:8@16";
+        "orderFrontStandardAboutPanelWithOptions:" => crate::about::order_front_with_options, c"v24@0:8@16";
         "unhideWithoutActivation" => ignored_nullary, c"v16@0:8";
         "updateWindows" => ignored_nullary, c"v16@0:8";
         "requestUserAttention:" => request_user_attention, c"q24@0:8q16";

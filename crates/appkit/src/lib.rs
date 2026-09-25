@@ -10,6 +10,7 @@
     clippy::useless_conversion
 )]
 
+mod about;
 pub mod alert;
 mod animation;
 pub mod appearance;
