@@ -295,7 +295,6 @@ unsafe fn entry<T: Copy>(handle: *mut c_void, name: &str) -> Option<T> {
         size_of::<*const c_void>(),
         "an entry point is a bare function pointer"
     );
-    // SAFETY: the caller's obligation, and the size was just checked.
     Some(unsafe { *(&found as *const *mut c_void as *const T) })
 }
 
@@ -462,7 +461,6 @@ pub fn error() -> String {
     let text = unsafe { get() };
     match text.is_null() {
         true => String::new(),
-        // SAFETY: as above.
         false => unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned(),
@@ -634,7 +632,6 @@ pub fn init(flags: u32) -> Result<(), String> {
 static VIDEO_THREAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn this_thread() -> usize {
-    // SAFETY: `pthread_self` takes nothing and always answers.
     unsafe { libc::pthread_self() as usize }
 }
 
@@ -713,7 +710,6 @@ pub fn open(id: JoystickId) -> Option<Joystick> {
 /// `joystick` must be one [`open`] returned and not yet closed.
 pub unsafe fn close(joystick: Joystick) {
     if let Some(close) = api().and_then(|a| a.SDL_CloseJoystick) {
-        // SAFETY: the caller's obligation.
         unsafe { close(joystick) };
     }
 }
@@ -731,7 +727,6 @@ pub unsafe fn name(joystick: Joystick) -> String {
     let text = unsafe { get(joystick) };
     match text.is_null() {
         true => String::new(),
-        // SAFETY: as above.
         false => unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned(),
@@ -805,7 +800,6 @@ macro_rules! getter {
         /// As [`close`].
         pub unsafe fn $name(joystick: Joystick) -> $ty {
             match api().and_then(|a| a.$field) {
-                // SAFETY: the caller's obligation.
                 Some(f) => unsafe { f(joystick) },
                 None => $default,
             }
@@ -833,7 +827,6 @@ getter!(/// How many hats it has.
 /// As [`close`].
 pub unsafe fn axis(joystick: Joystick, index: c_int) -> i16 {
     match api().and_then(|a| a.SDL_GetJoystickAxis) {
-        // SAFETY: the caller's obligation.
         Some(f) => unsafe { f(joystick, index) },
         None => 0,
     }
@@ -846,7 +839,6 @@ pub unsafe fn axis(joystick: Joystick, index: c_int) -> i16 {
 /// As [`close`].
 pub unsafe fn button(joystick: Joystick, index: c_int) -> bool {
     match api().and_then(|a| a.SDL_GetJoystickButton) {
-        // SAFETY: the caller's obligation.
         Some(f) => unsafe { f(joystick, index) },
         None => false,
     }
@@ -859,7 +851,6 @@ pub unsafe fn button(joystick: Joystick, index: c_int) -> bool {
 /// As [`close`].
 pub unsafe fn hat(joystick: Joystick, index: c_int) -> u8 {
     match api().and_then(|a| a.SDL_GetJoystickHat) {
-        // SAFETY: the caller's obligation.
         Some(f) => unsafe { f(joystick, index) },
         None => 0,
     }
@@ -991,7 +982,6 @@ pub fn open_gamepad(id: JoystickId) -> Option<Gamepad> {
 /// `gamepad` must be one [`open_gamepad`] returned and not yet closed.
 pub unsafe fn close_gamepad(gamepad: Gamepad) {
     if let Some(close) = api().and_then(|a| a.SDL_CloseGamepad) {
-        // SAFETY: the caller's obligation.
         unsafe { close(gamepad) };
     }
 }
@@ -1010,7 +1000,6 @@ pub unsafe fn gamepad_name(gamepad: Gamepad) -> String {
     if text.is_null() {
         String::new()
     } else {
-        // SAFETY: as above.
         unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned()
@@ -1024,7 +1013,6 @@ pub unsafe fn gamepad_name(gamepad: Gamepad) -> String {
 /// As [`close_gamepad`].
 pub unsafe fn gamepad_vendor(gamepad: Gamepad) -> u16 {
     match api().and_then(|a| a.SDL_GetGamepadVendor) {
-        // SAFETY: the caller's obligation.
         Some(get) => unsafe { get(gamepad) },
         None => 0,
     }
@@ -1054,7 +1042,6 @@ pub unsafe fn gamepad_properties(gamepad: Gamepad) -> GamepadProperties {
     else {
         return GamepadProperties::default();
     };
-    // SAFETY: the caller's obligation.
     let properties = unsafe { properties(gamepad) };
     if properties == 0 {
         return GamepadProperties::default();
@@ -1079,7 +1066,6 @@ pub unsafe fn gamepad_properties(gamepad: Gamepad) -> GamepadProperties {
 /// As [`close_gamepad`].
 pub unsafe fn gamepad_axis(gamepad: Gamepad, axis: c_int) -> i16 {
     match api().and_then(|a| a.SDL_GetGamepadAxis) {
-        // SAFETY: the caller's obligation.
         Some(get) => unsafe { get(gamepad, axis) },
         None => 0,
     }
@@ -1092,7 +1078,6 @@ pub unsafe fn gamepad_axis(gamepad: Gamepad, axis: c_int) -> i16 {
 /// As [`close_gamepad`].
 pub unsafe fn gamepad_button(gamepad: Gamepad, button: c_int) -> bool {
     match api().and_then(|a| a.SDL_GetGamepadButton) {
-        // SAFETY: the caller's obligation.
         Some(get) => unsafe { get(gamepad, button) },
         None => false,
     }
@@ -1134,7 +1119,6 @@ pub mod clipboard {
         }
         // SAFETY: as above; copy before giving the allocation back to SDL.
         let bytes = unsafe { CStr::from_ptr(text).to_bytes().to_vec() };
-        // SAFETY: as above.
         unsafe { free(text.cast()) };
         Some(bytes)
     }
@@ -1146,7 +1130,6 @@ pub mod clipboard {
         // SAFETY: SDL3 declares this exact prototype.
         let has =
             unsafe { entry::<unsafe extern "C" fn() -> bool>(handle, "SDL_HasClipboardText")? };
-        // SAFETY: no arguments.
         Some(unsafe { has() })
     }
 }
@@ -1204,7 +1187,6 @@ pub mod virtual_joystick {
         let Some(handle) = library() else {
             return false;
         };
-        // SAFETY: as above.
         let Some(detach) = (unsafe {
             entry::<unsafe extern "C" fn(JoystickId) -> bool>(handle, "SDL_DetachVirtualJoystick")
         }) else {
@@ -1232,7 +1214,6 @@ pub mod virtual_joystick {
         }) else {
             return false;
         };
-        // SAFETY: the caller's obligation.
         unsafe { set(joystick, axis, value) }
     }
 
@@ -1254,7 +1235,6 @@ pub mod virtual_joystick {
         }) else {
             return false;
         };
-        // SAFETY: the caller's obligation.
         unsafe { set(joystick, button, down) }
     }
 
@@ -1629,7 +1609,6 @@ pub mod video {
     unsafe fn decode<T: Copy>(raw: &super::Event) -> T {
         const _: () = assert!(size_of::<super::Event>() == 128);
         assert!(size_of::<T>() <= 128, "an event member is inside the union");
-        // SAFETY: the caller's obligation, and the size was just checked.
         unsafe { *(raw.bytes.as_ptr() as *const T) }
     }
 
@@ -2408,7 +2387,6 @@ pub mod video {
             let (Some(egl), Some(_)) = (egl(), display_and_config()) else {
                 return false;
             };
-            // SAFETY: no arguments.
             !current.is_null() && unsafe { (egl.get_current_context)() } == current
         }
 
@@ -2452,7 +2430,6 @@ pub mod video {
             let context =
                 unsafe { (egl.create_context)(display, config, share, attributes.as_ptr()) };
             if context.is_null() {
-                // SAFETY: no arguments.
                 let code = unsafe { (egl.get_error)() };
                 return Err(format!("eglCreateContext failed with {code:#x}"));
             }
@@ -2484,7 +2461,6 @@ pub mod video {
         else {
             return 0;
         };
-        // SAFETY: no arguments.
         unsafe { f() }
     }
 
@@ -2596,7 +2572,6 @@ pub mod video {
             true => api.SDL_ShowCursor,
             false => api.SDL_HideCursor,
         };
-        // SAFETY: no arguments.
         f.is_some_and(|f| unsafe { f() })
     }
 
@@ -2654,7 +2629,6 @@ pub mod video {
         // rather than restoring the desktop's, which is the opposite of what a
         // program setting `+arrowCursor` back asked for.
         let cursor = match cursor.is_null() {
-            // SAFETY: no arguments.
             true => match api.SDL_GetDefaultCursor.map(|f| unsafe { f() }) {
                 Some(default) if !default.is_null() => default,
                 _ => return false,
@@ -2673,16 +2647,14 @@ pub mod video {
         let Some(f) = api().and_then(|a| a.SDL_DestroyCursor) else {
             return;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(cursor) };
     }
 
     /// Which modifier keys are held right now, as `SDL_Keymod` bits.
     pub fn keyboard_modifiers() -> u16 {
-        api().and_then(|a| a.SDL_GetModState).map_or(0, |f| {
-            // SAFETY: no arguments.
-            unsafe { f() }
-        })
+        api()
+            .and_then(|a| a.SDL_GetModState)
+            .map_or(0, |f| unsafe { f() })
     }
 
     /// The pointer in desktop coordinates, and which buttons are down.
@@ -2848,7 +2820,6 @@ pub mod audio {
         let Some(f) = api().and_then(|a| a.SDL_ResumeAudioStreamDevice) else {
             return false;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(stream) }
     }
 
@@ -2859,7 +2830,6 @@ pub mod audio {
         let Some(f) = api().and_then(|a| a.SDL_PauseAudioStreamDevice) else {
             return false;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(stream) }
     }
 
@@ -2868,7 +2838,6 @@ pub mod audio {
     /// As [`put`], and nothing may use `stream` afterwards.
     pub unsafe fn destroy(stream: AudioStream) {
         if let Some(f) = api().and_then(|a| a.SDL_DestroyAudioStream) {
-            // SAFETY: the caller's obligation.
             unsafe { f(stream) };
         }
     }
@@ -2878,7 +2847,6 @@ pub mod audio {
     /// As [`put`].
     pub unsafe fn clear(stream: AudioStream) {
         if let Some(f) = api().and_then(|a| a.SDL_ClearAudioStream) {
-            // SAFETY: the caller's obligation.
             unsafe { f(stream) };
         }
     }
@@ -2953,7 +2921,6 @@ pub mod audio {
         let Some(f) = api().and_then(|a| a.SDL_GetAudioStreamAvailable) else {
             return 0;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(stream) }.max(0) as usize
     }
 
@@ -2967,7 +2934,6 @@ pub mod audio {
         let Some(f) = api().and_then(|a| a.SDL_FlushAudioStream) else {
             return false;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(stream) }
     }
 
@@ -2981,7 +2947,6 @@ pub mod audio {
         let Some(f) = api().and_then(|a| a.SDL_GetAudioStreamQueued) else {
             return 0;
         };
-        // SAFETY: the caller's obligation.
         unsafe { f(stream) }
     }
 }
