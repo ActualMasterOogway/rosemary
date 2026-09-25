@@ -102,6 +102,7 @@ exports::exports! {
         "host_page_size" => info::host_page_size,
         "host_statistics" => info::host_statistics,
         "host_statistics64" => info::host_statistics64,
+        "host_info" => info::host_info,
         "task_get_special_port" => task::task_get_special_port,
         "task_set_special_port" => task::task_set_special_port,
 
