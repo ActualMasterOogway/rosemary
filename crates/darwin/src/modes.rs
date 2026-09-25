@@ -1,11 +1,3 @@
-//! File-mode and file-flag strings: `strmode`, `setmode`/`getmode`,
-//! `fflagstostr`.
-//!
-//! BSD's, which glibc never had. Ported from Apple's Libc (`string/FreeBSD/
-//! strmode.c`, `gen/FreeBSD/setmode.c`, `gen/strtofflags.c`) in its x86-64
-//! build, which is the non-`VARIANT_LEGACY` one: there `a` includes the sticky
-//! bit and an octal mode may set it.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
@@ -45,7 +37,6 @@ const S_IXOTH: u32 = 0o001;
 /// `bp` is writable for twelve bytes.
 pub unsafe extern "C" fn strmode(mode: c_int, bp: *mut c_char) {
     let out = mode_string(mode as u32);
-    // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy_nonoverlapping(out.as_ptr().cast(), bp, out.len()) };
 }
 
@@ -330,7 +321,6 @@ pub unsafe extern "C" fn setmode(mode: *const c_char) -> *mut c_void {
         libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
         umask as u32
     };
-    // SAFETY: the caller's obligation.
     let text = unsafe { CStr::from_ptr(mode) }.to_bytes();
     let Some(mut set) = compile(text, umask) else {
         return std::ptr::null_mut();

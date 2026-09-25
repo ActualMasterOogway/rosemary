@@ -1,22 +1,3 @@
-//! Name resolution: `getaddrinfo` and the three calls around it.
-//!
-//! Three separate divergences meet here, and only the first is visible in a
-//! header diff:
-//!
-//! - **The structure.** Darwin orders `ai_canonname` before `ai_addr`; this host
-//!   orders them the other way. Both are forty-eight bytes, so a list passed
-//!   along links and walks and dereferences a hostname as a socket address.
-//! - **The flags.** `AI_V4MAPPED` is `0x800` on Darwin and `0x8` here, where
-//!   `0x800` is nothing; `AI_ALL` is `0x100` there and `0x10` here.
-//! - **The error codes.** Darwin's are small positive numbers and this host's
-//!   are negative: `EAI_NONAME` is 8 there and -2 here, and 8 here is
-//!   `EAI_SERVICE`. A guest that prints "the service is unknown" for a host that
-//!   does not exist is reading a code from the wrong platform.
-//!
-//! The returned list is built here rather than handed over, so it is also freed
-//! here: [`freeaddrinfo`] is the matching half and a guest must not reach the
-//! host's.
-
 use std::ffi::{CStr, c_char, c_void};
 
 use super::addr;
@@ -191,7 +172,7 @@ unsafe extern "C" fn getaddrinfo(
         crate::errno::set(libc::EFAULT);
         return 11;
     }
-    // SAFETY: the caller's guarantee - NUL-terminated or null.
+    // SAFETY: NUL-terminated or null.
     if unsafe { blocked(node) } {
         // SAFETY: a writable slot, per the caller's guarantee.
         unsafe { *out = core::ptr::null_mut() };
@@ -246,7 +227,6 @@ unsafe extern "C" fn getaddrinfo(
             false => unsafe { (*tail).next = node },
         }
         tail = node;
-        // SAFETY: as above.
         at = unsafe { (*at).ai_next };
     }
     // SAFETY: the host's list, now copied.
@@ -279,7 +259,6 @@ unsafe fn blocked(node: *const c_char) -> bool {
     if NAMES.is_empty() || node.is_null() {
         return false;
     }
-    // SAFETY: the caller's guarantee.
     let Ok(name) = (unsafe { CStr::from_ptr(node) }).to_str() else {
         return false;
     };
@@ -316,7 +295,6 @@ unsafe fn free_list(head: *mut AddrInfo) {
 /// `head` is null or a list [`getaddrinfo`] returned. Handing this the host's
 /// own list would free a block this module did not allocate.
 unsafe extern "C" fn freeaddrinfo(head: *mut AddrInfo) {
-    // SAFETY: the caller's guarantee.
     unsafe { free_list(head) };
 }
 
@@ -367,7 +345,6 @@ unsafe extern "C" fn getnameinfo(
     servicelen: u32,
     flags: i32,
 ) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(sockaddr) = (unsafe { addr::to_host(address, addrlen) }) else {
         // Darwin's `EAI_FAMILY`.
         return 5;
@@ -426,7 +403,6 @@ unsafe fn in_darwins_shape(answer: *mut libc::hostent) -> *mut c_void {
     if answer.is_null() {
         return core::ptr::null_mut();
     }
-    // SAFETY: the caller's guarantee.
     let mut copy = unsafe { answer.read() };
     let Some(family) = addr::family_from_host(copy.h_addrtype) else {
         // A family the guest cannot name is no answer at all: it would read the

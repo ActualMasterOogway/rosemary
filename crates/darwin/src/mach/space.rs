@@ -1,15 +1,3 @@
-//! The task's port namespace: which integers name which rights.
-//!
-//! Mach calls this an IPC space. A `mach_port_t` is *not* a port - it is a name
-//! for a right the task holds, valid only in that task, which is why the same
-//! port has different names in two processes and why a right has to be
-//! translated at every process boundary. That translation is [`super::msg`]'s
-//! job; this module is the table it translates against.
-//!
-//! The names handed out here are this runtime's own and mean nothing to the
-//! host kernel. Nothing may be passed to a real system call: a `mach_port_t`
-//! that reached one would be a file descriptor number by coincidence.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::collections::HashMap;
@@ -656,7 +644,6 @@ mod tests {
         assert_ne!(name, MACH_PORT_NULL);
 
         let mut bits = 0;
-        // SAFETY: as above.
         assert_eq!(
             unsafe { mach_port_type(TASK_SELF, name, &mut bits) },
             KERN_SUCCESS

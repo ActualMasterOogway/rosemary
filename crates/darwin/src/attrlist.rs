@@ -1,15 +1,3 @@
-//! `getattrlist` and `fgetattrlist`, for the attributes a `stat` can answer.
-//!
-//! Darwin's bulk attribute call has no host counterpart. The caller names the
-//! attributes it wants as bitmaps, and the answer is a length word followed by
-//! each attribute in bit order, packed at four-byte alignment.
-//!
-//! Only the attributes `stat` answers are implemented. Any other bit fails the
-//! whole call with `ENOTSUP` and a line on stderr naming it. Guessing a
-//! `ATTR_CMN_FNDRINFO` or a volume capability would be worse than failing:
-//! the caller acts on the answer. Apple's `du` asks for `ATTR_DIR_LINKCOUNT` and
-//! treats a failure as "not hard-linked".
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -264,7 +252,6 @@ pub unsafe extern "C" fn getattrlist(
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let list = unsafe { list.read_unaligned() };
     if let Err(errno) = check(&list, options) {
         crate::errno::set(errno);
@@ -290,7 +277,6 @@ pub unsafe extern "C" fn getattrlist(
         (answer, rc == 0)
     });
     match found {
-        // SAFETY: the caller's obligation.
         Some(answer) => unsafe { copy_out(answer, options, buf, size) },
         None => -1,
     }
@@ -313,7 +299,6 @@ pub unsafe extern "C" fn fgetattrlist(
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let list = unsafe { list.read_unaligned() };
     if let Err(errno) = check(&list, options) {
         crate::errno::set(errno);
@@ -328,7 +313,6 @@ pub unsafe extern "C" fn fgetattrlist(
     let answer = pack(&list, options, &st, || {
         count_entries(&std::ffi::CString::new(format!("/proc/self/fd/{fd}")).unwrap_or_default())
     });
-    // SAFETY: the caller's obligation.
     unsafe { copy_out(answer, options, buf, size) }
 }
 

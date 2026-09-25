@@ -1,28 +1,3 @@
-//! `pthread_cond_t`, in the guest's own forty-eight bytes.
-//!
-//! A condition variable is a sequence counter and a count of sleepers:
-//!
-//! ```text
-//! +0   u64  signature   see [`super::object`]
-//! +8   u64  identity
-//! +16  u32  sequence    bumped by every signal and broadcast; the word waiters sleep on
-//! +20  u32  sleepers    waiters that have not yet returned
-//! +24..48             unused
-//! ```
-//!
-//! The counter is what closes the window POSIX's atomic "release the mutex and wait"
-//! is defined by. A waiter reads the sequence *while it still holds the guest mutex*,
-//! releases the mutex, and only then sleeps - passing the value it read as the
-//! compare. A signal that lands in between has already bumped the counter, so the
-//! compare fails and the sleep does not happen. Nothing is lost and no second lock is
-//! needed to bridge the two.
-//!
-//! The previous implementation kept a host `pthread_cond_t` and a host
-//! `pthread_mutex_t` "gate" beside it, purely so that a host condition wait could be
-//! the thing that released the gate atomically while the *guest's* mutex was released
-//! by hand. Every signal and broadcast took that gate. With the wait built directly on
-//! a compare-and-sleep there is nothing left to bridge.
-
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
@@ -49,7 +24,6 @@ unsafe fn live(at: u64) -> Option<Record> {
     if at == 0 {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Cond) };
     record
         .live_or_init(|record, _| {
@@ -107,7 +81,6 @@ impl Until {
 /// `at` is a guest `pthread_cond_t *` and `mutex` a guest `pthread_mutex_t *` the
 /// calling thread holds.
 unsafe fn wait(at: u64, mutex: u64, until: Option<Until>) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(record) = (unsafe { live(at) }) else {
         return err::EINVAL;
     };
@@ -173,7 +146,6 @@ pub unsafe extern "C" fn cond_init(at: u64, attr: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let Some(shared) = (unsafe { super::sync::simple_attr_pshared(attr, Kind::CondAttr) }) else {
         return err::EINVAL;
     };
@@ -181,7 +153,6 @@ pub unsafe extern "C" fn cond_init(at: u64, attr: u64) -> i32 {
         super::sync::say_unsupported("a process-shared condition variable");
         return err::ENOTSUP;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Cond) };
     record.seize();
     record.publish(lay_out);
@@ -195,7 +166,6 @@ pub unsafe extern "C" fn cond_destroy(at: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Cond) };
     let state = record.seize();
     match state {
@@ -234,7 +204,6 @@ fn signal_record(record: &Record, count: WakeCount) -> i32 {
 ///
 /// As [`cond_init`].
 pub unsafe extern "C" fn cond_signal(at: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     match unsafe { live(at) } {
         Some(record) => signal_record(&record, WakeCount::One),
         None => err::EINVAL,
@@ -245,7 +214,6 @@ pub unsafe extern "C" fn cond_signal(at: u64) -> i32 {
 ///
 /// As [`cond_init`].
 pub unsafe extern "C" fn cond_broadcast(at: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     match unsafe { live(at) } {
         Some(record) => signal_record(&record, WakeCount::All),
         None => err::EINVAL,
@@ -256,7 +224,6 @@ pub unsafe extern "C" fn cond_broadcast(at: u64) -> i32 {
 ///
 /// As [`cond_init`], with `mutex` a guest `pthread_mutex_t *` the caller holds.
 pub unsafe extern "C" fn cond_wait(at: u64, mutex: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     unsafe { wait(at, mutex, None) }
 }
 
@@ -275,7 +242,6 @@ pub unsafe extern "C" fn cond_timedwait(at: u64, mutex: u64, abstime: u64) -> i3
     if !(0..NANOSECONDS).contains(&deadline.tv_nsec) {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     unsafe { wait(at, mutex, Some(Until::Realtime(deadline))) }
 }
 
@@ -287,7 +253,6 @@ pub unsafe extern "C" fn cond_timedwait(at: u64, mutex: u64, abstime: u64) -> i3
 pub unsafe extern "C" fn cond_timedwait_relative(at: u64, mutex: u64, reltime: u64) -> i32 {
     if reltime == 0 {
         // A null interval means "wait forever", which is what Darwin does.
-        // SAFETY: the caller's guarantee.
         return unsafe { cond_wait(at, mutex) };
     }
     // SAFETY: the caller states `reltime` is a readable `timespec`.
@@ -298,10 +263,8 @@ pub unsafe extern "C" fn cond_timedwait_relative(at: u64, mutex: u64, reltime: u
     let interval = std::time::Duration::new(interval.tv_sec as u64, interval.tv_nsec as u32);
     let Some(deadline) = std::time::Instant::now().checked_add(interval) else {
         // Further away than this host's clock can name, which is "forever".
-        // SAFETY: the caller's guarantee.
         return unsafe { cond_wait(at, mutex) };
     };
-    // SAFETY: the caller's guarantee.
     unsafe { wait(at, mutex, Some(Until::Monotonic(deadline))) }
 }
 

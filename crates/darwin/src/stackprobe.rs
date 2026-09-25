@@ -1,5 +1,3 @@
-//! Darwin passes the size in `rax`, immediately before subtracting that size
-//! from `rsp`. Linux has no corresponding C entry point to forward to.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn chkstk() {

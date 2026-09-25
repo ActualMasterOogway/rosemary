@@ -1,30 +1,3 @@
-//! The informational half of Mach: what a process asks about itself, and what
-//! it asks about the machine.
-//!
-//! Not a port question like the rest of this directory - nothing is sent and no
-//! right changes hands - but these are spelled as Mach calls, so they are
-//! denied by the `task_` and `host_` prefixes along with the families and have
-//! to be answered here.
-//!
-//! They have to be answered rather than refused because a game engine reports
-//! its own memory use and budgets against the machine's, and this is where both
-//! figures come from. An import nothing defines is a call to address zero on
-//! the native backend, which is where the client was dying twice over:
-//! `task_info(0x103, 22, ...)` and then `host_page_size(0x203, ...)`, each with
-//! `rip` at zero.
-//!
-//! Each flavour is a different structure and the caller says how many 32-bit
-//! words it has room for, on the way in *and* on the way out. The structures
-//! are packed to four bytes: Mach lays them out as arrays of `natural_t`, so a
-//! 64-bit size follows a leading `integer_t` with no padding, and letting Rust
-//! align them naturally moves every field after the first.
-//!
-//! The figures come from `/proc/self/statm` and `getrusage`. What this host has
-//! no counterpart for stays zero, which is what Mach itself reports for a
-//! figure it has none of - and the flavours not listed here are refused, not
-//! zero-filled, because a caller cannot tell an invented measurement from a
-//! real one.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;
@@ -120,7 +93,6 @@ const _: () = {
 };
 
 fn page_size() -> u64 {
-    // SAFETY: `sysconf` reads a static system parameter and takes no pointer.
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u64
 }
 
@@ -275,7 +247,6 @@ pub unsafe extern "C" fn task_info(
                 count,
             )
         },
-        // SAFETY: as above.
         MACH_TASK_BASIC_INFO => unsafe {
             publish(
                 MachTaskBasicInfo {
@@ -290,7 +261,6 @@ pub unsafe extern "C" fn task_info(
                 count,
             )
         },
-        // SAFETY: as above.
         TASK_THREAD_TIMES_INFO => unsafe {
             publish(
                 TaskThreadTimesInfo {
@@ -302,7 +272,6 @@ pub unsafe extern "C" fn task_info(
             )
         },
         TASK_VM_INFO => {
-            // SAFETY: the caller's obligation.
             let available = unsafe { *count } as usize * size_of::<u32>();
             if available < size_of::<TaskVmInfo>() {
                 return KERN_INVALID_ARGUMENT;
@@ -527,7 +496,6 @@ pub unsafe extern "C" fn host_statistics(
             // SAFETY: the caller's obligation, checked against the size.
             unsafe { publish(value, out, count) }
         }
-        // SAFETY: as above.
         HOST_CPU_LOAD_INFO => unsafe { publish(cpu_ticks(), out, count) },
         _ => KERN_INVALID_ARGUMENT,
     }
@@ -592,7 +560,6 @@ mod tests {
     fn the_vm_flavour_answers_the_footprint_at_the_offset_callers_read() {
         let mut info = [0u8; 512];
         let mut count = (info.len() / 4) as u32;
-        // SAFETY: as above.
         let rc = unsafe {
             task_info(
                 TASK_SELF,
@@ -698,7 +665,6 @@ mod tests {
         // And the wide flavour is not reachable through the narrow call, or a
         // caller would read the wide fields at the narrow offsets.
         let mut count = (info.len() / 4) as u32;
-        // SAFETY: as above.
         assert_eq!(
             unsafe {
                 host_statistics(

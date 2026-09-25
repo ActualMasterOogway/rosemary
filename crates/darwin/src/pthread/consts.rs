@@ -1,24 +1,3 @@
-//! Darwin's pthread constants, and what each means to the host.
-//!
-//! These are **the guest's** numbers, so they are written out here rather than taken
-//! from the `libc` crate. Almost none of them agrees with Linux, and the two that
-//! matter most are not merely different but *swapped*:
-//!
-//! | | Darwin | glibc / musl |
-//! |---|---|---|
-//! | `PTHREAD_MUTEX_NORMAL` | 0 | 0 |
-//! | `PTHREAD_MUTEX_ERRORCHECK` | 1 | **2** |
-//! | `PTHREAD_MUTEX_RECURSIVE` | 2 | **1** |
-//!
-//! A guest asking for a recursive mutex and getting an error-checking one does not
-//! fail loudly: it takes the lock, recurses, and gets `EDEADLK` from a call whose
-//! return value nobody checks - or deadlocks outright. That is the whole reason this
-//! file exists.
-//!
-//! `PTHREAD_CREATE_JOINABLE` is 1 on Darwin and 0 on Linux, and `PTHREAD_CREATE_DETACHED`
-//! is 2 and 1 - so a guest that passes the *default* detach state explicitly gets a
-//! detached thread, and its `pthread_join` fails on a thread that is already gone.
-
 /// `pthread_attr_setdetachstate`.
 pub const PTHREAD_CREATE_JOINABLE: i32 = 1;
 pub const PTHREAD_CREATE_DETACHED: i32 = 2;

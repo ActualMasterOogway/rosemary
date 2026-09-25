@@ -1,16 +1,3 @@
-//! The parts of Darwin's `malloc.h` that ask about an allocator this host does
-//! not have.
-//!
-//! Darwin's malloc is zoned and its statistics are per zone; glibc's is not
-//! zoned at all. A program calls this to report how much memory it is using -
-//! Deltarune prints "Total memory used" from it - so the answer that matters is
-//! the total, and the total is a question glibc *does* answer, through
-//! `mallinfo2`.
-//!
-//! The zone argument is ignored, because there is one allocator and it is the
-//! one being asked about. A guest that had obtained a zone of its own could not
-//! have: `malloc_create_zone` is refused by name in `rosetta3::abi::table`.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;
@@ -43,7 +30,6 @@ pub unsafe extern "C" fn malloc_zone_statistics(_zone: *mut c_void, stats: *mut 
     }
     #[cfg(target_env = "gnu")]
     {
-        // SAFETY: takes no argument and returns by value.
         let info = unsafe { libc::mallinfo2() };
         // SAFETY: the caller states `stats` is writable.
         unsafe {

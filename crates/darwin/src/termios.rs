@@ -271,27 +271,23 @@ unsafe extern "C" fn cfgetispeed(t: *const Termios) -> u64 {
 
 /// `speed_t cfgetospeed(const struct termios *)`
 unsafe extern "C" fn cfgetospeed(t: *const Termios) -> u64 {
-    // SAFETY: as above.
     unsafe { (*t).c_ospeed }
 }
 
 /// `int cfsetispeed(struct termios *, speed_t)`: Darwin accepts any value.
 unsafe extern "C" fn cfsetispeed(t: *mut Termios, speed: u64) -> c_int {
-    // SAFETY: as above.
     unsafe { (*t).c_ispeed = speed };
     0
 }
 
 /// `int cfsetospeed(struct termios *, speed_t)`
 unsafe extern "C" fn cfsetospeed(t: *mut Termios, speed: u64) -> c_int {
-    // SAFETY: as above.
     unsafe { (*t).c_ospeed = speed };
     0
 }
 
 /// `int cfsetspeed(struct termios *, speed_t)`
 unsafe extern "C" fn cfsetspeed(t: *mut Termios, speed: u64) -> c_int {
-    // SAFETY: as above.
     unsafe {
         (*t).c_ispeed = speed;
         (*t).c_ospeed = speed;

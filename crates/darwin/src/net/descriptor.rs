@@ -1,6 +1,3 @@
-//! Descriptor calls whose ABI matches but whose effect on emulated socket
-//! state does not.
-
 /// `int close(int fd)`
 unsafe extern "C" fn close(fd: i32) -> i32 {
     // SAFETY: an integer descriptor; the call touches no caller memory.

@@ -1,34 +1,3 @@
-//! The allocator the *guest* allocates and frees with.
-//!
-//! The same registry [`objc::allocator`] holds, for the same reason and in the
-//! other direction. It is duplicated rather than shared because `objc` depends
-//! on nothing but `libc` on purpose - it knows nothing about Mach-O and should
-//! not learn - and the runtime above registers both from one place.
-//!
-//! ## Why a process has two allocators to begin with
-//!
-//! A guest image that ships its own allocator replaces `malloc` and `free` for
-//! every image the loader bound, through `__DATA,__interpose`. That reaches the
-//! guest's own images. It cannot reach this crate: this is host code compiled
-//! into the runtime and linked against the host's libc long before the guest
-//! existed.
-//!
-//! So there are two live allocators whenever a guest ships one, and every
-//! pointer that crosses between the guest and this crate is a question about
-//! which of them owns it:
-//!
-//! - a block this crate hands the guest to `free` must come from [`malloc`]
-//!   here, not from `libc::malloc`;
-//! - a block the guest hands this crate to free - `dispatch_data_create` with
-//!   `DISPATCH_DATA_DESTRUCTOR_FREE` is the one that turns up - must go back
-//!   through [`free`] here, not through `libc::free`.
-//!
-//! Getting it wrong does not fail at the call. The replacement allocator
-//! accepts the foreign pointer, works out which of its own pages "owns" it from
-//! the pointer's bits, and pushes it onto that page's free list - which now has
-//! a *live* block on it. The crash is thousands of allocations later, on a
-//! free-list next pointer that turns out to be ASCII text.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -65,7 +34,6 @@ pub unsafe fn malloc(size: usize) -> *mut c_void {
     // SAFETY: [`register`]'s contract - an address of `void *(size_t)` this
     // process can call.
     let malloc: unsafe extern "C" fn(usize) -> *mut c_void = unsafe { core::mem::transmute(f) };
-    // SAFETY: as above.
     unsafe { malloc(size) }
 }
 
@@ -85,7 +53,6 @@ pub unsafe fn free(block: *mut c_void) {
     // SAFETY: [`register`]'s contract - an address of `void(void *)` this
     // process can call.
     let free: unsafe extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(f) };
-    // SAFETY: as above.
     unsafe { free(block) }
 }
 

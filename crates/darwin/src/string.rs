@@ -1,19 +1,3 @@
-//! The `<string.h>` functions Darwin has and this host does not, or has under
-//! different terms.
-//!
-//! Everything in `<string.h>` that both sides define compatibly is a genuine
-//! passthrough and is claimed as one in [`crate::passthrough`]. What is left is
-//! two things:
-//!
-//! - Apple's own `memset_pattern4`/`8`/`16`, which fill a buffer by repeating a
-//!   fixed-width pattern - `memset` with a wider unit. glibc has no equivalent
-//!   under any name, so an image that calls one binds to nothing and jumps to
-//!   zero. Not niche, either: it is what a C++ compiler on Darwin emits for
-//!   `std::fill` over a 4-, 8- or 16-byte type, so any program that initialises
-//!   an array of doubles or of pointers has one.
-//! - `strerror`, `strerror_r` and `perror`, where the name is shared and the
-//!   contract is not. See [`strerror_r`].
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_char, c_void};
@@ -127,7 +111,6 @@ pub unsafe extern "C" fn perror(s: *const c_char) {
     let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errnum)) };
     let prefix = match s.is_null() {
         true => None,
-        // SAFETY: the caller's guarantee.
         false => Some(unsafe { std::ffi::CStr::from_ptr(s) }),
     };
     let line = match prefix.map(|p| p.to_bytes()).filter(|p| !p.is_empty()) {

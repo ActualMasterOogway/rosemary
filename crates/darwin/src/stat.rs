@@ -1,20 +1,3 @@
-//! `struct stat`, which is not the host's, and the calls that fill one.
-//!
-//! Darwin's is 144 bytes with a 64-bit `st_ino`, a 32-bit `st_dev` and four
-//! `timespec`s - the fourth being `st_birthtimespec`, which glibc's has no
-//! counterpart for. glibc's is a different size with a different field order.
-//! Handing a guest's buffer to the host's `stat` therefore fills the right
-//! number of bytes with the wrong meanings: a size read out of what the host put
-//! there is a plausible number, which is the worst kind of wrong.
-//!
-//! It was reachable until this module existed. `stat` is on
-//! [`crate::divergent`]'s list, but the *`$INODE64` spelling is a different
-//! name* and the loader's legacy-suffix fallback resolved it straight to the
-//! host's.
-//!
-//! The path arguments also go through [`crate::path`], because a Mac filesystem
-//! is case-insensitive and Mac software leans on that without meaning to.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int};
@@ -166,7 +149,6 @@ pub(crate) unsafe fn stdio_writes(mode: *const c_char) -> bool {
     if mode.is_null() {
         return false;
     }
-    // SAFETY: the caller's obligation.
     let mode = unsafe { CStr::from_ptr(mode) }.to_bytes();
     mode.iter().any(|b| matches!(b, b'w' | b'a' | b'+'))
 }
@@ -178,7 +160,6 @@ pub(crate) unsafe fn stdio_writes(mode: *const c_char) -> bool {
 /// `path` is a NUL-terminated string and `out` is null or a writable Darwin
 /// `struct stat`.
 pub unsafe extern "C" fn stat(path: *const c_char, out: *mut Stat) -> c_int {
-    // SAFETY: the caller's obligation.
     unsafe { at_path(path, out, false) }
 }
 
@@ -188,7 +169,6 @@ pub unsafe extern "C" fn stat(path: *const c_char, out: *mut Stat) -> c_int {
 ///
 /// As [`stat`].
 pub unsafe extern "C" fn lstat(path: *const c_char, out: *mut Stat) -> c_int {
-    // SAFETY: the caller's obligation.
     unsafe { at_path(path, out, true) }
 }
 
@@ -241,7 +221,6 @@ pub unsafe extern "C" fn fstat(fd: c_int, out: *mut Stat) -> c_int {
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     with_fallback(path, |path| {
-        // SAFETY: the caller's obligation.
         let rc = unsafe { libc::access(path, mode) };
         (rc, rc == 0)
     })
@@ -255,30 +234,8 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
 /// is why [`realpath`] resolves into its own and copies.
 pub(crate) const DARWIN_PATH_MAX: usize = 1024;
 
-/// `char *realpath(const char *, char *resolved)`, with the same fallback.
-///
-/// Two reasons this is not a passthrough.
-///
-/// The first is the fallback, and it is what makes a Qt application start: every
-/// `QDir::canonicalPath` is a `realpath`, and the host's fails outright on a path
-/// whose case does not match the disk. Qt treats that failure as an *empty* path
-/// rather than as an error, so a plugin directory spelled `Contents/plugins` in a
-/// bundle that has `Contents/Plugins` does not merely fail to load - it puts an
-/// empty string in the library search path, and Qt then reports that it looked
-/// for its platform plugin in `""`.
-///
-/// The second is the buffer. Darwin's `PATH_MAX` is a quarter of this host's, so
-/// the result is measured against [`DARWIN_PATH_MAX`] and refused with
-/// `ENAMETOOLONG` if it does not fit - which is what Darwin itself answers, and
-/// the alternative is writing past the end of the caller's array. The length
-/// that matters is the *guest* spelling's, which is why the path is translated
-/// back before it is measured.
-///
-/// The third is that a resolved path is a host path, and a guest that is given
-/// one will store it, compare it and be wrong about it later. A resolution that
-/// lands outside every mount has no guest spelling and is reported as `ENOENT`,
-/// which is also what a real Darwin kernel would say about a path that is not
-/// in its filesystem.
+/// Resolve a guest path with case fallback and translate the result back to a
+/// guest path. Refuse results longer than Darwin's `PATH_MAX`.
 ///
 /// # Safety
 ///
@@ -399,13 +356,11 @@ pub(crate) fn guest_path(host: &CStr) -> Option<std::ffi::CString> {
 ///
 /// Both arguments are NUL-terminated strings.
 pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
-    // SAFETY: the caller's obligation.
     let writing = unsafe { stdio_writes(mode) };
     with_fallback(path, |path| {
         if writing && !may_write(path) {
             return (std::ptr::null_mut(), false);
         }
-        // SAFETY: the caller's obligation.
         let file = unsafe { libc::fopen(path, mode) };
         (file, !file.is_null())
     })
@@ -429,7 +384,6 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c
         if writes(host_flags) && !may_write(path) {
             return (-1, false);
         }
-        // SAFETY: the caller's obligation.
         let fd = unsafe { libc::open(path, host_flags, mode) };
         (fd, fd >= 0)
     })
@@ -462,7 +416,6 @@ pub unsafe extern "C" fn openat(
         if writes(host_flags) && !may_write_at(dirfd, path) {
             return (-1, false);
         }
-        // SAFETY: the caller's obligation.
         let fd = unsafe { libc::openat(dirfd, path, host_flags, mode) };
         (fd, fd >= 0)
     };
@@ -522,7 +475,6 @@ pub unsafe extern "C" fn faccessat(
         fd => fd,
     };
     let ask = |path| {
-        // SAFETY: the caller's obligation.
         let rc = unsafe { libc::faccessat(dirfd, path, mode, host_flag) };
         (rc, rc == 0)
     };
@@ -679,7 +631,6 @@ pub unsafe extern "C" fn statfs(path: *const c_char, out: *mut Statfs) -> c_int 
         // SAFETY: the caller's obligation, and `host` is this host's own layout.
         let result = unsafe { libc::statfs(path, &mut host) };
         if result == 0 {
-            // SAFETY: as above.
             unsafe { fill_statfs(&host, out) };
         }
         (result, result == 0)
@@ -696,7 +647,6 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int {
     // SAFETY: `host` is this host's own layout and `fd` is the caller's.
     let result = unsafe { libc::fstatfs(fd, &mut host) };
     if result == 0 {
-        // SAFETY: the caller's obligation.
         unsafe { fill_statfs(&host, out) };
     }
     result
@@ -772,7 +722,6 @@ mod tests {
         )
         .expect("no NUL");
         let mut out = Stat::default();
-        // SAFETY: as above.
         let rc = unsafe { stat(lowered.as_ptr(), &mut out) };
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(rc, 0, "the lowercased path was not found");

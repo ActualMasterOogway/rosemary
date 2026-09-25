@@ -1,26 +1,3 @@
-//! Darwin's `xlocale.h`, on a host that has only half of it.
-//!
-//! Darwin gives nearly every libc function a `_l` variant taking an explicit
-//! `locale_t`. glibc gives that treatment to about a third of them - `strtod_l`,
-//! `strcoll_l`, `strftime_l` - and expects the rest to be reached by *switching*
-//! the thread's locale with `uselocale`. So each entry here is the plain
-//! function between a `uselocale` pair, and the module exists because the
-//! vendored `libc++` imports the whole family.
-//!
-//! A null `locale_t` is Darwin's C-locale sentinel for these convenience
-//! functions. That differs from management functions such as `duplocale`, where
-//! null means the caller's current locale, and from glibc's `_l` functions,
-//! which dereference null.
-//!
-//! **The `mbstate_t` is not converted.** Darwin's is 128 bytes and glibc's is
-//! eight, and a guest hands its own across. That is safe in the direction it
-//! matters - the host writes eight bytes into a buffer with room for a hundred
-//! and twenty-eight - and correct as long as the *same* pointer keeps coming
-//! back, which it does: the state is opaque to the guest, all-zero means
-//! "initial" on both, and every call that advances it is this one. What it would
-//! not survive is a guest that copied a partially-consumed state between two
-//! objects, and nothing in a C++ standard library does.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
@@ -101,7 +78,6 @@ pub unsafe extern "C" fn setlocale(category: c_int, locale: *const c_char) -> *m
     // SAFETY: the caller's string and the translated host category.
     let name = unsafe { libc::setlocale(category, locale) };
     if !name.is_null() && (category == libc::LC_ALL || category == libc::LC_CTYPE) {
-        // SAFETY: takes no argument.
         let max = unsafe { plain::__ctype_get_mb_cur_max() };
         MB_CUR_MAX.store(max as c_int, Ordering::Relaxed);
     }
@@ -641,7 +617,6 @@ pub unsafe extern "C" fn wctype(property: *const c_char) -> u64 {
     if property.is_null() {
         return 0;
     }
-    // SAFETY: the caller's obligation.
     let name = unsafe { std::ffi::CStr::from_ptr(property) }.to_bytes();
     let mask = match name {
         b"alnum" => ctype::ALPHA | ctype::DIGIT,
@@ -704,7 +679,6 @@ pub unsafe extern "C" fn toupper_(c: c_int) -> c_int {
     if c < 0 {
         return c;
     }
-    // SAFETY: as above.
     unsafe {
         if c <= u8::MAX as c_int {
             plain::toupper(c)
@@ -726,7 +700,6 @@ pub unsafe extern "C" fn toupper_(c: c_int) -> c_int {
 /// `loc` is a `locale_t` this process obtained, or null.
 pub unsafe extern "C" fn localeconv_l(loc: libc::locale_t) -> *mut c_void {
     let _switched = switch(loc);
-    // SAFETY: takes no argument and returns libc's own storage.
     unsafe { plain::localeconv() }
 }
 
@@ -741,7 +714,6 @@ pub unsafe extern "C" fn localeconv_l(loc: libc::locale_t) -> *mut c_void {
 /// As [`localeconv_l`].
 pub unsafe extern "C" fn mb_cur_max_l(loc: libc::locale_t) -> c_int {
     let _switched = switch(loc);
-    // SAFETY: takes no argument.
     unsafe { plain::__ctype_get_mb_cur_max() as c_int }
 }
 
@@ -751,7 +723,6 @@ pub unsafe extern "C" fn mb_cur_max_l(loc: libc::locale_t) -> c_int {
 ///
 /// Takes nothing; `unsafe` only to match the table's shape.
 pub unsafe extern "C" fn mb_cur_max() -> c_int {
-    // SAFETY: takes no argument.
     unsafe { plain::__ctype_get_mb_cur_max() as c_int }
 }
 
@@ -775,7 +746,6 @@ pub unsafe extern "C" fn collate_lookup_l(
     sec: *mut c_int,
     _loc: libc::locale_t,
 ) {
-    // SAFETY: the caller's obligation.
     unsafe {
         *len = 1;
         *prim = *t as c_int;
@@ -801,7 +771,6 @@ pub unsafe extern "C" fn collate_lookup(
     // SAFETY: at most MB_LEN_MAX bytes of a NUL-terminated string, which mbrtowc
     // stops reading at the NUL; `state` is a zeroed conversion state.
     let n = unsafe { plain::mbrtowc(&mut wc, t, 16, state.as_mut_ptr().cast()) };
-    // SAFETY: the caller's obligation.
     unsafe {
         *sec = 0;
         match n {
@@ -937,7 +906,6 @@ mod tests {
         let loc =
             unsafe { newlocale(category::ALL_MASK, core::ptr::null(), core::ptr::null_mut()) };
         assert!(!loc.is_null());
-        // SAFETY: as above.
         unsafe { libc::freelocale(loc) };
     }
 

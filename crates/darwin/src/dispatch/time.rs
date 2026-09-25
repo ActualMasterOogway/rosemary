@@ -1,10 +1,3 @@
-//! `dispatch_time_t`: an absolute deadline on the same clock `mach_absolute_time`
-//! reads.
-//!
-//! A guest mixes the two - it takes a `dispatch_time` deadline and compares it
-//! against a tick count it read itself - so both must name one timeline. See
-//! [`crate::mach`], whose timebase is 1/1 for the same reason.
-
 /// `DISPATCH_TIME_NOW`: read the clock rather than using the base given.
 pub const NOW: u64 = 0;
 /// `DISPATCH_TIME_FOREVER`: a deadline that never arrives.

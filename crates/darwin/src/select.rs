@@ -1,26 +1,3 @@
-//! `select` and `pselect`, whose `fd_set` is the same 128 bytes either way.
-//!
-//! Denied here for a long time on the strength of the declaration: an `fd_set`
-//! is `__int32_t fds_bits[32]` on Darwin and `long fds_bits[16]` here, so the
-//! word width differs. The *byte* layout does not. Both number the descriptors
-//! from the least significant bit of the first word up, and on a little-endian
-//! machine that puts descriptor `n` in bit `n % 8` of byte `n / 8` in both. Two
-//! structures with different fields and the same 128 bytes, which is the
-//! opposite of this crate's usual problem - so both sets pass straight through,
-//! and the assertion in the tests below is what keeps that true.
-//!
-//! What does *not* pass through is the timeout. `select` takes a
-//! `struct timeval`, whose `tv_usec` is a 32-bit `int` on Darwin and a 64-bit
-//! `long` here, so a guest asking for 500ms passed through asks for 500000
-//! seconds - see [`crate::net::sockopt`], which converts the same value for
-//! `SO_RCVTIMEO`. The guest's own `timeval` is left alone afterwards, because
-//! Darwin's `select` does not report the time remaining and this host's does:
-//! writing back what the host wrote would be a change a guest never asked for.
-//!
-//! `pselect`'s signal mask is Darwin's 32-bit `sigset_t`, numbered Darwin's way
-//! - `SIGBUS` and `SIGINFO` are not the same signals here - so it goes through
-//! the same conversion `sigprocmask` does.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_int, c_void};
@@ -214,7 +191,6 @@ mod tests {
 
         // SAFETY: a live `fd_set`, zeroed and then given one descriptor.
         let mut readfds: libc::fd_set = unsafe { core::mem::zeroed() };
-        // SAFETY: as above.
         unsafe { libc::FD_SET(ends[0], &mut readfds) };
 
         // Darwin's `struct timeval`: eight bytes of seconds, four of

@@ -1,42 +1,3 @@
-//! The variadic half of `xlocale.h`: `snprintf_l`, `sscanf_l`, `asprintf_l`.
-//!
-//! Separate from [`crate::xlocale`] only because of *how* they are written.
-//! Each is the same one-line idea as the rest of that family - switch the
-//! thread's locale and forward to the plain function - but a variadic C
-//! function cannot be written in Rust on a stable compiler (`c_variadic`,
-//! rust-lang/rust#44930), and there is no way to reach the caller's arguments
-//! without one.
-//!
-//! So each entry point is a `global_asm!` trampoline that builds the SysV
-//! `va_list` the ABI describes and calls an ordinary Rust function with a
-//! pointer to it:
-//!
-//! - a **register save area** of the six integer argument registers followed by
-//!   `xmm0..7`, which is where `va_arg` reads an argument that was passed in a
-//!   register;
-//! - `gp_offset`, the index into that area of the first *unnamed* integer
-//!   argument - eight bytes per named register argument, so 32 for
-//!   `snprintf_l`'s four and 24 for the other two's three;
-//! - `fp_offset` 48, where the vector half of the save area begins;
-//! - `overflow_arg_area` at `rbp+16`, the caller's own stack arguments, which
-//!   begin after the saved frame pointer and the return address.
-//!
-//! Shifting the register arguments down by one and tail-jumping to the plain
-//! function is **not** a substitute, and it is the obvious wrong answer: it is
-//! right only while every argument the caller passed fits in a register, and
-//! silently drops the seventh onwards.
-//!
-//! The vector registers are saved unconditionally rather than under the usual
-//! `test al, al`. `al` counts the vector registers the caller used, and saving
-//! eight registers nothing will read costs a hundred and twenty-eight bytes of
-//! stack; getting the branch wrong costs a `%f` that prints garbage.
-//!
-//! **x86-64 only.** The trampolines are that ABI's, and on another host these
-//! names stay unbound - which is where they were before this module existed.
-//! The emulated backend does not come through here at all: it has the guest's
-//! registers in hand and reads the arguments itself, in
-//! `rosetta3::shims::printf`.
-
 #![cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
 
 use std::ffi::{c_char, c_int, c_void};
@@ -140,7 +101,6 @@ unsafe extern "C" fn sscanf_l_body(
     ap: *mut VaList,
 ) -> c_int {
     let _switched = crate::xlocale::switch(locale);
-    // SAFETY: as above.
     unsafe { vsscanf(input, format, ap) }
 }
 
@@ -274,7 +234,6 @@ mod tests {
     #[test]
     fn a_double_is_read_from_the_vector_registers() {
         let mut buffer = [0i8; 64];
-        // SAFETY: as above.
         unsafe {
             snprintf_l()(
                 buffer.as_mut_ptr(),

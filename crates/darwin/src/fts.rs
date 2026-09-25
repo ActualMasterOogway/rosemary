@@ -1,20 +1,3 @@
-//! `<fts.h>`, walked here rather than by the host's.
-//!
-//! glibc has an `fts`, and none of it can be handed over: its `FTSENT` is laid
-//! out differently, `fts_statp` is a host `struct stat`, and the comparison
-//! callback would be given host entries to read as Darwin ones. So this is a
-//! port of Apple's `fts.c` (Libc `gen/fts.c`) onto Darwin's structures, keeping
-//! its traversal order, its `fts_info` answers and its shared path buffer - an
-//! entry's `fts_path` points into one buffer the stream owns, which a caller
-//! can observe and `ls` does.
-//!
-//! One behaviour is fixed rather than chosen: every stream runs as if the
-//! caller had asked for `FTS_NOCHDIR`. Apple's walk changes the process's
-//! working directory as it descends, which in a runtime with threads of its own
-//! would move theirs as well. The difference is visible only in `fts_accpath`,
-//! which is then the whole path rather than the name, and which is the path a
-//! caller is told to use either way.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int, c_long, c_void};
@@ -157,7 +140,6 @@ unsafe fn is_dot(name: *const c_char) -> bool {
 ///
 /// `p` is a live entry whose `path` is the stream's buffer.
 unsafe fn nappend(p: *const Ftsent) -> usize {
-    // SAFETY: the caller's obligation.
     unsafe {
         if (*p).level == FTS_ROOTLEVEL && (*p).pathlen == 1 && *(*p).path == b'/' as c_char {
             0
@@ -294,7 +276,6 @@ unsafe fn open_stream(mut argv: *const *const c_char, sp: *mut Fts) -> *mut Fts 
 ///
 /// `p` is a root entry of `sp`, whose buffer holds its path by construction.
 unsafe fn load(sp: *mut Fts, p: *mut Ftsent) {
-    // SAFETY: the caller's obligation.
     unsafe {
         let len = (*p).namelen as usize;
         (*p).pathlen = (*p).namelen;
@@ -486,7 +467,6 @@ pub unsafe extern "C" fn fts_set(_sp: *mut Fts, p: *mut Ftsent, instr: c_int) ->
         crate::errno::set(libc::EINVAL);
         return 1;
     }
-    // SAFETY: the caller's obligation.
     unsafe { (*p).instr = instr as u16 };
     0
 }
@@ -501,7 +481,6 @@ pub unsafe extern "C" fn fts_children(sp: *mut Fts, instr: c_int) -> *mut Ftsent
         crate::errno::set(libc::EINVAL);
         return null_mut();
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         let p = (*sp).cur;
         // Cleared so the caller can tell an empty directory from an error.
@@ -722,7 +701,6 @@ enum Follow {
 ///
 /// `p` is a live entry of `sp` whose `accpath` names it.
 unsafe fn stat_entry(sp: *mut Fts, p: *mut Ftsent, follow: Follow) -> u16 {
-    // SAFETY: the caller's obligation.
     unsafe {
         let mut scratch = Stat::default();
         let sbp: *mut Stat = match (*sp).isset(FTS_NOSTAT) {
@@ -791,7 +769,6 @@ unsafe fn stat_entry(sp: *mut Fts, p: *mut Ftsent, follow: Follow) -> u16 {
 ///
 /// `head` is a list of `nitems` live entries and the stream has a comparison.
 unsafe fn sort(sp: *mut Fts, head: *mut Ftsent, nitems: usize) -> *mut Ftsent {
-    // SAFETY: the caller's obligation.
     unsafe {
         if nitems > (*sp).nitems as usize {
             let wanted = nitems + 40;
@@ -867,7 +844,6 @@ unsafe fn alloc(sp: *mut Fts, name: *const c_char, namelen: usize) -> *mut Ftsen
 /// `head` is null or a list this stream allocated and no longer references.
 unsafe fn lfree(mut head: *mut Ftsent) {
     while !head.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe {
             let next = (*head).link;
             libc::free(head.cast());
@@ -882,7 +858,6 @@ unsafe fn lfree(mut head: *mut Ftsent) {
 ///
 /// `sp` is a live stream.
 unsafe fn palloc(sp: *mut Fts, more: usize) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe {
         let wanted = (*sp).pathlen as usize + more + 256;
         if wanted >= u16::MAX as usize {
@@ -909,7 +884,6 @@ unsafe fn palloc(sp: *mut Fts, more: usize) -> bool {
 ///
 /// `head` is the list being built, and the rest of the tree hangs off it.
 unsafe fn padjust(sp: *mut Fts, head: *mut Ftsent) {
-    // SAFETY: the caller's obligation.
     unsafe {
         let addr = (*sp).path;
         let adjust = |p: *mut Ftsent| {
@@ -941,7 +915,6 @@ unsafe fn padjust(sp: *mut Fts, head: *mut Ftsent) {
 /// `argv` is a null-terminated array of NUL-terminated strings.
 unsafe fn maxarglen(mut argv: *const *const c_char) -> usize {
     let mut max = 0;
-    // SAFETY: the caller's obligation.
     unsafe {
         while !(*argv).is_null() {
             max = max.max(CStr::from_ptr(*argv).to_bytes().len());
@@ -1033,7 +1006,6 @@ mod tests {
         let dir = tree("children");
         let root = CString::new(dir.to_str().unwrap()).unwrap();
         let argv = [root.as_ptr(), std::ptr::null()];
-        // SAFETY: as above.
         unsafe {
             let sp = fts_open(argv.as_ptr(), FTS_PHYSICAL, Some(by_name));
             let top = fts_read(sp);

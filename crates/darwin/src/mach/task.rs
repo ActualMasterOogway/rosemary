@@ -1,5 +1,3 @@
-//! The ports a process holds for itself, and the exception ports it registers.
-
 #![cfg(not(target_os = "macos"))]
 
 use super::kern::*;
@@ -345,7 +343,6 @@ mod tests {
         let rc = unsafe { task_get_special_port(TASK_SELF, TASK_BOOTSTRAP_PORT, &mut port) };
         assert_eq!(rc, KERN_SUCCESS);
         assert_eq!(port, BOOTSTRAP);
-        // SAFETY: as above.
         assert_eq!(
             unsafe { task_get_special_port(TASK_SELF, 0, &mut port) },
             KERN_INVALID_ARGUMENT

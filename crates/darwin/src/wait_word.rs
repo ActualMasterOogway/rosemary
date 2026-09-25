@@ -1,23 +1,3 @@
-//! Host compare-and-wait operations on a 32-bit userspace word.
-//!
-//! This is the one thing every lock in this crate needs from the operating system and
-//! the only thing it needs: *park this thread until that word changes*. Everything
-//! above it - `pthread_mutex_t`, `pthread_cond_t`, `pthread_rwlock_t`, `pthread_once_t`,
-//! and Darwin's own `__ulock_*` - is built out of it, in the guest's own bytes.
-//!
-//! It is deliberately smaller than either Darwin's ulock API or a pthread mutex: the
-//! callers keep their own error and wake semantics, and none of them is expressed in
-//! terms of a host lock.
-//!
-//! Each host spells it differently and all three spellings are the same operation:
-//!
-//! * **Linux** has `futex`, used here through `rustix`.
-//! * **macOS** has `__ulock_wait`/`__ulock_wake`, which is what Apple's own
-//!   `os_unfair_lock`, `libc++` and libdispatch bottom out in. No libc wrapper
-//!   declares them, so they are declared here.
-//! * **FreeBSD** has `_umtx_op`, which is what its own libthr is built on.
-//! * **Anything else** gets a bounded polling fallback, which is correct and slow.
-
 use std::sync::atomic::AtomicU32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,6 +1,3 @@
-//! `uname`, `sysconf` and `compat_mode`: what the system says it is, and which
-//! century it is in.
-
 use crate::sysctl::{
     CTL_HW, CTL_KERN, HW_MACHINE, KERN_HOSTNAME, KERN_OSRELEASE, KERN_OSTYPE, KERN_VERSION,
 };
@@ -556,7 +553,6 @@ mod tests {
             );
         }
         let legacy = std::ffi::CString::new("legacy").unwrap();
-        // SAFETY: as above.
         unsafe {
             assert_eq!(compat_mode(cmd.as_ptr(), legacy.as_ptr()), 0);
             assert_eq!(compat_mode(cmd.as_ptr(), std::ptr::null()), 0);

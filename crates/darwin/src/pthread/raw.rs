@@ -1,10 +1,3 @@
-//! Declarations for the pthread functions the `libc` crate does not bind.
-//!
-//! Every one of these is in the C library on both hosts and in POSIX; the crate simply
-//! has not declared it for one platform or the other. Declared here rather than at
-//! each call site so the list of what is missing is one list, and so a future `libc`
-//! that grows them is one deletion.
-
 unsafe extern "C" {
     /// Not bound for Apple platforms, though libpthread exports it.
     pub fn pthread_attr_getguardsize(

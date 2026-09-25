@@ -1,12 +1,3 @@
-//! `nl_langinfo`, whose item numbers are Darwin's.
-//!
-//! The strings are the host's: the guest's `setlocale` is the host's, so the
-//! host knows the answers. What differs is the question. Darwin numbers the
-//! items 0 to 57 in its own order (`<langinfo.h>`), and glibc's `nl_item`
-//! encodes a category in the high bits - a Darwin `CODESET`, 0, asked of glibc
-//! is `ABDAY_1`'s neighbourhood of nothing. So each item is translated, and two
-//! answers are adjusted to what a Mac says.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int};

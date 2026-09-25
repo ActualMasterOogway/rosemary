@@ -1,32 +1,3 @@
-//! The guest's pthread objects: what is in their bytes, and who owns them.
-//!
-//! A guest `pthread_mutex_t` is `{ long __sig; char __opaque[56]; }` - a signature and
-//! a block of bytes libpthread reserves for itself. The sizes are public; the contents
-//! of `__opaque` are not, and this module does not try to find out.
-//!
-//! It does not have to. **On a host that is not a Mac, every one of those bytes is
-//! ours.** The guest never reads them: the type is opaque, and the only things that
-//! touch it are the `pthread_*` functions, all of which this crate implements. So the
-//! opaque block holds a record of our own design, and the only facts about Darwin that
-//! matter are three:
-//!
-//! * the **size** of each object, so a record fits inside one;
-//! * the **signature** each *static initializer* writes, because those are emitted by
-//!   the guest's compiler rather than by a call we service - a `PTHREAD_MUTEX_INITIALIZER`
-//!   arrives already "initialised" and has to be recognised;
-//! * that the signature is the **first eight bytes**, which the public struct says.
-//!
-//! All three are checked against the host's own declarations on macOS, where the
-//! guest's types and this process's are the same types. That is what makes the layout
-//! used on Linux something measured rather than something believed.
-//!
-//! Every object is **inline**: its whole state lives in the guest's own bytes, and no
-//! kind owns a heap allocation or a host object. What varies between kinds is only the
-//! shape of the body, which each of [`super::mutex`], [`super::cond`], [`super::rwlock`]
-//! and [`super::once`] lays out for itself. The lifecycle - is this an object of this
-//! kind, was it statically initialised, is somebody building it, has it been destroyed -
-//! is the same for all of them and lives here.
-
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Darwin's object sizes on LP64, from `<sys/_pthread/_pthread_types.h>`: the `long`
@@ -438,7 +409,6 @@ mod tests {
         assert_eq!(first, sig::MUTEX_INIT);
 
         let c = libc::PTHREAD_COND_INITIALIZER;
-        // SAFETY: as above.
         assert_eq!(
             unsafe { *(&c as *const libc::pthread_cond_t as *const u64) },
             sig::COND_INIT

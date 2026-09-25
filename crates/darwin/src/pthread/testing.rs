@@ -1,11 +1,3 @@
-//! A guest pthread object, for the tests.
-//!
-//! Zeroed as a guest's `.bss` object arrives, or carrying a Darwin static initializer
-//! as a `.data` one does. Shared behind an `Arc` because most of what is worth
-//! asserting about a lock needs a second thread, and every object is reached by
-//! address through this module's own functions - which is exactly how a guest reaches
-//! it.
-
 use std::sync::Arc;
 
 #[repr(C, align(8))]
@@ -14,7 +6,6 @@ pub struct Guest<const N: usize>([u8; N]);
 // SAFETY: the bytes are only ever touched through the `pthread_*` entry points, whose
 // whole job is to make concurrent access to them safe.
 unsafe impl<const N: usize> Send for Guest<N> {}
-// SAFETY: as above.
 unsafe impl<const N: usize> Sync for Guest<N> {}
 
 impl<const N: usize> Guest<N> {

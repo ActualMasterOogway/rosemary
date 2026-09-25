@@ -1,17 +1,3 @@
-//! Mach semaphores, which are named out of the port space and are not ports.
-//!
-//! `semaphore_t` is a `mach_port_t` on a Mac and the calls below take one, so
-//! the names have to come from the same counter as the ports or a caller could
-//! hold a semaphore and a port with the same number. Nothing else about them is
-//! Mach-like: a semaphore is not sent to, and no message carries one.
-//!
-//! In-process only. A Mach semaphore *can* be shared by sending it in a message
-//! and this cannot, which is a real divergence - but the sharing form needs a
-//! kernel object two tasks can both block on, and the only shape of that here
-//! is a futex in shared memory. Nothing this runtime has met asks for it, and a
-//! semaphore that silently failed to synchronise two processes would be a
-//! deadlock nobody could locate.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::sync::{Arc, Condvar, Mutex};

@@ -1,26 +1,3 @@
-//! `getrlimit`/`setrlimit`, where the resource numbers and the sentinel for
-//! "no limit" both differ.
-//!
-//! `struct rlimit` is the same sixteen bytes on both platforms, which is what
-//! makes this look safe to pass through. Two things inside it are not:
-//!
-//! | resource | Darwin | this host |
-//! |---|---|---|
-//! | `RLIMIT_AS` / `RLIMIT_RSS` | 5 | 9 / 5 |
-//! | `RLIMIT_MEMLOCK` | 6 | 8 |
-//! | `RLIMIT_NPROC` | 7 | 6 |
-//! | `RLIMIT_NOFILE` | **8** | **7** |
-//!
-//! So a program asking Darwin's `RLIMIT_NOFILE` is answered here about the
-//! memory it may lock, and one asking for the process limit is told about
-//! address space. Every one of those succeeds.
-//!
-//! And `RLIM_INFINITY` is `1<<63 - 1` on Darwin and `~0` here - the sentinel
-//! trap from `SEM_FAILED`, one header over. A guest that compares the limit it
-//! read against its own `RLIM_INFINITY` concludes the limit is finite and
-//! enormous, and one that hands `RLIM_INFINITY` back to `setrlimit` asks for a
-//! specific huge number instead of "no limit".
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_int;

@@ -1,13 +1,3 @@
-//! The program's name: Darwin's `getprogname`/`setprogname`, and the name this
-//! host's libc prefixes `warn` and `err` with.
-//!
-//! The guest's `err`, `warn` and `errx` are the host's, and glibc's print
-//! `program_invocation_short_name` - which is this runtime's name, so a guest
-//! `ls` complained as `rosetta3: /nope: No such file or directory`. Once the
-//! guest's `argv` exists, [`set`] makes the guest's name the process's, which
-//! is what it is from then on: every message this runtime prints of its own
-//! spells out `rosetta3:` itself.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, CString, c_char};
@@ -73,7 +63,6 @@ pub unsafe extern "C" fn setprogname(progname: *const c_char) {
     if progname.is_null() {
         return;
     }
-    // SAFETY: the caller's obligation.
     let bytes = unsafe { CStr::from_ptr(progname) }.to_bytes();
     let offset = bytes.len() - basename(bytes).len();
     // SAFETY: an offset inside the caller's string.

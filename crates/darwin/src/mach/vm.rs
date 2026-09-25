@@ -1,18 +1,3 @@
-//! `vm_region_64` and the two memory calls beside it, for this task alone.
-//!
-//! Mach's VM calls take a task port, and the only task this crate can answer
-//! for is its own - everything below reads `/proc/self/maps`, and a straight
-//! answer about somebody else's address space would be a fabrication. A port
-//! that is not [`TASK_SELF`] is refused, the way [`super::info::task_info`]
-//! refuses one.
-//!
-//! What asks: a game that reports its own memory use, and a crash reporter
-//! deciding whether a pointer is readable before it follows one. Both walk the
-//! map by calling `vm_region_64` with the address one past the region it was
-//! last told about, so the contract that matters is the *search*: the answer is
-//! the first region at or after the address handed in, and its real bounds come
-//! back in the same two out-parameters.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;

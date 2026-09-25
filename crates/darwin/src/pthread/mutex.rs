@@ -1,32 +1,3 @@
-//! `pthread_mutex_t`, in the guest's own sixty-four bytes.
-//!
-//! A three-state lock word and a host wait-on-address call, which is the same shape
-//! Darwin's own mutexes have: `__ulock_wait` there, a futex here, and the state
-//! machine in between is ours either way. No host `pthread_mutex_t` is involved in
-//! any of it - there is nothing a host mutex could provide that this needs, and a
-//! guest mutex that *was* a host mutex could not live in the guest's bytes, could not
-//! be recognised from a static initializer, and could not be waited on by a condition
-//! variable without a second lock to bridge the two.
-//!
-//! ```text
-//! +0   u64  signature   see [`super::object`]
-//! +8   u64  identity
-//! +16  u32  state       0 unlocked, 1 locked, 2 locked and possibly contended
-//! +20  u32  kind        normal, error-checking, or recursive
-//! +24  u64  owner       the locking thread, for the kinds that check
-//! +32  u32  recursion   acquisitions past the first, for a recursive mutex
-//! +36  u32  waiters     callers in the slow path, including kernel sleepers
-//! +40..64             unused
-//! ```
-//!
-//! `pthread_mutexattr_setprotocol` is honoured as far as Darwin honours it, which is
-//! that the value reads back and changes nothing. Darwin records the protocol and its
-//! lock paths never consult it; there is no priority inheritance in a Darwin mutex to
-//! reproduce. An earlier version of this file kept a whole second, host-backed mutex
-//! representation for `PTHREAD_PRIO_INHERIT` and `PTHREAD_PRIO_PROTECT`, which offered
-//! a guest *more* than it would get on a Mac and, on Linux, could fail a lock outright
-//! for a caller whose scheduling parameters a priority-protect mutex refused.
-
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
@@ -108,7 +79,6 @@ unsafe fn live(at: u64) -> Option<Record> {
     if at == 0 {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Mutex) };
     record
         .live_or_init(
@@ -237,7 +207,6 @@ pub unsafe extern "C" fn mutex_init(at: u64, attr: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let Some(settings) = (unsafe { MutexAttr::of_guest(attr) }) else {
         return err::EINVAL;
     };
@@ -248,7 +217,6 @@ pub unsafe extern "C" fn mutex_init(at: u64, attr: u64) -> i32 {
     let Some(kind) = MutexKind::from_darwin(settings.kind) else {
         return err::EINVAL;
     };
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Mutex) };
     // Re-initialising a live mutex is undefined in POSIX. Nothing is owned, so there
     // is nothing to reclaim and the previous state is simply overwritten.
@@ -264,7 +232,6 @@ pub unsafe extern "C" fn mutex_destroy(at: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Mutex) };
     let state = record.seize();
     match state {
@@ -292,7 +259,6 @@ pub unsafe extern "C" fn mutex_destroy(at: u64) -> i32 {
 ///
 /// As [`mutex_init`].
 pub unsafe extern "C" fn mutex_lock(at: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     match unsafe { live(at) } {
         Some(record) => lock_record(&record, kind_of(&record), false),
         None => err::EINVAL,
@@ -303,7 +269,6 @@ pub unsafe extern "C" fn mutex_lock(at: u64) -> i32 {
 ///
 /// As [`mutex_init`].
 pub unsafe extern "C" fn mutex_trylock(at: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     match unsafe { live(at) } {
         Some(record) => lock_record(&record, kind_of(&record), true),
         None => err::EINVAL,
@@ -314,7 +279,6 @@ pub unsafe extern "C" fn mutex_trylock(at: u64) -> i32 {
 ///
 /// As [`mutex_init`].
 pub unsafe extern "C" fn mutex_unlock(at: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     match unsafe { live(at) } {
         Some(record) => unlock_record(&record, kind_of(&record)),
         None => err::EINVAL,

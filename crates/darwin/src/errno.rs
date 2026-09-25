@@ -1,27 +1,3 @@
-//! `errno`, whose *numbers* agree only up to 34.
-//!
-//! Above `ERANGE` the two platforms renumber the whole table, and they renumber
-//! it into each other rather than out of range - which is the expensive kind:
-//!
-//! | | Darwin | Linux |
-//! |---|---|---|
-//! | `EAGAIN` | 35 | 11 (`EDEADLK` on Darwin) |
-//! | `ETIMEDOUT` | 60 | 110 |
-//! | `ENAMETOOLONG` | 63 | 36 (`EINPROGRESS` on Darwin) |
-//! | `ELOOP` | 62 | 40 (`EMSGSIZE` on Darwin) |
-//!
-//! A guest comparing `errno == EAGAIN` after a would-block read compares 11
-//! against Darwin's 35 and concludes the call failed for good; one that gets
-//! Linux's 11 back reads it as `EDEADLK`. Nothing fails loudly.
-//!
-//! It reaches further than `errno`. The `pthread_*` family returns these numbers
-//! *directly*, so a guest's `condition_variable::wait_for` compares the host's
-//! `ETIMEDOUT` (110) against Darwin's (60), decides the wait failed rather than
-//! timed out, and throws - which is how this showed up.
-//!
-//! See [`error`] for how the translation is arranged for a slot the guest holds
-//! a pointer to.
-
 /// Darwin's `errno` values, paired with this host's for the same name.
 ///
 /// The first thirty-four agree and are still listed: the point of the table is
@@ -207,7 +183,6 @@ pub fn get() -> i32 {
 
 #[inline(always)]
 pub fn set(value: i32) {
-    // SAFETY: as above.
     unsafe { *location() = value };
 }
 
@@ -404,7 +379,6 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn the_guests_slot_holds_darwins_numbering() {
         set(libc::EAGAIN);
-        // SAFETY: the accessor takes no argument and returns a live slot.
         let slot = unsafe { error() };
         // SAFETY: the slot this call just returned.
         assert_eq!(unsafe { *slot }, 35, "Darwin's EAGAIN");
@@ -453,7 +427,6 @@ mod tests {
         // SAFETY: `at` is this module's own `error`, whose prototype is `int *(void)`.
         let f: unsafe extern "C" fn() -> *mut libc::c_int =
             unsafe { std::mem::transmute(at as usize as *const ()) };
-        // SAFETY: as above.
         assert_eq!(unsafe { f() }, guest_location());
     }
 }

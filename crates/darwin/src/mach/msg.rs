@@ -1,20 +1,3 @@
-//! `mach_msg`: a message, the rights inside it, and the names those rights get
-//! at the other end.
-//!
-//! The header a caller fills in is 24 bytes of *names*, and a name means nothing
-//! outside the task that holds it. So a message cannot be handed across as
-//! bytes: every port in it - the destination, the reply port, and each port
-//! descriptor - is looked up in this task's space on the way out and inserted
-//! into the receiver's on the way in. The bytes that cross carry addresses
-//! instead, which are the same in every process; see [`super::wire`].
-//!
-//! What is deliberately **not** carried: out-of-line memory. A
-//! `MACH_MSG_OOL_DESCRIPTOR` asks the kernel to map the sender's pages into the
-//! receiver, and there is no way to do that between two unrelated processes
-//! here. A message containing one is refused with `MACH_SEND_INVALID_TYPE`
-//! rather than sent with the pointer copied verbatim, which would hand the
-//! receiver an address that means something else in its own address space.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;

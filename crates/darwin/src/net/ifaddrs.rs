@@ -1,14 +1,3 @@
-//! `getifaddrs`, whose structure matches and whose contents do not.
-//!
-//! `struct ifaddrs` has the same fields at the same offsets on both platforms,
-//! which is exactly why this is not a passthrough: the list is full of
-//! `struct sockaddr`s, and those are the ones whose family byte moves. A guest
-//! walking the host's list reads every interface's family as `AF_UNSPEC` and
-//! decides it has no addresses.
-//!
-//! The copied list uses Darwin link addresses even for Linux interfaces with
-//! no address, and translates flags instead of exposing Linux-only bits.
-
 use std::ffi::{CStr, c_char, c_void};
 
 use super::addr;
@@ -65,7 +54,6 @@ unsafe fn is_link(addr: *const libc::sockaddr) -> bool {
     let family = libc::AF_PACKET;
     #[cfg(not(target_os = "linux"))]
     let family = libc::AF_LINK;
-    // SAFETY: the caller's guarantee.
     !addr.is_null() && unsafe { (*addr).sa_family as i32 == family }
 }
 
@@ -287,7 +275,6 @@ unsafe extern "C" fn getifaddrs(out: *mut *mut IfAddrs) -> i32 {
             false => unsafe { (*tail).next = node },
         }
         tail = node;
-        // SAFETY: as above.
         at = unsafe { (*at).ifa_next };
     }
     // SAFETY: the host's list, now copied.
@@ -319,7 +306,6 @@ unsafe fn free_list(head: *mut IfAddrs) {
 ///
 /// `head` is null or a list [`getifaddrs`] returned.
 unsafe extern "C" fn freeifaddrs(head: *mut IfAddrs) {
-    // SAFETY: the caller's guarantee.
     unsafe { free_list(head) };
 }
 

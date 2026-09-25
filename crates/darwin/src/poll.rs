@@ -1,24 +1,3 @@
-//! `poll`, whose `struct pollfd` matches and whose event bits do not.
-//!
-//! The structure is `int fd; short events; short revents` on both platforms, so
-//! nothing here rewrites it. The bits are the problem, and in the way this
-//! project treats as the dangerous one - they collide rather than go missing:
-//!
-//! | | Darwin | Linux |
-//! |---|---|---|
-//! | `POLLWRNORM` | `POLLOUT` (`0x004`) | `0x100` |
-//! | `POLLWRBAND` | `0x100` | `0x200` |
-//! | `POLLEXTEND` | `0x200` | - (`POLLWRBAND`) |
-//! | `POLLWRITE` | `0x1000` | - (`POLLREMOVE`) |
-//!
-//! A guest asking for Darwin's `POLLWRBAND` passed straight through asks Linux
-//! for `POLLWRNORM`, and one asking for `POLLEXTEND` on a vnode asks for
-//! `POLLWRBAND` on a socket. Neither fails; both wait for the wrong thing.
-//!
-//! The four Darwin-only vnode bits have no Linux meaning at all and are dropped
-//! rather than mapped onto a neighbour, so a guest polling a file for
-//! `POLLEXTEND` is told nothing happened rather than told the wrong thing did.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_void;

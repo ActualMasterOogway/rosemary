@@ -1,12 +1,3 @@
-//! Launching another program: `execve`, `posix_spawn`, and what they mean when the
-//! program being launched is a Mach-O.
-//!
-//! A Darwin application is often several programs. It re-launches itself to install an
-//! update, spawns a crash reporter it expects to outlive it, spawns a helper for the
-//! menu bar. Every one of those is a Mach-O, and this host's kernel cannot execute a
-//! Mach-O: the call fails with `ENOEXEC`, or - worse on a host that has an ELF of the
-//! same name - runs something else entirely.
-
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use crate::signal::signal_to_host;
@@ -102,7 +93,6 @@ unsafe fn object<T>(at: *mut c_void) -> Option<&'static mut T> {
     if at.is_null() {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     let stored = unsafe { *(at as *const u64) };
     if stored == 0 {
         return None;
@@ -122,7 +112,6 @@ unsafe fn init<T: Default>(at: *mut c_void) -> c_int {
         return libc::EINVAL;
     }
     let boxed = Box::into_raw(Box::new(T::default())) as u64;
-    // SAFETY: the caller's guarantee.
     unsafe { *(at as *mut u64) = boxed };
     0
 }
@@ -136,14 +125,12 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
     if at.is_null() {
         return libc::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let stored = unsafe { *(at as *const u64) };
     if stored == 0 {
         return libc::EINVAL;
     }
     // SAFETY: this module allocated it, and the store below stops a second free.
     drop(unsafe { Box::from_raw(stored as *mut T) });
-    // SAFETY: the caller's guarantee.
     unsafe { *(at as *mut u64) = 0 };
     0
 }
@@ -165,7 +152,6 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
 /// `envp` is null or a null-terminated array of NUL-terminated strings.
 #[cfg(not(target_os = "macos"))]
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
-    // SAFETY: the caller's obligation.
     unsafe { crate::env::host_spelling(envp) }
 }
 
@@ -391,7 +377,6 @@ pub unsafe extern "C" fn execve(
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let (given, arguments) = unsafe { (CStr::from_ptr(path), argv_of(argv)) };
     let plan = launch(given, &arguments);
     let raw = plan.argv.as_deref().map(as_argv);
@@ -445,7 +430,6 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let name = unsafe { CStr::from_ptr(file) };
     let found = match search_path(name) {
         Ok(found) => found,
@@ -459,10 +443,8 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
     if crate::errno::get() != libc::ENOEXEC {
         return rc;
     }
-    // SAFETY: the caller's guarantee.
     let shell = shell_argv(&found, &unsafe { argv_of(argv) });
     let shell = as_argv(&shell);
-    // SAFETY: as above.
     unsafe { execve(BSHELL.as_ptr(), shell.as_ptr(), environ()) }
 }
 
@@ -717,7 +699,6 @@ pub unsafe extern "C" fn posix_spawn(
     if path.is_null() {
         return libc::EFAULT;
     }
-    // SAFETY: the caller's guarantee.
     let (given, arguments) = unsafe { (CStr::from_ptr(path), argv_of(argv)) };
     // SAFETY: both are null or this module's own objects.
     let (actions, attributes) = unsafe {
@@ -733,7 +714,6 @@ pub unsafe extern "C" fn posix_spawn(
         .as_ref()
         .is_some_and(|a| a.flags & flag::SETEXEC != 0)
     {
-        // SAFETY: the caller's guarantee.
         unsafe { execve(path, argv, envp) };
         return crate::errno::get();
     }
@@ -801,7 +781,6 @@ pub unsafe extern "C" fn posix_spawnp(
     if file.is_null() {
         return libc::EFAULT;
     }
-    // SAFETY: the caller's guarantee.
     let name = unsafe { CStr::from_ptr(file) };
     // The guest's `PATH` in the guest's namespace, as for [`execvp`].
     let found = match search_path(name) {
@@ -815,10 +794,8 @@ pub unsafe extern "C" fn posix_spawnp(
     }
     // A file the kernel will not execute is a script for `/bin/sh`, as
     // Darwin's `posix_spawnp` has it.
-    // SAFETY: the caller's guarantee.
     let shell = shell_argv(&found, &unsafe { argv_of(argv) });
     let shell = as_argv(&shell);
-    // SAFETY: as above.
     unsafe {
         posix_spawn(
             pid,
@@ -835,7 +812,6 @@ pub unsafe extern "C" fn posix_spawnp(
 ///
 /// Each takes the guest's `posix_spawn*_t`, which Darwin declares as a `void *`.
 pub unsafe extern "C" fn file_actions_init(at: *mut c_void) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { init::<FileActions>(at) }
 }
 
@@ -843,7 +819,6 @@ pub unsafe extern "C" fn file_actions_init(at: *mut c_void) -> c_int {
 ///
 /// As above.
 pub unsafe extern "C" fn file_actions_destroy(at: *mut c_void) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { destroy::<FileActions>(at) }
 }
 
@@ -853,7 +828,6 @@ pub unsafe extern "C" fn file_actions_destroy(at: *mut c_void) -> c_int {
 ///
 /// As above.
 unsafe fn add(at: *mut c_void, action: Action) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<FileActions>(at) } {
         Some(actions) => {
             actions.actions.push(action);
@@ -878,9 +852,7 @@ pub unsafe extern "C" fn file_actions_addopen(
     }
     // The child opens this on the host's behalf, after this process has gone,
     // so the prefix's spelling is what has to be recorded.
-    // SAFETY: the caller's guarantee.
     let path = prefix::ns::to_host(unsafe { CStr::from_ptr(path) }).into_owned();
-    // SAFETY: the caller's guarantee.
     unsafe {
         add(
             at,
@@ -898,7 +870,6 @@ pub unsafe extern "C" fn file_actions_addopen(
 ///
 /// As above.
 pub unsafe extern "C" fn file_actions_adddup2(at: *mut c_void, from: c_int, to: c_int) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Dup2 { from, to }) }
 }
 
@@ -906,7 +877,6 @@ pub unsafe extern "C" fn file_actions_adddup2(at: *mut c_void, from: c_int, to: 
 ///
 /// As above.
 pub unsafe extern "C" fn file_actions_addclose(at: *mut c_void, fd: c_int) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Close(fd)) }
 }
 
@@ -914,7 +884,6 @@ pub unsafe extern "C" fn file_actions_addclose(at: *mut c_void, fd: c_int) -> c_
 ///
 /// As above.
 pub unsafe extern "C" fn file_actions_addinherit_np(at: *mut c_void, fd: c_int) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Inherit(fd)) }
 }
 
@@ -926,9 +895,7 @@ pub unsafe extern "C" fn file_actions_addchdir_np(at: *mut c_void, path: *const 
         return libc::EINVAL;
     }
     // As `addopen`: recorded now, used by the child.
-    // SAFETY: the caller's guarantee.
     let path = prefix::ns::to_host(unsafe { CStr::from_ptr(path) }).into_owned();
-    // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Chdir(path)) }
 }
 
@@ -936,7 +903,6 @@ pub unsafe extern "C" fn file_actions_addchdir_np(at: *mut c_void, path: *const 
 ///
 /// As above.
 pub unsafe extern "C" fn file_actions_addfchdir_np(at: *mut c_void, fd: c_int) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { add(at, Action::Fchdir(fd)) }
 }
 
@@ -944,7 +910,6 @@ pub unsafe extern "C" fn file_actions_addfchdir_np(at: *mut c_void, fd: c_int) -
 ///
 /// As above.
 pub unsafe extern "C" fn attr_init(at: *mut c_void) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { init::<Attributes>(at) }
 }
 
@@ -952,7 +917,6 @@ pub unsafe extern "C" fn attr_init(at: *mut c_void) -> c_int {
 ///
 /// As above.
 pub unsafe extern "C" fn attr_destroy(at: *mut c_void) -> c_int {
-    // SAFETY: the caller's guarantee.
     unsafe { destroy::<Attributes>(at) }
 }
 
@@ -960,7 +924,6 @@ pub unsafe extern "C" fn attr_destroy(at: *mut c_void) -> c_int {
 ///
 /// As above.
 pub unsafe extern "C" fn attr_setflags(at: *mut c_void, flags: u16) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<Attributes>(at) } {
         Some(attributes) => {
             attributes.flags = flags as u32;
@@ -974,7 +937,6 @@ pub unsafe extern "C" fn attr_setflags(at: *mut c_void, flags: u16) -> c_int {
 ///
 /// As above, and `out` is a writable `short *`.
 pub unsafe extern "C" fn attr_getflags(at: *mut c_void, out: *mut u16) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<Attributes>(at) } {
         Some(attributes) if !out.is_null() => {
             // SAFETY: the caller states `out` is writable.
@@ -989,7 +951,6 @@ pub unsafe extern "C" fn attr_getflags(at: *mut c_void, out: *mut u16) -> c_int 
 ///
 /// As above.
 pub unsafe extern "C" fn attr_setpgroup(at: *mut c_void, pgroup: libc::pid_t) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<Attributes>(at) } {
         Some(attributes) => {
             attributes.pgroup = pgroup;
@@ -1003,7 +964,6 @@ pub unsafe extern "C" fn attr_setpgroup(at: *mut c_void, pgroup: libc::pid_t) ->
 ///
 /// As above, and `set` is a readable Darwin `sigset_t` - one 32-bit word.
 pub unsafe extern "C" fn attr_setsigmask(at: *mut c_void, set: *const u32) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<Attributes>(at) } {
         Some(attributes) if !set.is_null() => {
             // SAFETY: the caller states `set` is a readable Darwin `sigset_t`.
@@ -1018,10 +978,8 @@ pub unsafe extern "C" fn attr_setsigmask(at: *mut c_void, set: *const u32) -> c_
 ///
 /// As above.
 pub unsafe extern "C" fn attr_setsigdefault(at: *mut c_void, set: *const u32) -> c_int {
-    // SAFETY: the caller's guarantee.
     match unsafe { object::<Attributes>(at) } {
         Some(attributes) if !set.is_null() => {
-            // SAFETY: as above.
             attributes.sigdefault = unsafe { *set };
             0
         }

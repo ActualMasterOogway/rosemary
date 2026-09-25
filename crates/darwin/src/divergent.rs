@@ -1,5 +1,3 @@
-//! Names whose Darwin and host ABIs differ, and which this crate has not yet bridged.
-
 // The reasons, shared by the entries that give them. Only the non-macOS lists have
 // entries, so on macOS these name nothing - which is the same statement the empty
 // lists below make.
@@ -326,7 +324,7 @@ pub fn reason(name: &str) -> Option<&'static str> {
 /// is what this crate has looked at and vouched for, and `SHIMMED_ABOVE` what it
 /// leaves to the runtime above. Neither has a `symbol` entry.
 fn implemented_here(name: &str) -> bool {
-        crate::is_implemented(name)
+    crate::is_implemented(name)
 }
 
 pub fn contains(name: &str) -> bool {

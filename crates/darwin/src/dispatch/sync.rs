@@ -1,10 +1,3 @@
-//! `dispatch_group_t` and `dispatch_semaphore_t`.
-//!
-//! Both are counters with a wait, and both are used to *join* work rather than to
-//! order it - so the property that matters is that a waiter is never left asleep
-//! after the count has reached the value it was waiting for. Every decrement below
-//! therefore notifies under the same lock that published it.
-
 use std::ffi::c_void;
 use std::sync::{Condvar, Mutex};
 
@@ -143,13 +136,10 @@ fn submit(notify: Notify) {
             queue: q,
             context,
             function,
-        } => {
-            // SAFETY: as above.
-            unsafe {
-                queue::async_f(q, context, function as usize as u64);
-                object::release(q);
-            }
-        }
+        } => unsafe {
+            queue::async_f(q, context, function as usize as u64);
+            object::release(q);
+        },
     }
 }
 

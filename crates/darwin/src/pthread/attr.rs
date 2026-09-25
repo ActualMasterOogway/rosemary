@@ -1,5 +1,3 @@
-//! `pthread_attr_t` and the three attribute types.
-
 use super::consts::*;
 use super::object::{Kind, Record, size};
 use super::raw;
@@ -271,7 +269,6 @@ pub mod imp {
     /// Called only through an import slot this crate defines; `at` is the guest's own
     /// `pthread_attr_t *`.
     unsafe fn record(at: u64) -> Option<Record> {
-        // SAFETY: the caller's guarantee.
         let r = unsafe { Record::at(at, Kind::Attr) };
         r.is_ours().then_some(r)
     }
@@ -312,7 +309,6 @@ pub mod imp {
             ///
             /// As [`attr_init`].
             pub unsafe extern "C" fn $name(at: u64, value: u64) -> i32 {
-                // SAFETY: the caller's guarantee.
                 let Some(r) = (unsafe { record(at) }) else {
                     return err::EINVAL;
                 };
@@ -333,7 +329,6 @@ pub mod imp {
             ///
             /// As [`attr_init`], and `out` is a writable pointer of the stated width.
             pub unsafe extern "C" fn $name(at: u64, out: u64) -> i32 {
-                // SAFETY: the caller's guarantee.
                 let Some(r) = (unsafe { record(at) }) else {
                     return err::EINVAL;
                 };
@@ -350,7 +345,6 @@ pub mod imp {
     }
 
     unsafe fn set_int(at: u64, index: usize, value: u64, valid: fn(i32) -> bool) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -442,7 +436,6 @@ pub mod imp {
     ///
     /// As [`attr_init`].
     pub unsafe extern "C" fn attr_getstacksize(at: u64, out: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -462,7 +455,6 @@ pub mod imp {
     ///
     /// As [`attr_init`].
     pub unsafe extern "C" fn attr_getguardsize(at: u64, out: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -479,7 +471,6 @@ pub mod imp {
     ///
     /// As [`attr_init`].
     pub unsafe extern "C" fn attr_getstackaddr(at: u64, out: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -498,7 +489,6 @@ pub mod imp {
     ///
     /// As [`attr_init`].
     pub unsafe extern "C" fn attr_setstack(at: u64, base: u64, bytes: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -521,7 +511,6 @@ pub mod imp {
     ///
     /// As [`attr_init`], with two writable out-parameters.
     pub unsafe extern "C" fn attr_getstack(at: u64, base_out: u64, size_out: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -542,7 +531,6 @@ pub mod imp {
     ///
     /// As [`attr_init`].
     pub unsafe extern "C" fn attr_setschedpolicy(at: u64, policy: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -564,7 +552,6 @@ pub mod imp {
     ///
     /// As [`attr_init`], with `param` a writable `struct sched_param *`.
     pub unsafe extern "C" fn attr_setschedparam(at: u64, param: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };
@@ -583,7 +570,6 @@ pub mod imp {
     ///
     /// As [`attr_setschedparam`].
     pub unsafe extern "C" fn attr_getschedparam(at: u64, param: u64) -> i32 {
-        // SAFETY: the caller's guarantee.
         let Some(r) = (unsafe { record(at) }) else {
             return err::EINVAL;
         };

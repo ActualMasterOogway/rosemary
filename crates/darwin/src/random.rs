@@ -1,5 +1,3 @@
-//! Darwin's `arc4random` family, backed by the host kernel's random source.
-
 #![cfg(not(target_os = "macos"))]
 
 unsafe extern "C" fn arc4random() -> u32 {

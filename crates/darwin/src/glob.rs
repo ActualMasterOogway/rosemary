@@ -1,12 +1,5 @@
 #![cfg(not(target_os = "macos"))]
 
-//! `glob`, walked here rather than forwarded to the host's.
-//!
-//! FIXME (ACCURACY): Two deliberate departures from Darwin's own code. A path is not truncated at
-//! `MAXPATHLEN`: Darwin's walk carries fixed 1024-byte buffers and silently
-//! stops matching past them, and a `Vec` has no reason to. And a leading `.` is
-//! matched by an escaped `\.` as well as by a bare one - see [`Walk::expand`].
-
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 type ErrorFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
@@ -997,7 +990,6 @@ unsafe extern "C" fn glob(
         }
     }
 
-    // SAFETY: as above.
     unsafe {
         (*out).gl_pathc = walk.pathc;
         (*out).gl_pathv = walk.pathv;
@@ -1227,7 +1219,6 @@ mod tests {
         let dir = fixture("dooffs");
         let mut found = zeroed();
         found.gl_offs = 2;
-        // SAFETY: as above.
         unsafe {
             assert_eq!(
                 glob(
@@ -1255,7 +1246,6 @@ mod tests {
     fn braces_expand_in_order_and_nest() {
         let dir = fixture("brace");
         let mut found = zeroed();
-        // SAFETY: as above.
         unsafe {
             let braced = pattern(&dir, "{alpha,gamma}");
             // Without the flag the braces are literal, and no such file exists.
@@ -1442,7 +1432,6 @@ mod tests {
 
         // `GLOB_ERR` turns the same failure into an aborted walk.
         SAW.store(-1, Ordering::Relaxed);
-        // SAFETY: as above.
         let status = unsafe { glob(pattern.as_ptr(), darwin::ERR, Some(note), &raw mut found) };
         assert_eq!(status, darwin::ABORTED);
         // SAFETY: nothing matched, so nothing was allocated.
@@ -1454,7 +1443,6 @@ mod tests {
     fn gl_flags_reports_the_input_flags_and_magchar() {
         let dir = fixture("flags");
         let mut found = zeroed();
-        // SAFETY: as above.
         unsafe {
             assert_eq!(
                 glob(

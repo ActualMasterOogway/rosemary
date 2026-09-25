@@ -32,7 +32,6 @@ pub unsafe extern "C" fn bsearch(
     width: usize,
     compar: Option<Compare>,
 ) -> *mut c_void {
-    // SAFETY: as above.
     unsafe { crate::call_as_darwin!(libc::bsearch(key, base, nel, width, compar)) }
 }
 

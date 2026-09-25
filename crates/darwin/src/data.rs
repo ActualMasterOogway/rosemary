@@ -1,5 +1,3 @@
-//! libSystem globals that have no host object to bind on Linux.
-
 /// Darwin keeps the public resolver state in a 512-byte, pointer-aligned object.
 ///
 /// Resolver entry points initialise it before consuming its fields. Keeping the

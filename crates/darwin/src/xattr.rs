@@ -1,32 +1,3 @@
-//! Extended attributes, which differ in arity, in namespace, *and* in name.
-//!
-//! Darwin's calls take two arguments this host's do not:
-//!
-//! ```text
-//! Darwin   getxattr(path, name, value, size, u_int32_t position, int options)
-//! Linux    getxattr(path, name, value, size)
-//! FreeBSD  extattr_get_file(path, namespace, name, value, size)
-//! ```
-//!
-//! Passing one through leaves `position` and `options` in registers nobody
-//! reads, which is harmless, and it works by accident. What does not work by
-//! accident is the *name*: Darwin's attribute namespace is flat, and neither
-//! host's is. On Linux an attribute on a regular file must be called `user.`
-//! something, and one that is not is refused with `EOPNOTSUPP` no matter what
-//! the filesystem supports. FreeBSD does not spell the namespace into the name
-//! at all - it is a separate argument, and the calls have different names.
-//!
-//! That is how this surfaced. Crashpad stores
-//! `org.chromium.crashpad.database.initialized` on its database directory,
-//! got `EOPNOTSUPP` for every read and every write, and reported "failed to
-//! initialize crash reporter" - a filesystem answer wearing the shape of a
-//! missing feature.
-//!
-//! So the guest's flat name is put in this host's user namespace on the way
-//! down and taken back out on the way up, which keeps `listxattr` reporting the
-//! names the guest wrote. How that is done is the [`host`] module's business
-//! and the only part of this file that is per-host.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -377,12 +348,10 @@ unsafe extern "C" fn getxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { host_name(name) }) else {
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's guarantee.
     let Some(path) = (unsafe { host_file(path) }) else {
         return -1;
     };
@@ -407,12 +376,10 @@ unsafe extern "C" fn setxattr(
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { host_name(name) }) else {
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's guarantee.
     let Some(path) = (unsafe { host_file(path) }) else {
         return -1;
     };
@@ -436,12 +403,10 @@ unsafe extern "C" fn setxattr(
 ///
 /// `path` and `name` are NUL-terminated.
 unsafe extern "C" fn removexattr(path: *const c_char, name: *const c_char, options: i32) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { host_name(name) }) else {
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's guarantee.
     let Some(path) = (unsafe { host_file(path) }) else {
         return -1;
     };
@@ -465,7 +430,6 @@ unsafe extern "C" fn listxattr(
     size: usize,
     options: i32,
 ) -> isize {
-    // SAFETY: the caller's guarantee.
     let Some(path) = (unsafe { host_file(path) }) else {
         return -1;
     };
@@ -500,7 +464,6 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
     if name.is_null() {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     host::name(unsafe { CStr::from_ptr(name) })
 }
 
@@ -612,7 +575,6 @@ mod tests {
         assert_eq!(value[0], b'7');
 
         let mut names = [0u8; 64];
-        // SAFETY: as above.
         let listed = unsafe { listxattr(c.as_ptr(), names.as_mut_ptr().cast(), names.len(), 0) };
         assert!(listed > 0);
         assert!(
@@ -622,7 +584,6 @@ mod tests {
             "the guest's own spelling is what comes back"
         );
 
-        // SAFETY: as above.
         assert_eq!(
             unsafe { removexattr(c.as_ptr(), c"com.example.tag".as_ptr(), 0) },
             0

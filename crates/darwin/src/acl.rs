@@ -1,15 +1,3 @@
-//! Darwin's extended ACLs (`<sys/acl.h>`) and the membership lookup that names
-//! their subjects, answered for a host that has none.
-//!
-//! A Mac ACL is an NFSv4-style list attached to a file by its filesystem, keyed
-//! by UUIDs that `mbr_identifier_translate` maps to users. Nothing here stores
-//! one or could say what a host POSIX ACL would translate to, so every file
-//! answers the way a Mac file without an ACL does: `acl_get_link_np` fails with
-//! `ENOENT`. `ls -l` asks this of every entry, and prints no `+`.
-//!
-//! No `acl_t` is ever handed out, so the calls that take one can only have
-//! been given something else, and refuse it.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_char, c_int, c_void};

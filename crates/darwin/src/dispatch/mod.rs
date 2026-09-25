@@ -1,28 +1,3 @@
-//! libdispatch: queues, groups, semaphores, and the objects they are made of.
-//!
-//! Darwin programs use libdispatch the way other programs use threads directly, so
-//! this is not an optional corner of the platform - a guest that cannot
-//! `dispatch_async` cannot start. There is no libdispatch on this host to forward to,
-//! so the parts a guest actually reaches are implemented here:
-//!
-//! * [`queue`] - the queues and the pool of threads that drains them, including the
-//!   main queue, which only the main thread may run.
-//! * [`sync`] - `dispatch_group_t` and `dispatch_semaphore_t`.
-//! * [`object`] - the refcount, context and finalizer every dispatch object has.
-//! * [`time`] - `dispatch_time_t`, on the same clock as `mach_absolute_time`.
-//! * [`block`] - invoking a block, and the *registered* copy and release. That
-//!   registration is the one piece this crate does not own: a block must be copied
-//!   and released by a single runtime, and the process's lives above this crate.
-//!
-//! What a guest hands in is guest code, and reaching it needs thunks this crate has
-//! no vocabulary for. That is already handled before a call arrives:
-//! `rosetta3::shims::block` rewrites a block's code pointers to native thunks and
-//! then calls the entry points here, so everything below deals in ordinary host
-//! function pointers.
-//!
-//! On macOS none of this is bound to a guest import - the host's libdispatch is the
-//! guest's - but all of it is compiled and tested there.
-
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
 pub mod block;
@@ -75,7 +50,6 @@ unsafe extern "C" fn once(predicate: *mut c_void, block: u64) {
     if block == 0 {
         return;
     }
-    // SAFETY: the caller's obligation.
     unsafe { once_with(predicate, || block::invoke(block)) };
 }
 

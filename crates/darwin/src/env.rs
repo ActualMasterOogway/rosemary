@@ -1,28 +1,3 @@
-//! The guest's environment, which is deliberately *not* this process's.
-//!
-//! A guest reads `HOME` and builds `$HOME/Library/Application Support/...` from
-//! it. Passed through, that is this host's `/home/user`, and the guest then
-//! writes its save data to a Darwin path built out of a Linux one - which the
-//! namespace dutifully maps to `<prefix>/root/home/user/Library`, beside the
-//! `/Users/user/Library` the runtime prepared and nothing else will ever look
-//! in. The variable has to answer the way the rest of the filesystem does.
-//!
-//! So the guest gets an environment block of its own, seeded from this
-//! process's and then corrected, and `getenv`, `setenv`, `putenv`, `unsetenv`
-//! and `environ` all work on that block. Host libraries - SDL, Mesa, the GL
-//! driver - keep reading the real one through the host's own libc, which is the
-//! point: isolating the guest's view does not disturb theirs.
-//!
-//! Four variables are corrected, and each is a path this runtime has an
-//! opinion about. `PATH` is one of them because its directories are: this
-//! machine's `/run/current-system/sw/bin` names nothing inside a prefix, and a
-//! shell given it finds no commands at all. Everything else is copied
-//! verbatim, because a guest that wants `LANG` wants this machine's.
-//!
-//! Entries are leaked rather than freed. `getenv` hands out an interior pointer
-//! that C callers hold indefinitely, so freeing a replaced entry is how a guest
-//! comes to read a string that is not there any more.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, CString, c_char, c_int};
@@ -166,7 +141,6 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
     if name.is_empty() || name.contains(&b'=') {
         return std::ptr::null_mut();
@@ -196,7 +170,6 @@ pub unsafe extern "C" fn setenv(
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let (name, value) = unsafe { (CStr::from_ptr(name), CStr::from_ptr(value)) };
     let name = name.to_bytes();
     if name.is_empty() || name.contains(&b'=') {
@@ -234,7 +207,6 @@ pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
     if name.is_empty() || name.contains(&b'=') {
         crate::errno::set(libc::EINVAL);
@@ -264,7 +236,6 @@ pub unsafe extern "C" fn putenv(entry: *mut c_char) -> c_int {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let text = unsafe { CStr::from_ptr(entry) }.to_bytes();
     let Some(split) = text.iter().position(|b| *b == b'=') else {
         // No `=` means "remove this name", which is what a Darwin `putenv`
@@ -311,7 +282,7 @@ pub unsafe fn host_spelling(envp: *const *const c_char) -> Vec<CString> {
     }
     let mut at = envp;
     loop {
-        // SAFETY: the caller's obligation - the array is null-terminated.
+        // SAFETY: the array is null-terminated.
         let entry = unsafe { *at };
         if entry.is_null() {
             break;
@@ -435,7 +406,6 @@ mod tests {
             std::env::var_os(name.to_str().expect("utf-8")).is_none(),
             "the host's environment was written too"
         );
-        // SAFETY: as above.
         unsafe { unsetenv(name.as_ptr()) };
     }
 
@@ -472,7 +442,6 @@ mod tests {
             }
         }
         assert!(found, "the block's entry is not in `environ`");
-        // SAFETY: as above.
         unsafe { unsetenv(name.as_ptr()) };
     }
 

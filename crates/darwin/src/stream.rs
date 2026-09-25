@@ -1,12 +1,3 @@
-//! BSD's stdio extensions, `funopen` and `fgetln`, over the host's `FILE`.
-//!
-//! A guest's `FILE *` is the host's (see [`crate::stdio`]), so a stream these
-//! make is an ordinary host stream every other stdio call already accepts.
-//! glibc has neither function; `funopen` becomes `fopencookie`, whose
-//! callbacks are adapted to the BSD shapes, and `fgetln` becomes `getline`
-//! into a buffer kept per stream. FreeBSD has both with Darwin's ABI and
-//! needs neither.
-
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
@@ -188,7 +179,6 @@ pub unsafe extern "C" fn fgetln(stream: *mut libc::FILE, len: *mut usize) -> *mu
     if n < 0 {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     unsafe { *len = n as usize };
     line.buf
 }

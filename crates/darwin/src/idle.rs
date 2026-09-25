@@ -1,21 +1,3 @@
-//! The calls at which a guest thread says it is doing nothing.
-//!
-//! A thread that asks to sleep or to yield is a thread waiting for another one,
-//! and so a thread that is part-way through nothing. That is worth knowing for
-//! a resource only the thread holding it can give up.
-//!
-//! The OpenGL context is such a resource here. AppKit lets a program make one
-//! context current on two threads and serialise the two itself - which is what
-//! a program with a render thread does, setting the renderer up on the thread
-//! it starts on and drawing on the thread that draws - while the GL underneath
-//! this runtime allows a context one thread at a time and has no call by which
-//! one thread can take it from another. So the handover has to happen on the
-//! holder, at a moment it is known not to be drawing, and a sleep the program
-//! was making anyway is exactly that moment. See `appkit::opengl`.
-//!
-//! The cost is one relaxed load, and a call the guest was about to enter the
-//! kernel from.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The registered hook, as an address. Zero until something registers one.
@@ -63,7 +45,6 @@ unsafe extern "C" fn nanosleep(requested: *const libc::timespec, left: *mut libc
 
 unsafe extern "C" fn sched_yield() -> i32 {
     reached();
-    // SAFETY: no arguments.
     unsafe { libc::sched_yield() }
 }
 

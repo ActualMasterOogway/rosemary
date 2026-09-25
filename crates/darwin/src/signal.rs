@@ -1,14 +1,3 @@
-//! The parts of a signal disposition whose *shape* differs, rather than its meaning.
-//!
-//! `struct sigaction`'s `sa_mask` is a `sigset_t`, and a `sigset_t` is a 32-bit word
-//! on Darwin and a 128-byte structure under glibc. `siginfo_t`'s faulting address is a
-//! field on Darwin and an accessor under Linux. Neither difference is interesting -
-//! both sides mean the same thing - so both are spelled once here rather than at every
-//! reader.
-//!
-//! The signal *numbers* are a different matter and are not bridged: see
-//! [`crate::divergent`], which refuses to pass a guest's `sigaction` through.
-
 /// A saved `sa_mask`, in a form a fault handler can stash without allocating.
 ///
 /// Held as bytes rather than as a `sigset_t`, for two reasons that come to the same
@@ -466,7 +455,6 @@ pub unsafe fn sigaction(
     // SAFETY: zeroed is a valid `struct sigaction` on both hosts - `SIG_DFL` with
     // an empty mask and no flags - and every field is written below before use.
     let mut host_act: libc::sigaction = unsafe { core::mem::zeroed() };
-    // SAFETY: as above.
     let mut host_old: libc::sigaction = unsafe { core::mem::zeroed() };
 
     // What the guest last installed through [`deliver`], for reporting `old`.
@@ -1457,7 +1445,6 @@ pub mod entry {
         /// client with, and zero is not a signal number to translate.
         #[test]
         fn signal_zero_probes_existence_rather_than_being_translated() {
-            // SAFETY: `getpid` takes no argument.
             let self_pid = unsafe { libc::getpid() };
             assert_eq!(kill_(self_pid, 0), 0);
             assert_eq!(kill_(self_pid, 99), -1, "not a signal");
@@ -1532,7 +1519,6 @@ mod tests {
             0
         );
 
-        // SAFETY: as above.
         let after = unsafe {
             let mut current: libc::sigaction = core::mem::zeroed();
             libc::sigaction(host, core::ptr::null(), &mut current);
@@ -1565,7 +1551,6 @@ mod tests {
         }
         let saved = Mask::of(&action);
 
-        // SAFETY: as above.
         let mut other: libc::sigaction = unsafe { core::mem::zeroed() };
         saved.apply(&mut other);
         // SAFETY: `other.sa_mask` is a live, initialised set.
@@ -1740,7 +1725,6 @@ mod disposition_tests {
     fn a_signal_this_host_lacks_is_refused() {
         // SAFETY: `SIGINFO` maps to nothing here, so nothing is installed.
         assert_eq!(unsafe { sigaction(signum::SIGINFO, None, None) }, -1);
-        // SAFETY: as above.
         assert_eq!(unsafe { signal(signum::SIGEMT, 0) }, u64::MAX);
     }
 

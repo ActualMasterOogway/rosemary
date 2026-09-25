@@ -1,15 +1,3 @@
-//! `<vis.h>`: `vis`, `strvis`, `unvis`.
-//!
-//! BSD's, which glibc never had; libedit saves and loads its history through
-//! them. Ported from Apple's Libc (`gen/FreeBSD/vis.c`, NetBSD 1.62, and
-//! `unvis.c`, NetBSD 1.41) with **Apple's** flag numbering, which is not
-//! NetBSD's current one: `VIS_GLOB` is `0x100` and `UNVIS_END` is `0x1000`
-//! there, and the guest was compiled against those.
-//!
-//! Characters are decoded with the host's `mbtowc`, which is the locale the
-//! guest's own `setlocale` set: the point of the multibyte path is that a
-//! character the locale can print is left alone.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_int};
@@ -267,7 +255,6 @@ fn encode(src: &[u8], len: usize, flags: c_int, extra: &[u8]) -> Vec<u8> {
 ///
 /// `dst` is writable for `bytes.len() + 1`.
 unsafe fn emit(dst: *mut c_char, bytes: &[u8]) -> *mut c_char {
-    // SAFETY: the caller's obligation.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr().cast(), dst, bytes.len());
         let end = dst.add(bytes.len());
@@ -290,7 +277,6 @@ pub unsafe extern "C" fn vis(
 ) -> *mut c_char {
     let cc = [c as u8, nextc as u8];
     let out = encode(&cc, 1, flags, b"");
-    // SAFETY: the caller's obligation.
     unsafe { emit(dst, &out) }
 }
 
@@ -302,11 +288,9 @@ pub unsafe extern "C" fn vis(
 pub unsafe extern "C" fn strvis(dst: *mut c_char, src: *const c_char, flags: c_int) -> c_int {
     let src = match src.is_null() {
         true => &[][..],
-        // SAFETY: the caller's obligation.
         false => unsafe { CStr::from_ptr(src) }.to_bytes(),
     };
     let out = encode(src, src.len(), flags, b"");
-    // SAFETY: the caller's obligation.
     unsafe { emit(dst, &out) };
     out.len() as c_int
 }
@@ -672,7 +656,6 @@ pub unsafe extern "C" fn unvis(
     astate: *mut c_int,
     flag: c_int,
 ) -> c_int {
-    // SAFETY: the caller's obligation.
     unsafe {
         let mut byte = *cp as u8;
         let mut state = *astate as u32;

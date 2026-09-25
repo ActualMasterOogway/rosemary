@@ -214,7 +214,6 @@ pub unsafe extern "C" fn atomic_load(
 ) {
     atomic_before(_model);
     let _guard = atomic_lock(src);
-    // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
     drop(_guard);
     atomic_after(_model);
@@ -231,7 +230,6 @@ pub unsafe extern "C" fn atomic_store(
 ) {
     atomic_before(_model);
     let _guard = atomic_lock(dest);
-    // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size.max(0) as usize) };
     drop(_guard);
     atomic_after(_model);
@@ -248,7 +246,6 @@ pub unsafe extern "C" fn atomic_store(
 ///
 /// As `realloc`.
 pub unsafe extern "C" fn reallocf(ptr: *mut c_void, size: usize) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     unsafe {
         let grown = libc::realloc(ptr, size);
         if grown.is_null() && !ptr.is_null() && size != 0 {
@@ -293,7 +290,6 @@ pub unsafe extern "C" fn strtonum(
         None => (std::ptr::null(), saved),
     };
     if !errstrp.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { *errstrp = text };
     }
     crate::errno::set(errno);
@@ -324,7 +320,7 @@ unsafe extern "C" {
 /// The buffers are compatible in size, which is the whole question: glibc
 /// writes 80 bytes on x86-64 (registers, the saved-mask flag, and the 8-byte
 /// kernel mask) into Darwin's 152, and 192 on arm64 into Darwin's 196.
-/// 
+///
 /// FIXME (ACCURACY): I hate this. This will definitely cause unpredictable issues
 /// on another OS or architecture. Please fix this. Please.
 #[cfg(target_os = "linux")]
@@ -343,7 +339,7 @@ const CS_OPS_STATUS: u32 = 0;
 /// Only `CS_OPS_STATUS` of this process, answered with no flags: nothing here
 /// is code-signed, and a Mac reports an unsigned process the same way. Apple's
 /// bash asks to learn whether it runs under the installer's restrictions.
-/// 
+///
 /// FIXME (ACCURACY): No real code signing, this always reports success!
 ///
 /// # Safety
@@ -355,7 +351,6 @@ pub unsafe extern "C" fn csops(
     useraddr: *mut c_void,
     usersize: usize,
 ) -> c_int {
-    // SAFETY: takes nothing.
     if pid != 0 && pid != unsafe { libc::getpid() } {
         crate::errno::set(libc::ESRCH);
         return -1;
@@ -424,7 +419,6 @@ mod tests {
         // SAFETY: a live four-byte local.
         let rc = unsafe { csops(0, CS_OPS_STATUS, (&raw mut flags).cast(), 4) };
         assert_eq!((rc, flags), (0, 0));
-        // SAFETY: as above.
         let rc = unsafe { csops(0, 99, (&raw mut flags).cast(), 4) };
         assert_eq!(rc, -1);
     }

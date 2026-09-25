@@ -1,23 +1,3 @@
-//! What the synchronization objects share: attribute sets, and the one refusal.
-//!
-//! The objects themselves are one module each - [`super::mutex`], [`super::cond`],
-//! [`super::rwlock`] and [`super::once`] - and every one of them keeps its whole state
-//! in the guest's own bytes. None of them holds a host object, a heap allocation, or a
-//! host `pthread_*` lock; the only thing any of them asks the operating system for is
-//! [`crate::wait_word`], which parks a thread on a word of memory.
-//!
-//! That is the shape Darwin has. A guest's mutex is *its* mutex: sixty-four bytes it
-//! owns, possibly written by its own compiler as a static initializer that no call of
-//! ours ever sees. Nothing about it wants to be a `pthread_mutex_t` of this process's
-//! libc, and the seam where the two met used to cost a boxed allocation per object, a
-//! lookup from the guest address on every call, a second "gate" lock so a condition
-//! wait could release a guest mutex atomically, and a whole second mutex
-//! representation for the priority protocols. All of that is gone. Host libpthread is
-//! left doing the one thing it alone can do: starting threads.
-//!
-//! Compiled on both hosts and exercised by the tests on both, though only Linux binds
-//! a guest import to any of it.
-
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
@@ -87,7 +67,6 @@ impl MutexAttr {
         if attr == 0 {
             return Some(MutexAttr::default());
         }
-        // SAFETY: the caller's guarantee.
         let r = unsafe { Record::at(attr, Kind::MutexAttr) };
         r.is_ours()
             .then(|| MutexAttr::unpacked_public(r.cell().load(Ordering::Relaxed)))
@@ -107,7 +86,6 @@ pub(super) unsafe fn simple_attr_pshared(attr: u64, kind: Kind) -> Option<Option
     if attr == 0 {
         return Some(None);
     }
-    // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(attr, kind) };
     r.is_ours()
         .then(|| Some(r.cell().load(Ordering::Relaxed) as i32))

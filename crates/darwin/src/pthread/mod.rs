@@ -1,28 +1,3 @@
-//! The pthread interface, as the guest's Darwin declares it.
-//!
-//! Threading is the part of the C library where a wrong constant does not fail, it
-//! *deadlocks* - so this module reproduces Darwin's whole surface rather than passing
-//! any of it through and hoping. Four separate things differ, and each is handled
-//! somewhere below:
-//!
-//! * **Constants.** `PTHREAD_MUTEX_RECURSIVE` is 2 on Darwin and 1 on Linux, and
-//!   `PTHREAD_MUTEX_ERRORCHECK` is 1 and 2 - so the two are swapped, and a guest
-//!   asking for a recursive lock gets one that returns `EDEADLK` instead of recursing.
-//!   See [`consts`].
-//! * **Object layout.** A `pthread_mutex_t` is sixty-four bytes carrying a signature
-//!   on Darwin and forty bytes of zeroes under musl, and a `PTHREAD_MUTEX_INITIALIZER`
-//!   is a *static* initializer no call of ours ever sees written. See [`object`].
-//! * **Object lifetime.** Every synchronization object keeps its whole state in the
-//!   guest's own bytes, so there is nothing to allocate, find again, or free. See
-//!   [`object`], and [`mutex`], [`cond`], [`rwlock`] and [`once`] for the four
-//!   layouts.
-//! * **Signatures.** `pthread_setname_np` takes one argument on Darwin and two on
-//!   Linux; `pthread_once_t` is sixteen bytes and four.
-//!
-//! On macOS none of this is bound to a guest import - the host's libpthread is the
-//! guest's - but all of it is *compiled and tested* there, against the very
-//! implementation a guest would otherwise have called.
-
 pub mod attr;
 mod cond;
 pub mod consts;
@@ -64,12 +39,10 @@ pub fn id() -> u32 {
     }
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: `gettid` takes no argument and cannot fail.
         unsafe { libc::syscall(libc::SYS_gettid) as u32 }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        // SAFETY: `pthread_self` is infallible and takes no argument.
         unsafe { libc::pthread_self() as u32 }
     }
 }
@@ -203,7 +176,6 @@ macro_rules! simple_attr {
             if at == 0 {
                 return err::EINVAL;
             }
-            // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
             object::publish_cell(&r, $default);
             0
@@ -216,7 +188,6 @@ macro_rules! simple_attr {
             if at == 0 {
                 return err::EINVAL;
             }
-            // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
             object::destroy_plain(&r)
         }
@@ -251,7 +222,6 @@ unsafe fn mutexattr_word(at: u64) -> Option<Record> {
     if at == 0 {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     let r = unsafe { Record::at(at, Kind::MutexAttr) };
     r.is_ours().then_some(r)
 }
@@ -265,7 +235,6 @@ unsafe fn mutexattr_word(at: u64) -> Option<Record> {
 ///
 /// As [`mutexattr_init`].
 pub unsafe extern "C" fn mutexattr_settype(at: u64, kind: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(r) = (unsafe { mutexattr_word(at) }) else {
         return err::EINVAL;
     };
@@ -290,7 +259,6 @@ pub unsafe extern "C" fn mutexattr_settype(at: u64, kind: u64) -> i32 {
 ///
 /// As [`mutexattr_init`], with `out` a writable `int *`.
 pub unsafe extern "C" fn mutexattr_gettype(at: u64, out: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(r) = (unsafe { mutexattr_word(at) }) else {
         return err::EINVAL;
     };
@@ -347,7 +315,6 @@ pub unsafe extern "C" fn mutexattr_getprotocol(at: u64, out: u64) -> i32 {
 ///
 /// As [`mutexattr_init`].
 pub unsafe extern "C" fn mutexattr_setpolicy_np(at: u64, policy: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     if unsafe { mutexattr_word(at) }.is_none() {
         return err::EINVAL;
     }
@@ -371,7 +338,6 @@ macro_rules! pshared {
             if at == 0 {
                 return err::EINVAL;
             }
-            // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
             if !r.is_ours() {
                 return err::EINVAL;
@@ -387,7 +353,6 @@ macro_rules! pshared {
             if at == 0 || out == 0 {
                 return err::EINVAL;
             }
-            // SAFETY: the caller's guarantee.
             let r = unsafe { Record::at(at, $kind) };
             if !r.is_ours() {
                 return err::EINVAL;
@@ -479,7 +444,6 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
 /// `thread` is a `pthread_t` this process issued.
 #[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
-    // SAFETY: the caller's obligation.
     match unsafe { stack_of(thread) } {
         Some((low, size)) => low.wrapping_add(size as u64),
         None => 0,
@@ -493,7 +457,6 @@ pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
 /// As [`get_stackaddr_np`].
 #[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
-    // SAFETY: the caller's obligation.
     unsafe { stack_of(thread) }.map_or(0, |(_, size)| size as u64)
 }
 
@@ -642,7 +605,6 @@ pub unsafe extern "C" fn mach_thread_np(thread: u64) -> u32 {
 
 /// `int pthread_yield_np(void)`, Darwin's spelling of `sched_yield`.
 pub unsafe extern "C" fn yield_np() -> i32 {
-    // SAFETY: takes no argument and touches no memory.
     unsafe { libc::sched_yield() }
 }
 
@@ -855,7 +817,6 @@ pub unsafe extern "C" fn key_create(
 /// `thread` is a handle this process's `pthread_create` produced and `value` is
 /// a writable pointer slot or null.
 pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     err::from_host(unsafe { libc::pthread_join(thread_of(thread), value as usize as *mut _) })
 }
 
@@ -912,7 +873,7 @@ extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     // call `pthread_exit` - which ends the thread from under these frames without
     // unwinding them, leaking anything still boxed. `rosetta3::thread::entry` does
     // the same for the same reason.
-    // SAFETY: the caller's guarantee - the same allocation, reclaimed once.
+    // SAFETY: the same allocation, reclaimed once.
     let start = *unsafe { Box::from_raw(context as *mut Start) };
     // SAFETY: this thread is live by definition.
     let qos = u64::from(start.qos_class) | ((start.qos_relative_priority as u32 as u64) << 32);
@@ -957,7 +918,6 @@ pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i3
     if out == 0 || start == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let Some(attributes) = (unsafe { Attributes::of_guest(attr) }) else {
         return err::EINVAL;
     };
@@ -1007,7 +967,6 @@ pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i3
 ///
 /// As [`join`].
 pub unsafe extern "C" fn detach(thread: u64) -> i32 {
-    // SAFETY: the caller's guarantee.
     err::from_host(unsafe { libc::pthread_detach(thread_of(thread)) })
 }
 
@@ -1024,7 +983,6 @@ pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
 /// As [`key_delete`]; `value` is the guest's own pointer, which only guest code
 /// dereferences.
 pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
-    // SAFETY: as above.
     err::from_host(unsafe {
         libc::pthread_setspecific(
             key as libc::pthread_key_t,
@@ -1483,7 +1441,6 @@ mod tests {
     #[test]
     fn a_statically_initialised_recursive_mutex_recurses() {
         let m = Mutex::statically_initialised(object::sig::RECURSIVE_MUTEX_INIT);
-        // SAFETY: as above.
         unsafe {
             assert_eq!(sync::mutex_lock(m.at()), 0);
             assert_eq!(

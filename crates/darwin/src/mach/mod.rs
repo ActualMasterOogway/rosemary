@@ -1,24 +1,3 @@
-//! Mach, on a host that has not got one.
-//!
-//! The clock uses a monotonic counter. Ports, rights, messages, and bootstrap
-//! names use a synthetic namespace over Unix sockets. Crash reporters require
-//! this namespace during startup.
-//!
-//! | Module | What it holds |
-//! | --- | --- |
-//! | [`wire`] | a port is a bound unix datagram socket; a right is its address |
-//! | [`space`] | the task's names for the rights it holds |
-//! | [`msg`] | `mach_msg`, and translating names at the process boundary |
-//! | [`bootstrap`] | the name server two unrelated processes rendezvous through |
-//! | [`task`] | `mach_task_self_`, the thread and host ports, exception ports |
-//! | [`info`] | `task_info` and the host statistics, which are not port questions at all |
-//! | [`vm`] | `vm_region_64` and the two memory calls beside it, for this task alone |
-//! | [`sync`] | Mach semaphores, which are named out of the same space |
-//! | [`kern`] | `kern_return_t` and the three numberings it is not |
-//!
-//! Exception delivery, out-of-line message memory, cross-task VM calls, and
-//! dead-name notifications are unsupported. The timebase reports 1 ns/tick.
-
 // The clock below is compiled and tested on macOS and bound to nothing there:
 // the host's own Mach is the guest's. See [`symbol`].
 #![cfg_attr(target_os = "macos", allow(dead_code))]

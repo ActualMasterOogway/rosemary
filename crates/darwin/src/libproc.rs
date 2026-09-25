@@ -156,7 +156,6 @@ fn freebsd_proc_sysctl(flavor: c_int, pid: c_int) -> Result<Vec<u8>, i32> {
 
 #[cfg(target_os = "linux")]
 fn footprint() -> (u64, u64) {
-    // SAFETY: `sysconf` reads a static system parameter and takes no pointer.
     let page = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u64;
     let Ok(text) = std::fs::read_to_string("/proc/self/statm") else {
         return (0, 0);
@@ -426,16 +425,14 @@ mod tests {
     #[test]
     fn another_process_and_an_unknown_flavour_are_refused() {
         let mut info = ProcTaskInfo::default();
-        let mut ask = |pid, flavor| {
-            unsafe {
-                proc_pidinfo(
-                    pid,
-                    flavor,
-                    0,
-                    (&raw mut info).cast(),
-                    size_of::<ProcTaskInfo>() as c_int,
-                )
-            }
+        let mut ask = |pid, flavor| unsafe {
+            proc_pidinfo(
+                pid,
+                flavor,
+                0,
+                (&raw mut info).cast(),
+                size_of::<ProcTaskInfo>() as c_int,
+            )
         };
         assert_eq!(ask(0, 999), 0);
         assert_eq!(ask(1, PROC_PIDTASKINFO), 0, "not this process");

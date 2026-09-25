@@ -1,24 +1,3 @@
-//! What a Mach port is made of on a host that has no Mach: one unix datagram
-//! socket per receive right.
-//!
-//! The choice of transport is what makes the rest of this directory possible.
-//! Mach's two hard properties are that a message keeps its boundaries and that a
-//! *right* can travel inside one, and a `SOCK_DGRAM` unix socket has both: it
-//! preserves datagram framing, and `SCM_RIGHTS` moves a descriptor between
-//! processes. A receive right therefore **is** a bound socket, and moving one to
-//! another process is passing its descriptor - not a simulation of the move but
-//! the same thing under a different name.
-//!
-//! Ports are named in the abstract namespace (a leading NUL), so nothing is left
-//! on disk when a process dies and a port's name is released the moment its last
-//! descriptor closes. That in turn is why a send right can be *just* a 64-bit
-//! id: the id names an address, and a send to an address nothing is bound to
-//! fails with `ECONNREFUSED`, which is the same event as sending to a dead port.
-//!
-//! The id is random rather than sequential because the namespace is shared by
-//! every process on the host: a counter would collide across two runs, and a
-//! collision hands one run's message to another run's port.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_int;
@@ -86,7 +65,6 @@ pub fn fresh_address() -> Address {
     // the process, the thread, and a counter.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // SAFETY: `getpid` takes no argument and only reads.
     let pid = unsafe { libc::getpid() } as u64;
     (pid << 32) | count
 }
@@ -98,7 +76,6 @@ pub fn fresh_address() -> Address {
 fn sockaddr(address: Address) -> (libc::sockaddr_un, libc::socklen_t) {
     let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    // SAFETY: `getuid` takes no argument and cannot fail.
     let uid = unsafe { libc::getuid() };
     let name = format!("rosetta3.mach.{uid}.{address:016x}");
     // The leading NUL is the abstract namespace; the name is what follows it and

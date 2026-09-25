@@ -1,16 +1,3 @@
-//! `<pwd.h>`, where the structure is the same idea with the fields in different
-//! places.
-//!
-//! Darwin's `struct passwd` carries two members glibc's does not - `pw_change`
-//! and `pw_class`, both BSD's - and they sit in the middle, so everything after
-//! them moves:
-//!
-//! | member | Darwin | this host |
-//! |---|---|---|
-//! | `pw_gecos` | 40 | 24 |
-//! | `pw_dir` | **48** | **32** |
-//! | `pw_shell` | 56 | 40 |
-
 #![cfg(not(target_os = "macos"))]
 
 use std::cell::RefCell;
@@ -106,9 +93,7 @@ fn entry(host: &libc::passwd, at: impl Fn(usize) -> *mut c_char) -> Passwd {
 ///
 /// `host` is a live `struct passwd` this process's libc returned.
 unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
-    // SAFETY: the caller's guarantee.
     let host = unsafe { &*host };
-    // SAFETY: as above.
     let strings = unsafe { strings_of(host) };
     let guest = entry(host, |i| strings[i].as_ptr().cast_mut());
     ANSWER.with(|slot| {
@@ -138,7 +123,6 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
 /// names it; one no mount reaches is reported as empty rather than as a path
 /// the guest cannot use.
 fn home_of(host: &libc::passwd) -> CString {
-    // SAFETY: takes no argument and cannot fail.
     if host.pw_uid == unsafe { libc::getuid() }
         && let Ok(home) = CString::new(prefix::ns::home())
     {
@@ -270,7 +254,6 @@ unsafe fn fill_r(
     size: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
-    // SAFETY: the caller's obligation.
     unsafe { *result = std::ptr::null_mut() };
     let strings = match answer {
         Ok(Some(strings)) => strings,
@@ -329,7 +312,6 @@ pub unsafe extern "C" fn getpwuid_r(
 ) -> c_int {
     // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
     let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwuid_r(uid, h, b, n, r) });
-    // SAFETY: the caller's obligation.
     unsafe {
         fill_r(
             answer,
@@ -359,7 +341,6 @@ pub unsafe extern "C" fn getpwnam_r(
     }
     // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
     let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwnam_r(name, h, b, n, r) });
-    // SAFETY: the caller's obligation.
     unsafe {
         fill_r(
             answer,

@@ -1,5 +1,3 @@
-//! Darwin scheduler policies, whose numeric values differ from Linux's.
-
 #![cfg(not(target_os = "macos"))]
 
 use crate::pthread;

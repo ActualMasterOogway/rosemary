@@ -1,39 +1,3 @@
-//! `kqueue`, on host readiness interfaces.
-//!
-//! BSD's event queue is the readiness interface every Darwin program with an
-//! I/O thread reaches for. Linux has `epoll`, whose persistent interest list is
-//! close enough to use directly. Other hosts use the portable `poll`
-//! reconstruction, which rebuilds a poll set for every `kevent` call.
-//!
-//! Two things do not fall out of that, and they are what the rest of this
-//! module is:
-//!
-//! - **The queue needs a descriptor of its own.** `kqueue()` returns one, and a
-//!   caller is entitled to close it, pass it to `poll`, or hand it to another
-//!   thread. Linux returns the `epoll` descriptor; the generic backend returns
-//!   its `eventfd` wakeup descriptor.
-//! - **`EVFILT_USER` is not readiness at all.** It is a flag one thread sets
-//!   with `NOTE_TRIGGER` to wake another out of `kevent`, which is how a program
-//!   ends its own I/O loop. The backends use a private eventfd so a blocked
-//!   `kevent` returns at once.
-//!
-//! Deliberate refusals, following refusal-over-guessing:
-//!
-//! - **Every filter but `EVFILT_READ`, `EVFILT_WRITE` and `EVFILT_USER`** is
-//!   `EINVAL`. `EVFILT_VNODE` and `EVFILT_PROC` watch objects `poll` cannot see
-//!   at all, and `EVFILT_TIMER` would be a timer this module drove rather than
-//!   the kernel - each is a real piece of work rather than a constant.
-//! - **`kevent64` is not here.** Its `struct kevent64_s` is forty-eight bytes
-//!   with two more words on the end, so it is a second marshalling rather than
-//!   a second name for this one, and nothing has imported it.
-//!
-//! One gap, written down because it cannot be closed from here: `close` is not
-//! this crate's call to see, so a queue's record outlives the descriptor. A new
-//! `kqueue()` clears whatever the number held before, which covers the case
-//! that matters - the same number issued to a second queue - but a `kevent` on
-//! a number that has since become an ordinary file answers about the old queue
-//! rather than failing with `EBADF`.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -487,7 +451,6 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         if change.filter != EVFILT_USER {
             let fd =
                 c_int::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
-            // SAFETY: `F_GETFD` reads a flag word and takes no pointer.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
                 return Err(crate::errno::from_host(crate::errno::get()));
             }
@@ -1076,7 +1039,6 @@ mod tests {
             flags: EV_ADD,
             ..add
         };
-        // SAFETY: as above.
         assert_eq!(
             unsafe {
                 kevent(

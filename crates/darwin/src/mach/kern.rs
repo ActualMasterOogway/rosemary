@@ -1,10 +1,3 @@
-//! `kern_return_t`, the `mach_msg` return codes, and the names for them.
-//!
-//! Split out because every other module in this directory returns one of these
-//! and none of them agrees with an `errno`: a Mach call reports failure in its
-//! return value, in a numbering of its own, and a caller that reads `errno`
-//! after one is reading whatever the last libc call left there.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_char;
@@ -168,7 +161,6 @@ mod tests {
         let text = unsafe { std::ffi::CStr::from_ptr(first) };
         assert_eq!(text.to_str().unwrap(), "(os/kern) invalid name");
 
-        // SAFETY: as above.
         let unknown = unsafe { std::ffi::CStr::from_ptr(mach_error_string(0x7fff_0001)) };
         assert!(unknown.to_str().unwrap().contains("0x7fff0001"));
     }

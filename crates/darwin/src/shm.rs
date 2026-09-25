@@ -61,7 +61,6 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
 }
 
 pub unsafe extern "C" fn shm_open(name: *const c_char, flags: FcntlFlags, mode: u32) -> c_int {
-    // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { host_name(name) }) else {
         return -1;
     };
@@ -81,7 +80,6 @@ pub unsafe extern "C" fn shm_open(name: *const c_char, flags: FcntlFlags, mode: 
 }
 
 pub unsafe extern "C" fn shm_unlink(name: *const c_char) -> c_int {
-    // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { host_name(name) }) else {
         return -1;
     };

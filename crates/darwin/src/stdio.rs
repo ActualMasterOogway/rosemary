@@ -1,15 +1,3 @@
-//! The three `FILE *` globals, which are the same object under a different name.
-//!
-//! Darwin spells them `__stdinp`/`__stdoutp`/`__stderrp` and the host spells them
-//! `stdin`/`stdout`/`stderr`. Both are *pointer objects*: the symbol's address is a
-//! `FILE **`, and the guest loads through it and hands the result to `fwrite`. `FILE`
-//! itself never crosses the seam - the guest has no declaration of it and never reads
-//! a field - so there is nothing to bridge beyond the name.
-//!
-//! Data rather than functions, which is why `rosetta3::abi::table` refuses to *call*
-//! them and this module still resolves them: the two are different questions about the
-//! same symbol.
-
 #[cfg(target_os = "macos")]
 const HOST_STDIN: &str = "__stdinp";
 #[cfg(target_os = "macos")]

@@ -276,21 +276,7 @@ pub mod entry {
         lock_type_to_host, preallocate, takes_a_lock, takes_third_argument, to_host,
     };
 
-    /// `int fcntl(int fd, int cmd, ...)`, with the ellipsis spelled out.
-    ///
-    /// Three separate translations, and the middle one is the one that matters:
-    ///
-    /// * the command, through [`to_host`], which refuses rather than forwarding a
-    ///   number that means something else here;
-    /// * the `F_SETFL` flag word, which is an `open` flag word and so is Darwin's;
-    /// * the `F_GETFL` answer, back into Darwin's, because the guest's next call is
-    ///   `F_SETFL` with that word plus a bit.
-    ///
-    /// An unmappable bit in `F_SETFL` is dropped, not refused. `F_SETFL` ignores
-    /// every flag outside its own handful on both platforms, so a Darwin-only bit
-    /// reaching it was already a no-op there; failing the call would make this
-    /// stricter than the platform being emulated, and callers do not expect a
-    /// `F_SETFL` that fails.
+    /// Translate Darwin commands and flag words for the host `fcntl`.
     ///
     /// # Safety
     ///
@@ -312,7 +298,7 @@ pub mod entry {
             return -1;
         };
         if takes_a_lock(command) {
-            // SAFETY: the caller's obligation - a lock command's third argument
+            // SAFETY: a lock command's third argument
             // is a `struct flock *`.
             return unsafe { lock(fd, host_command, arg as *mut Flock) };
         }
@@ -400,7 +386,6 @@ pub mod entry {
             crate::errno::set(libc::EINVAL);
             return -1;
         }
-        // SAFETY: the caller's obligation.
         let wanted = unsafe { *flock };
         let Some(kind) = lock_type_to_host(wanted.kind) else {
             crate::errno::set(libc::EINVAL);
@@ -415,7 +400,6 @@ pub mod entry {
         // command reads.
         let rc = unsafe { libc::fcntl(fd, host_command, &mut host) };
         if rc >= 0 && host_command == libc::F_GETLK {
-            // SAFETY: the caller's obligation.
             unsafe {
                 *flock = Flock {
                     start: host.l_start,
@@ -667,7 +651,6 @@ mod tests {
         let flags = unsafe { entry::fcntl(read_end, cmd::F_GETFL, 0) };
         assert!(flags >= 0);
         assert_eq!(flags & oflag::O_NONBLOCK, 0, "a fresh pipe blocks");
-        // SAFETY: as above.
         let rc =
             unsafe { entry::fcntl(read_end, cmd::F_SETFL, (flags | oflag::O_NONBLOCK) as usize) };
         assert_eq!(rc, 0);

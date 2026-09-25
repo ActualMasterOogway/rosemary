@@ -1,34 +1,3 @@
-//! `struct dirent`, which is not the host's, and the calls that hand one out.
-//!
-//! Darwin's 64-bit `dirent` leads with a 64-bit inode *and* a 64-bit seek
-//! offset, then a record length, a **name length** glibc has no counterpart
-//! for, the type byte, and a 1024-byte name:
-//!
-//! | member | Darwin | this host |
-//! |---|---|---|
-//! | `d_ino` | 0 | 0 |
-//! | `d_seekoff` / `d_off` | 8 | 8 |
-//! | `d_reclen` | 16 | 16 |
-//! | `d_namlen` | **18** | - |
-//! | `d_type` | **20** | 18 |
-//! | `d_name` | **21** | 19 |
-//!
-//! So the name a guest reads out of a glibc entry starts two bytes early, on
-//! the type byte and one byte of the record length - a name that is not the
-//! file's and is not empty either, which is how this reaches a caller as a
-//! wrong answer rather than as a failure.
-//!
-//! `DIR` itself stays the **host's**: it is opaque on both platforms and the
-//! guest never looks inside one, so `opendir`, `dirfd`, `telldir`, `seekdir`
-//! and `rewinddir` pass through untouched and only the calls that expose an
-//! entry are rewritten. That keeps a handle usable by anything here that has
-//! not been thought about, which a wrapper structure would not.
-//!
-//! `readdir` promises storage that lives until the next call on the same
-//! handle, and Darwin keeps it inside the `DIR`. There is nowhere to put it in
-//! the host's, so [`ENTRIES`] holds one per open handle and [`closedir`] - the
-//! only reason that call is here - drops it.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::collections::HashMap;
@@ -94,7 +63,6 @@ fn entries<T>(with: impl FnOnce(&mut HashMap<usize, Box<Dirent>>) -> T) -> T {
 ///
 /// `host` is a live `struct dirent` this process's libc returned.
 unsafe fn convert(host: *const libc::dirent) -> Dirent {
-    // SAFETY: the caller's guarantee.
     let host = unsafe { &*host };
     // FreeBSD spells the inode number `d_fileno`; Darwin and Linux spell it `d_ino`.
     #[cfg(target_os = "freebsd")]
@@ -130,7 +98,6 @@ unsafe fn convert(host: *const libc::dirent) -> Dirent {
 unsafe fn next(dir: *mut libc::DIR) -> Result<Option<Dirent>, c_int> {
     let saved = crate::errno::get();
     crate::errno::set(0);
-    // SAFETY: the caller's obligation.
     let host = unsafe { libc::readdir(dir) };
     if host.is_null() {
         return match crate::errno::get() {
@@ -156,7 +123,6 @@ pub unsafe extern "C" fn readdir(dir: *mut libc::DIR) -> *mut Dirent {
         crate::errno::set(libc::EBADF);
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     let Ok(Some(entry)) = (unsafe { next(dir) }) else {
         return std::ptr::null_mut();
     };
@@ -193,7 +159,6 @@ pub unsafe extern "C" fn readdir_r(
     if dir.is_null() || entry.is_null() {
         return crate::errno::from_host(libc::EINVAL);
     }
-    // SAFETY: the caller's obligation.
     match unsafe { next(dir) } {
         Ok(None) => 0,
         Ok(Some(read)) => {
@@ -222,7 +187,6 @@ pub unsafe extern "C" fn closedir(dir: *mut libc::DIR) -> c_int {
         return -1;
     }
     entries(|open| open.remove(&(dir as usize)));
-    // SAFETY: the caller's obligation.
     unsafe { libc::closedir(dir) }
 }
 
@@ -240,7 +204,6 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
         crate::errno::set(libc::EFAULT);
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     let host = prefix::ns::to_host(unsafe { CStr::from_ptr(path) });
     // SAFETY: a NUL-terminated path.
     let dir = unsafe { libc::opendir(host.as_ptr()) };
@@ -277,7 +240,6 @@ pub unsafe extern "C" fn scandir(
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's obligation.
     let dir = unsafe { opendir(path) };
     if dir.is_null() {
         return -1;
@@ -335,7 +297,6 @@ pub unsafe extern "C" fn scandir(
         crate::heap::malloc((kept.len() + 1) * size_of::<*mut Dirent>()).cast::<*mut Dirent>()
     };
     if array.is_null() {
-        // SAFETY: as above.
         for block in kept {
             unsafe { crate::heap::free(block.cast()) };
         }
@@ -346,7 +307,6 @@ pub unsafe extern "C" fn scandir(
         // SAFETY: `array` holds `kept.len() + 1` pointers.
         unsafe { array.add(i).write(*block) };
     }
-    // SAFETY: as above.
     unsafe { array.add(kept.len()).write(std::ptr::null_mut()) };
     // SAFETY: the caller states `list` is writable.
     unsafe { *list = array };
@@ -484,7 +444,6 @@ mod tests {
     fn readdir_r_uses_the_callers_storage() {
         let dir = fixture("readdir-r");
         let path = c_path(&dir);
-        // SAFETY: as above.
         unsafe {
             let handle = opendir(path.as_ptr());
             assert!(!handle.is_null());

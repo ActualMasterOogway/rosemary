@@ -1,23 +1,3 @@
-//! `<uuid/uuid.h>`, which is part of libSystem on Darwin and a separate library
-//! here.
-//!
-//! Not a divergence in the ABI: a `uuid_t` is sixteen unsigned bytes on both, and
-//! the calls mean the same things. The divergence is in *where the symbols live*.
-//! On a Mac `uuid_generate` is in the library every program already links; here it
-//! is in `libuuid.so.1`, which this runtime does not link and the guest cannot ask
-//! for by an install name this host would recognise. So the import binds to
-//! nothing and the guest calls zero.
-//!
-//! Implemented rather than `dlopen`ed for that reason: a `dlopen("libuuid.so.1")`
-//! is a build of this host away from failing, and what it would provide is forty
-//! lines of formatting over sixteen random bytes.
-//!
-//! `uuid_generate_time` is deliberately the same as `uuid_generate_random`. A
-//! version-1 UUID embeds the host's MAC address and a timestamp, which is a real
-//! difference in what the value *discloses*; Apple's own `uuid_generate` picks
-//! random when a system has no stable node id, so a caller cannot depend on which
-//! it gets.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::c_char;
@@ -95,7 +75,6 @@ unsafe extern "C" fn compare(a: *const u8, b: *const u8) -> i32 {
     if a.is_null() || b.is_null() {
         return 0;
     }
-    // SAFETY: the caller's guarantee.
     let (a, b) = unsafe {
         (
             core::slice::from_raw_parts(a, LEN),
@@ -118,7 +97,6 @@ unsafe extern "C" fn is_null(at: *const u8) -> i32 {
     if at.is_null() {
         return 1;
     }
-    // SAFETY: the caller's guarantee.
     let bytes = unsafe { core::slice::from_raw_parts(at, LEN) };
     i32::from(bytes.iter().all(|b| *b == 0))
 }
@@ -160,7 +138,6 @@ unsafe fn format(bytes: &[u8; LEN], out: *mut c_char, upper: bool) {
 ///
 /// `at` is sixteen readable bytes and `out` thirty-seven writable ones.
 unsafe extern "C" fn unparse_lower(at: *const u8, out: *mut c_char) {
-    // SAFETY: the caller's guarantee.
     unsafe { unparse(at, out, false) };
 }
 
@@ -174,7 +151,6 @@ unsafe extern "C" fn unparse_lower(at: *const u8, out: *mut c_char) {
 ///
 /// As [`unparse_lower`].
 unsafe extern "C" fn unparse_upper(at: *const u8, out: *mut c_char) {
-    // SAFETY: the caller's guarantee.
     unsafe { unparse(at, out, true) };
 }
 
@@ -204,7 +180,6 @@ unsafe extern "C" fn parse(text: *const c_char, out: *mut u8) -> i32 {
     if text.is_null() || out.is_null() {
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let text = unsafe { core::ffi::CStr::from_ptr(text) }.to_bytes();
     if text.len() != TEXT_LEN - 1 {
         return -1;

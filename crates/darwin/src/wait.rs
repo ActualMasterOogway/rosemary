@@ -1,20 +1,3 @@
-//! `wait`, `waitpid`, `wait3` and `wait4`, whose options and status words
-//! are numbered Darwin's way.
-//!
-//! Two differences, both silent when passed through:
-//!
-//! - `WCONTINUED` is `0x10` on Darwin and `8` here, where `0x10` is not a
-//!   defined bit - so a job-control shell reaping with `WUNTRACED|WCONTINUED`
-//!   is refused with `EINVAL` on every call, and loops on it forever.
-//! - The status word carries a signal number wherever a child was killed or
-//!   stopped, and those are this host's numbers: a child stopped by `SIGTSTP`
-//!   reports 20 here, which Darwin calls `SIGCHLD`. A continued child is
-//!   `0xffff` here and `0x137f` - "stopped by `SIGCONT`" - on Darwin.
-//!
-//! `struct rusage` passes through: its members are `long`s but for the
-//! `timeval`s' `tv_usec`, an `int` on Darwin, whose low half is at the same
-//! offset on a little-endian host and never exceeds a million.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_int, c_void};
@@ -81,7 +64,6 @@ unsafe fn reap(
     // the module note explains.
     let reaped = unsafe { libc::wait4(pid, &mut host_status, host_options, rusage.cast()) };
     if reaped > 0 && !status.is_null() {
-        // SAFETY: the caller's obligation.
         unsafe { *status = status_to_darwin(host_status) };
     }
     reaped
@@ -93,7 +75,6 @@ unsafe fn reap(
 ///
 /// As [`reap`].
 pub unsafe extern "C" fn wait(status: *mut c_int) -> libc::pid_t {
-    // SAFETY: the caller's obligation.
     unsafe { reap(-1, status, 0, std::ptr::null_mut()) }
 }
 
@@ -107,7 +88,6 @@ pub unsafe extern "C" fn waitpid(
     status: *mut c_int,
     options: c_int,
 ) -> libc::pid_t {
-    // SAFETY: the caller's obligation.
     unsafe { reap(pid, status, options, std::ptr::null_mut()) }
 }
 
@@ -121,7 +101,6 @@ pub unsafe extern "C" fn wait3(
     options: c_int,
     rusage: *mut c_void,
 ) -> libc::pid_t {
-    // SAFETY: the caller's obligation.
     unsafe { reap(-1, status, options, rusage) }
 }
 
@@ -136,7 +115,6 @@ pub unsafe extern "C" fn wait4(
     options: c_int,
     rusage: *mut c_void,
 ) -> libc::pid_t {
-    // SAFETY: the caller's obligation.
     unsafe { reap(pid, status, options, rusage) }
 }
 

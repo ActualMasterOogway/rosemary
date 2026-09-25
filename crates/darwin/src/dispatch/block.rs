@@ -1,16 +1,3 @@
-//! Blocks, as far as libdispatch needs them.
-//!
-//! `dispatch_async` outlives its caller's stack frame, so the block it is handed has
-//! to be copied to the heap and released once it has run. Copying is the one part
-//! this crate must not do itself: a block carries its runtime's
-//! `_NSConcreteMallocBlock` in its `isa`, and the runtime asked to release it later
-//! has to be the one that wrote it. There is exactly one block runtime in this
-//! process and it lives above this crate, so it is registered here rather than
-//! reimplemented.
-//!
-//! Invoking is different, and is done directly below: the offset of `invoke` in a
-//! block literal is the published Block ABI, not a property of any runtime.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Byte offset of `invoke` in a `Block_layout`, after `isa`, `flags` and `reserved`.

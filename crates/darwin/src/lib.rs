@@ -20,8 +20,6 @@
     clippy::useless_vec
 )]
 
-//! The macOS API surface Rosetta 3 targets, and a host implementation of each entry.
-
 use std::ffi::CString;
 
 #[cfg(not(target_os = "macos"))]
@@ -392,8 +390,7 @@ static MODULES: &[exports::Module] = &[
 ];
 
 fn implemented(name: &str) -> Option<u64> {
-    registered(name)
-        .or_else(|| exports::Module::resolve(MODULES, name))
+    registered(name).or_else(|| exports::Module::resolve(MODULES, name))
 }
 
 pub fn is_implemented(symbol: &str) -> bool {

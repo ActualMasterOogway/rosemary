@@ -1,21 +1,3 @@
-//! The name server: how a process finds a port it was not handed.
-//!
-//! On a Mac this is launchd, reached through the task's bootstrap port. Two
-//! processes that share a bootstrap namespace can rendezvous by agreeing on a
-//! string, which is the only way an unrelated pair ever gets a first port
-//! between them - everything else in Mach needs a port to ask on.
-//!
-//! Here the namespace is a directory of one small file per service, holding the
-//! port's address (see [`super::wire`]). A directory rather than a server
-//! process because there is no launchd to be: the parent that would have to
-//! start one is the guest, and the guest is what is asking. One directory per
-//! user, which is the same scope launchd's per-user namespace has.
-//!
-//! A service whose process died leaves its file behind. That is what
-//! [`super::wire::is_bound`] is for: a registration over a stale name succeeds,
-//! and a lookup of one reports the service as unknown rather than handing out a
-//! send right to nothing.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char};
@@ -39,7 +21,6 @@ fn namespace() -> Option<&'static Path> {
     DIR.get_or_init(|| {
         let base = match std::env::var_os("XDG_RUNTIME_DIR") {
             Some(runtime) => PathBuf::from(runtime).join("rosetta3"),
-            // SAFETY: `getuid` takes no argument and cannot fail.
             None => PathBuf::from(format!("/tmp/rosetta3-{}", unsafe { libc::getuid() })),
         };
         let dir = base.join("bootstrap");
@@ -277,7 +258,6 @@ mod tests {
         );
 
         let mut client = MACH_PORT_NULL;
-        // SAFETY: as above.
         let rc = unsafe { bootstrap_look_up(BOOTSTRAP, service.as_ptr(), &mut client) };
         assert_eq!(rc, BOOTSTRAP_SUCCESS);
         assert!(
@@ -288,7 +268,6 @@ mod tests {
 
         // A second check-in while the first holder is alive is refused.
         let mut again = MACH_PORT_NULL;
-        // SAFETY: as above.
         let rc = unsafe { bootstrap_check_in(BOOTSTRAP, service.as_ptr(), &mut again) };
         assert_eq!(rc, BOOTSTRAP_NAME_IN_USE);
 
@@ -320,13 +299,11 @@ mod tests {
         space::destroy(first);
 
         let mut port = MACH_PORT_NULL;
-        // SAFETY: as above.
         assert_eq!(
             unsafe { bootstrap_look_up(BOOTSTRAP, service.as_ptr(), &mut port) },
             BOOTSTRAP_UNKNOWN_SERVICE
         );
         let mut second = MACH_PORT_NULL;
-        // SAFETY: as above.
         assert_eq!(
             unsafe { bootstrap_check_in(BOOTSTRAP, service.as_ptr(), &mut second) },
             BOOTSTRAP_SUCCESS

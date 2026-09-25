@@ -1,23 +1,3 @@
-//! `pthread_once_t`, in the guest's own sixteen bytes.
-//!
-//! ```text
-//! +0   u64  signature   see [`super::object`]
-//! +8   u32  state       never run, running, or done
-//! +12  u32  sleepers    threads waiting for the routine to finish
-//! ```
-//!
-//! Three states and a wait-on-address call. The routine is guest code, so it is passed
-//! in as a closure the caller builds rather than a function pointer this can hold: the
-//! emulated backend has to reach it through a thunk, which is vocabulary this crate
-//! does not have.
-//!
-//! This used to box a host `pthread_once_t` and reach the guest's routine through a
-//! thread-local slot and a generic trampoline, because a host `pthread_once` takes a
-//! function pointer and nothing else. The host object could not hold the guest's state
-//! for the plainest of reasons: glibc reads Darwin's `_PTHREAD_ONCE_SIG` as its own
-//! "already run", so a statically initialised guest `pthread_once_t` passed straight
-//! through would never run its routine at all, and would say it had.
-
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
@@ -50,7 +30,6 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::Once) };
     let built = record.live_or_init(|record, _| {
         record.u32(STATE).store(NEVER, Ordering::Relaxed);
@@ -80,7 +59,6 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
             Err(_) => {
                 record.u32(SLEEPERS).fetch_add(1, Ordering::SeqCst);
                 if state.load(Ordering::Acquire) == RUNNING {
-                    // SAFETY: as above.
                     let _ = unsafe { wait_word::wait_u32(state, RUNNING, None, Scope::Private) };
                 }
                 record.u32(SLEEPERS).fetch_sub(1, Ordering::Relaxed);
@@ -104,7 +82,6 @@ pub unsafe extern "C" fn once_entry(at: u64, routine: Option<extern "C" fn()>) -
     let Some(routine) = routine else {
         return err::EINVAL;
     };
-    // SAFETY: the caller's guarantee.
     unsafe { once(at, || routine()) }
 }
 
@@ -171,7 +148,6 @@ mod tests {
             },
             0
         );
-        // SAFETY: as above.
         assert_eq!(unsafe { once(control.at(), || unreachable!()) }, 0);
         assert_eq!(ran.load(Ordering::Relaxed), 1);
     }

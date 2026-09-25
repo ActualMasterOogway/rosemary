@@ -1,19 +1,3 @@
-//! `setsockopt`/`getsockopt`, where neither the level nor the option name nor
-//! one of the values is the same number.
-//!
-//! `SOL_SOCKET` is `0xffff` on Darwin and `1` here - and `1` on Darwin is
-//! `IPPROTO_ICMP`, so a guest setting a socket option ends up setting an ICMP
-//! one. Below the level, essentially nothing lines up: Darwin numbers the
-//! boolean options as single bits (`SO_REUSEADDR` is `0x0004`) and Linux numbers
-//! them sequentially (`SO_REUSEADDR` is `2`, which is Darwin's `SO_ACCEPTCONN`).
-//!
-//! The `IP_*` and `IPV6_*` names are the same story one layer up: `IP_TTL` is 4
-//! on Darwin and 2 here, where 4 is `IP_OPTIONS`.
-//!
-//! An option this module has not been taught is **refused** with `ENOPROTOOPT`
-//! rather than passed through, because a wrong option number does not fail - it
-//! sets a different, real option.
-
 use std::ffi::c_void;
 
 use crate::errno;

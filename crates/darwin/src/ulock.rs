@@ -1,24 +1,3 @@
-//! `__ulock_wait` and `__ulock_wake`, Darwin's futex, onto the host's.
-//!
-//! These are what every Darwin blocking primitive bottoms out in - `os_unfair_lock`,
-//! libc++'s `atomic::wait`, and libdispatch's own semaphores - so a guest reaches
-//! them without ever naming them. They are a kernel interface with no libc wrapper
-//! and no host spelling, which is why they are reimplemented here rather than
-//! refused: refusing them would refuse blocking itself.
-//!
-//! The shapes line up better than most of this crate's subjects. Both are
-//! compare-and-block on a word of user memory, both take a relative timeout, and both
-//! wake by address. Three things do not:
-//!
-//! * **Width.** Darwin has 64-bit compare operations; a Linux futex compares 32 bits
-//!   and only 32. See [`wait`], which checks the full width itself first.
-//! * **Waking one named thread.** `ULF_WAKE_THREAD` names its target by port, which a
-//!   futex cannot do. Woken threads re-check their word and block again, so waking
-//!   *everyone* is a correct answer where waking an arbitrary one is not.
-//! * **Reporting.** `ULF_NO_ERRNO` asks for `-errno` as the return value instead of
-//!   `errno` being set, because the callers inside libplatform run where touching
-//!   `errno` is not allowed.
-
 // Compiled and tested on macOS, bound to nothing there: the host's own kernel answers
 // these. See [`symbol`].
 #![cfg_attr(target_os = "macos", allow(dead_code))]
@@ -126,7 +105,6 @@ pub unsafe extern "C" fn wait(
     value: u64,
     timeout_us: u32,
 ) -> i32 {
-    // SAFETY: the caller's guarantee.
     unsafe {
         wait_ns(
             operation,
@@ -152,7 +130,6 @@ pub unsafe extern "C" fn wait2(
     timeout_ns: u64,
     _owner: u64,
 ) -> i32 {
-    // SAFETY: the caller's guarantee.
     unsafe { wait_ns(operation, addr, value, timeout_ns) }
 }
 

@@ -1,26 +1,3 @@
-//! `os_log`: Apple's unified logging, as lines on stderr.
-//!
-//! Qt routes every `qWarning` and `qDebug` through `os_log` rather than writing
-//! to stderr itself, so without this a Qt application's diagnostics do not go
-//! missing quietly - `os_log_create` is an unbound import and the first warning
-//! it tries to write is a jump to address zero. That is the failure this module
-//! exists for, and the reason it earns its keep twice: the warnings it lets
-//! through are how the *next* problem gets diagnosed.
-//!
-//! There is no unified log on this host and nothing to read one, so a message is
-//! formatted and written to stderr - which is where a Mac puts it too when the
-//! process is being watched from a terminal, and what a program's own fallback
-//! handler would have done.
-//!
-//! The work is in [`format_message`]. `_os_log_impl` does not take varargs: the
-//! compiler packs the arguments into a private buffer at the call site and passes
-//! the format string beside it, so the arguments have to be decoded before
-//! anything can be printed. The decode is driven by the **format string** rather
-//! than by the buffer's type nibbles - each item carries its own size, so the
-//! format says how to read the bytes and the buffer says how many there are.
-//! That way a conversion this module has not seen costs one wrong argument rather
-//! than a misparse of everything after it.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char, c_void};
@@ -84,7 +61,6 @@ unsafe fn text(p: *const c_char) -> String {
         // the line needs to see rather than an empty gap.
         return "(null)".to_string();
     }
-    // SAFETY: the caller's obligation.
     let bytes = unsafe { CStr::from_ptr(p) }.to_bytes();
     String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned()
 }
@@ -137,7 +113,6 @@ impl Item<'_> {
         // A pointer is eight bytes and an item type of 2 ("string"); anything
         // else of another width is characters the call site copied in.
         if self.payload.len() == 8 {
-            // SAFETY: the caller's obligation.
             return unsafe { text(self.unsigned() as *const c_char) };
         }
         let end = self
@@ -192,7 +167,6 @@ unsafe fn format_message(format: *const c_char, buffer: *const u8, size: u32) ->
     if format.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     let template = unsafe { CStr::from_ptr(format) }.to_bytes().to_vec();
     let bytes: &[u8] = match buffer.is_null() || size == 0 {
         true => &[],
@@ -295,7 +269,6 @@ unsafe extern "C" fn os_log_create(
     subsystem: *const c_char,
     category: *const c_char,
 ) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     let (subsystem, category) = unsafe { (text(subsystem), text(category)) };
     let log: &'static Log = Box::leak(Box::new(Log {
         subsystem,
@@ -334,7 +307,6 @@ unsafe extern "C" fn _os_log_impl(
     if kind == log_type::DEBUG && !debug_enabled() {
         return;
     }
-    // SAFETY: the caller's obligation.
     let message = unsafe { format_message(format, buffer, size) };
     let level = match kind {
         log_type::FAULT => "fault",

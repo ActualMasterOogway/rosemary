@@ -1,5 +1,3 @@
-//! Interface names and IPv6 address constants owned by Darwin's networking ABI.
-
 use std::ffi::c_char;
 
 unsafe extern "C" fn index_to_name(index: u32, out: *mut c_char) -> *mut c_char {

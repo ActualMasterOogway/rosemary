@@ -1,32 +1,3 @@
-//! Ancillary data: the `msg_control` buffer of a `sendmsg` or a `recvmsg`.
-//!
-//! The one part of a `struct msghdr` whose *contents* diverge rather than its
-//! shape. `struct cmsghdr` is
-//! `{ uint32_t cmsg_len; int cmsg_level; int cmsg_type; }` on Darwin - twelve
-//! bytes, padded to four - and `{ size_t cmsg_len; int; int; }` here - sixteen,
-//! padded to eight. So the payload of a Darwin control message starts four bytes
-//! before this host looks for it, and the length it reads is the length *and*
-//! the level.
-//!
-//! The types diverge on top of that, in the way that collides: `SCM_RIGHTS` is 1
-//! on both, but Darwin's `SCM_TIMESTAMP` is 2, which is `SCM_CREDENTIALS` here,
-//! and Darwin's `SCM_CREDS` is 3, which is `SCM_SECURITY` here. A descriptor
-//! array handed over unread would be read as a credentials structure.
-//!
-//! Known types are translated and the rest are refused by number, because a
-//! payload is only convertible if this module knows what is in it:
-//!
-//! - `SCM_RIGHTS`, whose payload is an array of `int` and is the same array on
-//!   both. This is the one that matters - it is how a descriptor is passed over
-//!   a socket, which is what a helper process is given its side of a connection
-//!   with.
-//! - `SCM_TIMESTAMP` on the way back, whose payload is a `struct timeval` and so
-//!   diverges again in the width of `tv_usec`; see [`crate::net::sockopt`] for
-//!   the same conversion one call over.
-
-//! - IP TOS / IPv6 traffic class for ECN, and IPv4/IPv6 packet information.
-//!   Packet information has the same field layout on both platforms.
-
 use std::ffi::c_void;
 
 /// Darwin's `struct cmsghdr`.
@@ -300,7 +271,6 @@ pub unsafe fn from_host(host: &libc::msghdr, control: *mut c_void, capacity: u32
                 dropped = true;
             }
         }
-        // SAFETY: as above.
         entry = unsafe { libc::CMSG_NXTHDR(host, entry) };
     }
     (written as u32, dropped)

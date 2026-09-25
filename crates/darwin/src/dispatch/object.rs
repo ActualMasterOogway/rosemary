@@ -1,12 +1,3 @@
-//! What every `dispatch_object_t` has in common: a refcount, a context, and a
-//! finalizer.
-//!
-//! A guest holds these as opaque pointers, so a handle is the host address of the
-//! allocation and nothing has to be mapped or translated. What does have to be right
-//! is the lifetime: `dispatch_release` on the last reference runs the finalizer the
-//! guest installed, and a queue released while work is still pending must not free
-//! itself out from under the worker running it.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -81,7 +72,6 @@ pub unsafe fn header<'a>(handle: u64) -> Option<&'a Header> {
 ///
 /// As [`header`].
 pub unsafe fn typed<'a>(handle: u64, kind: Kind) -> Option<&'a Header> {
-    // SAFETY: the caller's guarantee.
     unsafe { header(handle) }.filter(|h| h.kind == kind)
 }
 
@@ -100,7 +90,6 @@ pub fn retain(handle: u64) {
 /// `handle` is null or a live object of this module's, and the caller is giving up a
 /// reference it holds.
 pub unsafe fn release(handle: u64) {
-    // SAFETY: the caller's guarantee.
     let Some(h) = (unsafe { header(handle) }) else {
         return;
     };

@@ -1,25 +1,3 @@
-//! `pthread_rwlock_t`, in the guest's own two hundred bytes.
-//!
-//! ```text
-//! +0   u64  signature   see [`super::object`]
-//! +8   u64  identity
-//! +16  u32  state       the writer bit, or a count of readers
-//! +20  u32  sleepers    threads blocked on the state word
-//! +24  u64  writer      the thread holding it for writing
-//! +32..200            unused
-//! ```
-//!
-//! Readers block only while a writer holds the lock, and not because one is waiting
-//! for it. That is the weaker of the two policies POSIX allows and the one that cannot
-//! deadlock a thread taking a read lock it already holds - which POSIX permits and
-//! real code does. A writer can in principle be starved by an unbroken stream of
-//! readers; the alternative trades a performance property for a hang.
-//!
-//! This used to be a boxed host `pthread_rwlock_t` found again from the guest's
-//! address on every call, with a comment about how Darwin's own rwlock records its
-//! address at initialisation and so could not be initialised anywhere but where it
-//! would live. A lock that lives in the guest's bytes has no such problem to describe.
-
 use std::sync::atomic::Ordering;
 
 use super::consts::*;
@@ -51,7 +29,6 @@ unsafe fn live(at: u64) -> Option<Record> {
     if at == 0 {
         return None;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::RwLock) };
     record
         .live_or_init(|record, _| {
@@ -166,7 +143,6 @@ pub unsafe extern "C" fn rwlock_init(at: u64, attr: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let Some(shared) = (unsafe { super::sync::simple_attr_pshared(attr, Kind::RwLockAttr) }) else {
         return err::EINVAL;
     };
@@ -174,7 +150,6 @@ pub unsafe extern "C" fn rwlock_init(at: u64, attr: u64) -> i32 {
         super::sync::say_unsupported("a process-shared read-write lock");
         return err::ENOTSUP;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::RwLock) };
     record.seize();
     record.publish(lay_out);
@@ -188,7 +163,6 @@ pub unsafe extern "C" fn rwlock_destroy(at: u64) -> i32 {
     if at == 0 {
         return err::EINVAL;
     }
-    // SAFETY: the caller's guarantee.
     let record = unsafe { Record::at(at, Kind::RwLock) };
     let state = record.seize();
     match state {
@@ -217,7 +191,6 @@ macro_rules! rwlock_op {
         ///
         /// As [`rwlock_init`].
         pub unsafe extern "C" fn $name(at: u64) -> i32 {
-            // SAFETY: the caller's guarantee.
             match unsafe { live(at) } {
                 #[allow(clippy::redundant_closure_call)]
                 Some(record) => ($body)(&record),

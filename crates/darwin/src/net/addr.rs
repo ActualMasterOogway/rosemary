@@ -1,25 +1,3 @@
-//! Address families and the socket addresses that carry them.
-//!
-//! `struct sockaddr_in` is sixteen bytes on both platforms and
-//! `struct sockaddr_in6` twenty-eight, and every field from byte two onward -
-//! port, address, flow label, scope - is at the same offset and in the same
-//! order. Only the first two bytes differ, and they differ completely:
-//!
-//! ```text
-//! Darwin   uint8_t sa_len; uint8_t sa_family;   ->  [0x10, 0x02] for AF_INET
-//! Linux    uint16_t sa_family;                  ->  [0x02, 0x00] for AF_INET
-//! ```
-//!
-//! So a Darwin `sockaddr` handed to glibc has its **family read out of the
-//! length byte** - `AF_INET` becomes 16, which is `AF_NETLINK` here - and one
-//! filled in by glibc and read by the guest has family `AF_UNSPEC`. Neither
-//! crashes; a `connect` simply fails with `EAFNOSUPPORT`, and a `getsockname`
-//! reports an address of no family at all.
-//!
-//! The family *numbers* diverge on top of that: `AF_INET6` is 30 on Darwin and
-//! 10 here, and 30 here is `AF_TIPC`. This is the collision class again - the
-//! value exists on both sides and means something else.
-
 use std::ffi::c_void;
 
 /// `sizeof(struct sockaddr_storage)`, 128 on both platforms.

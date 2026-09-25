@@ -1,9 +1,3 @@
-//! Queues, and the threads that drain them.
-//!
-//! Serial queues preserve submission order; concurrent queues use available workers.
-//! [`drain_main`] runs main-queue work on the main thread during the run loop.
-//! Workers grow on demand because guest blocks may wait on other queued work.
-
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -44,9 +38,7 @@ impl Work {
                 block::invoke(b);
                 block::release(b);
             },
-            // SAFETY: the caller's guarantee.
             Work::Borrowed(b) => unsafe { block::invoke(b) },
-            // SAFETY: the caller's guarantee.
             Work::Function(f, context) => unsafe { f(context as *mut c_void) },
         }
     }
@@ -65,7 +57,6 @@ impl Item {
     /// As [`Work::run`].
     unsafe fn run(self) {
         let done = self.done;
-        // SAFETY: the caller's guarantee.
         unsafe { self.work.run() };
         if let Some(done) = done {
             done.signal();
@@ -431,7 +422,6 @@ pub unsafe extern "C" fn queue_create_with_target(
     attr: u64,
     _target: u64,
 ) -> u64 {
-    // SAFETY: as above.
     unsafe { queue_create(label, attr) }
 }
 
@@ -442,7 +432,6 @@ unsafe fn label_of(label: *const c_char) -> String {
     if label.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's guarantee.
     unsafe { std::ffi::CStr::from_ptr(label) }
         .to_string_lossy()
         .into_owned()

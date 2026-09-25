@@ -1,14 +1,3 @@
-//! The socket calls that carry an address, a family or a `MSG_*` flag.
-//!
-//! `listen`, `shutdown` and `close` are absent on purpose: their arguments are
-//! plain integers that agree on both platforms, so the host's own are the
-//! answer and [`crate::passthrough`] claims them.
-//!
-//! The `MSG_*` flags are the collision class again. `MSG_EOR` is `0x8` on Darwin
-//! and `MSG_CTRUNC` here; `MSG_WAITALL` is `0x40` on Darwin and `MSG_DONTWAIT`
-//! here. A `recv` asking to wait for the whole buffer, passed through, asks not
-//! to wait at all - and gets a short read that looks like a slow network.
-
 use std::ffi::c_void;
 
 use super::addr::{self, HostAddr};
@@ -135,7 +124,6 @@ unsafe fn with_address(
     len: u32,
     call: unsafe extern "C" fn(i32, *const libc::sockaddr, libc::socklen_t) -> i32,
 ) -> i32 {
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { addr::to_host(address, len) }) else {
         crate::errno::set(libc::EAFNOSUPPORT);
         return -1;
@@ -275,7 +263,6 @@ unsafe extern "C" fn sendto(
         let sent = unsafe { libc::sendto(fd, buf, len, host_flags, core::ptr::null(), 0) };
         return half_close_if_asked(fd, flags, sent);
     }
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { addr::to_host(address, addrlen) }) else {
         crate::errno::set(libc::EAFNOSUPPORT);
         return -1;
@@ -375,7 +362,6 @@ unsafe fn msghdr_to_host(
     control: &mut Vec<u8>,
     sending: bool,
 ) -> Option<libc::msghdr> {
-    // SAFETY: the caller's guarantee.
     let g = unsafe { guest.read() };
     if sending && !g.control.is_null() && g.controllen != 0 {
         // SAFETY: the guest's control buffer, with the length it gave for it.
@@ -423,7 +409,6 @@ unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isi
     }
     let mut name = None;
     let mut control = Vec::new();
-    // SAFETY: the caller's guarantee.
     let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name, &mut control, true) })
     else {
         crate::errno::set(libc::EOPNOTSUPP);
@@ -449,7 +434,6 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
     let guest: *mut MsgHdr = message.cast();
     let mut name = None;
     let mut sent_control = Vec::new();
-    // SAFETY: the caller's guarantee.
     let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) })
     else {
         crate::errno::set(libc::EOPNOTSUPP);
@@ -815,25 +799,8 @@ struct Endpoints {
     dstaddrlen: u32,
 }
 
-/// `int connectx(int, const sa_endpoints_t *, sae_associd_t, unsigned int,
-/// const struct iovec *, unsigned int, size_t *, sae_connid_t *)`
-///
-/// Darwin's own multipath-aware connect. This host has no such call, and does
-/// not need one for what a guest uses it for: the three things `connectx` adds
-/// over `connect` are a source endpoint, which is a `bind` before the connect;
-/// data sent with the handshake, which is a `writev` after it; and an
-/// association, which only Multipath TCP has and which a guest asks for by
-/// socket type rather than here.
-///
-/// So this is `bind`, `connect`, `writev` - the same sequence with the same
-/// outcome, minus the round trip that fast-open would have saved. The `flags`
-/// are `CONNECT_DATA_IDEMPOTENT` and its relatives, which say the payload may
-/// be replayed; sending it after the handshake instead satisfies all of them.
-///
-/// `sae_srcif` is refused rather than dropped: binding to an interface by index
-/// is a different call here - `SO_BINDTODEVICE`, which takes a name - and a
-/// connection that silently ignored the interface it was pinned to would go out
-/// of the wrong one and work.
+/// Implements `connectx` with `bind`, `connect`, and `writev`. Refuses a source
+/// interface because binding to a different interface would be incorrect.
 ///
 /// # Safety
 ///
@@ -855,7 +822,6 @@ unsafe extern "C" fn connectx(
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: the caller's guarantee.
     let ends = unsafe { endpoints.read() };
     if ends.srcif != 0 {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -1415,7 +1381,6 @@ mod tests {
         );
         let mut sender = [0u8; 16];
         let mut sender_len = 16u32;
-        // SAFETY: as above.
         assert_eq!(
             unsafe { getsockname(tx, sender.as_mut_ptr().cast(), &mut sender_len) },
             0

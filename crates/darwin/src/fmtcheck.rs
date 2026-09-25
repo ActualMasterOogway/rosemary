@@ -1,10 +1,3 @@
-//! `fmtcheck`, which glibc never had. ncurses calls it on every format string
-//! it reads out of a terminal description.
-//!
-//! Ported from Apple's `gen/FreeBSD/fmtcheck.c`: the two formats' conversions
-//! are compared in order, and the first is returned only if every one of its
-//! arguments has the type the second's would.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{CStr, c_char};
@@ -261,7 +254,6 @@ pub unsafe extern "C" fn fmtcheck(f1: *const c_char, f2: *const c_char) -> *cons
     if f1.is_null() {
         return f2;
     }
-    // SAFETY: the caller's obligation.
     let (a, b) = unsafe { (CStr::from_ptr(f1).to_bytes(), CStr::from_ptr(f2).to_bytes()) };
     match compatible(a, b) {
         true => f1,

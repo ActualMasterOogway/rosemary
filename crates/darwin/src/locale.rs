@@ -1,14 +1,3 @@
-//! `locale_t`, asked the one question this runtime asks of it.
-//!
-//! Darwin has `querylocale`, a BSD extension that names one category of a `locale_t`.
-//! glibc and musl do not; the portable spelling is `nl_langinfo_l`, which answers a
-//! different question about the same object, and neither can be asked "what is this
-//! locale called".
-//!
-//! Which is fine, because the only thing that needs asking is whether a `locale_t`
-//! formats numbers the way `rosetta3::shims::printf` renders them - and that has a
-//! portable answer.
-
 /// Whether `loc` formats numbers the way the C locale does.
 ///
 /// A null `loc` means Darwin's C-locale sentinel for the `*_l` convenience

@@ -1,23 +1,3 @@
-//! Darwin's `sysctl`, which is where a program asks what system it is running on.
-//!
-//! Not a passthrough anywhere, for two separate reasons:
-//!
-//! * On Linux there is nothing to pass through to. `sysctl(2)` was deprecated and then
-//!   removed, and its MIB never had anything to do with Darwin's.
-//! * On macOS there *is*, and it answers about the **host** where several of these
-//!   keys are questions about the **guest**. `hw.machine` under Rosetta 2 is
-//!   `x86_64`, not `arm64`, because the process asking is an Intel one - and a guest
-//!   that reads `arm64` here will go looking for arm64 code paths it does not have.
-//!
-//! So the shape is: the architecture-dependent keys are answered from the guest's own
-//! architecture on both hosts, and everything else is forwarded to the real `sysctl`
-//! on macOS and answered from this module's table on Linux.
-//!
-//! The MIB numbers below are Darwin's, from `<sys/sysctl.h>`. This is the one category
-//! where defining a constant here rather than taking it from the `libc` crate is
-//! correct: they are part of the *guest's* ABI, and the host's `CTL_KERN` - where the
-//! host has one at all - is a different number for a different thing.
-
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Top-level MIB identifiers.
@@ -252,7 +232,6 @@ fn ncpu() -> u32 {
 
 #[cfg(not(target_os = "macos"))]
 fn page_size() -> u32 {
-    // SAFETY: `sysconf` reads a static system parameter and takes no pointer.
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u32
 }
 
@@ -287,12 +266,10 @@ unsafe fn copy_out(value: &Value, oldp: *mut libc::c_void, oldlenp: *mut libc::s
     // SAFETY: the caller guarantees `oldlenp` is a writable `size_t`.
     let available = unsafe { *oldlenp };
     if oldp.is_null() {
-        // SAFETY: as above.
         unsafe { *oldlenp = bytes.len() };
         return 0;
     }
     if available < bytes.len() {
-        // SAFETY: as above.
         unsafe { *oldlenp = bytes.len() };
         crate::errno::set(libc::ENOMEM);
         return -1;

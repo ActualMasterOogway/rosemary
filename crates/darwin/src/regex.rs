@@ -1,25 +1,3 @@
-//! POSIX regular expressions, which are the same *API* on both hosts and not
-//! the same ABI.
-//!
-//! Three things diverge, and each is silent on its own:
-//!
-//! * `regmatch_t` holds two `regoff_t`, and `regoff_t` is `off_t` - sixty-four
-//!   bits - on Darwin and `int` under glibc. A guest that passes an array of
-//!   them gets every second field written into the first half of the next
-//!   entry, and reads a match offset that is a stack address.
-//! * `regex_t` is four fields and thirty-two bytes on Darwin, and sixty-four
-//!   bytes under glibc. A guest that declares one statically - which is what a
-//!   compiled-once pattern is - has its *neighbours* overwritten by a host
-//!   `regcomp`.
-//! * `REG_NEWLINE` and `REG_NOSUB` have each other's values. A guest asking for
-//!   one gets the other, and neither failure looks like a flag.
-//!
-//! So the guest's `regex_t` is this crate's structure, holding a host one
-//! allocated beside it, and the matches are translated on the way back. The
-//! matching itself is the host's: a second regular-expression engine would be a
-//! different dialect, which is the one difference a caller would see in its
-//! results rather than in a crash.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::{c_char, c_int, c_void};

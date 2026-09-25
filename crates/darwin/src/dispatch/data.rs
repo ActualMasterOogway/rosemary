@@ -1,11 +1,3 @@
-//! `dispatch_data_t`, as far as `dispatch_data_create` needs it.
-//!
-//! The one thing a caller depends on here is *who owns the bytes*. A null destructor
-//! means the buffer is the caller's and libdispatch must take its own copy; any other
-//! means the buffer is being handed over and the destructor is what frees it. Getting
-//! that backwards is either a use-after-free or a leak, neither of which shows up at
-//! the call.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
