@@ -1741,6 +1741,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("geteuid", U32),
     sig!("getgid", U32),
     sig!("getgroups", I32, I32, P),
+    sig!("getgrouplist_2", I32, P, U32, P),
     //
     // `struct passwd` is five pointers, two 32-bit ids and two `time_t`s;
     // `struct group` is two pointers, a `gid_t` and a pointer.
@@ -1798,6 +1799,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getsockopt", I32, I32, I32, I32, P, P),
     sig!("gettimeofday", I32, P, P),
     sig!("getuid", U32),
+    sig!("getaudit_addr", I32, P, U32),
     sig!("getwc", I32, P),
     sig!("getxattr", I64, P, P, P, U64, U32, I32),
     sig!("getentropy", I32, P, U64),

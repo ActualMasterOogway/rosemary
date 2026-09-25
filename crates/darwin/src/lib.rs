@@ -26,6 +26,8 @@ use std::ffi::CString;
 pub mod acl;
 mod atomics;
 pub mod attrlist;
+#[cfg(not(target_os = "macos"))]
+pub mod audit;
 pub mod backtrace;
 pub mod bsd;
 pub mod callback;
@@ -345,6 +347,8 @@ static MODULES: &[exports::Module] = &[
     callback::MODULE,
     #[cfg(not(target_os = "macos"))]
     passwd::MODULE,
+    #[cfg(not(target_os = "macos"))]
+    audit::MODULE,
     #[cfg(not(target_os = "macos"))]
     dirent::MODULE,
     #[cfg(not(target_os = "macos"))]
