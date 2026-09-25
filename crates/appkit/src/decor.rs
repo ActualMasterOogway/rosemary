@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrome::menu::{Item, Panel, PanelLayout};
@@ -106,10 +107,24 @@ pub fn config() -> Config {
     })
 }
 
+/// Whether the chrome is drawn dark. The chrome is the host's, not the
+/// guest's, so it follows the desktop even though AppKit here answers Aqua.
+static DARK: AtomicBool = AtomicBool::new(false);
+
 fn theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    // AppKit here only ever answers Aqua, so the light variant.
-    THEME.get_or_init(Theme::light)
+    static LIGHT: OnceLock<Theme> = OnceLock::new();
+    static DARK_THEME: OnceLock<Theme> = OnceLock::new();
+    match DARK.load(Ordering::Relaxed) {
+        true => DARK_THEME.get_or_init(Theme::dark),
+        false => LIGHT.get_or_init(Theme::light),
+    }
+}
+
+/// Follow the desktop's theme; true when it flipped. An unknown theme keeps
+/// the light chrome.
+fn follow_system_theme() -> bool {
+    let dark = sdl3::video::system_theme() == sdl3::video::SystemTheme::Dark;
+    DARK.swap(dark, Ordering::Relaxed) != dark
 }
 
 /// Set what has to be decided before SDL's video subsystem starts.
@@ -263,6 +278,7 @@ struct Chrome {
     strip_top: f32,
     hover: Option<(Row, Part)>,
     pressed: Option<(Row, Part)>,
+    dark: bool,
     generation: u64,
 }
 
@@ -344,6 +360,10 @@ fn models(config: Config, facts: &Facts, window: Id) -> (Option<Bar>, Option<Bar
 /// composed.
 pub(crate) fn pump() {
     let config = config();
+    if follow_system_theme() {
+        repaint_menus();
+    }
+    let dark = DARK.load(Ordering::Relaxed);
     let mut live = Vec::new();
     for window in crate::window::all() {
         let Some(facts) = crate::window::facts(window) else {
@@ -382,6 +402,7 @@ pub(crate) fn pump() {
             }
             let unchanged = existing.is_some_and(|c| {
                 c.sdl == sdl as usize
+                    && c.dark == dark
                     && c.size == size
                     && c.titlebar == titlebar
                     && c.strip == strip
@@ -432,6 +453,7 @@ pub(crate) fn pump() {
                     strip_top: titlebar_height,
                     hover,
                     pressed,
+                    dark,
                     generation,
                 },
             );
@@ -911,6 +933,15 @@ fn paint_level(level: &Level) {
         level.panel.paint(&mut canvas, &level.layout, theme);
         dump_panel(level.popup_id, surface, pixels);
         true
+    });
+}
+
+/// Repaint the open menus, after the theme changed under them.
+fn repaint_menus() {
+    TRACKING.with(|tracking| {
+        if let Some(tracking) = tracking.borrow().as_ref() {
+            tracking.levels.iter().for_each(paint_level);
+        }
     });
 }
 
