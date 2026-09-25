@@ -1,15 +1,3 @@
-//! `NSView`.
-//!
-//! A view here has a frame, a window and a subview list, and draws nothing. That
-//! is not a stub: the one view Deltarune actually renders through is its own
-//! `YYGLView`, whose drawing is `NSOpenGLContext` and `gl*` calls the guest
-//! makes itself. What AppKit has to supply is where the view is and how big its
-//! backing store is, because those are what the guest sizes its viewport from.
-//!
-//! `-convertRectToBacking:` is the reason `-frame` alone is not enough. On a
-//! Retina display a 640x480 view has a 1280x960 framebuffer, and a guest that
-//! set its viewport from the frame would draw into a quarter of the window.
-
 use std::ffi::c_void;
 
 use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
@@ -462,7 +450,6 @@ pub unsafe fn describe(view: Id, depth: usize, out: &mut String) {
 ///
 /// `view` must be null or an object this runtime allocated.
 pub unsafe fn hit_test(view: Id, point: NSPoint) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe { hit(view, point, 0) }
 }
 
@@ -477,7 +464,6 @@ pub unsafe fn pointer_in(view: Id) -> Option<NSPoint> {
     if !is_view(view) {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let window = unsafe { window_of(view) };
     if window.is_null() {
         return None;
@@ -1316,7 +1302,6 @@ unsafe extern "C" fn tracking_areas(receiver: Id, sel: Sel) -> Id {
         // SAFETY: `-addTrackingArea:` is `void (id, SEL, id)`, and adding nil
         // is what makes the empty list without adding anything to it.
         unsafe { add_tracking_area(receiver, sel, std::ptr::null_mut()) };
-        // SAFETY: as above.
         unsafe { remove_tracking_area(receiver, sel, std::ptr::null_mut()) };
     }
     view.tracking_areas
@@ -1892,7 +1877,6 @@ mod tests {
 
         // SAFETY: `-removeFromSuperview` is `void (id, SEL)`.
         unsafe { remove_from_superview(child, objc::sel::get("removeFromSuperview")) };
-        // SAFETY: as above.
         let array =
             unsafe { corefoundation::collections::array(list as *const c_void) }.expect("an array");
         assert!(array.values.is_empty());
@@ -1910,7 +1894,6 @@ mod tests {
             objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
         // SAFETY: both are objects this runtime allocated.
         unsafe { set_window(parent, window) };
-        // SAFETY: as above.
         assert_eq!(unsafe { window_of(child) }, window);
     }
 
@@ -1965,7 +1948,6 @@ mod tests {
         // A view the size of the window is, which is what puts a game's one
         // layer on the direct path.
         let whole = view(rect(0.0, 0.0, 400.0, f64::from(height)));
-        // SAFETY: as above.
         unsafe { add_subview(content, objc::sel::get("addSubview:"), whole) };
         // SAFETY: a view of this crate's.
         let frame = unsafe { presentation_frame(whole) }.expect("the view is in a window");

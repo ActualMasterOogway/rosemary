@@ -1,10 +1,3 @@
-//! The current affine transform used by immediate AppKit drawing.
-//!
-//! Focused-image drawing currently consumes device-space rectangles directly,
-//! so installing a transform is intentionally a no-op. The object and selectors
-//! still need to exist: older games build a transform around text rendering even
-//! when the transform is the identity.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

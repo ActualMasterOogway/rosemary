@@ -1,28 +1,3 @@
-//! What a window shows of the views that draw on the CPU.
-//!
-//! AppKit gives every view that draws a backing of its own - since macOS
-//! 10.14 every window is layer-backed, so each view is a layer - and the
-//! window server composites them back to front, subviews over their
-//! superviews. `-drawRect:` draws into the view's with its focus locked. Qt's
-//! raster widgets reach the screen exactly this way:
-//! `QNSWindowBackingStore::flush` locks focus on its view and draws the widget
-//! image with `-[NSImage drawInRect:fromRect:...]`.
-//!
-//! One store per window instead would be wrong in a way that shows: Qt gives
-//! every native child widget a view of its own and flushes each separately,
-//! a parent's flush covering its children's rectangles, so whichever flushed
-//! last would win and the window would flicker between them.
-//!
-//! Here a store is premultiplied B, G, R, A pixels, top row first: one per
-//! view that has drawn, at the view's pixel size, and one per window which
-//! the views are composited into. Presenting a window's goes through
-//! [`set_presenter`] when something has claimed the window's surface - Metal
-//! composites it under its layers, as the window server would - and through
-//! SDL's window surface otherwise.
-//!
-//! FIXME (ACCURACY): drawing is scaled nearest-neighbour and a view's bounds
-//! origin is taken to be zero.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -894,7 +869,6 @@ fn compose(window: sdl3::Window, store: &Store) -> Option<Store> {
         if !crate::window::is_shown(shown) || crate::view::is_hidden_or_has_hidden_ancestor(view) {
             continue;
         }
-        // SAFETY: as above.
         let Some(frame) = (unsafe { crate::view::presentation_frame(view) }) else {
             continue;
         };

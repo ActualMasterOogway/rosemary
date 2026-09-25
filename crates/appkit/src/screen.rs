@@ -1,10 +1,3 @@
-//! `NSScreen`, over SDL's displays.
-//!
-//! A screen object is one display id and nothing else: everything it answers is
-//! asked of SDL when it is asked, because a display can be resized, rearranged
-//! or unplugged between two questions and a cached rectangle would then be a
-//! rectangle for a screen that no longer has it.
-
 use std::ffi::c_void;
 
 use corefoundation::base::CFTypeRef;
@@ -653,7 +646,6 @@ pub unsafe extern "C" fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> CFTyp
 /// `uuid` is null or an object this runtime allocated.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGDisplayGetDisplayIDFromUUID(uuid: CFTypeRef) -> u32 {
-    // SAFETY: the caller's obligation.
     let Some(bytes) = (unsafe { corefoundation::uuid::bytes_of(uuid) }) else {
         return 0;
     };
@@ -766,7 +758,6 @@ pub unsafe fn display_id(screen: Id) -> Option<u32> {
     if screen.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let is_screen = unsafe { objc::object::class_of(screen) }
         .is_some_and(|c| objc::class::lookup(c"NSScreen").is_some_and(|k| std::ptr::eq(c, k)));
     is_screen.then(|| display_of(screen))

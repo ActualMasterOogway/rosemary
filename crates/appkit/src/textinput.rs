@@ -1,22 +1,3 @@
-//! Text Input Services: what a program asks about the keyboard layout.
-//!
-//! Carbon rather than AppKit, but it is the keyboard, so it lives beside
-//! [`crate::keymap`]. A program reaches it to be told when the user switches
-//! input source, to describe the source it has, or to get the `'uchr'` layout
-//! resource and translate key codes itself through [`UCKeyTranslate`].
-//!
-//! The resource is [`crate::uchr`]'s, and it is a real one: a guest reads the
-//! tables as readily as it calls back in, so an opaque stand-in is a "there is a
-//! layout" branch with nothing in it - which is measurably worse than the null
-//! this module used to return. What is handed out describes US ANSI, the layout
-//! [`crate::keymap`] already assumes, so the two cannot disagree about what a
-//! key types.
-//!
-//! One source is reported, and it is a keyboard layout rather than an input
-//! method: this host does no composition of its own, so an input mode, an
-//! override layout and a marked-text session all have no answer here and are
-//! not implemented rather than answered emptily.
-
 #![expect(non_snake_case, reason = "the C spelling is the interface")]
 
 use corefoundation::base::CFTypeRef;
@@ -128,7 +109,7 @@ pub unsafe extern "C" fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -
 /// asked for Japanese and got a US layout would type mojibake rather than
 /// falling back.
 pub unsafe extern "C" fn TISCopyInputSourceForLanguage(language: CFTypeRef) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null or a `CFStringRef`.
+    // SAFETY: null or a `CFStringRef`.
     let Some(language) = (unsafe { text_of(language) }) else {
         return std::ptr::null();
     };
@@ -148,7 +129,7 @@ pub unsafe extern "C" fn TISCreateInputSourceList(
     properties: CFTypeRef,
     _include_all_installed: u8,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null or a `CFDictionaryRef`.
+    // SAFETY: null or a `CFDictionaryRef`.
     let matches = unsafe { matches_filter(properties) };
     source_list(matches)
 }
@@ -213,7 +194,7 @@ pub unsafe extern "C" fn TISGetInputSourceProperty(
     _source: CFTypeRef,
     key: CFTypeRef,
 ) -> CFTypeRef {
-    // SAFETY: the caller's obligation - null or a `CFStringRef`.
+    // SAFETY: null or a `CFStringRef`.
     match unsafe { text_of(key) } {
         Some(key) => property(&key),
         None => std::ptr::null(),
@@ -226,7 +207,6 @@ pub unsafe extern "C" fn TISGetInputSourceProperty(
 ///
 /// `value` is null or an object this runtime allocated.
 unsafe fn text_of(value: CFTypeRef) -> Option<String> {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::string::as_string(value) }
         .map(|s| String::from_utf8_lossy(&s.utf8()).into_owned())
 }
@@ -379,7 +359,7 @@ pub unsafe extern "C" fn UCKeyTranslate(
         false => unsafe { *dead_key_state },
         true => 0,
     };
-    // SAFETY: the caller's obligation - the layout it was handed.
+    // SAFETY: the layout it was handed.
     let chars = unsafe {
         crate::uchr::translate(
             layout.cast(),
@@ -402,7 +382,6 @@ pub unsafe extern "C" fn UCKeyTranslate(
         }
     };
     if !dead_key_state.is_null() {
-        // SAFETY: as above.
         unsafe { *dead_key_state = state };
     }
     if !actual_length.is_null() {
@@ -644,7 +623,6 @@ mod tests {
             count(unsafe { TISCreateInputSourceList(std::ptr::null(), 0) }),
             1
         );
-        // SAFETY: takes no argument.
         assert_eq!(count(unsafe { TISCreateASCIICapableInputSourceList() }), 1);
 
         let matching = dictionary(

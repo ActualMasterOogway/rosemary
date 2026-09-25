@@ -254,7 +254,6 @@ unsafe fn open_launch_urls(receiver: Id, delegate: Id) {
         unsafe { corefoundation::api::CFRelease(*object) };
     }
     let sel = objc::sel::get("application:openURLs:");
-    // SAFETY: the caller's obligation.
     let method = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel));
     if let Some(method) = method {
         // SAFETY: `-application:openURLs:` is `void (id, SEL, NSApplication *,
@@ -318,9 +317,7 @@ unsafe fn turn(receiver: Id, mode: &str) {
     // through their `-sendEvent:` override. Dispatch through the receiver rather
     // than calling this class's implementation directly so a principal
     // `NSApplication` subclass sees the event.
-    // SAFETY: the caller's obligation.
     unsafe { dispatch_posted_events(receiver) };
-    // SAFETY: the caller's obligation.
     unsafe { service_run_loop(mode, 0.002) };
 }
 
@@ -541,7 +538,6 @@ unsafe extern "C" fn menu_for(receiver: Id, sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn set_menu_for(receiver: Id, sel: Sel, menu: Id) {
-    // SAFETY: as above.
     let slot = unsafe { menu_slot(receiver, sel) };
     objc::arc::release(*slot);
     *slot = objc::arc::retain(menu);
@@ -716,7 +712,6 @@ unsafe extern "C" fn run_modal_for_window(receiver: Id, sel: Sel, window: Id) ->
             break;
         }
     }
-    // SAFETY: as above.
     unsafe { end_modal_session(receiver, sel, window) };
     modal_response::STOP
 }
@@ -737,18 +732,15 @@ unsafe fn send_if_implemented(target: Id, selector: &str, argument: Id) {
         return;
     }
     let sel = objc::sel::get(selector);
-    // SAFETY: the caller's obligation.
     let Some(method) = (unsafe { objc::object::class_of(target) }).and_then(|c| c.method(sel))
     else {
         return;
     };
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(Id, Sel, Id) = unsafe {
         std::mem::transmute::<*const c_void, unsafe extern "C" fn(Id, Sel, Id)>(
             method.implementation(),
         )
     };
-    // SAFETY: as above.
     unsafe { f(target, sel, argument) };
 }
 
@@ -917,7 +909,6 @@ mod tests {
         assert_eq!(class.name_str(), "R3TestApplicationSubclass");
 
         // The same object the second time, whatever it is sent to.
-        // SAFETY: as above.
         let again = unsafe {
             shared_application(
                 objc::class::ptr(objc::class::lookup(c"NSApplication").expect("NSApplication"))

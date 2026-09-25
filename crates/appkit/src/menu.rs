@@ -1,17 +1,3 @@
-//! `NSMenu` and `NSMenuItem`.
-//!
-//! Bookkeeping and nothing else: SDL has no menu bar, so nothing here is drawn
-//! and no item is ever clicked. What they still have to do is hold what a
-//! program puts in them, because a program builds its menus at launch and then
-//! reads them back - `-itemWithTag:`, `-setState:` on the item it just found,
-//! `[[NSApp mainMenu] itemAtIndex:0]` - long before anybody could have clicked
-//! one.
-//!
-//! An item's target and action are kept and never fired. That is the honest
-//! shape while there are no events: firing would need the responder chain, and a
-//! program that sets an action expects it to happen when the user picks the item
-//! rather than at the moment it is set.
-
 use std::ffi::c_void;
 
 use objc::object::Id;
@@ -569,7 +555,6 @@ mod tests {
             assert_eq!(is_separator_item(plain, sel), 0);
         }
         // And two separators are two items, so each can sit at its own index.
-        // SAFETY: as above.
         let second = unsafe { separator_item(class, objc::sel::get("separatorItem")) };
         assert_ne!(separator, second);
     }

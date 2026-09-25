@@ -1,21 +1,3 @@
-//! Turning an archived AppKit object into a live one.
-//!
-//! This is what `-initWithCoder:` would be if the objects in this crate adopted
-//! `NSCoding`. They do not, deliberately: a coder is a general mechanism for
-//! reading a class this runtime has never seen, and what is actually needed is
-//! the four archived classes a nib is made of. A general decoder would have to
-//! answer for all of them and would answer wrongly for the ones it did not know.
-//!
-//! So the shape is a match on the class name the archive recorded, and a name
-//! that is not in it stays [`crate::nib`]'s placeholder - an object with no
-//! methods that reports itself the first time a program uses it.
-//!
-//! Interface Builder writes geometry as *text*: `NSWindowRect` is the string
-//! `{{300, 300}, {1000, 665}}` and `NSFrameSize` is `{800, 600}`. Parsing that
-//! is most of this module, and a rectangle read wrongly is a window in the wrong
-//! place rather than an error, so [`rect`] and [`size`] return `None` rather
-//! than a default on anything they do not understand.
-
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 use foundation::unarchiver::{Archive, Uid};
 use objc::object::Id;
@@ -83,7 +65,6 @@ unsafe fn send_init_window(object: Id, rect: NSRect, style: usize) -> Id {
 /// The selector must name a method taking one `NSRect` and returning an object.
 unsafe fn send_init_frame(object: Id, frame: NSRect) -> Id {
     let sel = objc::sel::get("initWithFrame:");
-    // SAFETY: the caller's obligation.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
             std::mem::transmute(objc::msg::entry());
@@ -95,7 +76,6 @@ unsafe fn send_init_frame(object: Id, frame: NSRect) -> Id {
 ///
 /// The selector must name a method taking one object and returning nothing.
 unsafe fn send_object(receiver: Id, selector: &str, argument: Id) {
-    // SAFETY: the caller's obligation.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
         f(receiver, objc::sel::get(selector), argument);
@@ -107,7 +87,6 @@ unsafe fn send_object(receiver: Id, selector: &str, argument: Id) {
 /// The selector must name a method taking one `NSUInteger` and returning
 /// nothing.
 unsafe fn send_integer(receiver: Id, selector: &str, value: usize) {
-    // SAFETY: the caller's obligation.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel, usize) = std::mem::transmute(objc::msg::entry());
         f(receiver, objc::sel::get(selector), value);
@@ -118,7 +97,6 @@ unsafe fn send_integer(receiver: Id, selector: &str, value: usize) {
 ///
 /// The selector must name a method taking one `BOOL` and returning nothing.
 unsafe fn send_flag(receiver: Id, selector: &str, value: bool) {
-    // SAFETY: the caller's obligation.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
         f(receiver, objc::sel::get(selector), u8::from(value));

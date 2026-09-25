@@ -1,19 +1,3 @@
-//! `NSImage`, as far as a runtime with no raster pipeline can take one.
-//!
-//! An image here holds the bytes it was made from and can say how big they are.
-//! It cannot draw, composite or re-encode them, because doing any of that means
-//! decoding - and a decoder for every format `NSImage` accepts is a library, not
-//! a module.
-//!
-//! The split is where it is because *size* is answerable exactly from a
-//! container header and everything else is not. A program that only measures an
-//! image gets the right answer; one that asks for pixels is refused by name,
-//! with the format it handed in, which is the queue for whoever adds a decoder.
-//!
-//! Deltarune is why this exists at all, and its `splash.png` is why the header
-//! sniffing is not just PNG: the file is a Windows BMP under a `.png` name. The
-//! runner's own PNG reader says "Not a PNG" - correctly - and falls back here.
-
 use std::ffi::c_void;
 use std::{cell::RefCell, ptr};
 
@@ -533,7 +517,6 @@ unsafe extern "C" fn init_with_cg_image(
     image.cg_image = unsafe { corefoundation::api::CFRetain(cg_image) };
     image.size = match size.width > 0.0 && size.height > 0.0 {
         true => size,
-        // SAFETY: as above.
         false => unsafe {
             NSSize {
                 width: crate::graphics::CGImageGetWidth(cg_image) as f64,

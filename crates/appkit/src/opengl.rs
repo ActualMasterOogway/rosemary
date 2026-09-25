@@ -1,7 +1,5 @@
 #![allow(non_snake_case)]
 
-//! `NSOpenGLPixelFormat` and `NSOpenGLContext`, over SDL's GL.
-
 use std::ffi::c_void;
 
 use foundation::geometry::NSRect;

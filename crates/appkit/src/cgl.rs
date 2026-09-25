@@ -1,17 +1,5 @@
 #![allow(non_snake_case)]
 
-//! CGL's renderer information, which is how a Mac program finds the GPUs.
-//!
-//! `CGLQueryRendererInfo` hands back an opaque object, and every question about
-//! a renderer is a property read off it. A program walks the list, skips the
-//! renderers that are neither accelerated nor online, and builds its own device
-//! description from what is left - so an empty list is a program that reports no
-//! graphics hardware, and it stops there.
-//!
-//! There is one renderer here, because there is one context: the window and its
-//! GL come from SDL, which has already chosen a device by the time a guest can
-//! draw. Reporting two would be describing a choice this tree does not offer.
-
 use std::ffi::c_void;
 
 /// `CGLError`. Only the two this module can produce are named.
@@ -168,7 +156,6 @@ pub unsafe extern "C" fn CGLDescribeRenderer(
     if value.is_null() {
         return K_CGL_BAD_VALUE;
     }
-    // SAFETY: the caller's obligation.
     let Some(info) = (unsafe { info(rend) }) else {
         return K_CGL_BAD_RENDERER_INFO;
     };
@@ -268,7 +255,6 @@ fn memory_bytes() -> Option<i32> {
 ///
 /// `rend` is a pointer [`CGLQueryRendererInfo`] returned and not yet destroyed.
 pub unsafe extern "C" fn CGLDestroyRendererInfo(rend: *mut c_void) -> CGLError {
-    // SAFETY: the caller's obligation.
     if unsafe { info(rend) }.is_none() {
         return K_CGL_BAD_RENDERER_INFO;
     }
@@ -316,7 +302,6 @@ mod tests {
             assert_eq!(value, 1, "property {prop}");
         }
         let mut mask = 0;
-        // SAFETY: as above.
         unsafe { CGLDescribeRenderer(rend, 0, property::DISPLAY_MASK, &mut mask) };
         assert_eq!(mask, -1, "the mask the caller asked about");
         // SAFETY: an object nothing has destroyed yet.

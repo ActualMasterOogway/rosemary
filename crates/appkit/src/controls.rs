@@ -1,11 +1,3 @@
-//! The standard controls a program builds its own window from: `NSStackView`,
-//! `NSBox`, `NSProgressIndicator`, and the convenience constructors of
-//! `NSButton` and `NSTextField`.
-//!
-//! None of these draws, as no view here does. What they keep is the state a
-//! program reads back, and - for the stack view - where its arranged subviews
-//! go, since that is geometry a program's other views are tied to.
-
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 

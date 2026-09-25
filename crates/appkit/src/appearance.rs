@@ -1,9 +1,3 @@
-//! `NSAppearance`, fixed to the runtime's light Aqua appearance.
-//!
-//! The renderer and semantic colours in this runtime are light, so returning a
-//! matching appearance is more useful than a nil property: applications often
-//! inspect its name to select their colour assets.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use objc::object::Id;

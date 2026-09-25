@@ -1,15 +1,3 @@
-//! `NSResponder`'s contextual menu and its default event methods, which every
-//! responder inherits.
-//!
-//! `-menu` and `-setMenu:` are declared on `NSResponder`, so an application, a
-//! window and a view all answer them - Qt sets one on `NSApp` while building its
-//! menu bar, and on a view to give it a right-click menu.
-//!
-//! Kept beside the objects rather than in them, because `NSResponder` is declared
-//! abstract here: its subclasses have layouts of their own and there is no word in
-//! the base class to put a menu in. A side table is the one place a property
-//! shared by three unrelated layouts can live.
-
 use std::sync::Mutex;
 
 use objc::object::Id;
@@ -66,7 +54,6 @@ unsafe extern "C" fn set_menu(receiver: Id, _sel: Sel, value: Id) {
 pub(crate) unsafe fn forward(receiver: Id, sel: Sel, event: Id) {
     // SAFETY: null or an object this runtime allocated.
     let next = match unsafe { crate::view::superview_of(receiver) } {
-        // SAFETY: as above.
         next if next.is_null() => unsafe { crate::view::window_of(receiver) },
         next => next,
     };

@@ -1,11 +1,3 @@
-//! `NSColor`, as four components and nothing else.
-//!
-//! No colour space. Every colour a program in this tree has asked for is one of
-//! the named constants or an explicit RGBA, and both are already in the space
-//! the only consumer - `glClearColor`, through a window's background - wants. A
-//! `-colorUsingColorSpace:` that answered by returning `self` would be a
-//! conversion that silently did not happen, so there is not one.
-
 use std::ffi::c_void;
 
 use foundation::geometry::CGFloat;
@@ -31,7 +23,6 @@ pub const INSTANCE_SIZE: usize = size_of::<Color>();
 ///
 /// `color` must be null or an object this runtime allocated.
 pub unsafe fn components(color: Id) -> (f64, f64, f64, f64) {
-    // SAFETY: the caller's obligation.
     let is_color = unsafe { objc::object::class_of(color) }.is_some_and(|c| {
         objc::class::lookup(c"NSColor").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
     });
@@ -290,7 +281,6 @@ unsafe extern "C" fn color_space_name(_receiver: Id, _sel: Sel) -> Id {
 ///
 /// `name` is an `NSString` or nil.
 unsafe extern "C" fn color_using_color_space_name(receiver: Id, _sel: Sel, name: Id) -> Id {
-    // SAFETY: the caller's obligation.
     let name = unsafe { foundation::string::bytes(name) };
     // A null or empty name means "the most appropriate space", which is this one.
     if name.is_empty() {

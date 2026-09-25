@@ -1,12 +1,3 @@
-//! What the desktop is told this program is.
-//!
-//! None of it is guessable from the process: the executable is `rosetta3`, and
-//! the only place the guest's own identity is written down is its `Info.plist`.
-//! SDL passes what it is given here to the audio server - so a volume mixer
-//! names the game rather than the runner - and to the compositor, which matches
-//! the identifier against a desktop entry for window grouping and for the icon
-//! shown outside the window.
-
 use std::ffi::CString;
 use std::path::Path;
 use std::sync::OnceLock;

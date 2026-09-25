@@ -1,11 +1,3 @@
-//! `NSAnimationContext`, whose animations finish the moment they start.
-//!
-//! Nothing here draws frames in between, so the honest animation is the one
-//! whose end state is applied at once: the changes block runs, and then the
-//! completion handler, both before `+runAnimationGroup:completionHandler:`
-//! returns. A program that waits for the handler to continue its own work - the
-//! usual reason to pass one - then continues.
-
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
@@ -28,7 +20,6 @@ unsafe fn invoke(block: Id) -> Option<*const c_void> {
     if block.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let invoke = unsafe { *((block as *const u8).add(BLOCK_INVOKE_OFFSET) as *const usize) };
     (invoke != 0).then_some(invoke as *const c_void)
 }
@@ -50,7 +41,6 @@ unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn run_animation_group(_class: Id, _sel: Sel, changes: Id, completion: Id) {
     // SAFETY: `void (^)(NSAnimationContext *)`, as the selector declares.
     if let Some(f) = unsafe { invoke(changes) } {
-        // SAFETY: as above.
         unsafe {
             let f: unsafe extern "C" fn(Id, Id) = std::mem::transmute(f);
             f(changes, current());
@@ -58,7 +48,6 @@ unsafe extern "C" fn run_animation_group(_class: Id, _sel: Sel, changes: Id, com
     }
     // SAFETY: `void (^)(void)`, as the selector declares.
     if let Some(f) = unsafe { invoke(completion) } {
-        // SAFETY: as above.
         unsafe {
             let f: unsafe extern "C" fn(Id) = std::mem::transmute(f);
             f(completion);

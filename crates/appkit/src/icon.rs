@@ -1,11 +1,3 @@
-//! The application icon: the bundle's `.icns`, given to every window.
-//!
-//! The process is `rosetta3` and its own bundle is not the guest's, so nothing
-//! the window server does on its own names the guest's icon - under
-//! `ROSETTA3_OBJC=builtin` there is not even a re-exec into a mirrored `.app`
-//! for it to read. The icon therefore has to be handed over per window, which
-//! on macOS SDL turns into the application icon and elsewhere into the window's.
-
 use std::sync::{Mutex, OnceLock};
 
 use crate::raster::Bitmap;

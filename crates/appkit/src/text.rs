@@ -1,21 +1,3 @@
-//! `NSText` and `NSTextView`, as far as being *configured* goes.
-//!
-//! There is no text system here: nothing lays out glyphs, nothing draws a
-//! caret, and no key event reaches an editor. What a program still does before
-//! any of that could matter is configure one - a Cocoa program's input-method
-//! handler is an `NSTextView` subclass, and it sets its flags in its own
-//! `-init` long before a window exists.
-//!
-//! So each flag is *stored and read back* rather than ignored. That is the
-//! difference between this and the ignored setters on `NSView`: a view that
-//! drops `-setNeedsDisplay:` has answered the question, and a text view that
-//! drops `-setFieldEditor:` and then answers `-isFieldEditor` with NO has told
-//! its caller the opposite of what it was asked.
-//!
-//! The flags live in a table beside the objects rather than in an ivar, because
-//! the class a guest actually instantiates is its **own** subclass and its ivar
-//! offsets were fixed against Apple's `NSTextView`, not this one.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -1257,7 +1239,6 @@ mod tests {
     #[test]
     fn editable_and_selectable_move_together() {
         let view = text_view();
-        // SAFETY: as above.
         unsafe {
             let sel = objc::sel::get("setEditable:");
             set_editable(view, sel, 1);

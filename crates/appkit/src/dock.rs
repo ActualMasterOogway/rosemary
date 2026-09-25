@@ -1,10 +1,3 @@
-//! `NSDockTile`: the application's Dock icon, which this host does not have.
-//!
-//! A program reaches it to put a badge on the icon or draw its own content into
-//! it. There is no Dock to show either in, so the tile keeps what it is given
-//! and answers it back - a program that sets a badge and reads it to decide
-//! whether to clear it must find its own value - and `-display` draws nothing.
-
 use std::ffi::c_void;
 
 use objc::object::Id;

@@ -1,15 +1,3 @@
-//! `NSEvent`, as the fields a responder method reads out of one.
-//!
-//! Not a queue. AppKit's `NSEvent` is also the thing `-nextEventMatchingMask:`
-//! hands back, and this one is only ever built by [`crate::event`] on its way to
-//! `-keyDown:` or `-mouseDown:` - because that is how a program of this shape
-//! receives input, and a queue nothing dequeues from would be a second, silent
-//! path for the same events.
-//!
-//! `-locationInWindow` is in the window's coordinates, which is AppKit's
-//! bottom-left origin and not SDL's top-left one. The conversion is
-//! [`crate::geometry`]'s, in the one place it belongs.
-
 use std::ffi::c_void;
 
 use foundation::geometry::{CGFloat, NSPoint};
@@ -72,7 +60,6 @@ pub const INSTANCE_SIZE: usize = size_of::<Event>();
 ///
 /// `event` must be null or an object this runtime allocated.
 unsafe fn event_of<'a>(event: Id) -> Option<&'a Event> {
-    // SAFETY: the caller's obligation.
     let is_event = unsafe { objc::object::class_of(event) }.is_some_and(|c| {
         objc::class::lookup(c"NSEvent").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
     });
@@ -278,7 +265,6 @@ unsafe extern "C" fn user_data(receiver: Id, _sel: Sel) -> *mut c_void {
 
 /// Where the event happened, in its window's coordinates.
 pub fn location_of(event: Id) -> NSPoint {
-    // SAFETY: as above.
     unsafe { event_of(event) }.map_or(NSPoint::default(), |e| e.location)
 }
 

@@ -1,6 +1,3 @@
-//! CoreGraphics color spaces, data providers and images. Contexts are in
-//! [`crate::cgcontext`].
-
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;

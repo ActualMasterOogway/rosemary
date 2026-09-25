@@ -1,10 +1,3 @@
-//! `NSPasteboard`, backed by process-local named boards.
-//!
-//! A pasteboard is a contract between objects in one process. Keeping its
-//! contents here, rather than in an `NSPasteboard` instance's ivars, gives the
-//! general and named boards their documented identity: asking for a board by
-//! name twice returns the same board and therefore the same contents.
-
 use std::sync::{Mutex, OnceLock};
 
 use corefoundation::api;

@@ -1,10 +1,3 @@
-//! Paragraph-style objects used by attributed AppKit text.
-//!
-//! Text layout currently keeps only the resulting string dimensions, so these
-//! properties have no raster effect yet. The objects still preserve Cocoa's
-//! construction and mutation flow instead of turning a variadic attributes
-//! dictionary into an early nil terminator.
-
 use std::sync::OnceLock;
 
 use objc::object::Id;

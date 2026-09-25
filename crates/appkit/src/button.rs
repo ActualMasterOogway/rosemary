@@ -1,5 +1,3 @@
-//! SDL mouse buttons as AppKit's.
-
 use crate::nsevent::kind;
 use sdl3::mouse;
 

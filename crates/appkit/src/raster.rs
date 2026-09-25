@@ -1,5 +1,3 @@
-//! Decoding the containers `NSImage` accepts, and the TIFF it hands back.
-
 /// An image in memory: RGBA, top row first, `width * height * 4` bytes.
 #[derive(Clone, PartialEq)]
 pub struct Bitmap {

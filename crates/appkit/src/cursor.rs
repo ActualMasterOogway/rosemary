@@ -1,18 +1,3 @@
-//! `NSCursor` and `NSTrackingArea`.
-//!
-//! Both are here because both are about the pointer, and both are almost all
-//! bookkeeping. SDL has one cursor for the process and no notion of a tracking
-//! region, so what a program can actually change is whether the pointer is
-//! visible and, for a cursor it made from an image of its own, what it looks
-//! like. A named cursor has no shape for SDL to switch to and shows the
-//! desktop's own.
-//!
-//! A tracking area therefore remembers what it was made with, and the only
-//! delivery from one is `-cursorUpdate:` for `NSTrackingCursorUpdate`. It has to
-//! exist as an object, because a view holds one and compares it against the one
-//! it removes; making it a placeholder instead would refuse
-//! `-removeTrackingArea:` on a program that had already got its area added.
-
 use std::ffi::c_void;
 
 use foundation::geometry::{NSPoint, NSRect, NSSize};
@@ -248,12 +233,10 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
 }
 
 unsafe extern "C" fn image(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: as above.
     unsafe { (*(receiver as *const Cursor)).image }
 }
 
 unsafe extern "C" fn hot_spot(receiver: Id, _sel: Sel) -> NSPoint {
-    // SAFETY: as above.
     unsafe { (*(receiver as *const Cursor)).hot_spot }
 }
 
@@ -348,13 +331,11 @@ pub fn discard_rects(view: Id) {
 pub unsafe fn reset_rects(view: Id) {
     discard_rects(view);
     let sel = objc::sel::get("resetCursorRects");
-    // SAFETY: the caller's obligation.
     let method = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel));
     if tracing() {
         // The window as well as the method: a rectangle on a view that is in no
         // window can never hold the pointer, and the two failures look the same
         // from the outside.
-        // SAFETY: the caller's obligation.
         let window = unsafe { crate::view::window_of(view) };
         eprintln!(
             "rosetta3: appkit: -resetCursorRects to {view:p} (in window {window:p}): {}",
@@ -380,12 +361,10 @@ pub unsafe fn reset_rects(view: Id) {
 ///
 /// `view` must be null or an object this runtime allocated.
 pub unsafe fn reset_rects_in_tree(view: Id) {
-    // SAFETY: the caller's obligation.
     for child in unsafe { crate::view::children(view) } {
         // SAFETY: an object this runtime allocated.
         unsafe { reset_rects_in_tree(child) };
     }
-    // SAFETY: as above.
     unsafe { reset_rects(view) };
 }
 
@@ -393,7 +372,6 @@ pub unsafe fn reset_rects_in_tree(view: Id) {
 ///
 /// `view` must be null or an object this runtime allocated.
 pub unsafe fn discard_rects_in_tree(view: Id) {
-    // SAFETY: the caller's obligation.
     for child in unsafe { crate::view::children(view) } {
         // SAFETY: an object this runtime allocated.
         unsafe { discard_rects_in_tree(child) };
@@ -523,9 +501,7 @@ unsafe fn installed_in(view: Id, key: bool, first: Id, out: &mut Vec<Installed>)
         return;
     }
     let hidden = crate::view::is_hidden_or_has_hidden_ancestor(view);
-    // SAFETY: the caller's obligation.
     let point = unsafe { crate::view::pointer_in(view) };
-    // SAFETY: as above.
     for area in unsafe { crate::view::tracking_areas_of(view) } {
         let Some(tracked) = area_of(area) else {
             continue;
@@ -540,7 +516,6 @@ unsafe fn installed_in(view: Id, key: bool, first: Id, out: &mut Vec<Installed>)
             holds: !hidden && point.is_some_and(|p| crate::view::holds(view, rect, p)),
         });
     }
-    // SAFETY: as above.
     for child in unsafe { crate::view::children(view) } {
         // SAFETY: an object this runtime allocated.
         unsafe { installed_in(child, key, first, out) };
@@ -897,17 +872,14 @@ unsafe extern "C" fn set_on_mouse_entered(receiver: Id, _sel: Sel, on: u8) {
 }
 
 unsafe extern "C" fn is_set_on_mouse_entered(receiver: Id, _sel: Sel) -> u8 {
-    // SAFETY: as above.
     (unsafe { (*(receiver as *const Cursor)).on_mouse_entered } != 0) as u8
 }
 
 unsafe extern "C" fn set_on_mouse_exited(receiver: Id, _sel: Sel, on: u8) {
-    // SAFETY: as above.
     unsafe { &mut *(receiver as *mut Cursor) }.on_mouse_exited = (on != 0) as usize;
 }
 
 unsafe extern "C" fn is_set_on_mouse_exited(receiver: Id, _sel: Sel) -> u8 {
-    // SAFETY: as above.
     (unsafe { (*(receiver as *const Cursor)).on_mouse_exited } != 0) as u8
 }
 
@@ -1016,11 +988,9 @@ mod tests {
             unhide(class, objc::sel::get("unhide"));
         }
         assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 1);
-        // SAFETY: as above.
         unsafe { unhide(class, objc::sel::get("unhide")) };
         assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 0);
         // And a stray unhide does not go negative.
-        // SAFETY: as above.
         unsafe { unhide(class, objc::sel::get("unhide")) };
         assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 0);
 
@@ -1205,9 +1175,7 @@ mod tests {
         let class = objc::class::ptr(objc::class::lookup(c"NSCursor").expect("NSCursor")) as Id;
         // SAFETY: `+namedCursor` is `id (Class, SEL)`.
         let arrow = unsafe { named_cursor(class, objc::sel::get("arrowCursor")) };
-        // SAFETY: as above.
         let again = unsafe { named_cursor(class, objc::sel::get("arrowCursor")) };
-        // SAFETY: as above.
         let beam = unsafe { named_cursor(class, objc::sel::get("IBeamCursor")) };
         assert_eq!(arrow, again);
         assert_ne!(arrow, beam);

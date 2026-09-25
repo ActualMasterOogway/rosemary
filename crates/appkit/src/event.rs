@@ -746,10 +746,8 @@ fn chain(start: Id, sel: objc::sel::Sel) -> Option<(Id, &'static objc::class::Me
                 true => fallback = fallback.or(Some((responder, method))),
             }
         }
-        // SAFETY: as above.
         let next = unsafe { crate::view::superview_of(responder) };
         responder = match next.is_null() {
-            // SAFETY: as above.
             true => unsafe { crate::view::window_of(responder) },
             false => next,
         };

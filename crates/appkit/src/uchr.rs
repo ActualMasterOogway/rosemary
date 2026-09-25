@@ -1,17 +1,3 @@
-//! The `'uchr'` keyboard layout resource, and the translation of one.
-//!
-//! A guest asking for `kTISPropertyUnicodeKeyLayoutData` reads the bytes itself
-//! as readily as it passes them back to `UCKeyTranslate`, so an opaque stand-in
-//! is worse than nothing: the guest takes the "there is a layout" branch and
-//! finds no tables in it. What is built here is therefore a real resource in the
-//! format `<CarbonCore/UnicodeUtilities.h>` describes - US ANSI, the layout
-//! [`crate::keymap`] already assumes, with the five dead keys the real one
-//! carries.
-//!
-//! [`translate`] parses whatever layout it is handed rather than answering from
-//! the tables below, so a guest that built its own resource, or copied this one,
-//! gets what its own bytes say.
-
 use std::sync::OnceLock;
 
 /// `kUCKeyLayoutHeaderFormat` and the per-section format tags.
@@ -598,10 +584,7 @@ impl Reader {
     }
 
     fn u32(&self, at: usize) -> Option<u32> {
-        (at + 4 <= self.limit).then(|| {
-            // SAFETY: as above.
-            unsafe { self.base.add(at).cast::<u32>().read_unaligned() }
-        })
+        (at + 4 <= self.limit).then(|| unsafe { self.base.add(at).cast::<u32>().read_unaligned() })
     }
 }
 

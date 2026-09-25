@@ -1,18 +1,3 @@
-//! `NSOpenPanel` and `NSSavePanel`, which are answered "cancelled".
-//!
-//! A file panel is AppKit's own browser: a window full of AppKit's controls,
-//! with a filesystem view and a sidebar. Nothing in this tree draws one - the
-//! same reason `crate::alert` gives - and there is no host dialog to stand in
-//! for it either, because the paths a guest sees are not this host's view of
-//! the filesystem.
-//!
-//! So the panel is reported on stderr, where whoever is running the program can
-//! see what it wanted to be handed, and `-runModal` answers
-//! `NSModalResponseCancel`. Cancelling is the one answer that is true: nobody
-//! chose a file. A program reads that as "the person changed their mind", which
-//! is a path it already has, rather than being handed a file that was never
-//! picked.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

@@ -1,5 +1,3 @@
-//! `NSWindow`, over an SDL window.
-
 use std::ffi::c_void;
 
 use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
@@ -353,7 +351,6 @@ pub unsafe fn sdl_window(object: Id) -> sdl3::Window {
     if object.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     let is_window = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
         objc::class::lookup(c"NSWindow").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
     });
@@ -796,7 +793,6 @@ unsafe extern "C" fn convert_rect_from_screen(receiver: Id, sel: Sel, rect: NSRe
 
 unsafe extern "C" fn convert_rect_to_screen(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
     NSRect {
-        // SAFETY: as above.
         origin: unsafe { convert_base_to_screen(receiver, sel, rect.origin) },
         size: rect.size,
     }
@@ -1480,7 +1476,6 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
         return 0;
     }
     window_of(receiver).first_responder = responder;
-    // SAFETY: as above.
     if unsafe { responder_agrees(responder, "becomeFirstResponder") } {
         update_text_input(receiver);
         return 1;
@@ -1530,7 +1525,6 @@ fn set_text_input_area(window: &Window) {
 ///
 /// `view` must be a live view from this runtime.
 pub(crate) unsafe fn refresh_text_input_area_for(view: Id) {
-    // SAFETY: the caller's obligation.
     let receiver = unsafe { crate::view::window_of(view) };
     if receiver.is_null() {
         return;
@@ -1558,7 +1552,6 @@ unsafe fn responder_agrees(responder: Id, selector: &str) -> bool {
         return true;
     }
     let sel = objc::sel::get(selector);
-    // SAFETY: the caller's guarantee.
     let Some(method) = unsafe { objc::object::class_of(responder) }.and_then(|c| c.method(sel))
     else {
         return true;
@@ -1715,7 +1708,6 @@ unsafe extern "C" fn reset_cursor_rects(receiver: Id, _sel: Sel) {
 }
 
 unsafe extern "C" fn discard_cursor_rects(receiver: Id, _sel: Sel) {
-    // SAFETY: as above.
     unsafe { crate::cursor::discard_rects_in_tree(content_view_of(receiver)) };
 }
 
@@ -2204,7 +2196,6 @@ mod tests {
         assert!(!draws_with_opengl(before));
 
         assert!(rebuild_for_opengl(object));
-        // SAFETY: as above.
         let after = unsafe { sdl_window(object) };
         assert_ne!(after, before, "the window was not rebuilt");
         assert_ne!(
@@ -2232,7 +2223,6 @@ mod tests {
 
         // Asking twice is not two rebuilds.
         assert!(rebuild_for_opengl(object));
-        // SAFETY: as above.
         assert_eq!(unsafe { sdl_window(object) }, after);
     }
 

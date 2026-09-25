@@ -1,20 +1,3 @@
-//! `ROSETTA3_DEBUG_INPUT`: a scripted pointer and keyboard, timed from launch.
-//!
-//! `ROSETTA3_DEBUG_KEY` exists because this compositor implements no
-//! virtual-keyboard protocol, and the pointer is worse off: `wtype` and
-//! `ydotool` cover neither, `SDL_WarpMouseInWindow` moves the real cursor only
-//! when the window has pointer focus, and nothing at all can press a button.
-//! So a click on a login field - the one thing between a run and an account -
-//! is an event no script outside this process can produce.
-//!
-//! A step goes through [`crate::event::deliver`], so hit testing, the responder
-//! chain and every accessor a guest reads off the event run exactly as they
-//! would for a person's hand. The one thing it cannot reproduce is the
-//! compositor's own cursor moving, so [`pointer`] records where the script put
-//! it and `+[NSEvent mouseLocation]` answers from there once a script is
-//! running - a guest that reads the pointer position instead of the event's
-//! would otherwise see the two disagree.
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;

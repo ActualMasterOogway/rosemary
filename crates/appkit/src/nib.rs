@@ -1,5 +1,3 @@
-//! Instantiating a nib.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 

@@ -1,9 +1,3 @@
-//! `NSAlert`, which is reported rather than shown.
-//!
-//! Alerts are written to stderr because this runtime cannot draw AppKit controls.
-//! `-runModal` returns the declining button, if present, to avoid implying consent
-//! to a dialog the user never saw.
-
 use std::ffi::{CString, c_void};
 
 use objc::object::Id;
@@ -202,7 +196,6 @@ unsafe fn text_of(string: Id) -> String {
     if string.is_null() {
         return String::new();
     }
-    // SAFETY: the caller's obligation.
     String::from_utf8_lossy(&unsafe { foundation::string::bytes(string) }).into_owned()
 }
 

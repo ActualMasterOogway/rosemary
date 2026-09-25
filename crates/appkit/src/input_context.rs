@@ -1,11 +1,3 @@
-//! `NSTextInputContext`: the object between a text view and the input method.
-//!
-//! This host does no composition of its own - text arrives committed, through
-//! [`crate::text::commit`] - so a context here has no marked text to discard and
-//! no candidate window to place. What it does have is an answer to "is anything
-//! taking text input right now", which is what `+currentInputContext` is asked
-//! for, and the one keyboard layout [`crate::textinput`] reports.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

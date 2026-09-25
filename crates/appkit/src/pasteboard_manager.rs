@@ -1,24 +1,3 @@
-//! The Carbon Pasteboard Manager, over the boards [`crate::pasteboard`] keeps.
-//!
-//! `PasteboardCreate` and `+[NSPasteboard generalPasteboard]` name the same
-//! clipboard on a Mac, so this is a second vocabulary rather than a second store:
-//! text copied through Cocoa pastes through here and the other way round, which
-//! is what a program mixing the two - Qt does, its clipboard is Pasteboard
-//! Manager and its text fields are Cocoa - depends on.
-//!
-//! Qt is why this exists at all: `QCocoaClipboard`'s constructor calls
-//! `PasteboardCreate`, so an unbound import here is not a clipboard that does
-//! nothing, it is a jump to address zero while the Cocoa platform plugin is
-//! still being built.
-//!
-//! **One item per board.** The Pasteboard Manager models a board as items that
-//! each carry flavours, and a board here is a flat set of flavours - so there is
-//! one item, its identifier is 1, and every flavour belongs to it. That is the
-//! whole of a clipboard, which never has more: `QMimeData` is one item with a
-//! flavour per format. What it does not reproduce is a *drag* of several files,
-//! where each file is an item of its own; such a drag arrives here as one item
-//! holding the last flavour written for each type.
-
 // The C spellings are the interface.
 #![allow(non_snake_case)]
 
@@ -93,7 +72,6 @@ fn board_of(handle: *const c_void) -> Option<&'static Pasteboard> {
 ///
 /// `value` is null or an object this runtime allocated.
 unsafe fn text(value: CFTypeRef) -> Option<Vec<u8>> {
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::string::as_string(value) }.map(|s| s.utf8())
 }
 
@@ -111,7 +89,6 @@ pub unsafe extern "C" fn PasteboardCreate(name: CFTypeRef, out: *mut *const c_vo
     if out.is_null() {
         return status::PARAM_ERR;
     }
-    // SAFETY: the caller's obligation.
     let spelled = unsafe { text(name) }.unwrap_or_default();
     let spelled = String::from_utf8_lossy(&spelled).into_owned();
     let board = match spelled.is_empty() || spelled == CLIPBOARD_NAME {
@@ -298,7 +275,6 @@ pub unsafe extern "C" fn PasteboardCopyItemFlavorData(
     if item != ITEM {
         return status::BAD_ITEM;
     }
-    // SAFETY: the caller's obligation.
     let Some(flavor) = (unsafe { text(flavor) }) else {
         return status::PARAM_ERR;
     };
@@ -329,7 +305,6 @@ pub unsafe extern "C" fn PasteboardPutItemFlavor(
     let Some(board) = board_of(handle) else {
         return status::PARAM_ERR;
     };
-    // SAFETY: the caller's obligation.
     let Some(flavor) = (unsafe { text(flavor) }) else {
         return status::PARAM_ERR;
     };
@@ -371,7 +346,6 @@ pub unsafe extern "C" fn PasteboardGetItemFlavorFlags(
     if item != ITEM {
         return status::BAD_ITEM;
     }
-    // SAFETY: the caller's obligation.
     let Some(flavor) = (unsafe { text(flavor) }) else {
         return status::PARAM_ERR;
     };
@@ -531,7 +505,6 @@ mod tests {
     #[test]
     fn an_absent_flavour_is_refused_rather_than_empty() {
         let pb = private_board("absent");
-        // SAFETY: as above.
         unsafe {
             assert_eq!(PasteboardClear(pb), status::NO_ERR);
             let mut out: CFTypeRef = std::ptr::null();
@@ -553,7 +526,6 @@ mod tests {
     #[test]
     fn synchronize_reports_a_change_once() {
         let pb = private_board("sync");
-        // SAFETY: as above.
         unsafe {
             PasteboardClear(pb);
             PasteboardSynchronize(pb);

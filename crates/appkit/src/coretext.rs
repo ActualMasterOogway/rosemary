@@ -1,13 +1,3 @@
-//! CoreText over real font files.
-//!
-//! A font descriptor, and a font, is an immutable attributes dictionary. A
-//! font is a descriptor that has been resolved to a face - it carries the
-//! face's file and index under private keys beside the public attributes - and
-//! a size. Everything a font is asked for is read from that face through
-//! [`crate::fonts`]: glyph ids from its `cmap`, metrics from its tables, and
-//! glyph images rasterized from its outlines. Qt shapes text with HarfBuzz
-//! over the tables `CTFontCopyTable` returns, so those must be the real ones.
-
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;

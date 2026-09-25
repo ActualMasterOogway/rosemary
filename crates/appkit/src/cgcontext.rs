@@ -1,17 +1,3 @@
-//! `CGContext` over a bitmap, with the graphics state CoreText draws through.
-//!
-//! Qt rasterizes every glyph by creating a bitmap context over a `QImage`,
-//! setting a fill color and a text matrix, and calling `CTFontDrawGlyphs`. So
-//! a context here is a pixel buffer plus a stack of graphics states, and the
-//! drawing it supports is what that path and the style's backgrounds need:
-//! filling rectangles and blending coverage masks.
-//!
-//! Device space is CoreGraphics': the origin at the bottom-left of the bitmap,
-//! y up. The bitmap's first row is the top one.
-//!
-//! FIXME (ACCURACY): paths, patterns, shadings and dashes are accepted and not
-//! drawn; a non-rectilinear fill covers its bounding box.
-
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -256,7 +242,6 @@ pub unsafe extern "C" fn CGContextSaveGState(context: CFTypeRef) {
 
 pub unsafe extern "C" fn CGContextRestoreGState(context: CFTypeRef) {
     if let Some(context) = context_of(context) {
-        // SAFETY: as above.
         let state = unsafe { &mut *context.state };
         if let Some(saved) = state.saved.pop() {
             state.current = saved;
@@ -395,7 +380,6 @@ pub unsafe extern "C" fn CGContextClearRect(context: CFTypeRef, rect: NSRect) {
     let Some(ctx) = context_of(context) else {
         return;
     };
-    // SAFETY: as above.
     let state = unsafe { (*ctx.state).current };
     let [left, bottom, right, top] = device_bounds(state.ctm, rect);
     for y in bottom.round() as i64..top.round() as i64 {

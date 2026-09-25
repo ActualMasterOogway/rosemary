@@ -1,5 +1,3 @@
-//! The process-wide `NSWorkspace` facade.
-
 use objc::object::Id;
 use objc::sel::Sel;
 

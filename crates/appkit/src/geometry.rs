@@ -1,12 +1,3 @@
-//! Where AppKit's coordinates are and where SDL's are.
-//!
-//! AppKit measures a window from the bottom-left of the primary display with
-//! y increasing upwards. SDL measures from the top-left of the desktop with y
-//! increasing downwards. Nothing warns about the difference: a window placed
-//! without converting appears mirrored about the middle of the screen, and a
-//! mouse coordinate read without converting is wrong by twice its distance from
-//! the centre - both of which look like a program bug rather than a runtime one.
-
 use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
 
 /// The height of the primary display, which is the origin AppKit measures from.

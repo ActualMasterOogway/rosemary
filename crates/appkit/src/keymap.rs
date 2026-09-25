@@ -1,17 +1,3 @@
-//! SDL scancodes as macOS virtual key codes.
-//!
-//! A guest reads `-[NSEvent keyCode]` and looks the number up in a table of its
-//! own - Deltarune's `getVirtualKeyEquivalent:` is exactly that - so the number
-//! has to be the one Apple's `kVK_` constants name and not a number this
-//! runtime finds convenient. They are the old ADB codes and have no pattern:
-//! `A` is 0, `S` is 1, `Z` is 6.
-//!
-//! SDL's scancodes are the USB HID keyboard usage IDs, which do have a pattern
-//! and are not these. The table below is the join, and it is the whole module.
-//! Both sides are named rather than spelled as numbers: the SDL side comes from
-//! `sdl3::keycodes`, which `tools/sdl-constants.py` writes out of SDL's own
-//! headers, and the macOS side from [`vk`] below.
-
 use sdl3::keycodes::{keymod, scancode};
 
 /// `kVK_*` from `<Carbon/HIToolbox/Events.h>`, for the keys this tree names.

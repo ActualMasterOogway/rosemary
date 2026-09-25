@@ -1,14 +1,3 @@
-//! The fonts behind CoreText: which files exist, and what is in them.
-//!
-//! A face is found by family and style among the fonts an application
-//! registered and the host's own, which fontconfig lists. Families a Mac has
-//! and the host does not - the system UI font, Helvetica, Menlo - resolve to
-//! the host's default sans-serif or monospace face, which is what fontconfig
-//! would substitute for them anyway.
-//!
-//! Parsed faces are cached for the process; a Qt application opens a handful
-//! of them and asks each one for glyphs thousands of times.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 

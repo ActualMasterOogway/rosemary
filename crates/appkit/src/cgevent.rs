@@ -1,17 +1,3 @@
-//! `CGEvent`, as much of it as a program that asks where the pointer is needs.
-//!
-//! Quartz's event API is two things at once: a way to *read* the input state
-//! and a way to *synthesise* input. A game uses the first to find the pointer
-//! when no window is under it - `CGEventCreate(NULL)` then
-//! `CGEventGetLocation` - and the second to put the pointer back, by posting a
-//! mouse-moved event. Both are here. Synthesising a *button* is not: see
-//! [`CGEventPost`].
-//!
-//! The coordinates are Quartz's global display space, whose origin is the top
-//! left of the desktop and whose y grows downward. That is SDL's own desktop
-//! space, so nothing is flipped here - unlike `+[NSEvent mouseLocation]`, which
-//! answers the same position in Cocoa's bottom-left space.
-
 use std::ffi::c_void;
 
 use foundation::geometry::NSPoint;

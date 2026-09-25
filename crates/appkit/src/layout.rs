@@ -1,18 +1,3 @@
-//! `NSLayoutConstraint`, solved by propagation rather than by Cassowary.
-//!
-//! A program that turns `translatesAutoresizingMaskIntoConstraints` off gets a
-//! view whose frame is whatever its constraints say and nothing else - so with
-//! no solver at all it stays zero-sized, and a web view pinned to its window's
-//! edges is never seen.
-//!
-//! What is solved here is the common shape of real layouts: each constrained
-//! view's edges, centre and size set equal to another view's, or to a constant.
-//! Every constrained view is placed from the current frames of what it is tied
-//! to, and the pass repeats until nothing moves, which settles any chain of
-//! such equalities. Inequalities only clamp sizes, and priorities only decide
-//! which of two conflicting equalities wins; a layout that needs the two to
-//! trade off against each other is not one this module can reproduce.
-
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Mutex;

@@ -1,5 +1,3 @@
-//! Minimal `NSFont` and `NSFontManager` facades.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -84,7 +82,6 @@ unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
     if font.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: the caller's obligation.
     unsafe { corefoundation::api::CFAutorelease(font) as Id }
 }
 

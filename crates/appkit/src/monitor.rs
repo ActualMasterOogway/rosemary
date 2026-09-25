@@ -60,13 +60,12 @@ unsafe fn call(block: Id, argument: Id) -> Id {
     if block.is_null() {
         return argument;
     }
-    // SAFETY: the caller's obligation - `invoke` is the third word of a block
+    // SAFETY: `invoke` is the third word of a block
     // literal, after `isa`, `flags` and `reserved`.
     let invoke = unsafe { *((block as *const u8).add(16) as *const usize) };
     if invoke == 0 {
         return argument;
     }
-    // SAFETY: as above.
     unsafe {
         let f: unsafe extern "C" fn(Id, Id) -> Id = std::mem::transmute(invoke);
         f(block, argument)
