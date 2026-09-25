@@ -1,21 +1,3 @@
-//! `__DATA,__interpose`: an image that replaces a function everyone else calls.
-//!
-//! An image built with `DYLD_INTERPOSE` - or with clang's
-//! `__attribute__((used)) static const struct { const void *r; const void *o; }`
-//! idiom that expands to the same thing - carries a section of pairs:
-//! `{ replacement, replacee }`, sixteen bytes each. dyld reads it and rewrites
-//! every binding, in every other image, whose target is `replacee` to point at
-//! `replacement` instead. That is how a program drops in a different allocator
-//! without any of its libraries being rebuilt.
-//!
-//! As an example, `mimalloc` uses this feature to ensure that memory allocator implementations
-//! do not conflict.
-//!
-//! The section is decoded here and the rewrite belongs to whoever owns the bindings. An interposed binding
-//! stops resolving to a host function pointer and starts naming guest code, so applying one changes how the
-//! driver must treat every call site that reaches it, therefore it is best to let the driver decide
-//! how to handle symbol interposition.
-
 use crate::error::Result;
 use crate::extensions::{Extension, read_words};
 use crate::image::MachObject;

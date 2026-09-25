@@ -177,15 +177,6 @@ fn thread_local_descriptors_are_enumerated_with_their_three_words() {
     );
 }
 
-/// The fact the whole thread-local block layout rests on, checked against the
-/// link editor rather than assumed from its documentation.
-///
-/// A descriptor says "offset 0x8" and nothing about what it is an offset from.
-/// The claim is that it is relative to the start of `__thread_data` - so for
-/// each thread-local, `template.initial_va + offset` must be the address `ld64`
-/// gave that variable's storage, which it records under the name
-/// `_<var>$tlv$init`. Getting this wrong by one section would produce a runtime
-/// that reads and writes plausible neighbouring variables.
 #[test]
 fn a_descriptor_offset_is_relative_to_the_start_of_the_thread_block() {
     let Some((bytes, report)) = link("ext_tlv_layout", &[]) else {

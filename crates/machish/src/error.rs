@@ -1,10 +1,3 @@
-//! Error type shared across the loader. `no_std`-friendly; implements
-//! [`std::error::Error`] when the `std` feature is on.
-//!
-//! Payloads are `&'static str` wherever possible so the common failure paths
-//! allocate nothing. The one exception is [`Error::UnresolvedSymbol`], which
-//! must name the symbol the embedder has to go shim.
-
 use alloc::string::String;
 use core::fmt;
 

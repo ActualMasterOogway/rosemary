@@ -1,5 +1,3 @@
-//! Link a Mach-O and print the transcript.
-
 use std::process::ExitCode;
 
 use machish::install_name::is_system_path;

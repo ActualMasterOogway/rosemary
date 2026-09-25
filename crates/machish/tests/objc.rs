@@ -33,10 +33,6 @@ const CLASS_SRC: &str = r#"
 int main(void) { return 0; }
 "#;
 
-/// A category on a class this image does not define. The distinction matters:
-/// `ld64` **merges** a category on a same-image class straight into that
-/// class's method list, so a fixture whose category targets its own class
-/// produces no `__objc_catlist` at all and tests nothing.
 const CATEGORY_SRC: &str = r#"
 #import <Foundation/Foundation.h>
 @interface NSString (Doubling)
@@ -146,12 +142,6 @@ fn a_class_is_decoded_whole() {
     );
 }
 
-/// The reason to decode any of this: a method carries a type encoding, and a
-/// type encoding is the only signature information a Mach-O records anywhere.
-///
-/// Everything else in this crate reports an import that the *embedder* must
-/// then find a signature for - see the ABI table in `rosetta3`. A method is the
-/// one case where the image answers the question itself.
 #[test]
 fn every_method_carries_its_type_encoding() {
     let Some((_, _, objc)) = objc_of("objc_types", CLASS_SRC) else {
@@ -191,13 +181,6 @@ fn every_method_carries_its_type_encoding() {
     }
 }
 
-/// Structural, not literal: every `IMP` must land in this image's `__text`.
-///
-/// This is the assertion the driver's whole substitution story rests on. An
-/// `IMP` handed to the host runtime is called as native arm64, so each one has
-/// to be recognisable as a *guest* address - and one that decoded to a host
-/// address, or to a data section, would be a silent wrong answer rather than a
-/// diagnostic.
 #[test]
 fn every_implementation_is_a_guest_text_address() {
     let Some((bytes, slide, objc)) = objc_of("objc_imps", CLASS_SRC) else {
@@ -299,10 +282,6 @@ fn the_class_ro_is_found_through_the_masked_bits_word() {
     assert!(obj.section_at(g.superclass.wrapping_sub(slide)).is_none());
 }
 
-/// The two selector-uniquing inputs, checked as slot addresses rather than
-/// contents: a `__objc_selrefs` slot holds a pointer to a *string* until a
-/// runtime uniques it and writes a `SEL` back over it, so the address of the
-/// slot is the durable fact and its content is not.
 #[test]
 fn selector_reference_slots_are_reported_by_address() {
     const SRC: &str = r#"
@@ -358,13 +337,6 @@ fn the_image_info_flag_decides_how_wide_a_category_is() {
     );
 }
 
-/// Both fixup encodings must decode to the same metadata.
-///
-/// The same cross-check `both_encodings_decode_to_the_same_stream` makes for
-/// imports, and it earns its keep here for a sharper reason: every edge in the
-/// Objective-C graph is a pointer, so in a chained-fixups image every one of
-/// them is a packed chain link in the file. A decoder reading file bytes
-/// instead of memory passes against `LC_DYLD_INFO` and returns garbage here.
 #[test]
 fn both_fixup_encodings_decode_to_the_same_metadata() {
     let Some(chained) = common::build_objc_x86_64("objc_chained", CLASS_SRC) else {
@@ -473,26 +445,6 @@ fn corrupting_the_metadata_never_panics() {
     }
 }
 
-/// A refusal is a named stop with the address in it, not a silent omission.
-///
-/// Forced by hand, because no x86-64 toolchain emits a relative method list -
-/// which is exactly why it is refused rather than decoded: there is no fixture
-/// that would keep a speculative decoder honest.
-/// The relative method-list encoding, which an x86-64 **dylib** really emits.
-///
-/// This module's scope note used to say the small form was arm64's alone. It
-/// was checked, on an executable, and it is wrong: the same `.m` built with
-/// `-dynamiclib` puts `__objc_methlist` in the image and sets `0x8000_0000` in
-/// every list header, while built as a program it emits pointer-based lists in
-/// `__objc_const`.
-///
-/// So the test is the one that argument deserves - **both builds of one source,
-/// compared** - rather than a decode of whichever this crate happened to have a
-/// fixture for. Agreement is evidence a single-encoding test cannot give, the
-/// same claim `both_fixup_encodings_decode_to_the_same_metadata` makes.
-///
-/// The encoding is asserted too, so a future toolchain that stopped emitting it
-/// fails here rather than passing this test vacuously.
 #[test]
 fn both_method_list_encodings_decode_to_the_same_methods() {
     let Some((_, _, program)) = objc_of("objc_lists_exe", CLASS_SRC) else {
@@ -577,12 +529,6 @@ fn both_method_list_encodings_decode_to_the_same_methods() {
     }
 }
 
-/// Cross-check against the linker's own symbol table.
-///
-/// Two things the same `ld64` wrote from the same facts: `_OBJC_CLASS_$_Greeter`
-/// names the `objc_class`, and `__objc_classlist` points at it. Agreement is
-/// evidence no single-source test can give - the same argument
-/// `trie_and_nlist_agree_on_the_same_image` makes for exports.
 #[test]
 fn the_class_list_agrees_with_the_symbol_table() {
     let Some((bytes, slide, objc)) = objc_of("objc_symbols", CLASS_SRC) else {
@@ -616,10 +562,6 @@ fn the_class_list_agrees_with_the_symbol_table() {
     }
 }
 
-/// `decode_image` is the fixup-level view; this is a reminder that the two
-/// agree about which bytes hold pointers. Every `IMP`, name and list pointer in
-/// the metadata is a *rebase*, and rebases are what make the file's packed
-/// words into addresses.
 #[test]
 fn the_metadata_pointers_are_all_rebases() {
     let Some(bytes) = common::build_objc_x86_64("objc_rebases", CLASS_SRC) else {

@@ -1,5 +1,3 @@
-//! A library whose symbol table is not built until something asks for one.
-
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

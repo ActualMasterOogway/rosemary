@@ -1,23 +1,3 @@
-//! A plain in-memory address space (`no_std`). Used when loading an image whose
-//! code is handed to a recompiler rather than executed, and throughout the test
-//! suite, where it lets every mapping and fixup be asserted on without giving
-//! the guest a single real page.
-//!
-//! Note what this deliberately does not need: sparse backing. An image's
-//! preferred base is `0x1_0000_0000` on x86-64 macOS, which looks like it would
-//! demand a 4 GiB allocation - but only because `__PAGEZERO` occupies
-//! `[0, 0x1_0000_0000)`, and the loader never maps `__PAGEZERO`. The reserved
-//! span starts at the first real segment, so each region is the size of the
-//! actual image and its base absorbs the rest.
-//!
-//! A space holds one region per [`reserve`](AddressSpace::reserve), because a
-//! link maps one region per image and a program with a bundled dylib has more
-//! than one. Regions are allocated separately and are disjoint: a single
-//! contiguous buffer spanning them would have to cover the gap between an
-//! executable at `0x1_0000_0000` and a dylib the allocator placed elsewhere,
-//! which is precisely the gigabytes-of-nothing the `__PAGEZERO` decision exists
-//! to avoid.
-
 use alloc::vec;
 use alloc::vec::Vec;
 

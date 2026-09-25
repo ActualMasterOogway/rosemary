@@ -1,5 +1,3 @@
-//! `S_MOD_INIT_FUNC_POINTERS` and `S_MOD_TERM_FUNC_POINTERS`.
-
 use crate::error::Result;
 use crate::extensions::{Extension, read_words};
 use crate::image::MachObject;

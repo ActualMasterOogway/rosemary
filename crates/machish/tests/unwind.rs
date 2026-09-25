@@ -1,20 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! `__TEXT,__unwind_info`, read from binaries that really have one.
-//!
-//! The table is a compression of `__eh_frame`, and every assertion here is
-//! structural rather than literal: a macOS update relays `/bin/ls`, and a test
-//! naming an address would go red for no reason.
-//!
-//! What each test would catch:
-//!
-//! - **coverage** - a first-level index walked with the wrong stride, or a
-//!   second-level page decoded with the wrong base, produces entries at
-//!   addresses that are not functions. Cross-checking against
-//!   `LC_FUNCTION_STARTS` is the independent expression of the same fact.
-//! - **lookup** - the table records starts, so the entry for an address is the
-//!   last one at or below it, and an address past the covered range has none.
-//! - **personality and LSDA** - the pair that makes a function able to catch
-//!   something. A C++ binary must have them; a C one must not.
 
 mod common;
 

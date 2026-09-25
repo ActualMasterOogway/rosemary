@@ -1,5 +1,3 @@
-//! A library the caller populates by hand.
-
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

@@ -1,5 +1,3 @@
-//! `LC_SEGMENT_64` records, and mapping them into an address space.
-
 use alloc::vec::Vec;
 use core::ops::Range;
 

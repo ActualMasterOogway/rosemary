@@ -1,14 +1,4 @@
 #![cfg(all(feature = "std", feature = "arch-x86_64"))]
-//! Requires the `std` and `arch-x86_64` features; compiles away without them,
-//! so `--no-default-features` still proves the `no_std` core builds.
-
-//! Hostile and malformed input.
-//!
-//! Every case here must produce a specific [`Error`] - never a panic, never a
-//! hang, never an unbounded allocation. The input to this crate is an untrusted
-//! third-party binary, so totality is a correctness requirement rather than
-//! polish. Several of these (a zero `cmdsize`, a load-command chain running past
-//! `sizeofcmds`) are bugs that have bitten real Mach-O loaders.
 
 use machish::Error;
 use machish::image::MachObject;

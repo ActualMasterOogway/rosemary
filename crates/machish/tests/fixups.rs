@@ -238,15 +238,6 @@ fn both_encodings_decode_to_the_same_stream() {
     );
 }
 
-/// `ADD_ADDR_ULEB` is a *signed* step spelled as an unsigned ULEB: a backwards
-/// jump is encoded two's-complement, which dyld adds into a `uintptr_t` and
-/// lets wrap. Real images rely on it - DELTARUNE's Mac runner steps back
-/// dozens of times in its bind stream, and rejecting the overflow refused the
-/// whole binary with `access out of bounds: addr=0x87558 len=0`.
-///
-/// Built by hand rather than from a fixture: `ld` only emits a backwards step
-/// when a large image's slot ordering happens to demand it, so a compiled
-/// fixture would not reliably contain one.
 #[test]
 fn a_backwards_add_addr_uleb_wraps_instead_of_erroring() {
     use machish::spec::constants as c;
@@ -564,10 +555,6 @@ fn an_unsatisfied_hard_import_is_reported_not_silently_zeroed() {
     }
 }
 
-/// A C++ dylib that allocates: `operator new` and `operator delete` are
-/// *coalesced* symbols, so `ld` binds each one twice - once in the ordinary
-/// bind stream, naming `libc++` by ordinal, and once in `weak_bind`, which asks
-/// only "does any loaded image override this".
 const COALESCED_SRC: &str = r#"
     struct Box { int v; Box(int x) : v(x) {} };
     extern "C" int make(int x) { Box *b = new Box(x); int v = b->v; delete b; return v; }

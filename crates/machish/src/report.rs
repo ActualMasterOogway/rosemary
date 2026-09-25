@@ -1,16 +1,3 @@
-//! The linking transcript.
-//!
-//! `selfish` returns a `LoadedImage` and stops (`selfish/src/loader.rs:133-139`),
-//! which is the right answer when the loaded code just runs: the CPU follows
-//! the pointers the linker wrote and nobody needs to know what they were.
-//!
-//! Rosetta 3 needs the opposite. Guest code is recompiled, and every call
-//! into a host shim has to be recognized at lift time and turned into a native
-//! call rather than followed into bytes the lifter would try to translate. That
-//! means the loader must report not just that binding succeeded but, for each
-//! binding, every address a call site might name - which is what
-//! [`BindingRecord`] is.
-
 use alloc::string::String;
 use alloc::vec::Vec;
 

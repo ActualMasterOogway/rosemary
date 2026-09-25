@@ -1,11 +1,3 @@
-//! Classic `LC_DYSYMTAB` indirect-symbol binding, for images predating
-//! `LC_DYLD_INFO`.
-//!
-//! There is no opcode stream and no chain here. The image says "slot *j* of
-//! this symbol-pointer section binds to symbol `indirect[reserved1 + j]`", and
-//! that is the whole encoding. It is the same table [`super::stubs`] already
-//! reads to pair slots with stubs, walked for a different purpose.
-
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};

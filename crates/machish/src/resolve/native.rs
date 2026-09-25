@@ -1,5 +1,3 @@
-//! `dlopen`/`dlsym`-backed resolution
-
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};

@@ -1,12 +1,3 @@
-//! Entry-point extraction.
-//!
-//! Mach-O has two incompatible encodings.
-//!
-//! `LC_MAIN` gives a file offset that must be added to the image's base,
-//! while `LC_UNIXTHREAD` gives a complete initial register set whose `rip` is
-//! already a virtual address. Conflating them puts the entry point off by the
-//! header size, which fails in a confusing way much later.
-
 use crate::error::{Error, Result};
 use crate::raw::{View, Word};
 

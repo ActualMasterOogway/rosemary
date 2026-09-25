@@ -1,5 +1,3 @@
-//! Recovering the `__stubs` entry that fronts each bound pointer slot.
-
 use alloc::collections::BTreeMap;
 
 use crate::error::Result;
