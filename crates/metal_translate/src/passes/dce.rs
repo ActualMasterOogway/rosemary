@@ -1,14 +1,3 @@
-//! Dead-code elimination.
-//!
-//! An instruction is kept if it has an effect beyond its result - a store, an
-//! atomic, a barrier, a texture write, a discard - or if something kept uses
-//! its result, or a terminator does. Everything else goes, including phis
-//! which only feed one another around a loop.
-//!
-//! A store is an effect only if something can read what it wrote. A `thread`
-//! local whose address never escapes into anything but more addresses and the
-//! pointer of a store is never read, so it goes with every store into it.
-
 use std::collections::{HashMap, HashSet};
 
 use super::operand_values;

@@ -1,11 +1,3 @@
-//! Removal of phis which choose between one value and nothing else.
-//!
-//! A phi whose inputs are all one operand, apart from the phi itself, is that
-//! operand: every path into the block passes through a predecessor, and the
-//! operand's definition dominates every predecessor, so it dominates the
-//! block as well. Folding a branch leaves such phis behind, and a phi of
-//! pointers is what makes emission ask for `VariablePointers`.
-
 use super::Substitution;
 use crate::ir::{Function, InstructionKind, Operand};
 

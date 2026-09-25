@@ -1,9 +1,3 @@
-//! Control-flow analysis over a Metal IR function.
-//!
-//! The successor and predecessor graph, dominance over it, and the merge
-//! block each divergence reconverges at. Restructuring consults this;
-//! emission consults the merges it reports.
-
 use super::*;
 
 pub(super) struct ControlFlow {

@@ -1,5 +1,3 @@
-//! Mapping LLVM's decoded types and predicates onto Metal IR ones.
-
 use super::*;
 
 pub(super) fn integer_predicate(predicate: u64) -> Result<IntegerPredicate, TranslateError> {

@@ -1,5 +1,3 @@
-//! Built-ins, barriers, atomics and fragment discard.
-
 use super::*;
 
 impl Emitter {

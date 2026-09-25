@@ -1,34 +1,3 @@
-//! Compare what a Vulkan driver's shader compiler makes of the translator's
-//! output under two IR pass pipelines.
-//!
-//! SPIR-V size says little about what runs, because every driver optimizes a
-//! module again. What a pass buys is what the driver's backend reports through
-//! `VK_KHR_pipeline_executable_properties` - registers, spills, instruction
-//! counts - so this translates every library in a pack twice, compiles a real
-//! pipeline from each module on a real adapter, and totals the statistics the
-//! driver returns for each.
-//!
-//! ```sh
-//! cargo run --release -p metal_translate --example shader_stats -- \
-//!     path/to/shaders_metal_osx.pack [--baseline none] [--candidate default] \
-//!     [--device NVIDIA] [--limit N] [--csv stats.csv]
-//! ```
-//!
-//! `--baseline` and `--candidate` take `ROSETTA3_METAL_PASSES` syntax. A
-//! pipeline needs more than a module, so each stage is given state which makes
-//! it compile:
-//!
-//! - a kernel is compiled for an 8x8x1 threadgroup;
-//! - a vertex function is compiled alone, with rasterization discarded and an
-//!   attribute of the shader's own type at every input location;
-//! - a fragment function is compiled behind a generated vertex function which
-//!   declares exactly its inputs, into a colour attachment of the shader's own
-//!   component type at every output location.
-//!
-//! Only the statistics of the translated stage are reported. The formats are a
-//! choice rather than what a game renders into, so the numbers compare two
-//! translations with each other; they do not predict a game's.
-
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -343,7 +312,6 @@ impl Harness {
             handles.set_layouts.push(layout);
         }
         let info = vk::PipelineLayoutCreateInfo::default().set_layouts(&handles.set_layouts);
-        // SAFETY: as above.
         handles.layout = unsafe { self.device.create_pipeline_layout(&info, None) }
             .map_err(vulkan("vkCreatePipelineLayout"))?;
         Ok(handles.layout)

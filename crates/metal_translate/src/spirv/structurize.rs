@@ -1,13 +1,3 @@
-//! Restructuring a Metal IR function into the reducible, single-entry
-//! regions SPIR-V requires.
-//!
-//! Metal IR inherits LLVM's unstructured control flow; SPIR-V demands that
-//! every divergence name its merge block. These passes rewrite a function
-//! into that shape -- splitting shared merges, isolating loop latches,
-//! cloning regions two selections share -- without changing what it
-//! computes. They run to a fixed point before emission, so emission itself
-//! can assume the shape.
-
 use super::cfg::{ControlFlow, Merge, natural_loop, reaches, successors_of};
 use super::*;
 

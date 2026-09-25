@@ -1,9 +1,3 @@
-//! Block splitting: terminators, block references, and `switch` expansion.
-//!
-//! Metal IR has no n-way branch, so a `switch` is recorded while its block
-//! is lowered and expanded into a chain of conditional branches once every
-//! block exists to branch to.
-
 use super::*;
 
 /// A decoded `switch`, before it has been expanded into comparisons.

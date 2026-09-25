@@ -1,9 +1,3 @@
-//! Operand and reflection queries over an instruction.
-//!
-//! The passes, the specializer and the SPIR-V emitter all need to walk an
-//! instruction's operands without knowing its kind. Keeping the walkers here,
-//! next to each other, is what keeps them in step with [`InstructionKind`].
-
 use super::*;
 
 /// The instruction's kind, for diagnostics. `Debug` would print every

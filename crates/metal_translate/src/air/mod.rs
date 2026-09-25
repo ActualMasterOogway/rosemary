@@ -1,10 +1,3 @@
-//! AIR container and LLVM representation import.
-//!
-//! Two frontends land here. [`bitcode`] decodes the LLVM bitstream a real
-//! metallib carries; [`text`] reads the `.ll` spelling the fixtures use. Both
-//! produce the same verified Metal IR, and both report through [`syntax`] and
-//! [`semantic`].
-
 use std::collections::{BTreeMap, HashMap};
 
 use llvm_bitcode::Bitcode;

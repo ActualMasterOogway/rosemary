@@ -1,10 +1,3 @@
-//! LLVM value, constant and function-body decoding.
-//!
-//! The bitcode frontend hands records here. [`ValueTable`] is the numbering
-//! LLVM's relative value references resolve against; [`body`] lowers one
-//! function body against it, and the remaining children hold the decoding
-//! tables that lowering consults.
-
 mod body;
 mod convert;
 mod intrinsic;

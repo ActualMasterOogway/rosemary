@@ -1,11 +1,3 @@
-//! LLVM metadata decoding for AIR entry-point interfaces.
-//!
-//! AIR describes a shader's stage interface entirely in module metadata: which
-//! argument carries which vertex attribute, buffer, texture or sampler, and
-//! which part of the returned value is which render target. Decoding the
-//! metadata graph keeps that mapping independent of parameter spellings and of
-//! any particular shader compiler's argument order.
-
 mod fields;
 #[cfg(test)]
 mod tests;

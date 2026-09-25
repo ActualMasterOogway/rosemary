@@ -1,5 +1,3 @@
-//! Vector and aggregate construction, extraction and selection.
-
 use super::*;
 
 impl Emitter {

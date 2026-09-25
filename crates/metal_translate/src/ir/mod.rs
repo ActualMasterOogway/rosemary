@@ -1,9 +1,3 @@
-//! The Metal-shaped intermediate representation both frontends produce.
-//!
-//! This module is the data model alone. Verification lives in [`verify`] and
-//! the operand and reflection queries the rest of the crate runs over an
-//! instruction live in [`operands`].
-
 mod operands;
 mod verify;
 

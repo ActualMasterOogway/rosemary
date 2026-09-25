@@ -1,5 +1,3 @@
-//! Vector and aggregate extraction and insertion.
-
 use super::*;
 
 impl BodyLowering<'_> {

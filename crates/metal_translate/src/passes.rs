@@ -1,12 +1,3 @@
-//! Transformations of the Metal IR between import and SPIR-V emission.
-//!
-//! Every pass takes a verified function and leaves a verified function. A pass
-//! only rewrites what it can prove means the same thing in Metal; anything it
-//! is unsure of is left for emission exactly as the frontend produced it.
-//!
-//! Which passes run is part of what a translation is, so the shader cache keys
-//! an entry by [`PassPipeline::fingerprint`] as well as by its input.
-
 mod cfg;
 mod dce;
 mod fold;

@@ -1,8 +1,3 @@
-//! AIR to SPIR-V translation through a Metal-shaped intermediate representation.
-//!
-//! The IR describes Metal semantics; emission chooses Vulkan descriptors and
-//! SPIR-V capabilities.
-
 pub mod air;
 pub mod cache;
 pub mod ir;

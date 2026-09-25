@@ -1,5 +1,3 @@
-//! Pointers, allocation, casts, loads and stores.
-
 use super::*;
 
 impl BodyLowering<'_> {

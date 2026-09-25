@@ -1,5 +1,3 @@
-//! LLVM cast lowering and the pointer adaptations a widening bitcast forces.
-
 use super::*;
 
 /// LLVM cast opcodes. Each becomes an explicit Metal IR conversion; the IR

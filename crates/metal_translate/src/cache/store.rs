@@ -1,9 +1,3 @@
-//! Locating the cache directory, reading an entry, and the background
-//! writer that fills it.
-//!
-//! Writes are queued and drained off-thread: a cache miss must cost a
-//! translation, not a translation plus a disk write.
-
 use super::*;
 
 /// The directory this build's entries live in, or `None` where the cache is

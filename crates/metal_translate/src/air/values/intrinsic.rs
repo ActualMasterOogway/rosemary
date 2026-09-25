@@ -1,5 +1,3 @@
-//! Recognizing the AIR intrinsics and compiler helpers a shader calls.
-
 use super::*;
 
 /// Recognize compiler support functions whose bodies have a direct Metal IR

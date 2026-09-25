@@ -1,9 +1,3 @@
-//! Removal of blocks the entry block cannot reach.
-//!
-//! Structured control-flow recovery works over every block it is given, and
-//! a block no path reaches still has to be placed in some construct. A branch
-//! folded on a constant is the usual source of one.
-
 use std::collections::HashSet;
 
 use crate::ir::{Function, InstructionKind, successors};

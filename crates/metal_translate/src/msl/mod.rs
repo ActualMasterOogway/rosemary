@@ -1,14 +1,3 @@
-//! A deliberately small, semantics-preserving MSL source frontend.
-//!
-//! The first supported production shape is a compute kernel which writes an
-//! integer literal to element zero of a `device uint*` buffer.  It is useful as
-//! a vertical source-compiler slice and, importantly, rejects every construct
-//! whose Metal semantics have not been implemented yet.
-//!
-//! [`blit`] holds the one wider path, a bounded typed texture blit, and
-//! [`index`] the expression lowering that path needs; [`types`] is the
-//! declaration and type vocabulary both use.
-
 mod blit;
 mod index;
 mod types;

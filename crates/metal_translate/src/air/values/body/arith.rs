@@ -1,5 +1,3 @@
-//! Binary arithmetic, comparison and selection.
-
 use super::*;
 
 impl BodyLowering<'_> {

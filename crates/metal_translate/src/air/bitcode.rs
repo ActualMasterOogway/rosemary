@@ -1,5 +1,3 @@
-//! The LLVM bitstream frontend: a real metallib's AIR payload.
-
 use super::*;
 
 /// Import the first production-oriented bitcode shape without depending on

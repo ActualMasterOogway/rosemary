@@ -1,9 +1,3 @@
-//! SPIR-V emission from Metal IR.
-//!
-//! Emission assumes structured control flow, so a function is restructured
-//! into it first: [`structurize`] rewrites the shape and [`cfg`] is the
-//! analysis both it and emission read.
-
 mod cfg;
 mod emit;
 mod structurize;

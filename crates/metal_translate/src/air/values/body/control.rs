@@ -1,5 +1,3 @@
-//! Terminators and phis.
-
 use super::*;
 
 impl BodyLowering<'_> {

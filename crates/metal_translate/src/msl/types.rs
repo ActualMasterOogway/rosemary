@@ -1,5 +1,3 @@
-//! Declarations, attributes and the type vocabulary the frontend accepts.
-
 use super::*;
 
 pub(super) fn parse_resource_attribute(

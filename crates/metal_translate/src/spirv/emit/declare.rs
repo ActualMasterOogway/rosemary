@@ -1,5 +1,3 @@
-//! Declaring an entry point's resources, interface and prologue.
-
 use super::*;
 
 impl Emitter {

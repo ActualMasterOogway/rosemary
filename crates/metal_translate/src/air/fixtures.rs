@@ -1,9 +1,3 @@
-//! Synthetic LLVM bitstreams for tests.
-//!
-//! Writing real bitcode keeps the decoders under test end to end, including
-//! their VBR field widths and block nesting, rather than testing a hand-built
-//! in-memory tree the parser would never produce.
-
 use super::*;
 
 pub(crate) enum Element {

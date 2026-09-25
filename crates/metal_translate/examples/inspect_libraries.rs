@@ -1,9 +1,3 @@
-//! Inspect embedded metallibs without logging shader source or requiring a GPU.
-//!
-//! Reports, for each embedded library, either the emitted SPIR-V entry points
-//! or the first stage which rejected it. This exercises import, verification
-//! and emission; it does not parse the enclosing pack format and does not
-//! claim anything about GPU execution.
 use metal_translate::{
     FunctionConstantValues, PassPipeline, TargetProfile,
     air::{AirInput, parse_air},

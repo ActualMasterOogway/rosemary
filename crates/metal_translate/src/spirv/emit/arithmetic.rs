@@ -1,5 +1,3 @@
-//! Integer and floating-point arithmetic and comparison.
-
 use super::*;
 
 impl Emitter {

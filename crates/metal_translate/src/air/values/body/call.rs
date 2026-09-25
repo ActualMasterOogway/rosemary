@@ -1,5 +1,3 @@
-//! LLVM calls: AIR intrinsics, compiler helpers and `llvm.mem*`.
-
 use super::*;
 
 impl BodyLowering<'_> {

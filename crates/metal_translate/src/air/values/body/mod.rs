@@ -1,9 +1,3 @@
-//! Lowering one LLVM function body to a Metal IR function.
-//!
-//! LLVM stores a body as one flat record list. [`ValueTable::lower_body`]
-//! splits it into basic blocks, then hands each record to the method for its
-//! kind; [`BodyLowering`] holds the state those methods share.
-
 use super::*;
 
 mod arith;

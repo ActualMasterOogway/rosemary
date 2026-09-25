@@ -1,10 +1,3 @@
-//! The on-disk entry format.
-//!
-//! A cache entry is the whole `TranslatedLibrary`, so the codec has to
-//! carry every reflection field the runtime binds resources from. The tag
-//! tables below are what make an enum's numbering part of the format
-//! rather than of the Rust definition.
-
 use super::*;
 
 pub(super) fn encode(key: &[u8; 32], library: &TranslatedLibrary) -> Vec<u8> {

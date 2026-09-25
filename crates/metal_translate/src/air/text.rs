@@ -1,9 +1,3 @@
-//! The textual LLVM (`.ll`) frontend.
-//!
-//! This path has its own `Metadata` and `MetadataResource`: the text
-//! spelling of an AIR metadata node has nothing in common with the bitcode
-//! records [`super::metadata`] decodes, so the two stay separate types.
-
 use super::*;
 
 pub(super) fn parse_text(text: &str) -> Result<Module, TranslateError> {

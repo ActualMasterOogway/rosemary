@@ -1,5 +1,3 @@
-//! Loads, stores and address computation.
-
 use super::*;
 
 impl Emitter {

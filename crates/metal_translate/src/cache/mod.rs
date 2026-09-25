@@ -1,17 +1,3 @@
-//! An on-disk cache of translated shader libraries.
-//!
-//! [`store`] owns where entries live and the background writer;
-//! [`codec`] owns what an entry looks like on disk.
-//!
-//! An entry is a whole [`TranslatedLibrary`]: its SPIR-V words and the
-//! reflection the runtime binds resources from. Storing the modules without
-//! the reflection would only move the cost, since the reflection comes out of
-//! the same translation.
-//!
-//! Only successful translations are cached. A rejection carries diagnostics
-//! whose value is that they are read, and a stale one would be reported as
-//! though this build had produced it.
-
 mod codec;
 mod store;
 #[cfg(test)]

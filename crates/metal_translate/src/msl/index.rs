@@ -1,5 +1,3 @@
-//! Lowering the index expressions a blit kernel addresses its textures with.
-
 use super::*;
 
 /// Lower the scalar address expressions used by some apps buffer blits. This

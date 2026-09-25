@@ -1,13 +1,3 @@
-//! Constant folding, algebraic identities, and branches on constants.
-//!
-//! Only integer and boolean arithmetic is folded. A floating operation is
-//! left for the device: its result depends on rounding, denormal and NaN
-//! behaviour which Metal leaves to fast-math and SPIR-V leaves to the driver,
-//! and a translator which picked one would disagree with the other.
-//!
-//! Integer constants hold their bit pattern zero-extended into a `u64`, which
-//! is how the importer writes them, and every result is kept in that form.
-
 use std::collections::BTreeSet;
 
 use super::Substitution;

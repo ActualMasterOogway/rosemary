@@ -1,5 +1,3 @@
-//! Texture sampling, reads, writes and queries.
-
 use super::*;
 
 impl Emitter {

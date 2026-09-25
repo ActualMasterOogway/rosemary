@@ -1,9 +1,3 @@
-//! Verification of a Metal IR module.
-//!
-//! Every frontend hands its output through here before emission, so a
-//! malformed lowering is reported as a diagnostic naming the function rather
-//! than as invalid SPIR-V.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;

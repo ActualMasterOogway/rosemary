@@ -1,10 +1,3 @@
-//! The SPIR-V emitter.
-//!
-//! [`Emitter`] owns the rspirv builder and everything interned into a
-//! module: types, constants, globals and the interface. Declaration and
-//! interning, and the emission of an instruction itself, are grouped by
-//! what they do in this module's children.
-
 mod arithmetic;
 mod composite;
 mod convert;

@@ -1,5 +1,3 @@
-//! Conversion between scalar and vector types.
-
 use super::*;
 
 impl Emitter {

@@ -1,9 +1,3 @@
-//! Reading one field out of an AIR descriptor node.
-//!
-//! Each of these reads a named operand of a resource or stage-interface
-//! node and reports what it means in Metal terms, rejecting a node whose
-//! shape it does not recognize rather than guessing a default.
-
 use super::*;
 
 pub(super) fn resource_kind(tag: &str) -> Option<ResourceKind> {

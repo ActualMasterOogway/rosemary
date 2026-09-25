@@ -1,5 +1,3 @@
-//! Interning types, constants and undefined values into the module.
-
 use super::*;
 
 impl Emitter {

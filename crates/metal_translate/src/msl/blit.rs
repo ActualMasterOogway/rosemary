@@ -1,5 +1,3 @@
-//! The bounded typed texture blit: the one wider source path.
-
 use super::*;
 
 /// What a blit kernel's source says, once parsed and checked.

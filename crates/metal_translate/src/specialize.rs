@@ -1,17 +1,3 @@
-//! Metal function-constant specialization.
-//!
-//! AIR keeps each `[[function_constant(N)]]` as a `constant` global in the
-//! `air.fc_initializer` section, named `<name>.MTL_FC_INIT_<N>_<type>` where
-//! `<type>` is the Itanium mangling of the constant's Metal type. A constant
-//! derived from others - `constant bool b = !a;` - is a global which a static
-//! initializer in the `air.static_init` section writes before anything reads
-//! it. Specializing a module gives the first kind their values, answers every
-//! `is_function_constant_defined`, and runs the second kind once, so that the
-//! module the pass pipeline and emission see has neither.
-//!
-//! A constant which is given no value keeps its undefined initializer, which
-//! is what Metal promises for it, and `is_function_constant_defined` is false.
-
 use std::collections::{BTreeMap, HashMap};
 
 use crate::ir::{
