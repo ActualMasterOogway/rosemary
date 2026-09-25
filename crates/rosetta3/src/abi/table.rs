@@ -1492,11 +1492,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("clearerr", V, P),
     // `clock_t clock(void)`.
     sig!("clock", U64),
+    // `kern_return_t clock_get_time(clock_serv_t, mach_timespec_t *)`.
+    sig!("clock_get_time", I32, U32, P),
     // `struct timespec` is two 64-bit words on both architectures, and the
     // guest passes it by address, so the host fills it in place.
-    sig!("clock_get_time", I32, U32, P),
     sig!("clock_gettime", I32, U32, P),
     sig!("clock_getres", I32, U32, P),
+    sig!("clock_settime", I32, U32, P),
     sig!("clock_gettime_nsec_np", U64, I32),
     // `kern_return_t clock_sleep(mach_port_t, sleep_type_t, mach_timespec_t,
     // mach_timespec_t *)`.
