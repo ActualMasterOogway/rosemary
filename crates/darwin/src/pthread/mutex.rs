@@ -16,7 +16,6 @@ const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;
 const CONTENDED: u32 = 2;
 
-/// Darwin counts recursive acquisitions in an `unsigned short`.
 const RECURSION_LIMIT: u32 = u16::MAX as u32;
 
 const _: () = assert!(16 + BODY <= object::size::MUTEX);
