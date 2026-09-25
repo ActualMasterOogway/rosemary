@@ -1,6 +1,3 @@
-//! Contact authorization without an address-book backend. The store reports
-//! `Restricted` because it cannot fulfill a permission request.
-
 use objc::object::Id;
 use objc::sel::Sel;
 
