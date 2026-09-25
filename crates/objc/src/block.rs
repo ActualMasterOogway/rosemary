@@ -1,23 +1,3 @@
-//! Blocks: libclosure, reimplemented.
-//!
-//! A block is a struct with a code pointer, and *copying* one is what makes it
-//! usable past the frame it was written in: the literal starts on the stack, and
-//! anything that keeps it - a completion handler, a queued operation, an
-//! `objc_retainBlock` the compiler emitted - has to move it to the heap and run
-//! the copy helper the compiler generated for its captures. That algorithm is
-//! libclosure's, and this host does not necessarily have one: off Darwin nothing
-//! defines `_Block_copy`, so a runtime that dlsym'd for it aborted instead.
-//!
-//! It is reimplemented rather than worked around because the layout is fixed
-//! ABI. The compiler emitted the literal, the descriptor and the helpers into
-//! the guest image years ago; the only thing missing was the dozen lines that
-//! read them, which are these.
-//!
-//! The reference count lives in the block's own `flags` word, not in
-//! [`crate::arc`]'s side table, so [`crate::arc::retain`] and
-//! [`crate::arc::release`] route a block here - the way Apple's runtime routes
-//! one to `NSBlock`'s custom `-retain`.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
@@ -158,7 +138,6 @@ fn latching_decr_should_deallocate(flags: &AtomicI32) -> bool {
 ///
 /// `block` must be a block literal.
 unsafe fn helpers(block: *const Block) -> Option<&'static DescriptorHelpers> {
-    // SAFETY: the caller's obligation.
     let (flags, descriptor) =
         unsafe { ((*block).flags.load(Ordering::Relaxed), (*block).descriptor) };
     if flags & flag::HAS_COPY_DISPOSE == 0 || descriptor.is_null() {
@@ -187,7 +166,6 @@ pub fn copy(block: Id) -> Id {
     // SAFETY: a block literal, whose first three words are the header.
     let flags = unsafe { (*source).flags.load(Ordering::Relaxed) };
     if flags & flag::NEEDS_FREE != 0 {
-        // SAFETY: as above.
         latching_incr(unsafe { &(*source).flags });
         return block;
     }
@@ -254,7 +232,6 @@ pub fn release(block: Id) {
         // neither is this function's to free.
         return;
     }
-    // SAFETY: as above.
     if !latching_decr_should_deallocate(unsafe { &(*block).flags }) {
         return;
     }
@@ -287,11 +264,9 @@ pub unsafe fn object_assign(destination: *mut c_void, object: *const c_void, fla
     match flags & field::MASK {
         field::OBJECT => {
             crate::arc::retain(object as Id);
-            // SAFETY: the caller's obligation.
             unsafe { *destination = object };
         }
         field::BLOCK => {
-            // SAFETY: as above.
             unsafe { *destination = copy(object as Id) as *const c_void };
         }
         field::BYREF | field::BYREF_WEAK => {
@@ -313,7 +288,6 @@ pub unsafe fn object_dispose(object: *const c_void, flags: i32) {
     match flags & field::MASK {
         field::OBJECT => crate::arc::release(object as Id),
         field::BLOCK => release(object as Id),
-        // SAFETY: the caller's obligation.
         field::BYREF | field::BYREF_WEAK => unsafe { byref_release(object as *mut Byref) },
         _ => {}
     }
@@ -330,7 +304,6 @@ pub unsafe fn object_dispose(object: *const c_void, flags: i32) {
 /// `source` must be a `Block_byref`.
 unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
     crate::debug::validate(source as Id, "_Block_object_assign byref");
-    // SAFETY: the caller's obligation.
     let forwarding = unsafe { (*source).forwarding };
     if forwarding.is_null() {
         return source;
@@ -339,7 +312,6 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
     let live = unsafe { (*forwarding).flags.load(Ordering::Relaxed) };
     if live & flag::REFCOUNT_MASK != 0 {
         if live & byref_flag::NEEDS_FREE != 0 {
-            // SAFETY: as above.
             latching_incr(unsafe { &(*forwarding).flags });
         }
         return forwarding;
@@ -417,7 +389,6 @@ unsafe fn byref_copy(source: *mut Byref) -> *mut Byref {
 /// As [`byref_copy`].
 unsafe fn byref_release(byref: *mut Byref) {
     crate::debug::validate(byref as Id, "_Block_object_dispose byref");
-    // SAFETY: the caller's obligation.
     let byref = unsafe { (*byref).forwarding };
     if byref.is_null() {
         return;
@@ -428,7 +399,6 @@ unsafe fn byref_release(byref: *mut Byref) {
     if flags & byref_flag::NEEDS_FREE == 0 {
         return;
     }
-    // SAFETY: as above.
     if !latching_decr_should_deallocate(unsafe { &(*byref).flags }) {
         return;
     }
@@ -723,7 +693,6 @@ mod tests {
         assert_eq!(heap.captured, captured);
         assert_eq!(heap.flags & flag::NEEDS_FREE, flag::NEEDS_FREE);
         assert_eq!(heap.flags & flag::REFCOUNT_MASK, 2, "one reference");
-        // SAFETY: as above.
         let class = unsafe { crate::object::class_of(copied) }.expect("a class");
         assert_eq!(class.name_str(), "__NSMallocBlock__");
 

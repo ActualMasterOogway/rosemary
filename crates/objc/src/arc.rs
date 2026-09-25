@@ -1,14 +1,3 @@
-//! Reference counting, autorelease pools, weak references and `@synchronized`.
-//!
-//! The retain count lives in a side table rather than in the object, because an
-//! object here is only `isa` plus the ivars its class declared - a guest builds
-//! objects with that layout by hand, and there is no spare word to claim. A side
-//! table costs a hash per retain; correctness first, and the count is not on any
-//! path this runtime has measured.
-//!
-//! An absent entry means one reference, so an object that is never retained
-//! costs nothing and `-release` on it deallocates.
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
@@ -273,7 +262,6 @@ fn unregister_weak(slot: *mut Id) {
         slots.retain(|s| *s != slot as usize);
     }
     drop(guard);
-    // SAFETY: as above.
     unsafe { *slot = std::ptr::null_mut() };
 }
 

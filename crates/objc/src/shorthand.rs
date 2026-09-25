@@ -1,11 +1,3 @@
-//! The entry points the compiler emits in place of a message.
-//!
-//! `[Foo alloc]` becomes `objc_alloc(Foo)`, `-isKindOfClass:` becomes
-//! `objc_opt_isKindOfClass`, and so on. Each is a message with the send folded
-//! away, so each is implemented by resolving and calling the method it stands
-//! for - never by shortcutting to the root implementation, which would skip an
-//! override and be wrong in exactly the cases the override exists for.
-
 // The C spellings are the interface; renaming them would only hide it.
 #![allow(non_snake_case)]
 
@@ -21,14 +13,12 @@ use crate::sel::Sel;
 ///
 /// `receiver` must be null or a live object.
 unsafe fn send0(receiver: Id, sel: Sel) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel)) else {
         return std::ptr::null_mut();
     };
     // SAFETY: a nullary message returning an object is `id (*)(id, SEL)`.
     let f: unsafe extern "C" fn(Id, Sel) -> Id =
         unsafe { std::mem::transmute(imp.implementation()) };
-    // SAFETY: as above.
     unsafe { f(receiver, sel) }
 }
 
@@ -38,14 +28,11 @@ unsafe fn send0(receiver: Id, sel: Sel) -> Id {
 ///
 /// As [`send0`], and the method must take one word and return a `BOOL`.
 unsafe fn send1_bool(receiver: Id, sel: Sel, argument: usize) -> bool {
-    // SAFETY: the caller's obligation.
     let Some(imp) = unsafe { crate::object::class_of(receiver) }.and_then(|c| c.method(sel)) else {
         return false;
     };
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(Id, Sel, usize) -> bool =
         unsafe { std::mem::transmute(imp.implementation()) };
-    // SAFETY: as above.
     unsafe { f(receiver, sel, argument) }
 }
 
@@ -55,12 +42,10 @@ pub unsafe extern "C" fn objc_alloc(cls: Id) -> Id {
 }
 
 pub unsafe extern "C" fn objc_allocWithZone(cls: Id) -> Id {
-    // SAFETY: as above.
     unsafe { send0(cls, crate::sel::get("allocWithZone:")) }
 }
 
 pub unsafe extern "C" fn objc_alloc_init(cls: Id) -> Id {
-    // SAFETY: as above.
     let object = unsafe { objc_alloc(cls) };
     // SAFETY: a freshly allocated object.
     unsafe { send0(object, crate::sel::get("init")) }
@@ -143,7 +128,6 @@ pub unsafe extern "C" fn objc_setProperty_atomic(
     value: Id,
     offset: isize,
 ) {
-    // SAFETY: as above.
     unsafe { store_property(receiver, offset, value) }
 }
 
@@ -153,7 +137,6 @@ pub unsafe extern "C" fn objc_setProperty_nonatomic(
     value: Id,
     offset: isize,
 ) {
-    // SAFETY: as above.
     unsafe { store_property(receiver, offset, value) }
 }
 
@@ -163,7 +146,6 @@ pub unsafe extern "C" fn objc_setProperty_atomic_copy(
     value: Id,
     offset: isize,
 ) {
-    // SAFETY: as above.
     unsafe { store_property(receiver, offset, copy_of(value)) }
 }
 
@@ -173,7 +155,6 @@ pub unsafe extern "C" fn objc_setProperty_nonatomic_copy(
     value: Id,
     offset: isize,
 ) {
-    // SAFETY: as above.
     unsafe { store_property(receiver, offset, copy_of(value)) }
 }
 
@@ -185,9 +166,7 @@ unsafe fn store_property(receiver: Id, offset: isize, value: Id) {
         return;
     }
     crate::debug::validate_range(receiver, offset, size_of::<Id>(), "objc_setProperty");
-    // SAFETY: the caller's obligation.
     let slot = unsafe { (receiver as *mut u8).offset(offset) as *mut Id };
-    // SAFETY: as above.
     unsafe { crate::api::objc_storeStrong(slot, value) };
 }
 

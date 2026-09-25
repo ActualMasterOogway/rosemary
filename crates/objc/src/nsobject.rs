@@ -1,13 +1,3 @@
-//! `NSObject`.
-//!
-//! Here rather than in a Foundation crate because that is where it is on the
-//! system too: `libobjc.A.dylib` exports `_OBJC_CLASS_$_NSObject`, and a guest
-//! whose classes descend from it must find it before any framework has loaded.
-//!
-//! Only the root behaviour: allocation, the reference-counting messages, and the
-//! introspection every other class inherits. Anything that needs a string, a
-//! description or a hash table is Foundation's.
-
 use std::ffi::{CStr, c_void};
 
 use crate::class::{Class, Imp};
@@ -124,7 +114,6 @@ fn add(class: &'static Class, sel: &str, imp: Imp, types: &CStr) {
 ///
 /// `receiver` must be a class pointer.
 unsafe fn as_class(receiver: Id) -> &'static Class {
-    // SAFETY: the caller's obligation.
     match unsafe { crate::class::from_ptr(receiver as *const Class) } {
         Some(class) => class,
         None => crate::fail!("a class method was sent to nil"),
@@ -142,15 +131,12 @@ unsafe fn as_class(receiver: Id) -> &'static Class {
 /// `receiver` must be a live object, and the method must be
 /// `id (*)(id, SEL, void *)`.
 unsafe fn send1(receiver: Id, sel: Sel, argument: *mut c_void) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(method) = (unsafe { crate::object::class_of(receiver) }).and_then(|c| c.method(sel))
     else {
         return std::ptr::null_mut();
     };
-    // SAFETY: the caller's obligation.
     let f: unsafe extern "C" fn(Id, Sel, *mut c_void) -> Id =
         unsafe { std::mem::transmute(method.implementation()) };
-    // SAFETY: as above.
     unsafe { f(receiver, sel, argument) }
 }
 
@@ -283,7 +269,6 @@ unsafe extern "C" fn instances_respond(receiver: Id, _sel: Sel, selector: Sel) -
 ///
 /// `receiver` must be a live object.
 unsafe fn imp_for(receiver: Id, selector: Sel) -> Imp {
-    // SAFETY: the caller's obligation.
     let imp = unsafe { crate::object::class_of(receiver) }.map_or(std::ptr::null(), |c| {
         crate::class::method_implementation(c, selector)
     });
@@ -317,7 +302,6 @@ unsafe extern "C" fn perform(receiver: Id, _sel: Sel, selector: Sel) -> Id {
     // `selector`, whose prototype begins with the receiver and the selector.
     let f: unsafe extern "C" fn(Id, Sel) -> Id =
         unsafe { std::mem::transmute(imp_for(receiver, selector)) };
-    // SAFETY: as above.
     unsafe { f(receiver, selector) }
 }
 
@@ -325,7 +309,6 @@ unsafe extern "C" fn perform_with(receiver: Id, _sel: Sel, selector: Sel, object
     // SAFETY: as `perform`, for a method taking one object.
     let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
         unsafe { std::mem::transmute(imp_for(receiver, selector)) };
-    // SAFETY: as above.
     unsafe { f(receiver, selector, object) }
 }
 
@@ -339,7 +322,6 @@ unsafe extern "C" fn perform_with_with(
     // SAFETY: as `perform`, for a method taking two objects.
     let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
         unsafe { std::mem::transmute(imp_for(receiver, selector)) };
-    // SAFETY: as above.
     unsafe { f(receiver, selector, first, second) }
 }
 
@@ -433,7 +415,6 @@ mod tests {
         // SAFETY: every method reached here takes one word and returns one.
         let f: unsafe extern "C" fn(Id, Sel, *const c_void) -> *const c_void =
             unsafe { std::mem::transmute(imp) };
-        // SAFETY: as above.
         unsafe { f(receiver, sel, argument) }
     }
 
@@ -504,12 +485,10 @@ mod tests {
     ///
     /// `class` is a class pointer.
     unsafe fn copy_class(class: Id) -> Id {
-        // SAFETY: the caller's obligation.
         let meta = unsafe { crate::object::class_of(class) }.expect("a metaclass");
         let imp = crate::class::method_implementation(meta, sel::get("copy"));
         // SAFETY: `+copy` is `id (Class, SEL)`.
         let f: unsafe extern "C" fn(Id, Sel) -> Id = unsafe { std::mem::transmute(imp) };
-        // SAFETY: as above.
         unsafe { f(class, sel::get("copy")) }
     }
 }

@@ -1,11 +1,3 @@
-//! A live-instance count per class, for finding what a run is leaking.
-//!
-//! Off unless `ROSETTA3_OBJC_CENSUS` is set, and reported to standard error
-//! every interval - a class whose count climbs and never falls is an object the
-//! guest released and this runtime never deallocated. A total byte count is not
-//! enough: every leak looks the same from the allocator, and only the class says
-//! which one it is.
-
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +37,6 @@ pub unsafe fn freed(object: crate::object::Id) {
     if !enabled() {
         return;
     }
-    // SAFETY: the caller's obligation.
     if let Some(class) = unsafe { crate::object::class_of(object) } {
         adjust(class, -1);
     }

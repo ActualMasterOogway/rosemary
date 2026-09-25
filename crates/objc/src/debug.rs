@@ -1,5 +1,3 @@
-//! Expensive, fail-fast checks for misuse of the built-in Objective-C runtime.
-
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

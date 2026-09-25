@@ -1,13 +1,3 @@
-//! Instances: allocation, `isa`, and ivar access.
-//!
-//! An object is its class pointer followed by its ivars, and nothing else. It is
-//! allocated and freed so that guest code which does either by hand - and
-//! GameMaker's Objective-C bridge does - is not surprised, which means it has
-//! to come from the allocator the *guest* calls `free` on and not from this
-//! process's own. See [`crate::allocator`]: when the guest ships a replacement
-//! allocator those are two different heaps, and this module's whole contract is
-//! that the guest may `free` what it allocated here.
-
 use std::ffi::{CStr, c_void};
 
 use crate::class::{Class, ptr};
@@ -97,7 +87,6 @@ pub unsafe fn set_class(object: Id, class: &'static Class) -> Option<&'static Cl
     if object.is_null() {
         return None;
     }
-    // SAFETY: the caller's obligation.
     let previous = unsafe { class_of(object) };
     crate::debug::set_class(object, class);
     // SAFETY: as above; the first word is the `isa`.
@@ -112,7 +101,6 @@ pub unsafe fn set_class(object: Id, class: &'static Class) -> Option<&'static Cl
 ///
 /// As [`class_of`].
 pub unsafe fn indexed_ivars(object: Id) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { class_of(object) }) else {
         return std::ptr::null_mut();
     };
@@ -126,7 +114,6 @@ pub unsafe fn indexed_ivars(object: Id) -> *mut c_void {
 ///
 /// As [`class_of`], and `name` must be an object-typed ivar of its class.
 pub unsafe fn get_ivar(object: Id, name: &CStr) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(offset) = (unsafe { ivar_offset(object, name) }) else {
         return std::ptr::null_mut();
     };
@@ -140,11 +127,9 @@ pub unsafe fn get_ivar(object: Id, name: &CStr) -> Id {
 ///
 /// As [`get_ivar`].
 pub unsafe fn set_ivar(object: Id, name: &CStr, value: Id) {
-    // SAFETY: the caller's obligation.
     let Some(offset) = (unsafe { ivar_offset(object, name) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe { *((object as *mut u8).add(offset) as *mut Id) = value };
 }
 
@@ -154,7 +139,6 @@ pub unsafe fn set_ivar(object: Id, name: &CStr, value: Id) {
 ///
 /// As [`class_of`].
 unsafe fn ivar_offset(object: Id, name: &CStr) -> Option<usize> {
-    // SAFETY: the caller's obligation.
     let class = unsafe { class_of(object) }?;
     Some(class.ivar(name)?.offset() as usize)
 }

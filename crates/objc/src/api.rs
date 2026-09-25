@@ -1,10 +1,3 @@
-//! The public C API, as the guest and the rest of this tree call it.
-//!
-//! None of these is `#[no_mangle]`, deliberately. This runtime must be loadable
-//! into a process that already has Apple's libobjc - that is the whole of how it
-//! gets tested - so the C spellings exist only as strings in [`crate::symbol`],
-//! and the addresses reach a caller through the loader rather than the linker.
-
 // The C spellings are the interface; renaming them would only hide it.
 #![allow(non_snake_case)]
 
@@ -21,7 +14,6 @@ use crate::sel::Sel;
 ///
 /// `p` must be null or a NUL-terminated string that outlives the call.
 unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a CStr> {
-    // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) })
 }
 
@@ -31,7 +23,6 @@ unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a CStr> {
 ///
 /// `p` must be null or a class pointer this runtime produced.
 unsafe fn class(p: *const c_void) -> Option<&'static Class> {
-    // SAFETY: the caller's obligation.
     unsafe { crate::class::from_ptr(p as *const Class) }
 }
 
@@ -42,7 +33,6 @@ unsafe fn class(p: *const c_void) -> Option<&'static Class> {
 /// `p` must be null or a handle this runtime produced.
 unsafe fn method(p: *const c_void) -> Option<&'static Method> {
     crate::debug::validate_handle(p, "method", "Objective-C method API");
-    // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Method) })
 }
 
@@ -53,7 +43,6 @@ unsafe fn method(p: *const c_void) -> Option<&'static Method> {
 /// `p` must be null or a protocol this runtime produced.
 unsafe fn protocol(p: *const c_void) -> Option<&'static Protocol> {
     crate::debug::validate_handle(p, "protocol", "Objective-C protocol API");
-    // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const Protocol) })
 }
 
@@ -62,7 +51,6 @@ fn as_ptr<T>(value: Option<&'static T>) -> *mut c_void {
 }
 
 pub unsafe extern "C" fn sel_registerName(name: *const c_char) -> Sel {
-    // SAFETY: the caller's obligation.
     match unsafe { cstr(name) } {
         Some(name) => crate::sel::register(name),
         None => std::ptr::null(),
@@ -81,7 +69,6 @@ pub unsafe extern "C" fn sel_isEqual(a: Sel, b: Sel) -> bool {
 }
 
 pub unsafe extern "C" fn objc_getClass(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(unsafe { cstr(name) }.and_then(crate::class::lookup))
 }
 
@@ -90,15 +77,12 @@ pub unsafe extern "C" fn objc_getClass(name: *const c_char) -> *mut c_void {
 /// Apple's two differ in whether the class handler runs, and this runtime has no
 /// class handler: nothing here loads a class on demand.
 pub unsafe extern "C" fn objc_lookUpClass(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     unsafe { objc_getClass(name) }
 }
 
 pub unsafe extern "C" fn objc_getRequiredClass(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     let found = unsafe { objc_getClass(name) };
     if found.is_null() {
-        // SAFETY: as above.
         let name = unsafe { cstr(name) }.map_or("<null>".into(), |n| n.to_string_lossy());
         crate::fail!("objc_getRequiredClass: no class named {name}");
     }
@@ -106,7 +90,6 @@ pub unsafe extern "C" fn objc_getRequiredClass(name: *const c_char) -> *mut c_vo
 }
 
 pub unsafe extern "C" fn objc_getMetaClass(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(
         unsafe { cstr(name) }
             .and_then(crate::class::lookup)
@@ -119,7 +102,6 @@ pub unsafe extern "C" fn objc_allocateClassPair(
     name: *const c_char,
     extra: usize,
 ) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { cstr(name) }) else {
         return std::ptr::null_mut();
     };
@@ -129,36 +111,30 @@ pub unsafe extern "C" fn objc_allocateClassPair(
 }
 
 pub unsafe extern "C" fn objc_registerClassPair(cls: *const c_void) {
-    // SAFETY: the caller's obligation.
     if let Some(cls) = unsafe { class(cls) } {
         crate::class::register_pair(cls);
     }
 }
 
 pub unsafe extern "C" fn objc_disposeClassPair(cls: *const c_void) {
-    // SAFETY: the caller's obligation.
     if let Some(cls) = unsafe { class(cls) } {
         crate::class::dispose_pair(cls);
     }
 }
 
 pub unsafe extern "C" fn class_getName(cls: *const c_void) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.map_or(c"nil".as_ptr(), |c| c.name())
 }
 
 pub unsafe extern "C" fn class_getSuperclass(cls: *const c_void) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(unsafe { class(cls) }.and_then(|c| c.superclass()))
 }
 
 pub unsafe extern "C" fn class_isMetaClass(cls: *const c_void) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.is_some_and(|c| c.is_meta())
 }
 
 pub unsafe extern "C" fn class_getInstanceSize(cls: *const c_void) -> usize {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.map_or(0, |c| c.instance_size())
 }
 
@@ -168,7 +144,6 @@ pub unsafe extern "C" fn class_addMethod(
     imp: Imp,
     types: *const c_char,
 ) -> bool {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(types)) = (unsafe { class(cls) }, unsafe { cstr(types) }) else {
         return false;
     };
@@ -181,7 +156,6 @@ pub unsafe extern "C" fn class_replaceMethod(
     imp: Imp,
     types: *const c_char,
 ) -> Imp {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(types)) = (unsafe { class(cls) }, unsafe { cstr(types) }) else {
         return std::ptr::null();
     };
@@ -195,7 +169,6 @@ pub unsafe extern "C" fn class_addIvar(
     alignment: u8,
     types: *const c_char,
 ) -> bool {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(name), Some(types)) =
         (unsafe { class(cls) }, unsafe { cstr(name) }, unsafe {
             cstr(types)
@@ -210,7 +183,6 @@ pub unsafe extern "C" fn class_getInstanceVariable(
     cls: *const c_void,
     name: *const c_char,
 ) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
         return std::ptr::null();
     };
@@ -219,14 +191,12 @@ pub unsafe extern "C" fn class_getInstanceVariable(
 }
 
 pub unsafe extern "C" fn class_getInstanceMethod(cls: *const c_void, name: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }
         .and_then(|c| c.method(name))
         .map_or(std::ptr::null(), |m| m as *const Method as *const c_void)
 }
 
 pub unsafe extern "C" fn class_getClassMethod(cls: *const c_void, name: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }
         .and_then(|c| c.metaclass().method(name))
         .map_or(std::ptr::null(), |m| m as *const Method as *const c_void)
@@ -237,19 +207,16 @@ pub unsafe extern "C" fn class_getClassMethod(cls: *const c_void, name: Sel) -> 
 /// `rosetta3`'s dispatch caches this value and re-probes it to notice a swizzle,
 /// so it must change exactly when the resolution does. See the crate doc.
 pub unsafe extern "C" fn class_getMethodImplementation(cls: *const c_void, name: Sel) -> Imp {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.map_or(std::ptr::null(), |c| {
         crate::class::method_implementation(c, name)
     })
 }
 
 pub unsafe extern "C" fn class_respondsToSelector(cls: *const c_void, name: Sel) -> bool {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.is_some_and(|c| c.method(name).is_some())
 }
 
 pub unsafe extern "C" fn class_addProtocol(cls: *const c_void, proto: *const c_void) -> bool {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(proto)) = (unsafe { class(cls) }, unsafe { protocol(proto) }) else {
         return false;
     };
@@ -260,7 +227,6 @@ pub unsafe extern "C" fn class_conformsToProtocol(
     cls: *const c_void,
     proto: *const c_void,
 ) -> bool {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(proto)) = (unsafe { class(cls) }, unsafe { protocol(proto) }) else {
         return false;
     };
@@ -268,7 +234,6 @@ pub unsafe extern "C" fn class_conformsToProtocol(
 }
 
 pub unsafe extern "C" fn class_createInstance(cls: *const c_void, extra: usize) -> Id {
-    // SAFETY: the caller's obligation.
     unsafe { class(cls) }.map_or(std::ptr::null_mut(), |c| {
         crate::object::create_instance(c, extra)
     })
@@ -279,22 +244,18 @@ pub unsafe extern "C" fn class_createInstance(cls: *const c_void, extra: usize) 
 /// Never a wrapper: `rosetta3` compares this against its own thunk table to tell
 /// a guest method from a host one. See the crate doc.
 pub unsafe extern "C" fn method_getImplementation(m: *const c_void) -> Imp {
-    // SAFETY: the caller's obligation.
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.implementation())
 }
 
 pub unsafe extern "C" fn method_getTypeEncoding(m: *const c_void) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.types())
 }
 
 pub unsafe extern "C" fn method_getName(m: *const c_void) -> Sel {
-    // SAFETY: the caller's obligation.
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.sel)
 }
 
 pub unsafe extern "C" fn method_setImplementation(m: *const c_void, imp: Imp) -> Imp {
-    // SAFETY: the caller's obligation.
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.set_implementation(imp))
 }
 
@@ -309,7 +270,6 @@ pub unsafe extern "C" fn ivar_getOffset(ivar: *const c_void) -> isize {
 
 pub unsafe extern "C" fn ivar_getName(ivar: *const c_void) -> *const c_char {
     crate::debug::validate_handle(ivar, "ivar", "ivar_getName");
-    // SAFETY: as above.
     match ivar.is_null() {
         true => std::ptr::null(),
         false => unsafe { &*(ivar as *const Ivar) }.name(),
@@ -317,26 +277,21 @@ pub unsafe extern "C" fn ivar_getName(ivar: *const c_void) -> *const c_char {
 }
 
 pub unsafe extern "C" fn object_getClass(object: Id) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(unsafe { crate::object::class_of(object) })
 }
 
 pub unsafe extern "C" fn object_setClass(object: Id, cls: *const c_void) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     let Some(cls) = (unsafe { class(cls) }) else {
         return std::ptr::null_mut();
     };
-    // SAFETY: as above.
     as_ptr(unsafe { crate::object::set_class(object, cls) })
 }
 
 pub unsafe extern "C" fn object_getClassName(object: Id) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { crate::object::class_of(object) }.map_or(c"nil".as_ptr(), |c| c.name())
 }
 
 pub unsafe extern "C" fn object_getIndexedIvars(object: Id) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     unsafe { crate::object::indexed_ivars(object) }
 }
 
@@ -351,11 +306,9 @@ pub unsafe extern "C" fn object_getIvar(object: Id, ivar: *const c_void) -> Id {
     {
         crate::fail!("objc debug: object_getIvar was given an ivar from another class");
     }
-    // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { cstr(ivar_getName(ivar)) }) else {
         return std::ptr::null_mut();
     };
-    // SAFETY: as above.
     unsafe { crate::object::get_ivar(object, name) }
 }
 
@@ -371,16 +324,13 @@ pub unsafe extern "C" fn object_setIvar(object: Id, ivar: *const c_void, value: 
     {
         crate::fail!("objc debug: object_setIvar was given an ivar from another class");
     }
-    // SAFETY: the caller's obligation.
     let Some(name) = (unsafe { cstr(ivar_getName(ivar)) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe { crate::object::set_ivar(object, name, value) }
 }
 
 pub unsafe extern "C" fn objc_constructInstance(cls: *const c_void, bytes: *mut c_void) -> Id {
-    // SAFETY: the caller's obligation.
     let Some(cls) = (unsafe { class(cls) }) else {
         return std::ptr::null_mut();
     };
@@ -411,7 +361,6 @@ pub struct PropertyAttribute {
 /// `p` must be null or a handle this runtime produced.
 unsafe fn property(p: *const c_void) -> Option<&'static crate::property::Property> {
     crate::debug::validate_handle(p, "property", "Objective-C property API");
-    // SAFETY: the caller's obligation.
     (!p.is_null()).then(|| unsafe { &*(p as *const crate::property::Property) })
 }
 
@@ -446,7 +395,6 @@ pub unsafe extern "C" fn class_copyPropertyList(
     cls: *const c_void,
     out_count: *mut u32,
 ) -> *mut *const c_void {
-    // SAFETY: the caller's obligation.
     let properties = unsafe { class(cls) }
         .map(|c| c.properties())
         .unwrap_or_default();
@@ -462,7 +410,6 @@ pub unsafe extern "C" fn class_getProperty(
     cls: *const c_void,
     name: *const c_char,
 ) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
         return std::ptr::null();
     };
@@ -478,7 +425,6 @@ pub unsafe extern "C" fn class_addProperty(
     attributes: *const PropertyAttribute,
     count: u32,
 ) -> bool {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
         return false;
     };
@@ -496,11 +442,9 @@ pub unsafe extern "C" fn class_replaceProperty(
     attributes: *const PropertyAttribute,
     count: u32,
 ) {
-    // SAFETY: the caller's obligation.
     let (Some(cls), Some(name)) = (unsafe { class(cls) }, unsafe { cstr(name) }) else {
         return;
     };
-    // SAFETY: as above.
     unsafe { cls.set_property(name, &attribute_string(attributes, count)) };
 }
 
@@ -515,9 +459,7 @@ unsafe fn attribute_string(attributes: *const PropertyAttribute, count: u32) -> 
         if attributes.is_null() {
             break;
         }
-        // SAFETY: the caller's obligation.
         let entry = unsafe { &*attributes.add(i) };
-        // SAFETY: as above.
         let (Some(name), value) = (unsafe { cstr(entry.name) }, unsafe { cstr(entry.value) })
         else {
             continue;
@@ -530,12 +472,10 @@ unsafe fn attribute_string(attributes: *const PropertyAttribute, count: u32) -> 
 }
 
 pub unsafe extern "C" fn property_getName(p: *const c_void) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { property(p) }.map_or(c"".as_ptr(), |p| p.name())
 }
 
 pub unsafe extern "C" fn property_getAttributes(p: *const c_void) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { property(p) }.map_or(std::ptr::null(), |p| p.attributes())
 }
 
@@ -548,7 +488,6 @@ pub unsafe extern "C" fn property_copyAttributeList(
     p: *const c_void,
     out_count: *mut u32,
 ) -> *mut PropertyAttribute {
-    // SAFETY: the caller's obligation.
     let Some(p) = (unsafe { property(p) }) else {
         // SAFETY: null or writable.
         if !out_count.is_null() {
@@ -585,29 +524,24 @@ pub unsafe extern "C" fn objc_loadClassref(slot: *mut *mut c_void) -> *mut c_voi
 }
 
 pub unsafe extern "C" fn objc_getProtocol(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(unsafe { cstr(name) }.and_then(crate::protocol::lookup))
 }
 
 pub unsafe extern "C" fn objc_allocateProtocol(name: *const c_char) -> *mut c_void {
-    // SAFETY: the caller's obligation.
     as_ptr(unsafe { cstr(name) }.and_then(crate::protocol::allocate))
 }
 
 pub unsafe extern "C" fn objc_registerProtocol(proto: *const c_void) {
-    // SAFETY: the caller's obligation.
     if let Some(proto) = unsafe { protocol(proto) } {
         crate::protocol::register(proto);
     }
 }
 
 pub unsafe extern "C" fn protocol_getName(proto: *const c_void) -> *const c_char {
-    // SAFETY: the caller's obligation.
     unsafe { protocol(proto) }.map_or(c"nil".as_ptr(), |p| p.name())
 }
 
 pub unsafe extern "C" fn protocol_addProtocol(proto: *const c_void, addition: *const c_void) {
-    // SAFETY: the caller's obligation.
     if let (Some(proto), Some(addition)) =
         (unsafe { protocol(proto) }, unsafe { protocol(addition) })
     {
@@ -622,7 +556,6 @@ pub unsafe extern "C" fn protocol_addMethodDescription(
     is_required: bool,
     is_instance: bool,
 ) {
-    // SAFETY: the caller's obligation.
     if let (Some(proto), Some(types)) = (unsafe { protocol(proto) }, unsafe { cstr(types) }) {
         proto.add_method(name, types, is_required, is_instance);
     }
@@ -635,7 +568,6 @@ pub unsafe extern "C" fn protocol_getMethodDescription(
     is_required: bool,
     is_instance: bool,
 ) -> Description {
-    // SAFETY: the caller's obligation.
     unsafe { protocol(proto) }.map_or(
         Description {
             sel: std::ptr::null(),
@@ -701,7 +633,6 @@ pub unsafe extern "C" fn objc_storeStrong(slot: *mut Id, value: Id) {
         return;
     }
     crate::arc::retain(value);
-    // SAFETY: as above.
     unsafe { *slot = value };
     crate::arc::release(previous);
 }
@@ -753,7 +684,6 @@ pub unsafe extern "C" fn objc_copyWeak(to: *mut Id, from: *mut Id) {
 pub unsafe extern "C" fn objc_moveWeak(to: *mut Id, from: *mut Id) {
     // SAFETY: the caller owns both slots.
     unsafe { objc_copyWeak(to, from) };
-    // SAFETY: as above.
     unsafe { objc_destroyWeak(from) };
 }
 

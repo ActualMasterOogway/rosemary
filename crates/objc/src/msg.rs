@@ -1,16 +1,3 @@
-//! `objc_msgSend`.
-//!
-//! The one entry point that cannot be written in Rust: it takes its arguments in
-//! whatever registers the call site used and must pass them through untouched to
-//! an implementation whose prototype it does not know. So it is a naked function
-//! that spills the argument registers, calls [`lookup`] for the `IMP`, restores
-//! them, and jumps.
-//!
-//! Guest sends do not come through here - `rosetta3`'s dispatch intercepts
-//! `objc_msgSend` by name and resolves the target itself. This is for messages
-//! sent *by* the runtime and by this tree's own framework classes, and for the
-//! address the guest's import slot has to be bound to.
-
 use std::ffi::c_void;
 
 use crate::object::Id;
@@ -25,12 +12,10 @@ use crate::sel::Sel;
 ///
 /// `receiver` must be a non-null object pointer.
 unsafe extern "C" fn lookup(receiver: Id, sel: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let refused = match logging_unrecognised() {
         true => unrecognised_logged as *const c_void,
         false => unrecognised as *const c_void,
     };
-    // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
         return refused;
     };
@@ -71,7 +56,6 @@ pub fn forward() -> *const c_void {
 ///
 /// `receiver` is null or a live object.
 unsafe fn describe_unrecognised(receiver: Id, sel: Sel) -> String {
-    // SAFETY: the caller's obligation.
     let class = unsafe { crate::object::class_of(receiver) };
     let name = class.map_or("nil", |c| c.name_str());
     let selector = match sel.is_null() {
@@ -102,7 +86,6 @@ unsafe extern "C" fn unrecognised_logged(receiver: Id, sel: Sel) -> usize {
     use std::sync::Mutex;
     static SEEN: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
 
-    // SAFETY: the caller's obligation.
     let line = unsafe { describe_unrecognised(receiver, sel) };
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if seen.get_or_insert_default().insert(line.clone()) {
@@ -134,12 +117,10 @@ unsafe extern "C" fn unrecognised_stret_logged(_buffer: *mut c_void, receiver: I
 /// As [`lookup`].
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" fn lookup_stret(receiver: Id, sel: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let refused = match logging_unrecognised() {
         true => unrecognised_stret_logged as *const c_void,
         false => unrecognised_stret as *const c_void,
     };
-    // SAFETY: the caller's obligation.
     let Some(class) = (unsafe { crate::object::class_of(receiver) }) else {
         return refused;
     };
@@ -372,7 +353,6 @@ struct Super {
 ///
 /// `sup` must point at a live `objc_super` whose receiver is non-null.
 unsafe extern "C" fn lookup_super(sup: *const Super, sel: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let sup = unsafe { &*sup };
     // SAFETY: `class` is a class pointer this runtime handed out, or null.
     match unsafe { crate::class::from_ptr(sup.class) } {
@@ -389,9 +369,7 @@ unsafe extern "C" fn lookup_super(sup: *const Super, sel: Sel) -> *const c_void 
 ///
 /// As [`lookup_super`].
 unsafe extern "C" fn lookup_super2(sup: *const Super, sel: Sel) -> *const c_void {
-    // SAFETY: the caller's obligation.
     let sup = unsafe { &*sup };
-    // SAFETY: as above.
     match unsafe { crate::class::from_ptr(sup.class) }.and_then(|c| c.superclass()) {
         Some(class) => imp_or_unrecognised(class, sel),
         None => unrecognised as *const c_void,

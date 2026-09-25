@@ -1,20 +1,3 @@
-//! Classes, metaclasses, ivars and methods.
-//!
-//! The first two words of a class are its metaclass and its superclass, and the
-//! first word of an instance is its class, because guest code builds objects
-//! with that layout by hand - a `__cfstring` literal in the guest's `__DATA` is
-//! four words beginning with a class pointer, and nothing gets a chance to
-//! translate it. Everything past those words is this crate's own business.
-//!
-//! Two invariants the rest of the runtime leans on, restated from the crate doc
-//! because this is where they are kept:
-//!
-//! * [`method_implementation`] returns the resolved `IMP` itself, so a caller can
-//!   re-probe it to notice that a method was swizzled.
-//! * [`Method::implementation`] returns the *exact* pointer [`Class::add_method`]
-//!   was given. A `Method` is a stable handle whose `IMP` moves, never a wrapper
-//!   around one.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};

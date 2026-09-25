@@ -1,9 +1,3 @@
-//! Protocols.
-//!
-//! A protocol carries method *descriptions* - a selector and a type encoding,
-//! with no implementation - which is all a guest asking
-//! `protocol_getMethodDescription` wants back.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{LazyLock, RwLock};

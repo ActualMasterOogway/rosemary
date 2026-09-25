@@ -1,18 +1,3 @@
-//! `@property` metadata.
-//!
-//! A property is not a method and not an ivar: it is a name and an attribute
-//! string the compiler emitted beside them, and the only thing that reads it is
-//! code introspecting a class it did not write. That is a small audience, and it
-//! is exactly the audience this runtime has - a program asking what a class
-//! declares gets an empty answer from a runtime that models none of this, and an
-//! empty answer is indistinguishable from a class with no properties.
-//!
-//! The attribute string is the interesting half. `T@"NSString",C,N,V_name` is
-//! comma-separated fields whose first character is the attribute's name and
-//! whose remainder is its value, and the type field can itself contain a comma
-//! inside quotes - `T@"NSDictionary<NSString*,id>"` - so splitting on commas
-//! without tracking the quotes produces a type that stops halfway through.
-
 use std::ffi::{CStr, CString, c_char};
 
 /// One `@property`, leaked so the handle a caller holds stays valid.

@@ -1,19 +1,5 @@
 #![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 
-//! An Objective-C runtime.
-//!
-//! Implements the public libobjc API for guest classes with Apple's objc4 ABI.
-//! Symbols are exposed through [`symbol`] so this runtime can coexist with Apple's.
-//!
-//! Dispatch relies on two pointer identity guarantees:
-//!
-//! * `class_getMethodImplementation` returns the resolved `IMP` itself, and its
-//!   value changes when resolution changes, allowing dispatch to detect swizzling.
-//! * `method_getImplementation` returns the *exact* pointer `class_addMethod`
-//!   was given, allowing dispatch to distinguish guest thunks from host methods.
-//!
-//! Selectors point to interned names. There are no tagged pointers.
-
 pub mod allocator;
 pub mod api;
 pub mod arc;
