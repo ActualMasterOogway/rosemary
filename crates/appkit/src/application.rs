@@ -106,7 +106,11 @@ unsafe extern "C" fn main_menu(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn set_main_menu(receiver: Id, _sel: Sel, value: Id) {
     // SAFETY: an application.
-    unsafe { (*(receiver as *mut Application)).main_menu = objc::arc::retain(value) };
+    let slot = unsafe { &mut (*(receiver as *mut Application)).main_menu };
+    let old = std::mem::replace(slot, objc::arc::retain(value));
+    objc::arc::release(old);
+    // The menu bar shows the menus of the one it is given now.
+    crate::decor::close_menus();
 }
 
 /// The icon the program set on `NSApp`, or nil when it set none or there is no

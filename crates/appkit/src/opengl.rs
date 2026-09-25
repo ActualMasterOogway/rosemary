@@ -800,6 +800,7 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
             sdl3::error()
         );
     }
+    chrome_blit::fit_viewport(drawable_window(context), window, sdl);
 
     if holds_primary {
         state.owner = Some(thread);
@@ -1322,6 +1323,7 @@ unsafe extern "C" fn clear_current_context(_class: Id, _sel: Sel) {
 unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
     let window = drawable(context_of(receiver));
     if !window.is_null() {
+        chrome_blit::draw(window);
         sdl3::video::swap_window(window);
     }
 }
@@ -1434,6 +1436,301 @@ pub(crate) fn install() {
         "prepareOpenGL" => update, c"v16@0:8";
         "update" => update, c"v16@0:8";
     });
+}
+
+/// The chrome `crate::decor` paints, put over the top of a GL window's
+/// default framebuffer just before it is swapped.
+///
+/// The guest owns every pixel of that framebuffer, and it is the frame's
+/// height: GL counts rows from the bottom, so a guest's `glViewport(0, 0, w,
+/// h)` of its content size lands below the chrome and leaves this strip to
+/// be drawn here. A blit touches no state a draw call reads, which keeps the
+/// guest's context as it left it once the handful of bindings below are put
+/// back.
+mod chrome_blit {
+    use std::cell::RefCell;
+    use std::ffi::{CStr, c_void};
+
+    const READ_FRAMEBUFFER: u32 = 0x8CA8;
+    const DRAW_FRAMEBUFFER: u32 = 0x8CA9;
+    const READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
+    const DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+    const TEXTURE_2D: u32 = 0x0DE1;
+    const TEXTURE_BINDING_2D: u32 = 0x8069;
+    const COLOR_ATTACHMENT0: u32 = 0x8CE0;
+    const RGBA8: i32 = 0x8058;
+    const BGRA: u32 = 0x80E1;
+    const UNSIGNED_BYTE: u32 = 0x1401;
+    const UNPACK_ALIGNMENT: u32 = 0x0CF5;
+    const UNPACK_ROW_LENGTH: u32 = 0x0CF2;
+    const UNPACK_SKIP_ROWS: u32 = 0x0CF3;
+    const UNPACK_SKIP_PIXELS: u32 = 0x0CF4;
+    const PIXEL_UNPACK_BUFFER: u32 = 0x88EC;
+    const PIXEL_UNPACK_BUFFER_BINDING: u32 = 0x88EF;
+    const SCISSOR_TEST: u32 = 0x0C11;
+    const FRAMEBUFFER_SRGB: u32 = 0x8DB9;
+    const COLOR_BUFFER_BIT: u32 = 0x4000;
+    const NEAREST: i32 = 0x2600;
+    const TEXTURE_MIN_FILTER: u32 = 0x2801;
+    const TEXTURE_MAG_FILTER: u32 = 0x2800;
+    const FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+
+    #[allow(non_snake_case)]
+    struct Gl {
+        GetIntegerv: unsafe extern "C" fn(u32, *mut i32),
+        IsEnabled: unsafe extern "C" fn(u32) -> u8,
+        Enable: unsafe extern "C" fn(u32),
+        Disable: unsafe extern "C" fn(u32),
+        GenTextures: unsafe extern "C" fn(i32, *mut u32),
+        BindTexture: unsafe extern "C" fn(u32, u32),
+        TexParameteri: unsafe extern "C" fn(u32, u32, i32),
+        TexImage2D: unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void),
+        PixelStorei: unsafe extern "C" fn(u32, i32),
+        BindBuffer: unsafe extern "C" fn(u32, u32),
+        GenFramebuffers: unsafe extern "C" fn(i32, *mut u32),
+        BindFramebuffer: unsafe extern "C" fn(u32, u32),
+        FramebufferTexture2D: unsafe extern "C" fn(u32, u32, u32, u32, i32),
+        CheckFramebufferStatus: unsafe extern "C" fn(u32) -> u32,
+        BlitFramebuffer: unsafe extern "C" fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32),
+    }
+
+    impl Gl {
+        fn load() -> Option<Gl> {
+            fn get<T>(name: &CStr) -> Option<T> {
+                let found = sdl3::video::gl_proc_address(name)?;
+                assert_eq!(size_of::<T>(), size_of::<*mut c_void>());
+                // SAFETY: the caller names the prototype GL declares for it.
+                Some(unsafe { std::mem::transmute_copy(&found) })
+            }
+            Some(Gl {
+                GetIntegerv: get(c"glGetIntegerv")?,
+                IsEnabled: get(c"glIsEnabled")?,
+                Enable: get(c"glEnable")?,
+                Disable: get(c"glDisable")?,
+                GenTextures: get(c"glGenTextures")?,
+                BindTexture: get(c"glBindTexture")?,
+                TexParameteri: get(c"glTexParameteri")?,
+                TexImage2D: get(c"glTexImage2D")?,
+                PixelStorei: get(c"glPixelStorei")?,
+                BindBuffer: get(c"glBindBuffer")?,
+                GenFramebuffers: get(c"glGenFramebuffers")?,
+                BindFramebuffer: get(c"glBindFramebuffer")?,
+                FramebufferTexture2D: get(c"glFramebufferTexture2D")?,
+                CheckFramebufferStatus: get(c"glCheckFramebufferStatus")?,
+                BlitFramebuffer: get(c"glBlitFramebuffer")?,
+            })
+        }
+    }
+
+    /// The objects made in one context: a framebuffer does not travel
+    /// between contexts, so each thread's context has its own.
+    struct Cached {
+        context: usize,
+        texture: u32,
+        framebuffer: u32,
+        size: (u32, u32),
+        generation: u64,
+    }
+
+    thread_local! {
+        static CACHED: RefCell<Vec<Cached>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The contexts whose first viewport has been fitted to a window's
+    /// content, as (context, window) addresses.
+    static FITTED: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Give a context made current on a decorated window, the first time,
+    /// a viewport of the content rather than of the whole frame.
+    ///
+    /// GL starts a context's viewport at its drawable's size, and a guest
+    /// that never sets one relies on that matching its view - which, under
+    /// the chrome, it no longer does.
+    pub(super) fn fit_viewport(
+        object: objc::object::Id,
+        window: sdl3::Window,
+        context: sdl3::GlContext,
+    ) {
+        // SAFETY: null or a window this crate made.
+        if unsafe { crate::window::sdl_window(object) } != window {
+            // The hidden window a context waits in before it has a view.
+            return;
+        }
+        let inset = crate::window::content_inset(object);
+        if inset <= 0.0 {
+            return;
+        }
+        {
+            let mut fitted = FITTED.lock().unwrap_or_else(|e| e.into_inner());
+            let key = (context as usize, window as usize);
+            if fitted.contains(&key) {
+                return;
+            }
+            fitted.push(key);
+        }
+        let (Some((points, _)), Some((width, height))) = (
+            sdl3::video::window_size(window),
+            sdl3::video::window_size_in_pixels(window),
+        ) else {
+            return;
+        };
+        let density = match points > 0 {
+            true => f64::from(width) / f64::from(points),
+            false => 1.0,
+        };
+        let Some(viewport) = sdl3::video::gl_proc_address(c"glViewport") else {
+            return;
+        };
+        let inset = (inset * density).round() as i32;
+        // SAFETY: `glViewport(GLint, GLint, GLsizei, GLsizei)` on the context
+        // just made current.
+        unsafe {
+            let f: unsafe extern "C" fn(i32, i32, i32, i32) = std::mem::transmute(viewport);
+            f(0, 0, width, (height - inset).max(0));
+        }
+    }
+
+    /// Draw `window`'s chrome into the current context's default framebuffer.
+    pub(super) fn draw(window: sdl3::Window) {
+        let Some(chrome) = crate::decor::pixels(window) else {
+            return;
+        };
+        let context = sdl3::video::gl_current_context();
+        if context.is_null() || chrome.width == 0 || chrome.height == 0 {
+            return;
+        }
+        let Some((_, height)) = sdl3::video::window_size_in_pixels(window) else {
+            return;
+        };
+        static GL: std::sync::OnceLock<Option<Gl>> = std::sync::OnceLock::new();
+        let Some(gl) = GL.get_or_init(Gl::load) else {
+            return;
+        };
+        // SAFETY: a current context, and entry points of its GL.
+        unsafe { blit(gl, context as usize, &chrome, height) };
+    }
+
+    unsafe fn blit(gl: &Gl, context: usize, chrome: &crate::decor::Pixels, window_height: i32) {
+        let get = |name| {
+            let mut value = 0;
+            // SAFETY: a single-valued query into a local.
+            unsafe { (gl.GetIntegerv)(name, &mut value) };
+            value
+        };
+        let read = get(READ_FRAMEBUFFER_BINDING);
+        let draw = get(DRAW_FRAMEBUFFER_BINDING);
+        let texture = get(TEXTURE_BINDING_2D);
+        let unpack = [
+            get(UNPACK_ALIGNMENT),
+            get(UNPACK_ROW_LENGTH),
+            get(UNPACK_SKIP_ROWS),
+            get(UNPACK_SKIP_PIXELS),
+        ];
+        let unpack_buffer = get(PIXEL_UNPACK_BUFFER_BINDING);
+        // SAFETY: a capability query.
+        let scissor = unsafe { (gl.IsEnabled)(SCISSOR_TEST) } != 0;
+        let srgb = unsafe { (gl.IsEnabled)(FRAMEBUFFER_SRGB) } != 0;
+
+        let ready = CACHED.with(|cached| {
+            let mut cached = cached.borrow_mut();
+            let at = match cached.iter().position(|c| c.context == context) {
+                Some(at) => at,
+                None => {
+                    let (mut texture, mut framebuffer) = (0, 0);
+                    // SAFETY: names written into locals.
+                    unsafe {
+                        (gl.GenTextures)(1, &mut texture);
+                        (gl.GenFramebuffers)(1, &mut framebuffer);
+                    }
+                    cached.push(Cached {
+                        context,
+                        texture,
+                        framebuffer,
+                        size: (0, 0),
+                        generation: 0,
+                    });
+                    cached.len() - 1
+                }
+            };
+            let entry = &mut cached[at];
+            // SAFETY: objects of this context, and pixels that outlive the
+            // upload.
+            unsafe {
+                (gl.BindTexture)(TEXTURE_2D, entry.texture);
+                (gl.BindFramebuffer)(READ_FRAMEBUFFER, entry.framebuffer);
+                if entry.generation != chrome.generation {
+                    (gl.BindBuffer)(PIXEL_UNPACK_BUFFER, 0);
+                    (gl.PixelStorei)(UNPACK_ALIGNMENT, 4);
+                    (gl.PixelStorei)(UNPACK_ROW_LENGTH, 0);
+                    (gl.PixelStorei)(UNPACK_SKIP_ROWS, 0);
+                    (gl.PixelStorei)(UNPACK_SKIP_PIXELS, 0);
+                    (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST);
+                    (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST);
+                    (gl.TexImage2D)(
+                        TEXTURE_2D,
+                        0,
+                        RGBA8,
+                        chrome.width as i32,
+                        chrome.height as i32,
+                        0,
+                        BGRA,
+                        UNSIGNED_BYTE,
+                        chrome.pixels.as_ptr().cast(),
+                    );
+                    if entry.size != (chrome.width, chrome.height) {
+                        (gl.FramebufferTexture2D)(
+                            READ_FRAMEBUFFER,
+                            COLOR_ATTACHMENT0,
+                            TEXTURE_2D,
+                            entry.texture,
+                            0,
+                        );
+                        entry.size = (chrome.width, chrome.height);
+                    }
+                    entry.generation = chrome.generation;
+                }
+                (gl.CheckFramebufferStatus)(READ_FRAMEBUFFER) == FRAMEBUFFER_COMPLETE
+            }
+        });
+
+        // SAFETY: the current context; every binding changed is put back.
+        unsafe {
+            if ready {
+                (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, 0);
+                (gl.Disable)(SCISSOR_TEST);
+                (gl.Disable)(FRAMEBUFFER_SRGB);
+                let (width, height) = (chrome.width as i32, chrome.height as i32);
+                // The store's first row is the top; GL's is the bottom, so the
+                // destination runs downwards to flip it.
+                (gl.BlitFramebuffer)(
+                    0,
+                    0,
+                    width,
+                    height,
+                    0,
+                    window_height,
+                    width,
+                    window_height - height,
+                    COLOR_BUFFER_BIT,
+                    NEAREST as u32,
+                );
+            }
+            if scissor {
+                (gl.Enable)(SCISSOR_TEST);
+            }
+            if srgb {
+                (gl.Enable)(FRAMEBUFFER_SRGB);
+            }
+            (gl.BindTexture)(TEXTURE_2D, texture as u32);
+            (gl.BindBuffer)(PIXEL_UNPACK_BUFFER, unpack_buffer as u32);
+            (gl.PixelStorei)(UNPACK_ALIGNMENT, unpack[0]);
+            (gl.PixelStorei)(UNPACK_ROW_LENGTH, unpack[1]);
+            (gl.PixelStorei)(UNPACK_SKIP_ROWS, unpack[2]);
+            (gl.PixelStorei)(UNPACK_SKIP_PIXELS, unpack[3]);
+            (gl.BindFramebuffer)(READ_FRAMEBUFFER, read as u32);
+            (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, draw as u32);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -182,8 +182,8 @@ fn present_impl(
     {
         return Ok(false);
     }
-    let mut all = SWAPCHAINS.lock().expect("window swapchains");
-    let all = all.get_or_insert_with(HashMap::new);
+    let mut guard = SWAPCHAINS.lock().expect("window swapchains");
+    let all = guard.get_or_insert_with(HashMap::new);
     let extent = vk::Extent2D {
         width: frame.window_width.max(1),
         height: frame.window_height.max(1),
@@ -209,7 +209,8 @@ fn present_impl(
         }
     }
     let swapchain = all.get_mut(&window).expect("just created");
-    if !swapchain.layers.contains(&layer) {
+    let joined = !swapchain.layers.contains(&layer);
+    if joined {
         swapchain.layers.push(layer);
     }
     // The window resized, or the presentation engine said the last image no
@@ -237,7 +238,16 @@ fn present_impl(
             &holes,
         )),
     };
-    swapchain.present(frame, source, regions.as_deref(), owner.take())
+    let presented = swapchain.present(frame, source, regions.as_deref(), owner.take());
+    drop(guard);
+    // A layer's first frame starts the window's accumulator, which holds
+    // nothing of the window's store yet: the store may have gone straight to
+    // the screen before there was a layer to leave room for. Have it
+    // presented again, around the layer this time.
+    if joined && layer != window {
+        appkit::backing::present_again(frame.window);
+    }
+    presented
 }
 
 fn finish_source(source: Option<usize>) {

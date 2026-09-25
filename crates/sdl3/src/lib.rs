@@ -158,6 +158,13 @@ struct Api {
     SDL_SetWindowFullscreen: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowBordered: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_MinimizeWindow: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_MaximizeWindow: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_RestoreWindow: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_SetWindowMinimumSize: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
+    SDL_ShowWindowSystemMenu: Option<unsafe extern "C" fn(Window, c_int, c_int) -> bool>,
+    SDL_SetWindowHitTest:
+        Option<unsafe extern "C" fn(Window, Option<video::HitTest>, *mut c_void) -> bool>,
     SDL_SetWindowAlwaysOnTop: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowFocusable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowPixelDensity: Option<unsafe extern "C" fn(Window) -> f32>,
@@ -184,6 +191,7 @@ struct Api {
     SDL_GL_CreateContext: Option<unsafe extern "C" fn(Window) -> GlContext>,
     SDL_GL_DestroyContext: Option<unsafe extern "C" fn(GlContext) -> bool>,
     SDL_GL_MakeCurrent: Option<unsafe extern "C" fn(Window, GlContext) -> bool>,
+    SDL_GL_GetCurrentContext: Option<unsafe extern "C" fn() -> GlContext>,
     SDL_GL_SwapWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GL_SetAttribute: Option<unsafe extern "C" fn(c_int, c_int) -> bool>,
     SDL_GL_SetSwapInterval: Option<unsafe extern "C" fn(c_int) -> bool>,
@@ -371,6 +379,12 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowFullscreen,
             SDL_SetWindowResizable,
             SDL_SetWindowBordered,
+            SDL_MinimizeWindow,
+            SDL_MaximizeWindow,
+            SDL_RestoreWindow,
+            SDL_SetWindowMinimumSize,
+            SDL_ShowWindowSystemMenu,
+            SDL_SetWindowHitTest,
             SDL_SetWindowAlwaysOnTop,
             SDL_SetWindowFocusable,
             SDL_GetWindowPixelDensity,
@@ -390,6 +404,7 @@ fn api() -> Option<&'static Api> {
             SDL_GL_CreateContext,
             SDL_GL_DestroyContext,
             SDL_GL_MakeCurrent,
+            SDL_GL_GetCurrentContext,
             SDL_GL_SwapWindow,
             SDL_GL_SetAttribute,
             SDL_GL_SetSwapInterval,
@@ -1346,6 +1361,8 @@ pub mod video {
         pub const HIDDEN: u64 = 0x0000_0008;
         pub const BORDERLESS: u64 = 0x0000_0010;
         pub const RESIZABLE: u64 = 0x0000_0020;
+        pub const MINIMIZED: u64 = 0x0000_0040;
+        pub const MAXIMIZED: u64 = 0x0000_0080;
         pub const HIGH_PIXEL_DENSITY: u64 = 0x0000_2000;
         pub const ALWAYS_ON_TOP: u64 = 0x0001_0000;
         pub const UTILITY: u64 = 0x0002_0000;
@@ -1397,12 +1414,17 @@ pub mod video {
         pub const QUIT: u32 = 0x100;
         pub const WINDOW_RESIZED: u32 = 0x206;
         pub const WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
+        pub const WINDOW_MINIMIZED: u32 = 0x209;
+        pub const WINDOW_MAXIMIZED: u32 = 0x20a;
+        pub const WINDOW_RESTORED: u32 = 0x20b;
         pub const WINDOW_MOUSE_ENTER: u32 = 0x20c;
         pub const WINDOW_MOUSE_LEAVE: u32 = 0x20d;
         pub const WINDOW_FOCUS_GAINED: u32 = 0x20e;
         pub const WINDOW_FOCUS_LOST: u32 = 0x20f;
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
         pub const WINDOW_DISPLAY_SCALE_CHANGED: u32 = 0x214;
+        pub const WINDOW_ENTER_FULLSCREEN: u32 = 0x217;
+        pub const WINDOW_LEAVE_FULLSCREEN: u32 = 0x218;
         pub const KEY_DOWN: u32 = 0x300;
         pub const KEY_UP: u32 = 0x301;
         pub const TEXT_EDITING: u32 = 0x302;
@@ -1557,6 +1579,11 @@ pub mod video {
             window: u32,
             entered: bool,
         },
+        /// Minimized, maximized, restored, or in or out of fullscreen: read
+        /// [`window_flags`] for which.
+        WindowState {
+            window: u32,
+        },
         Key {
             window: u32,
             scancode: u32,
@@ -1659,6 +1686,14 @@ pub mod video {
                         window: e.window,
                         entered: tag == event_type::WINDOW_MOUSE_ENTER,
                     }
+                }
+                event_type::WINDOW_MINIMIZED
+                | event_type::WINDOW_MAXIMIZED
+                | event_type::WINDOW_RESTORED
+                | event_type::WINDOW_ENTER_FULLSCREEN
+                | event_type::WINDOW_LEAVE_FULLSCREEN => {
+                    let e: WindowEvent = decode(&raw);
+                    Event::WindowState { window: e.window }
                 }
                 event_type::KEY_DOWN | event_type::KEY_UP => {
                     let e: KeyboardEvent = decode(&raw);
@@ -1926,6 +1961,9 @@ pub mod video {
         show_window => SDL_ShowWindow,
         hide_window => SDL_HideWindow,
         raise_window => SDL_RaiseWindow,
+        minimize_window => SDL_MinimizeWindow,
+        maximize_window => SDL_MaximizeWindow,
+        restore_window => SDL_RestoreWindow,
         swap_window => SDL_GL_SwapWindow,
         start_text_input => SDL_StartTextInput,
         stop_text_input => SDL_StopTextInput,
@@ -2120,6 +2158,65 @@ pub mod video {
         unsafe { f(window, on) }
     }
 
+    /// `SDL_SetWindowMinimumSize`, in window coordinates.
+    pub fn set_window_minimum_size(window: Window, width: i32, height: i32) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowMinimumSize) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, width, height) }
+    }
+
+    /// `SDL_ShowWindowSystemMenu`: the window manager's own menu for the
+    /// window, at a point in window coordinates.
+    pub fn show_window_system_menu(window: Window, x: i32, y: i32) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_ShowWindowSystemMenu) else {
+            return false;
+        };
+        // SAFETY: a window this crate created.
+        unsafe { f(window, x, y) }
+    }
+
+    /// `SDL_HitTestResult`: what a point of a borderless window is to the
+    /// window manager.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum HitTestResult {
+        Normal = 0,
+        Draggable = 1,
+        ResizeTopLeft = 2,
+        ResizeTop = 3,
+        ResizeTopRight = 4,
+        ResizeRight = 5,
+        ResizeBottomRight = 6,
+        ResizeBottom = 7,
+        ResizeBottomLeft = 8,
+        ResizeLeft = 9,
+    }
+
+    /// `SDL_HitTest`. SDL may call it from whichever thread pumps events, and
+    /// the point is in window coordinates.
+    pub type HitTest = unsafe extern "C" fn(Window, *const Point, *mut c_void) -> HitTestResult;
+
+    /// `SDL_Point`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Point {
+        pub x: c_int,
+        pub y: c_int,
+    }
+
+    /// `SDL_SetWindowHitTest`: let the window manager move and resize a
+    /// borderless window from regions `callback` names, or stop with `None`.
+    pub fn set_window_hit_test(window: Window, callback: Option<HitTest>) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowHitTest) else {
+            return false;
+        };
+        // SAFETY: a window this crate created and a callback that ignores its
+        // data pointer.
+        unsafe { f(window, callback, std::ptr::null_mut()) }
+    }
+
     pub fn set_window_always_on_top(window: Window, on: bool) -> bool {
         let Some(f) = api().and_then(|a| a.SDL_SetWindowAlwaysOnTop) else {
             return false;
@@ -2199,6 +2296,15 @@ pub mod video {
         };
         // SAFETY: a context this crate created.
         unsafe { f(context) };
+    }
+
+    /// The context current on this thread, or null.
+    pub fn gl_current_context() -> GlContext {
+        match api().and_then(|a| a.SDL_GL_GetCurrentContext) {
+            // SAFETY: takes nothing.
+            Some(f) => unsafe { f() },
+            None => std::ptr::null_mut(),
+        }
     }
 
     pub fn gl_make_current(window: Window, context: GlContext) -> bool {
@@ -2709,6 +2815,14 @@ pub mod video {
     /// `SDL_HINT_MOUSE_RELATIVE_CURSOR_VISIBLE`: whether the pointer stays
     /// visible while relative mouse mode is on. SDL hides it by default.
     pub const HINT_RELATIVE_CURSOR_VISIBLE: &CStr = c"SDL_MOUSE_RELATIVE_CURSOR_VISIBLE";
+
+    /// `SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR`. libdecor's GTK plugin loads
+    /// GTK 3, which cannot share a process with the GTK 4 WebKit uses, so a
+    /// runtime drawing its own decorations turns it off before video starts.
+    pub const HINT_WAYLAND_ALLOW_LIBDECOR: &CStr = c"SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR";
+
+    /// `SDL_HINT_VIDEO_WAYLAND_PREFER_LIBDECOR`.
+    pub const HINT_WAYLAND_PREFER_LIBDECOR: &CStr = c"SDL_VIDEO_WAYLAND_PREFER_LIBDECOR";
 
     /// Hold the pointer in place over `window` and report motion only as
     /// deltas, or stop doing so.
