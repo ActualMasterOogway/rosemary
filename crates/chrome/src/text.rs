@@ -185,6 +185,39 @@ impl Font {
         }
         String::new()
     }
+
+    /// `text` broken into lines no wider than `width`: at spaces where it
+    /// can, and inside a word only when the word alone is too wide, as a
+    /// long path is. Each `\n` starts a line, and a blank one is kept.
+    pub fn wrap(&self, text: &str, size: f32, width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for paragraph in text.split('\n') {
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let joined = match line.is_empty() {
+                    true => word.to_string(),
+                    false => format!("{line} {word}"),
+                };
+                if self.measure(&joined, size) <= width {
+                    line = joined;
+                    continue;
+                }
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                for c in word.chars() {
+                    line.push(c);
+                    if line.chars().nth(1).is_some() && self.measure(&line, size) > width {
+                        line.pop();
+                        lines.push(std::mem::take(&mut line));
+                        line.push(c);
+                    }
+                }
+            }
+            lines.push(line);
+        }
+        lines
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +235,23 @@ mod tests {
         assert!(short.ends_with('\u{2026}'), "{short}");
         assert!(font.measure(&short, 13.0) <= 80.0);
         assert_eq!(font.truncate(text, 13.0, 0.0), "");
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_inside_overlong_words() {
+        let Some(font) = Font::system(400) else {
+            return;
+        };
+        let width = font.measure("alpha beta", 13.0);
+        assert_eq!(
+            font.wrap("alpha beta gamma\n\nend", 13.0, width),
+            ["alpha beta", "gamma", "", "end"]
+        );
+        let long = "x".repeat(200);
+        let lines = font.wrap(&long, 13.0, width);
+        assert!(lines.len() > 1);
+        assert_eq!(lines.concat(), long);
+        assert!(lines.iter().all(|line| font.measure(line, 13.0) <= width));
     }
 
     #[test]

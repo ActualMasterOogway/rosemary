@@ -41,6 +41,14 @@ impl Color {
     }
 }
 
+/// An image with straight R, G, B, A pixels, top row first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+}
+
 /// An outline in points, filled with the non-zero rule.
 #[derive(Clone, Debug, Default)]
 pub struct Path {
@@ -463,6 +471,69 @@ impl<'a> Canvas<'a> {
         pen - origin.x
     }
 
+    /// Draw `image` scaled into `rect`, averaging the source pixels under
+    /// each device pixel: an icon is usually far larger than it is shown.
+    pub fn draw_image(&mut self, image: &Image, rect: Rect) {
+        if image.width == 0
+            || image.height == 0
+            || image.pixels.len() < image.width * image.height * 4
+        {
+            return;
+        }
+        let s = self.scale;
+        let area = Area {
+            left: (rect.x * s).round() as i32,
+            top: (rect.y * s).round() as i32,
+            right: (rect.right() * s).round() as i32,
+            bottom: (rect.bottom() * s).round() as i32,
+        };
+        let clip = area.intersection(self.clip());
+        if area.is_empty() || clip.is_empty() {
+            return;
+        }
+        let across = image.width as f32 / (area.right - area.left) as f32;
+        let down = image.height as f32 / (area.bottom - area.top) as f32;
+        let span = |start: f32, step: f32, limit: usize| {
+            let first = (start.floor() as usize).min(limit - 1);
+            let last = ((start + step).ceil() as usize).clamp(first + 1, limit);
+            first..last
+        };
+        for y in clip.top..clip.bottom {
+            let rows = span((y - area.top) as f32 * down, down, image.height);
+            for x in clip.left..clip.right {
+                let columns = span((x - area.left) as f32 * across, across, image.width);
+                // Averaged premultiplied, so a transparent pixel's colour
+                // does not bleed into its neighbours.
+                let mut sum = [0.0f32; 4];
+                let mut count = 0.0;
+                for row in rows.clone() {
+                    for column in columns.clone() {
+                        let at = (row * image.width + column) * 4;
+                        let texel = &image.pixels[at..at + 4];
+                        let alpha = f32::from(texel[3]) / 255.0;
+                        for channel in 0..3 {
+                            sum[channel] += f32::from(texel[channel]) / 255.0 * alpha;
+                        }
+                        sum[3] += alpha;
+                        count += 1.0;
+                    }
+                }
+                let alpha = sum[3] / count;
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let straight = |v: f32| v / count / alpha;
+                let color = Color {
+                    r: straight(sum[0]),
+                    g: straight(sum[1]),
+                    b: straight(sum[2]),
+                    a: alpha,
+                };
+                self.blend(x, y, color, 1.0);
+            }
+        }
+    }
+
     fn blend(&mut self, x: i32, y: i32, color: Color, coverage: f32) {
         let alpha = (color.a * coverage).clamp(0.0, 1.0);
         if alpha <= 0.0 || x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
@@ -497,6 +568,21 @@ fn premultiply(color: Color, coverage: f32) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_is_averaged_down_into_its_rectangle() {
+        // Two opaque red pixels and two transparent ones, into one pixel.
+        let image = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0],
+        };
+        let mut pixels = vec![0u8; 4];
+        let mut canvas = Canvas::new(&mut pixels, 1, 1, 4, 1.0);
+        canvas.draw_image(&image, Rect::new(0.0, 0.0, 1.0, 1.0));
+        // Half-covered pure red, premultiplied B, G, R, A.
+        assert_eq!(pixels, [0, 0, 128, 128]);
+    }
 
     fn canvas_pixels(width: usize, height: usize) -> Vec<u8> {
         vec![0; width * height * 4]

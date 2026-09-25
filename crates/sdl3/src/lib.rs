@@ -101,9 +101,7 @@ struct Api {
     SDL_SetAppMetadataProperty: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetError: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_PumpEvents: Option<unsafe extern "C" fn()>,
-    SDL_ShowSimpleMessageBox:
-        Option<unsafe extern "C" fn(u32, *const c_char, *const c_char, Window) -> bool>,
-    SDL_ShowMessageBox: Option<unsafe extern "C" fn(*const MessageBoxData, *mut c_int) -> bool>,
+    SDL_QuitSubSystem: Option<unsafe extern "C" fn(u32)>,
 
     SDL_GetJoysticks: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
     SDL_OpenJoystick: Option<unsafe extern "C" fn(JoystickId) -> Joystick>,
@@ -156,6 +154,8 @@ struct Api {
     SDL_ShowWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_HideWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_RaiseWindow: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_SetWindowParent: Option<unsafe extern "C" fn(Window, Window) -> bool>,
+    SDL_SetWindowModal: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowFullscreen: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowResizable: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowBordered: Option<unsafe extern "C" fn(Window, bool) -> bool>,
@@ -215,6 +215,7 @@ struct Api {
         Option<unsafe extern "C" fn(u32, *mut c_int) -> *mut *mut DisplayMode>,
 
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
+    SDL_WaitEventTimeout: Option<unsafe extern "C" fn(*mut Event, i32) -> bool>,
     SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_StopTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetTextInputArea: Option<unsafe extern "C" fn(Window, *const Rect, c_int) -> bool>,
@@ -332,8 +333,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetAppMetadataProperty,
             SDL_GetError,
             SDL_PumpEvents,
-            SDL_ShowSimpleMessageBox,
-            SDL_ShowMessageBox,
+            SDL_QuitSubSystem,
             SDL_GetJoysticks,
             SDL_OpenJoystick,
             SDL_CloseJoystick,
@@ -383,6 +383,8 @@ fn api() -> Option<&'static Api> {
             SDL_ShowWindow,
             SDL_HideWindow,
             SDL_RaiseWindow,
+            SDL_SetWindowParent,
+            SDL_SetWindowModal,
             SDL_SetWindowFullscreen,
             SDL_SetWindowResizable,
             SDL_SetWindowBordered,
@@ -428,6 +430,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetDesktopDisplayMode,
             SDL_GetFullscreenDisplayModes,
             SDL_PollEvent,
+            SDL_WaitEventTimeout,
             SDL_StartTextInput,
             SDL_StopTextInput,
             SDL_SetTextInputArea,
@@ -492,98 +495,6 @@ pub fn error() -> String {
             .to_string_lossy()
             .into_owned(),
     }
-}
-
-/// Show a platform-native message box with a single acknowledgment button.
-pub fn show_simple_message_box(flags: u32, title: &CStr, message: &CStr) -> bool {
-    let Some(show) = api().and_then(|a| a.SDL_ShowSimpleMessageBox) else {
-        return false;
-    };
-    // SAFETY: both strings are NUL-terminated and a null parent window is
-    // explicitly allowed by SDL.
-    unsafe {
-        show(
-            flags,
-            title.as_ptr(),
-            message.as_ptr(),
-            std::ptr::null_mut(),
-        )
-    }
-}
-
-pub mod message_box {
-    pub const ERROR: u32 = 0x0000_0010;
-    pub const WARNING: u32 = 0x0000_0020;
-    pub const INFORMATION: u32 = 0x0000_0040;
-
-    /// `SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT`
-    pub const RETURN_KEY_DEFAULT: u32 = 0x0000_0001;
-    /// `SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT`
-    pub const ESCAPE_KEY_DEFAULT: u32 = 0x0000_0002;
-}
-
-/// `SDL_MessageBoxButtonData`
-#[repr(C)]
-struct MessageBoxButtonData {
-    flags: u32,
-    button_id: c_int,
-    text: *const c_char,
-}
-
-/// `SDL_MessageBoxData`
-#[repr(C)]
-struct MessageBoxData {
-    flags: u32,
-    window: Window,
-    title: *const c_char,
-    message: *const c_char,
-    num_buttons: c_int,
-    buttons: *const MessageBoxButtonData,
-    color_scheme: *const c_void,
-}
-
-/// One button: its [`message_box`] button flags, the id reported when it is
-/// pressed, and its label.
-pub struct Button<'a> {
-    pub flags: u32,
-    pub id: i32,
-    pub text: &'a CStr,
-}
-
-/// Show a platform-native message box with `buttons`, and wait for one.
-///
-/// `None` when no box could be shown - no SDL, or no display - which is the
-/// signal to ask some other way. `Some(-1)` when it was closed without a
-/// button.
-pub fn show_message_box(
-    flags: u32,
-    title: &CStr,
-    message: &CStr,
-    buttons: &[Button],
-) -> Option<i32> {
-    let show = api()?.SDL_ShowMessageBox?;
-    let raw: Vec<MessageBoxButtonData> = buttons
-        .iter()
-        .map(|button| MessageBoxButtonData {
-            flags: button.flags,
-            button_id: button.id,
-            text: button.text.as_ptr(),
-        })
-        .collect();
-    let data = MessageBoxData {
-        flags,
-        window: std::ptr::null_mut(),
-        title: title.as_ptr(),
-        message: message.as_ptr(),
-        num_buttons: raw.len() as c_int,
-        buttons: raw.as_ptr(),
-        color_scheme: std::ptr::null(),
-    };
-    let mut pressed: c_int = -1;
-    // SAFETY: `data` and every pointer in it - the strings and `raw` - outlive
-    // the call, a null parent window and a null colour scheme are both allowed,
-    // and `pressed` is a live local.
-    unsafe { show(&data, &mut pressed) }.then_some(pressed)
 }
 
 /// What the desktop is told this program is.
@@ -678,6 +589,10 @@ fn claim_video_thread() {
         std::sync::atomic::Ordering::AcqRel,
         std::sync::atomic::Ordering::Relaxed,
     );
+}
+
+fn release_video_thread() {
+    VIDEO_THREAD.store(0, std::sync::atomic::Ordering::Release);
 }
 
 /// Service SDL's own event queue, which is what makes the state below change.
@@ -1425,6 +1340,8 @@ pub mod video {
     /// The `SDL_EventType` values this tree acts on.
     pub mod event_type {
         pub const QUIT: u32 = 0x100;
+        pub const SYSTEM_THEME_CHANGED: u32 = 0x108;
+        pub const WINDOW_EXPOSED: u32 = 0x204;
         pub const WINDOW_RESIZED: u32 = 0x206;
         pub const WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
         pub const WINDOW_MINIMIZED: u32 = 0x209;
@@ -1670,9 +1587,26 @@ pub mod video {
         if !unsafe { poll(&mut raw) } {
             return None;
         }
+        Some(translate(&raw))
+    }
+
+    /// The next event, waiting up to `milliseconds` for one: for a loop with
+    /// nothing to do between events, which [`poll`] would spin.
+    pub fn wait(milliseconds: i32) -> Option<Event> {
+        let wait = api()?.SDL_WaitEventTimeout?;
+        let mut raw = super::Event::default();
+        // SAFETY: a writable event of SDL's own size.
+        if !unsafe { wait(&mut raw, milliseconds) } {
+            return None;
+        }
+        Some(translate(&raw))
+    }
+
+    fn translate(raw: &super::Event) -> Event {
+        let raw = *raw;
         let tag = kind(&raw);
         // SAFETY: each arm names the structure SDL documents for that tag.
-        Some(unsafe {
+        unsafe {
             match tag {
                 event_type::QUIT => Event::Quit,
                 event_type::WINDOW_RESIZED => {
@@ -1789,7 +1723,7 @@ pub mod video {
                 }
                 other => Event::Other(other),
             }
-        })
+        }
     }
 
     /// Start the video subsystem, once.
@@ -1798,15 +1732,38 @@ pub mod video {
     /// to do it from: a program that never opens a window should not have paid
     /// for a display connection.
     fn init_video() -> bool {
-        static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *READY.get_or_init(|| {
-            let up = super::init(super::init::VIDEO).is_ok();
-            if up {
+        let mut up = VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner());
+        if !*up {
+            *up = super::init(super::init::VIDEO).is_ok();
+            if *up {
                 // This thread now owns the event queue: see [`super::pump`].
                 super::claim_video_thread();
             }
-            up
-        })
+        }
+        *up
+    }
+
+    static VIDEO_UP: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+    /// Whether the video subsystem is running.
+    pub fn video_up() -> bool {
+        *VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Stop the video subsystem, for a caller that brought it up early and
+    /// has finished with it. Hints and app metadata are read when video
+    /// starts, so leaving it running would keep the early ones.
+    pub fn quit_video() {
+        let mut up = VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner());
+        if !*up {
+            return;
+        }
+        if let Some(quit) = api().and_then(|a| a.SDL_QuitSubSystem) {
+            // SAFETY: takes a flag word, for a subsystem this crate started.
+            unsafe { quit(super::init::VIDEO) };
+        }
+        *up = false;
+        super::release_video_thread();
     }
 
     /// Vulkan surfaces for a window SDL already owns.
@@ -1982,6 +1939,21 @@ pub mod video {
         // SAFETY: a window this crate created, and SDL's own flags.
         let window = unsafe { create(parent, offset_x, offset_y, width, height, flags) };
         (!window.is_null()).then_some(window)
+    }
+
+    /// Make `window` a dialog of `parent` that blocks input to it until it
+    /// closes; the compositor may also centre and attach it.
+    pub fn set_window_modal_for(window: Window, parent: Window) -> bool {
+        let Some(api) = api() else {
+            return false;
+        };
+        let (Some(set_parent), Some(set_modal)) = (api.SDL_SetWindowParent, api.SDL_SetWindowModal)
+        else {
+            return false;
+        };
+        // SAFETY: two windows this crate created; modal needs the parent set
+        // first.
+        unsafe { set_parent(window, parent) && set_modal(window, true) }
     }
 
     /// The window a popup is positioned against, or null for a toplevel.

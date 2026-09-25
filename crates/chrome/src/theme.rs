@@ -52,6 +52,23 @@ pub struct Theme {
     pub panel_leading: f32,
     pub panel_trailing: f32,
     pub panel_min_width: f32,
+
+    pub alert_width: f32,
+    pub alert_corner_radius: f32,
+    pub alert_icon_size: f32,
+    pub alert_background: Color,
+    pub alert_border: Color,
+    pub alert_text: Color,
+    pub alert_message_size: f32,
+    pub alert_informative_size: f32,
+    pub alert_button_height: f32,
+    pub alert_button: Color,
+    pub alert_button_pressed: Color,
+    pub alert_button_text: Color,
+    /// The default button, in the accent colour.
+    pub alert_default: Color,
+    pub alert_default_pressed: Color,
+    pub alert_default_text: Color,
 }
 
 impl Theme {
@@ -96,6 +113,21 @@ impl Theme {
             panel_leading: 22.0,
             panel_trailing: 18.0,
             panel_min_width: 180.0,
+            alert_width: 260.0,
+            alert_corner_radius: 12.0,
+            alert_icon_size: 64.0,
+            alert_background: Color::rgb(0xEC, 0xEC, 0xEC),
+            alert_border: Color::rgba(0, 0, 0, 0.22),
+            alert_text: Color::rgba(0, 0, 0, 0.85),
+            alert_message_size: 13.0,
+            alert_informative_size: 11.0,
+            alert_button_height: 28.0,
+            alert_button: Color::rgba(0, 0, 0, 0.08),
+            alert_button_pressed: Color::rgba(0, 0, 0, 0.18),
+            alert_button_text: Color::rgba(0, 0, 0, 0.85),
+            alert_default: Color::rgb(0x00, 0x7A, 0xFF),
+            alert_default_pressed: Color::rgb(0x00, 0x62, 0xD4),
+            alert_default_text: Color::rgb(0xFF, 0xFF, 0xFF),
         }
     }
 
@@ -119,6 +151,14 @@ impl Theme {
             panel_text_disabled: Color::rgba(255, 255, 255, 0.28),
             panel_selection: Color::rgb(0x0A, 0x5F, 0xD1),
             panel_separator: Color::rgba(255, 255, 255, 0.12),
+            alert_background: Color::rgb(0x32, 0x32, 0x32),
+            alert_border: Color::rgba(255, 255, 255, 0.18),
+            alert_text: Color::rgba(255, 255, 255, 0.88),
+            alert_button: Color::rgba(255, 255, 255, 0.16),
+            alert_button_pressed: Color::rgba(255, 255, 255, 0.28),
+            alert_button_text: Color::rgba(255, 255, 255, 0.88),
+            alert_default: Color::rgb(0x0A, 0x84, 0xFF),
+            alert_default_pressed: Color::rgb(0x40, 0x9C, 0xFF),
             ..Theme::light()
         }
     }

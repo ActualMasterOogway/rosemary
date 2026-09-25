@@ -21,10 +21,10 @@ impl About {
         format!("About {}", self.name)
     }
 
-    /// The panel's lines in AppKit's order. The build is left out when it
-    /// repeats the marketing version, as AppKit does.
-    fn message(&self) -> String {
-        let mut lines = vec![self.name.clone()];
+    /// The lines under the name, in AppKit's order. The build is left out
+    /// when it repeats the marketing version, as AppKit does.
+    fn details(&self) -> String {
+        let mut lines = Vec::new();
         let version = match (&self.application_version, &self.version) {
             (Some(app), Some(build)) if app != build => Some(format!("Version {app} ({build})")),
             (Some(app), _) => Some(format!("Version {app}")),
@@ -112,14 +112,24 @@ unsafe fn about(options: Id) -> About {
 
 /// `-orderFrontStandardAboutPanelWithOptions:`.
 ///
-/// Shown as a message box, which blocks where AppKit's panel does not: SDL has
-/// no modeless dialog, and an About panel that waits to be dismissed costs the
-/// program nothing it could observe beyond the time. The icon option is not
-/// shown, because the message box has nowhere to put one.
+/// Shown as an alert with the application's icon, which blocks where AppKit's
+/// panel does not: an About panel that waits to be dismissed costs the program
+/// nothing it could observe beyond the time. The icon option is not read; the
+/// application's own icon is shown.
 pub(crate) unsafe extern "C" fn order_front_with_options(_receiver: Id, _sel: Sel, options: Id) {
     // SAFETY: the guest passes a dictionary or nil.
     let about = unsafe { about(options) };
-    crate::alert::run_alert_panel(about.title().as_bytes(), about.message().as_bytes());
+    let request = crate::dialog::Request {
+        title: about.title(),
+        message: about.name.clone(),
+        informative: about.details(),
+        buttons: vec!["OK".to_string()],
+        cancel: None,
+        application_icon: true,
+    };
+    if crate::dialog::run(&request).is_none() {
+        eprintln!("rosetta3: appkit: could not show the About panel");
+    }
 }
 
 /// `-orderFrontStandardAboutPanel:`, the menu item's action, which is the
@@ -147,8 +157,8 @@ mod tests {
         let about = about(Some("1.2"), Some("345"));
         assert_eq!(about.title(), "About Game");
         assert_eq!(
-            about.message(),
-            "Game\n\nVersion 1.2 (345)\n\nMade by people\n\n(c) 2026"
+            about.details(),
+            "Version 1.2 (345)\n\nMade by people\n\n(c) 2026"
         );
     }
 
@@ -156,8 +166,8 @@ mod tests {
     fn a_build_equal_to_the_version_is_shown_once() {
         assert!(
             about(Some("1.2"), Some("1.2"))
-                .message()
-                .contains("Version 1.2\n")
+                .details()
+                .starts_with("Version 1.2\n")
         );
     }
 
@@ -167,7 +177,7 @@ mod tests {
             name: "Game".into(),
             ..Default::default()
         };
-        assert_eq!(about.message(), "Game");
+        assert_eq!(about.details(), "");
     }
 
     #[test]

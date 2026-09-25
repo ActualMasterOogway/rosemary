@@ -28,6 +28,7 @@ pub mod cursor;
 pub(crate) mod decode;
 pub mod decor;
 mod define;
+pub mod dialog;
 pub mod dock;
 pub mod event;
 mod font;

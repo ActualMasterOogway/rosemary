@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::ffi::{CString, OsString};
+use std::ffi::OsString;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -88,32 +88,20 @@ fn ask_with_dialog(request: &Request) -> Option<Answer> {
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return None;
     }
-    let message = CString::new(format!(
-        "{}\n\nTo use a MiniDarwin bundle you already have instead, choose Not now and run\n  \
-         rosetta3 prefix create --bundle FILE",
-        question(request)
-    ))
-    .ok()?;
-    use sdl3::message_box::{ESCAPE_KEY_DEFAULT, INFORMATION, RETURN_KEY_DEFAULT};
-    let pressed = sdl3::show_message_box(
-        INFORMATION,
-        c"Rosetta 3",
-        &message,
-        &[
-            sdl3::Button {
-                flags: ESCAPE_KEY_DEFAULT,
-                id: 0,
-                text: c"Not now",
-            },
-            sdl3::Button {
-                flags: RETURN_KEY_DEFAULT,
-                id: 1,
-                text: c"Download",
-            },
-        ],
-    )?;
-    Some(match pressed {
-        1 => Answer::Download,
+    let request = appkit::dialog::Request {
+        title: "Rosetta 3".to_string(),
+        message: "Download the Darwin base system?".to_string(),
+        informative: format!(
+            "{}\n\nTo use a MiniDarwin bundle you already have instead, choose Not Now and \
+             run\nrosetta3 prefix create --bundle FILE",
+            question(request)
+        ),
+        buttons: vec!["Download".to_string(), "Not Now".to_string()],
+        cancel: Some(1),
+        application_icon: false,
+    };
+    Some(match appkit::dialog::run(&request)? {
+        0 => Answer::Download,
         _ => Answer::Decline,
     })
 }
