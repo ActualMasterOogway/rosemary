@@ -1,14 +1,3 @@
-//! The MiniDarwin release this build trusts, one per architecture.
-//!
-//! These are the stamped `*.spec.yaml` files from a MiniDarwin release, copied
-//! verbatim into `src/specs/`. They are the root of trust - nothing verifies a
-//! spec, so it has to arrive by a route that is already trusted, and being
-//! compiled into this binary is that route. A checkout therefore names exactly
-//! one image per architecture, and `git checkout <tag>` shows which.
-//!
-//! To update: delete the old specs, copy the new stamped ones in. See
-//! `build.rs`.
-
 use crate::format::{Invalid, Spec};
 
 include!(concat!(env!("OUT_DIR"), "/pinned.rs"));

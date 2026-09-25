@@ -1,10 +1,3 @@
-//! The manifest: every path in a MiniDarwin tree, with its type, mode and hash.
-//!
-//! Loading one checks everything the reference verifier does - order,
-//! uniqueness, parents, per-type keys, case collisions, every directory
-//! digest, the tree digest, the summary - and that the text is in canonical
-//! form, so that its SHA-256 is an identity.
-
 use std::collections::{BTreeMap, HashMap};
 
 use super::yaml::{self, Map, Value};

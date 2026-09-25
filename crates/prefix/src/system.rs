@@ -1,17 +1,3 @@
-//! The `system_files` policy, and the dirty list that makes startup cheap.
-//!
-//! Every path a guest writes goes through [`crate::ns`], so the namespace sees
-//! a write land on a file the base owns before the host does. Under `repair`
-//! and `warn` it records the path in `.rosetta3/dirty` and lets the write
-//! happen; under `immutable` it refuses with `EROFS`. Startup then checks the
-//! handful of paths in that list instead of hashing every system file.
-//!
-//! The path is recorded *before* the write is attempted, so a guest that
-//! crashes mid-write still leaves the path behind to be checked.
-//!
-//! The policy is a consumer key in the prefix's own `.rosetta3/spec.yaml` -
-//! `docs/rootfs-spec.md` reserves unknown top-level keys for exactly this.
-
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -1,21 +1,3 @@
-//! Finding a file whose name a guest spelled in the wrong case.
-//!
-//! A Mac filesystem is case-*insensitive* by default, and Mac software relies on
-//! it without meaning to: Deltarune's runner lowercases the path it derives from
-//! its bundle and opens
-//! `/.../deltarune.app/contents/resources/game.ios`, which is the same file on
-//! HFS+ or APFS and nothing at all on ext4.
-//!
-//! So a path that does not exist is retried component by component against what
-//! is actually on disk, and the walk is *only* a fallback: an exact match is
-//! always taken first, so a directory that really does hold `Foo` and `foo` is
-//! never guessed at for either of them. A component that matches more than one
-//! entry ambiguously is not resolved at all - the real filesystem would have to
-//! answer, and it cannot.
-//!
-//! Not needed on macOS, where the kernel already does this - so the
-//! namespace never asks for it there. See [`crate::ns`].
-
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 

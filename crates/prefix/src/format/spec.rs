@@ -1,10 +1,3 @@
-//! The spec: the hashes of a release's artifact and manifest, plus identity.
-//!
-//! The spec is the root of trust and nothing verifies it, so where one came
-//! from matters more than what it says. The pinned ones are compiled into this
-//! build (see [`crate::pinned`]); anything else is a user's choice, and is
-//! reported as such.
-
 use std::collections::BTreeMap;
 
 use super::manifest::{hex64, keys, mapping, non_negative, string, string_map};

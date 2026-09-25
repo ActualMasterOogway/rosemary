@@ -1,9 +1,3 @@
-//! Fetch a pinned file from one of its sources.
-//!
-//! A source is a *place*, never an identity: the file is whatever its hash
-//! says, and the caller checks that. So sources are simply tried in order, and
-//! the first one that yields a file of an acceptable size wins.
-
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::OnceLock;

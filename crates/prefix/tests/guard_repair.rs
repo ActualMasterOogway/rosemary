@@ -1,6 +1,3 @@
-//! Under `system_files: repair` a write to a system file is allowed, and
-//! recorded for the next start to check.
-
 mod common;
 
 use std::ffi::CString;

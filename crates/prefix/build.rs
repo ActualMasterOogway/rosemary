@@ -1,11 +1,3 @@
-//! Compile in the MiniDarwin specs found in `src/specs/`.
-//!
-//! Updating the pinned image is "copy the new stamped `*.spec.yaml` files in
-//! and delete the old ones", with no source edit to forget. The architecture
-//! comes from the release's own file name; two specs for one architecture is a
-//! build error, because a checkout must name exactly one image per
-//! architecture.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 

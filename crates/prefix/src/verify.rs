@@ -1,10 +1,3 @@
-//! Compare a tree on disk with a manifest.
-//!
-//! Each difference is one of the five kinds `docs/rootfs-spec.md` defines, and
-//! each maps onto one repair: see [`crate::repair`]. The comparison never
-//! follows a symlink. A `/usr/lib` replaced by a link to a perfect copy is
-//! `wrong-type`, and everything under it is `missing` - not verified.
-
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::Metadata;

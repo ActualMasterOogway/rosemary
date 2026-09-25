@@ -1,7 +1,3 @@
-//! A provisioned prefix built by hand, for tests that need the namespace to
-//! resolve one. Each test binary is its own process, which is what lets it set
-//! `ROSETTA3_PREFIX` before the namespace first reads it.
-
 use std::path::PathBuf;
 
 use prefix::Prefix;

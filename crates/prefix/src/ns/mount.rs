@@ -1,16 +1,3 @@
-//! The table that says which host directory a guest directory is.
-//!
-//! Every mount is invertible, and resolution in both directions is
-//! longest-match, so a host path that falls under any mount has exactly one
-//! guest spelling and vice versa. That matters more than it sounds: a guest is
-//! handed paths *back* - from `getcwd`, `realpath`, `dladdr`, `NSBundle` - and
-//! one that cannot be spelled the way the guest spells it is a host path
-//! leaking into a Darwin program, which is the bug this table exists to stop.
-//!
-//! Matching is on whole components. `/dev` does not match `/device`, and the
-//! root mount matches everything only because every absolute path begins with
-//! a separator.
-
 use std::path::{Component, Path, PathBuf};
 
 /// One guest directory and the host directory it is.

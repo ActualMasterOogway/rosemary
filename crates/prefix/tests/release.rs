@@ -1,10 +1,3 @@
-//! The real, pinned MiniDarwin release, when one is available locally.
-//!
-//! `ROSETTA3_TEST_BUNDLE` names a release's `*.bundle.zip`; otherwise the
-//! user's rootfs cache is used if it holds the pinned files. With neither, the
-//! test says so and passes - which is not coverage: the hand-built fixtures in
-//! the unit tests are what always run.
-
 use std::path::PathBuf;
 
 use prefix::cache::Cache;

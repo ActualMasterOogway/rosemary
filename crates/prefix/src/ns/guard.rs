@@ -1,10 +1,3 @@
-//! The write guard: what the namespace does when a guest writes to a file the
-//! base owns. See [`crate::system`] for the policy it enforces.
-//!
-//! Only writes are guarded, so reads - nearly every call - never reach here,
-//! and the manifest is not even loaded until the first write lands inside the
-//! prefix's root.
-
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::os::unix::ffi::OsStrExt;

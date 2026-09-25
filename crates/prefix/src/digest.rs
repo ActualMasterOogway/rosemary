@@ -1,12 +1,3 @@
-//! `sha256-merkle-v1`: one identity for an unpacked tree, independent of how
-//! it was packed.
-//!
-//! A file's digest is its content's SHA-256, a symlink's is its target's, and a
-//! directory's is a SHA-256 over one `<type> SP <mode> SP <digest> SP <name>
-//! NUL` record per child, children in bytewise name order, with `-` as a
-//! symlink's mode. The tree digest is the root's, and the root's own mode is
-//! not part of it. See MiniDarwin's `docs/rootfs-spec.md`.
-
 use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};

@@ -1,22 +1,3 @@
-//! Putting a verified MiniDarwin base into a prefix.
-//!
-//! ```text
-//! trusted spec  (compiled in, or one the user named)
-//!     ├── manifest:  cache → bundle → sources     sha256 + size, then parsed
-//!     │                                           and every digest checked
-//!     └── tree:      cache (re-verified)
-//!                    or artifact: cache → bundle → sources   sha256 + size
-//!                        → manifest-guided extraction → compared → cached
-//!                                     ▼
-//!                  repair of the prefix's root from that tree
-//! ```
-//!
-//! The network is the last resort and needs the user's consent; everything
-//! else - including every repair after the first - is offline. Nothing is
-//! trusted because of where it was found: a cached file is hashed like a
-//! downloaded one, and a cached tree is compared with the manifest before it is
-//! used.
-
 use std::path::{Path, PathBuf};
 
 use crate::bundle;

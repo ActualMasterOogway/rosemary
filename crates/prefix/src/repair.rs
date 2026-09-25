@@ -1,18 +1,3 @@
-//! Put a prefix's system files back the way the base has them.
-//!
-//! Transactional, in two passes. First every replacement is *staged* under
-//! `.rosetta3/repair/` from the verified, cached base - so no network - and
-//! only then is each one renamed into place. Nothing is modified while the tree
-//! is still being read, and each rename is atomic, so a crash leaves either the
-//! old file or the known-good one, never half of each.
-//!
-//! Provisioning a new prefix is the same operation: a repair of a tree in which
-//! everything is missing.
-//!
-//! Nothing a user made is deleted. Something of the wrong type sitting where a
-//! system file belongs - a directory where a dylib should be, say - may hold
-//! the user's data, so it is moved aside to `.rosetta3/displaced/` instead.
-
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io;

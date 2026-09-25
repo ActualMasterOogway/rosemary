@@ -1,22 +1,3 @@
-//! The rootfs cache: content-addressed, and shared between every prefix.
-//!
-//! ```text
-//! $XDG_CACHE_HOME/rosetta3/rootfs/
-//!     artifacts/<sha256>.tar.gz   the compressed artifact, as distributed
-//!     manifests/<sha256>.yaml     its manifest
-//!     trees/<tree digest>/        the verified, unpacked tree
-//!     refs/<id>                   the prefixes that use one
-//!     staging/                    work in progress
-//! ```
-//!
-//! Both forms are kept. The artifact lets a user re-verify exactly what was
-//! distributed; the unpacked tree makes repair fast and offline. Ten prefixes
-//! on one base cost one copy of it.
-//!
-//! Everything under here is re-derivable, so the cache is never trusted: a
-//! tree is verified against the prefix's manifest before it is used, and an
-//! artifact is hashed before it is unpacked.
-
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

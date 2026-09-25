@@ -1,11 +1,3 @@
-//! `errno`, only far enough to put it back where it was found.
-//!
-//! [`crate::darwin`]'s own `errno` module is the real one - it translates
-//! between two platforms' numbering. This is not that: it reads and writes the
-//! *host's* slot and nothing else, and it exists because `darwin` depends on
-//! this crate rather than the other way round. Ten lines duplicated is cheaper
-//! than the cycle.
-
 /// This thread's host `errno` slot.
 fn location() -> *mut libc::c_int {
     // SAFETY: every spelling returns this thread's own slot, live for as long
@@ -28,7 +20,6 @@ pub(crate) fn get() -> i32 {
 
 #[inline(always)]
 pub(crate) fn set(value: i32) {
-    // SAFETY: as above.
     unsafe { *location() = value };
 }
 

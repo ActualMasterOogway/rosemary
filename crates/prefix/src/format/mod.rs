@@ -1,11 +1,3 @@
-//! MiniDarwin's release formats: the spec that pins a release, and the
-//! manifest that describes its tree.
-//!
-//! The normative definition is MiniDarwin's `docs/rootfs-spec.md`, and its
-//! `scripts/mdrootfs.py` is the reference implementation. This is a consumer
-//! of both, and follows the reference closely on purpose: every check it
-//! makes is one a verifier that skipped it would be weaker for.
-
 pub mod manifest;
 pub mod spec;
 pub mod yaml;

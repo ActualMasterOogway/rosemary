@@ -1,6 +1,3 @@
-//! Under `system_files: immutable` a write to a system file is refused with
-//! `EROFS`, and everything else is not.
-
 mod common;
 
 use std::ffi::CString;

@@ -1,23 +1,3 @@
-//! The guest filesystem namespace: which host path a Darwin path names.
-//!
-//! A guest speaks Darwin paths - `/usr/lib/libSystem.B.dylib`,
-//! `/Users/user/Library/Application Support`, `/Applications` - and this host
-//! has none of them. Every path a guest hands to a file call, and every path
-//! handed back to it, passes through here, so that one answer serves the whole
-//! tree instead of each crate inventing its own.
-//!
-//! Two steps, deliberately separate because they cost different amounts:
-//!
-//! * [`to_host`] is the *mapping*, which is string work and no syscalls. It
-//!   runs on every path.
-//! * [`fold`] is the case walk's walk for a name spelled in the wrong case, which
-//!   reads a directory per component. It runs only after a call has already
-//!   failed with `ENOENT`, which is what keeps the common path free.
-//!
-//! [`to_guest`] is the way back, for everything handed to a guest: `getcwd`,
-//! `realpath`, `readlink`, `dladdr`, an image path, an `NSBundle`. A host path
-//! no mount reaches has no guest spelling and is refused rather than leaked.
-
 mod case;
 mod guard;
 pub mod mount;

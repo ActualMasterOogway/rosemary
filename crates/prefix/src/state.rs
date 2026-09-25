@@ -1,9 +1,3 @@
-//! `.rosetta3/state.yaml`: what a prefix is, and what base it was made from.
-//!
-//! Written by this crate in the same YAML subset the MiniDarwin formats use,
-//! and read back leniently - an unknown key is ignored, so an older runtime can
-//! still open a prefix a newer one touched.
-
 use std::path::Path;
 
 use crate::format::yaml::{self, Map, Value};

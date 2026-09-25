@@ -1,5 +1,3 @@
-//! Where a prefix lives, and what is inside one.
-
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 

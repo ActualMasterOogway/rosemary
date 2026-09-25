@@ -1,26 +1,3 @@
-//! Manifest-guided extraction of a rootfs artifact.
-//!
-//! **This is the one place where a bug is a host compromise**, so it assumes
-//! the archive is hostile and implements exactly the refusal list
-//! `docs/rootfs-spec.md` gives, rather than a general hardening pass:
-//!
-//! * absolute names and `..`, and any entry named twice
-//! * anything the manifest does not name, or names as a different type
-//! * anything other than a file, directory or symlink
-//! * an entry whose parent directory the archive has not already made, so
-//!   nothing is ever written through a symlink
-//! * a file of a different size from the manifest's, so no decompression bomb
-//!   gets past the first header
-//! * set-id and sticky bits
-//! * a symlink target outside the `(../)*name(/name)*` shape
-//!
-//! Content is not hashed here. The tree is compared with the manifest
-//! afterwards, by the same code that checks a prefix.
-//!
-//! The `tar` crate is used to *read headers* only - it understands GNU long
-//! names and PAX records - and never to write anything: every file, directory
-//! and link is made below by this module, with `O_EXCL | O_NOFOLLOW`.
-
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};

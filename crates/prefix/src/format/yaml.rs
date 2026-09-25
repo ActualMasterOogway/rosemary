@@ -1,13 +1,3 @@
-//! The YAML subset MiniDarwin's formats are written in.
-//!
-//! A port of the reference parser in MiniDarwin's `scripts/mdrootfs.py`, and
-//! deliberately not a general YAML library: `docs/rootfs-spec.md` defines a
-//! hand-written spec as "any YAML the reference parser accepts", so accepting
-//! more than it does would make a spec this reads and that refuses. Two
-//! refusals are the point. A float (`min_os: 26.0`) and an integer with a
-//! leading zero (`0755`) each mean different things to different parsers, and
-//! a general library typed as `String` would quietly take either.
-
 use super::Invalid;
 
 /// A parsed value. Mappings keep their keys in document order, because the

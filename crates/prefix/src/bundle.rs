@@ -1,15 +1,3 @@
-//! A MiniDarwin bundle: `spec.yaml`, `manifest.yaml` and `rootfs.tar.gz` in
-//! one zip, under those fixed names.
-//!
-//! `mdrootfs bundle` writes the members *stored*, with fixed timestamps, so the
-//! zip is as reproducible as what is in it. That makes a reader small: this
-//! one takes stored members only, and refuses compression, encryption, zip64
-//! and any member it was not expecting, rather than carry a general zip
-//! implementation for a format that never needs one.
-//!
-//! A bundle's own spec vouches for nothing - it arrived in the same file as
-//! the things it pins. The caller decides which spec to trust.
-
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
