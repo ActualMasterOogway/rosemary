@@ -1,16 +1,3 @@
-//! Carbon's Process Manager, for the one process there is.
-//!
-//! A Mac program still reaches for this at startup: it asks for its own serial
-//! number, turns itself from a background process into a foreground one so that
-//! it can own the menu bar, and brings itself to the front. Under this tree
-//! there is exactly one process and it is already the one in front, so the
-//! answers are short - but they have to be given, because a program that
-//! cannot name itself does not carry on.
-//!
-//! No other process can be named. `GetNextProcess` and the rest of the walk are
-//! deliberately absent: this tree has no view of what else is running, and a
-//! list with one entry in it would be a claim that nothing else is.
-
 use std::ffi::{CStr, c_char, c_void};
 
 type OSStatus = i32;
@@ -46,7 +33,6 @@ unsafe fn is_this_process(psn: *const ProcessSerialNumber) -> bool {
     if psn.is_null() {
         return false;
     }
-    // SAFETY: the caller's obligation.
     let psn = unsafe { *psn };
     psn == CURRENT || psn == NO_PROCESS
 }
@@ -73,7 +59,6 @@ pub unsafe extern "C" fn GetCurrentProcess(psn: *mut ProcessSerialNumber) -> i16
 ///
 /// As [`GetCurrentProcess`].
 pub unsafe extern "C" fn GetFrontProcess(psn: *mut ProcessSerialNumber) -> i16 {
-    // SAFETY: the caller's obligation.
     unsafe { GetCurrentProcess(psn) }
 }
 
@@ -91,7 +76,6 @@ pub unsafe extern "C" fn SameProcess(
     if a.is_null() || b.is_null() || result.is_null() {
         return PARAM_ERR as i16;
     }
-    // SAFETY: the caller's obligation.
     let same = unsafe { *a == *b };
     // SAFETY: the caller states `result` is writable.
     unsafe { *result = u8::from(same) };
@@ -104,7 +88,6 @@ pub unsafe extern "C" fn SameProcess(
 ///
 /// `psn` is null or a readable `ProcessSerialNumber`.
 pub unsafe extern "C" fn SetFrontProcess(psn: *const ProcessSerialNumber) -> i16 {
-    // SAFETY: the caller's obligation.
     match unsafe { is_this_process(psn) } {
         true => NO_ERR as i16,
         false => PROC_NOT_FOUND as i16,
@@ -127,7 +110,6 @@ pub unsafe extern "C" fn TransformProcessType(
     psn: *const ProcessSerialNumber,
     _kind: u32,
 ) -> OSStatus {
-    // SAFETY: the caller's obligation.
     match unsafe { is_this_process(psn) } {
         true => NO_ERR,
         false => PROC_NOT_FOUND,
@@ -146,7 +128,6 @@ pub unsafe extern "C" fn GetProcessBundleLocation(
     if location.is_null() {
         return PARAM_ERR;
     }
-    // SAFETY: the caller's obligation.
     if !unsafe { is_this_process(psn) } {
         return PROC_NOT_FOUND;
     }
@@ -239,7 +220,6 @@ mod tests {
         assert_eq!(same, 1);
         // SAFETY: a readable serial number.
         assert_eq!(unsafe { SetFrontProcess(&psn) }, NO_ERR as i16);
-        // SAFETY: as above.
         assert_eq!(unsafe { TransformProcessType(&psn, 1) }, NO_ERR);
     }
 
@@ -249,7 +229,6 @@ mod tests {
         let other = ProcessSerialNumber { high: 0, low: 99 };
         // SAFETY: a readable serial number.
         assert_eq!(unsafe { SetFrontProcess(&other) }, PROC_NOT_FOUND as i16);
-        // SAFETY: as above.
         assert_eq!(unsafe { TransformProcessType(&other, 1) }, PROC_NOT_FOUND);
     }
 

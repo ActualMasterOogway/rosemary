@@ -1,9 +1,3 @@
-//! The Carbon Event Manager, as a process that has no Carbon events.
-//!
-//! AppKit supplies input, so the Carbon queue stays empty. Receives return
-//! `eventLoopTimedOutErr` and unhandled sends return `eventNotHandledErr`.
-//! Handler registrations can be removed, but handlers and timers never fire.
-
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -256,7 +250,6 @@ mod tests {
         };
         assert_eq!(status, NO_ERR);
         assert_ne!(reference, 0);
-        // SAFETY: takes no pointer.
         unsafe {
             assert_eq!(RemoveEventHandler(reference), NO_ERR);
             assert_eq!(RemoveEventHandler(reference), EVENT_INVALID_PARAMETER);
@@ -267,10 +260,8 @@ mod tests {
     /// difference between two readings.
     #[test]
     fn the_event_time_advances() {
-        // SAFETY: takes nothing and reads nothing.
         let first = unsafe { GetCurrentEventTime() };
         std::thread::sleep(std::time::Duration::from_millis(2));
-        // SAFETY: as above.
         let second = unsafe { GetCurrentEventTime() };
         assert!(second > first, "{second} is not after {first}");
     }

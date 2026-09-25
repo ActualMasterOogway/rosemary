@@ -1,21 +1,3 @@
-//! Carbon's File Manager and Folder Manager, over POSIX paths.
-//!
-//! An `FSRef` is eighty opaque bytes on every Mac, and what is in them is the
-//! File Manager's business alone - a program may copy one, compare two, and
-//! hand one back, and that is all. So this keeps the paths and puts an index
-//! into the bytes, which makes the copy and the comparison work without this
-//! tree having to invent a catalog node id it could not keep true.
-//!
-//! The reference is *interned* by path rather than allocated per call: two
-//! `FSFindFolder`s for the same folder have to compare equal, and a table that
-//! grew an entry per call would also grow without bound in a program that asks
-//! every frame.
-//!
-//! Where a folder lands is answered from `$HOME` the same way
-//! `foundation::paths` answers `NSSearchPathForDirectoriesInDomains`, because
-//! the two name the same directories and a program that writes through one and
-//! reads through the other has to find its own files again.
-
 use std::collections::HashMap;
 use std::ffi::{CStr, c_void};
 use std::path::PathBuf;
@@ -79,7 +61,6 @@ fn interned(index: u64) -> Option<PathBuf> {
 ///
 /// As [`store`].
 pub unsafe fn store_path(out: *mut c_void, path: PathBuf) {
-    // SAFETY: the caller's obligation.
     unsafe { store(out, path) };
 }
 
@@ -107,7 +88,6 @@ unsafe fn load(reference: *const c_void) -> Option<PathBuf> {
         return None;
     }
     let mut bytes = [0_u8; 16];
-    // SAFETY: the caller's obligation.
     unsafe { std::ptr::copy_nonoverlapping(reference.cast::<u8>(), bytes.as_mut_ptr(), 16) };
     if u64::from_le_bytes(bytes[..8].try_into().ok()?) != MAGIC {
         return None;
@@ -258,7 +238,6 @@ pub unsafe extern "C" fn FSRefMakePath(
     if out.is_null() || max == 0 {
         return PARAM_ERR;
     }
-    // SAFETY: the caller's obligation.
     let Some(path) = (unsafe { load(reference) }) else {
         return PARAM_ERR;
     };
@@ -282,7 +261,6 @@ pub unsafe extern "C" fn FSRefMakePath(
 ///
 /// Both arguments are null or whole `FSRef`s.
 pub unsafe extern "C" fn FSCompareFSRefs(a: *const c_void, b: *const c_void) -> OSStatus {
-    // SAFETY: the caller's obligation.
     let (Some(a), Some(b)) = (unsafe { load(a) }, unsafe { load(b) }) else {
         return PARAM_ERR;
     };
@@ -308,7 +286,6 @@ pub unsafe extern "C" fn FSIsAliasFile(
     alias: *mut u8,
     folder: *mut u8,
 ) -> OSStatus {
-    // SAFETY: the caller's obligation.
     let Some(path) = (unsafe { load(reference) }) else {
         return PARAM_ERR;
     };
@@ -317,7 +294,6 @@ pub unsafe extern "C" fn FSIsAliasFile(
         unsafe { *alias = 0 };
     }
     if !folder.is_null() {
-        // SAFETY: as above.
         unsafe { *folder = u8::from(path.is_dir()) };
     }
     NO_ERR
@@ -339,7 +315,6 @@ pub unsafe extern "C" fn FSResolveAliasFile(
     target_is_folder: *mut u8,
     was_aliased: *mut u8,
 ) -> OSStatus {
-    // SAFETY: the caller's obligation.
     let Some(path) = (unsafe { load(reference) }) else {
         return PARAM_ERR;
     };
@@ -348,7 +323,6 @@ pub unsafe extern "C" fn FSResolveAliasFile(
         unsafe { *target_is_folder = u8::from(path.is_dir()) };
     }
     if !was_aliased.is_null() {
-        // SAFETY: as above.
         unsafe { *was_aliased = 0 };
     }
     NO_ERR
@@ -756,7 +730,6 @@ pub unsafe extern "C" fn FSGetVolumeInfo(
             unicode: [0; 255],
         };
         name.unicode[..units.len()].copy_from_slice(&units);
-        // SAFETY: as above.
         unsafe { volume_name.write_unaligned(name) };
     }
     if !root_directory.is_null() {
@@ -790,7 +763,6 @@ pub unsafe extern "C" fn FSGetCatalogInfo(
     fs_spec: *mut c_void,
     parent_ref: *mut c_void,
 ) -> i16 {
-    // SAFETY: the caller's obligation.
     let Some(path) = (unsafe { load(reference) }) else {
         return PARAM_ERR as i16;
     };
@@ -829,7 +801,6 @@ pub unsafe extern "C" fn FSGetCatalogInfo(
             unicode: [0; 255],
         };
         name.unicode[..leaf.len()].copy_from_slice(&leaf);
-        // SAFETY: as above.
         unsafe { out_name.write_unaligned(name) };
     }
     if !parent_ref.is_null() {
