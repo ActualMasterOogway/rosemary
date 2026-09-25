@@ -1067,12 +1067,21 @@ exports::exports! {
         "pthread_getspecific" => getspecific,
         "pthread_setspecific" => setspecific,
 
+        #[cfg(not(target_os = "macos"))]
         "pthread_create" => create,
+        #[cfg(target_os = "macos")]
+        "pthread_create" => libc::pthread_create,
         "pthread_join" => join,
         "pthread_detach" => detach,
         "pthread_kill" => kill,
+        #[cfg(not(target_os = "macos"))]
         "pthread_get_stackaddr_np" => get_stackaddr_np,
+        #[cfg(target_os = "macos")]
+        "pthread_get_stackaddr_np" => libc::pthread_get_stackaddr_np,
+        #[cfg(not(target_os = "macos"))]
         "pthread_get_stacksize_np" => get_stacksize_np,
+        #[cfg(target_os = "macos")]
+        "pthread_get_stacksize_np" => libc::pthread_get_stacksize_np,
         "pthread_setname_np" => setname_np,
         "pthread_getname_np" => getname_np,
         "pthread_main_np" => main_np,

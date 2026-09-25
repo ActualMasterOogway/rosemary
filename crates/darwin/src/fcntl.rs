@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "macos"))]
 use crate::translation::DarwinTranslation;
 
 pub mod cmd {
