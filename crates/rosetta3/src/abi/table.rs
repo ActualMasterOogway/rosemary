@@ -1712,6 +1712,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fseeko", I32, P, I64, I32),
     sig!("fsetpos", I32, P, P),
     sig!("fstat", I32, I32, P),
+    sig!("fstatat", I32, I32, P, P, I32),
     sig!("fstatfs", I32, I32, P),
     sig!("fstatvfs", I32, I32, P),
     sig!("fsync", I32, I32),
