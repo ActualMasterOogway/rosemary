@@ -1454,6 +1454,9 @@ pub(crate) fn install() {
         "isOpaque" => yes, c"c16@0:8";
         "isFlipped" => no, c"c16@0:8";
         "isHidden" => is_hidden, c"c16@0:8";
+        // No live-resize session is ever started here: the window system resizes
+        // a window in one step and nothing posts NSWindowWillStartLiveResize.
+        "inLiveResize" => no, c"c16@0:8";
         "isHiddenOrHasHiddenAncestor" => is_hidden_or_has_hidden_ancestor_method, c"c16@0:8";
         "display" => display, c"v16@0:8";
         "displayIfNeeded" => display, c"v16@0:8";

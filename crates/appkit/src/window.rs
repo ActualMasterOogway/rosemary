@@ -1988,6 +1988,8 @@ pub(crate) fn install() {
         "isKeyWindow" => is_key_window, c"c16@0:8";
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
+        // No window is ever attached as a sheet: nothing implements -beginSheet:.
+        "isSheet" => no, c"c16@0:8";
         "screen" => screen, c"@16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "backgroundColor" => background_color, c"@16@0:8";

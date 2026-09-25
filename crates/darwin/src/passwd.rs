@@ -96,15 +96,23 @@ unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
     let host = unsafe { &*host };
     let strings = unsafe { strings_of(host) };
     let guest = entry(host, |i| strings[i].as_ptr().cast_mut());
-    ANSWER.with(|slot| {
+    let answer = Box::new(Entry {
+        guest,
+        _strings: strings.into(),
+    });
+    let mut answer = Some(answer);
+    let published = ANSWER.try_with(|slot| {
         let mut slot = slot.borrow_mut();
-        slot.entry = Some(Box::new(Entry {
-            guest,
-            _strings: strings.into(),
-        }));
+        slot.entry = answer.take();
         slot.entry
             .as_mut()
             .map_or(std::ptr::null_mut(), |e| &raw mut e.guest)
+    });
+    // A guest `atexit` handler runs after glibc has destroyed the main thread's
+    // storage; the process is ending, so the entry is leaked instead.
+    published.unwrap_or_else(|_| {
+        let leaked = Box::leak(answer.take().expect("not consumed by try_with"));
+        &raw mut leaked.guest
     })
 }
 
