@@ -1,4 +1,3 @@
-//! How many link rows one entry into a region costs, for a given guest.
 use rosetta3::Program;
 
 fn main() {

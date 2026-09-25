@@ -1,5 +1,3 @@
-//! Taking the mouse, but only when asked.
-
 use std::ffi::{c_ulong, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};

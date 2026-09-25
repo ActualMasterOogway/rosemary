@@ -1,5 +1,3 @@
-//! Signal handlers: a guest function the *kernel* calls.
-
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
 

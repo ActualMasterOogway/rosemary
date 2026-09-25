@@ -1,10 +1,3 @@
-//! The host's own Steam client, as this process's copy of it.
-//!
-//! `steamclient.so` is an ordinary ELF shared library that talks to the Steam
-//! process already running on this machine. Loading it here is what makes the
-//! bridge worth having: the guest's Steamworks calls reach the user's real
-//! account, friends list and overlay, and no macOS Steam client has to exist.
-
 use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 

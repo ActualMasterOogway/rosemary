@@ -474,7 +474,6 @@ unsafe fn invalidate_icache(start: *mut u8, len: usize) {
         unsafe extern "C" {
             fn sys_icache_invalidate(start: *mut core::ffi::c_void, len: usize);
         }
-        // SAFETY: the caller's guarantee.
         unsafe { sys_icache_invalidate(start as *mut core::ffi::c_void, len) };
     }
     #[cfg(not(target_os = "macos"))]

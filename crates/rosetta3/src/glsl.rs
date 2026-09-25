@@ -1,14 +1,3 @@
-//! Rewriting the GLSL a guest hands the driver.
-//!
-//! A program compiled against Apple's OpenGL may use extensions that exist
-//! nowhere else. `GL_EXT_bindable_uniform` is the one that matters here: Apple
-//! implements it, Mesa never did, and a shader that asks for it fails to
-//! compile - after which every `glUseProgram` is `GL_INVALID_OPERATION` and the
-//! program draws nothing at all, which is a blank window and no explanation.
-//!
-//! So the source is rewritten on its way through `glShaderSource`, which is the
-//! one place every shader passes and the last place it is still text.
-
 use std::ffi::{CStr, c_char};
 
 /// Reassemble the source a guest passed as `count` pieces.
@@ -23,7 +12,6 @@ use std::ffi::{CStr, c_char};
 unsafe fn joined(count: i32, strings: *const *const c_char, lengths: *const i32) -> String {
     let mut source = String::new();
     for i in 0..count.max(0) as usize {
-        // SAFETY: the caller's obligation.
         let piece = unsafe { *strings.add(i) };
         if piece.is_null() {
             continue;

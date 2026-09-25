@@ -1,16 +1,3 @@
-//! The few `/usr/lib` libraries a prefix's base supplies as **guest code**.
-//!
-//! Everything else under `/usr/lib` is bridged symbol by symbol, and that is the
-//! rule for good reason: libSystem, the Objective-C runtime and GL are this
-//! runtime's to implement, because they are where a guest meets the host. The
-//! libraries listed here are the opposite case. `libedit`, `libncurses`, and
-//! `libutil` are ordinary userland code on top of libSystem. `libedit` even has
-//! variadic entry points that take guest callbacks (`el_set(el, EL_ADDFN, ...)`).
-//! The base ships the real libraries, so their own imports go through this
-//! runtime like any guest's.
-//!
-//! Only under a prefix: without one there is no base to take them from.
-
 use machish::error::Result;
 use machish::image::MachObject;
 use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};

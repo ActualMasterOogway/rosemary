@@ -1,5 +1,3 @@
-//! A static diagnostic: would any call out of `__text` be followed into as guest code?
-
 use std::collections::BTreeSet;
 use std::ops::Range;
 

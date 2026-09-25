@@ -1,6 +1,3 @@
-//! Host->guest calls: a native trampoline per guest function pointer, built for
-//! whichever CPU this runtime is running on.
-
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;

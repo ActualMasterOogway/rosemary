@@ -1,9 +1,3 @@
-//! Math helpers whose arguments or return values the signature table cannot name.
-//!
-//! Only the register marshaling: the arithmetic is [`darwin::math`]'s, because the
-//! native backend needs the same four functions and reaches them by calling the
-//! address in the import slot rather than by being intercepted here.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

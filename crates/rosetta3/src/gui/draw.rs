@@ -1,5 +1,3 @@
-//! The draw list, and the two-hundred-line immediate-mode UI built on it.
-
 use super::font::Atlas;
 
 /// One vertex, in the layout both backends declare to their shaders.

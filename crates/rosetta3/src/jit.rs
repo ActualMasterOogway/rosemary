@@ -1,5 +1,3 @@
-//! How hard Cranelift is asked to work on the code it emits.
-
 use microlift::cranelift_codegen;
 use microlift::cranelift_native;
 
@@ -277,25 +275,7 @@ pub fn opt_level() -> OptLevel {
     *LEVEL
 }
 
-/// Whether Cranelift's IR verifier runs on everything this crate compiles.
-///
-/// **This is the single most expensive thing translation does.** Cranelift runs the
-/// verifier at several points in a compile - after legalisation, after the egraph pass,
-/// after register allocation - and each run is a full walk of the function checking
-/// that every value is dominated by its definition, that types agree, that the CFG is
-/// consistent.
-///
-/// ```text
-///                     verifier on   verifier off
-/// compile                 754 ms         405 ms
-/// wall, process start     821 ms         466 ms
-/// ```
-///
-/// **1.9× off the compile and 1.8× off the run**, for a check that says nothing about
-/// the guest program and everything about whether microlift emitted well-formed IR -
-/// which is a property of *microlift's source*, not of the bytes it was pointed at, and
-/// so is answered by the lifter's own test suite rather than by every region a shipped
-/// binary translates.
+/// Enable Cranelift IR verification. Defaults to on in debug builds.
 pub fn verify() -> bool {
     #[dynamic]
     static VERIFY: bool = match std::env::var(VERIFY_ENV) {
@@ -353,74 +333,24 @@ pub fn block_linking() -> bool {
     *ON
 }
 
-/// Whether each exit site carries its own probe - microlift's
-/// `LifterConfig::inline_link_probes`.
-///
-/// **Off**, because it was measured and it did not pay: it folds the probe's slot
-/// arithmetic into an immediate but leaves the wall clock where it was, and costs
-/// 2.0% more host code. See the field's own note in microlift. The knob is here
-/// because the reason it did not pay is a property of this host's indirect
-/// predictor, which a program with a larger working set could contradict.
+/// Whether each exit site has its own probe. Off by default.
 pub fn inline_link_probes() -> bool {
     #[dynamic]
     static ON: bool = !boolean_env(INLINE_LINK_PROBES_ENV, false, "probes stay shared");
     *ON
 }
 
-/// Whether an exit whose destination is known at lift time gets a cell of its own -
-/// microlift's `LifterConfig::link_cells`.
-///
-/// The cell is a fast path in front of the table probe, not a replacement for it: a
-/// load and a branch against the probe's shift, mask, scale, add, load and compare,
-/// and - the part that is not a constant factor - a lookup that *cannot collide*.
-/// Two hot targets sixteen bytes apart share a table row and evict each other
-/// forever; two cells cannot. The cost is region size, which microlift measures at
-/// +28 bytes of aarch64 `.text` per exit plus 32 bytes of data per distinct target.
-///
-/// Inert unless [`block_linking`] is on, which is what the `&&` says.
+/// Whether a known destination gets its own link cell.
 pub fn link_cells() -> bool {
     #[dynamic]
     static ON: bool = block_linking() && boolean_env(NO_LINK_CELLS_ENV, false, "cells stay on");
     *ON
 }
 
-/// The per-thread call-return ring - microlift's `LifterConfig::call_return_stack`.
-///
-/// **Off by default, because it was measured and it costs.** On a call-heavy guest
-/// (two `noinline` calls per iteration, 40M iterations) it is **+15.8%** against the
-/// same run with link cells and no ring; on genuinely nested mutual recursion,
-/// +12% to +20% at every depth tried. The regression is the same for a given number
-/// of *calls* regardless of how deep they nest, which is the shape of a per-call cost
-/// rather than a per-frame one.
-///
-/// The reason is structural rather than a tuning failure. The ring pays a push at
-/// **every** out-of-region call - a null test, an offset load, a mask, two stores and
-/// a store back - to make the matching `RET` a load and a compare instead of the
-/// probe's shift, mask, scale, add, load and compare. Those two are close enough that
-/// the push is not repaid; and on a miss the return pays the pop *and* the whole
-/// probe behind it. What would repay it is the probe missing often, and it does not:
-/// instrumenting the same run shows **one** declined `ret` probe in 9.6M guest calls,
-/// because an 8192-row direct-mapped table over a normal working set essentially
-/// always hits.
-///
-/// FEX pays the same push and it is worth it there, because what FEX buys is a real
-/// `ret` instruction that the CPU's return-address-stack predicts. Microlift's ring
-/// cannot buy that - Cranelift has no `ret`-flavoured indirect branch and no way to
-/// name an address inside a function - so it stores a link cell instead, which keeps
-/// the bookkeeping and drops the payoff. Recovering the payoff is host call/return
-/// nesting, not a bigger ring.
-///
-/// So it stays, behind [`CALL_RETURN_ENV`], as the machinery that work builds on and
-/// as something to re-measure against it - not as a default.
-///
-/// [`CALLRET_FRAMES`] frames deep. Deeper than the guest recurses costs nothing but
-/// memory; shallower costs the oldest frames a probe on the way out, which is a hit
-/// rate and never a wrong answer - see microlift's `core::callret`.
+/// Configure the call-return ring. Disabled by default.
 pub fn call_return_stack() -> Option<CallRetConfig> {
     #[dynamic]
     static CONFIG: Option<CallRetConfig> = {
-        // Cells first: a frame names a cell, so there is nothing for one to hold
-        // without them.
         if !link_cells() || !opted_in(CALL_RETURN_ENV) {
             return None;
         }

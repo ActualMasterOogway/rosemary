@@ -1,5 +1,3 @@
-//! `ioctl`, the variadic whose argument list is one value wide.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

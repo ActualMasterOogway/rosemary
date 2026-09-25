@@ -1,5 +1,3 @@
-//! The font atlas, rasterized by CoreText at the size the window asks for.
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;

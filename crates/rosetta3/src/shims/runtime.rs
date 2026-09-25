@@ -1,5 +1,3 @@
-//! Symbols the runtime supplies itself, because the host will not hand them out.
-
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -32,7 +30,6 @@ pub fn set_process_args(argc: u64, argv: u64) {
         // entry is a NUL-terminated string in this address space.
         let argv0 = unsafe { *(argv as usize as *const *const c_char) };
         if !argv0.is_null() {
-            // SAFETY: as above.
             darwin::progname::set(unsafe { std::ffi::CStr::from_ptr(argv0) });
         }
     }
@@ -183,7 +180,6 @@ unsafe extern "C" fn ns_get_executable_path(buf: *mut u8, bufsize: *mut u32) -> 
     // SAFETY: a guest `uint32_t *`, directly addressable under the identity mapping.
     let available = unsafe { *bufsize } as usize;
     if buf.is_null() || available < needed {
-        // SAFETY: as above.
         unsafe { *bufsize = needed as u32 };
         return -1;
     }

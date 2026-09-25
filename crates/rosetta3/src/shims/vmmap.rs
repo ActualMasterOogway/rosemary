@@ -1,5 +1,3 @@
-//! `mmap` and `mprotect`: a guest that generates its own code.
-
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
 

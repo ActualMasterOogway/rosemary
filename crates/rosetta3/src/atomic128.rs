@@ -1,5 +1,3 @@
-//! `CMPXCHG16B`, performed by the host because the guest shares it.
-
 use iced_x86::{Instruction, Register};
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -189,7 +187,6 @@ mod tests {
         assert_eq!(found, 0x1111_2222_3333_4444_5555_6666_7777_8888);
         assert_eq!(cell.0, 0xdead);
 
-        // SAFETY: as above.
         let found = unsafe { compare_exchange(&mut cell.0, 0, 0xbeef) };
         assert_eq!(found, 0xdead, "a failed CAS reports what was there");
         assert_eq!(cell.0, 0xdead, "and leaves it alone");
@@ -220,7 +217,6 @@ mod tests {
                             // joined below. Racing on it is the test.
                             let current = unsafe { compare_exchange(at as *mut u128, 0, 0) };
                             let next = current.wrapping_add(1);
-                            // SAFETY: as above.
                             let found = unsafe { compare_exchange(at as *mut u128, current, next) };
                             if found == current {
                                 break;
@@ -250,7 +246,6 @@ mod tests {
             let found = unsafe { compare_exchange(&mut cell.0, i + 500, 0xbad) };
             assert_eq!(found, i, "iteration {i}");
             assert_eq!(cell.0, i, "a mismatched CAS must not store");
-            // SAFETY: as above.
             unsafe { compare_exchange(&mut cell.0, i, i + 1) };
         }
         assert_eq!(cell.0, 1000);

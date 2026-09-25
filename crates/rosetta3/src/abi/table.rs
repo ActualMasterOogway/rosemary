@@ -1,4 +1,3 @@
-//! What the runtime knows about the functions a guest imports.
 use static_init::dynamic;
 
 use super::ArgType as T;

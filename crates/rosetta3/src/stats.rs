@@ -1,5 +1,3 @@
-//! Where translation time actually goes.
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 

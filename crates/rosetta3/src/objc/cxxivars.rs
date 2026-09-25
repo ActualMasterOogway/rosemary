@@ -1,5 +1,3 @@
-//! `.cxx_construct`: the C++ members of a guest Objective-C class.
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::RwLock;
@@ -230,7 +228,6 @@ mod tests {
 
         let name = host::c_string("Rosetta3CxxProbe2").expect("no NUL");
         let root = host::c_string("NSObject").expect("no NUL");
-        // SAFETY: as above.
         unsafe {
             let ns = host::objc_getClass(root.as_ptr());
             assert!(!ns.is_null(), "no NSObject in this process");

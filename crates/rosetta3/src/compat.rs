@@ -1,6 +1,3 @@
-//! Framework behaviour gated on **which binary is the main executable**, and the one
-//! place this runtime cannot be invisible.
-
 use crate::objc::send::{Id, class, class_method, ns_string, sel, send1, send2};
 
 /// The compatibility defaults this runtime registers, and why each is here.

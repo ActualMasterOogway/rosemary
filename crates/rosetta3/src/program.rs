@@ -1,5 +1,3 @@
-//! A loaded guest program, ready to be lifted.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Range;

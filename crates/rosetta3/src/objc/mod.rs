@@ -1,5 +1,3 @@
-//! Realizing the guest's Objective-C classes, in the host's runtime.
-
 pub mod cxxivars;
 pub mod dispatch;
 pub mod encoding;
@@ -514,7 +512,6 @@ fn register_class(
                 name,
                 ivar: ivar.name.clone(),
             });
-            // SAFETY: as above.
             unsafe { host::objc_disposeClassPair(cls) };
             return None;
         }
@@ -635,7 +632,6 @@ fn add_method(
     // SAFETY: both strings outlive the call; `imp` is an executable arm64
     // trampoline this runtime built and never frees.
     let sel = unsafe { host::sel_registerName(name.as_ptr()) };
-    // SAFETY: as above.
     let ok = unsafe { host::class_addMethod(target, sel, imp as host::Imp, types.as_ptr()) };
     // `false` means the class already has the selector, which for a freshly
     // allocated class means the guest declared it twice.
@@ -685,7 +681,6 @@ fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
         rt.protocols.insert(p.va, existing as u64);
         return;
     }
-    // SAFETY: as above.
     let proto = unsafe { host::objc_allocateProtocol(name.as_ptr()) };
     if proto.is_null() {
         return;

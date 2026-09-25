@@ -1,5 +1,3 @@
-//! Messages sent *by* the guest: `objc_msgSend`, and the runtime it calls.
-
 use machish::resolve::SyntheticDylib;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -1132,7 +1130,6 @@ fn plan_for(symbol: &str, vm: &Vm, class: host::Class, sel: u64) -> Result<&'sta
     // instance method of the metaclass, and `class` is already the metaclass
     // when the receiver is a class, so this answers for both.
     //
-    // SAFETY: as above.
     let method = unsafe { host::class_getInstanceMethod(class, sel as host::Sel) };
     if method.is_null() {
         return Err(unrecognised(symbol, class, sel));
@@ -1258,7 +1255,6 @@ fn signature_of(symbol: &str, method: host::Method) -> Result<Signature> {
             reason: "the method carries no type encoding, so its signature is unknown",
         });
     }
-    // SAFETY: as above.
     let types = unsafe { std::ffi::CStr::from_ptr(types) };
     let Ok(types) = types.to_str() else {
         return Err(AbiError::Refused {
@@ -1532,7 +1528,6 @@ fn selector_bytes(sel: u64) -> Option<&'static [u8]> {
     if name.is_null() {
         return None;
     }
-    // SAFETY: as above.
     Some(unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes())
 }
 
@@ -1548,7 +1543,6 @@ fn unrecognised(symbol: &str, class: host::Class, sel: u64) -> AbiError {
     let name = unsafe { host::class_getName(class) };
     let name = match name.is_null() {
         true => "<unnamed>".to_string(),
-        // SAFETY: as above.
         false => unsafe { std::ffi::CStr::from_ptr(name) }
             .to_string_lossy()
             .into_owned(),

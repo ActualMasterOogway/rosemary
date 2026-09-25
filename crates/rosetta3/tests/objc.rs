@@ -1,5 +1,3 @@
-//! Gated to macOS: every test here realizes guest classes in the *host*
-//! Objective-C runtime, and a host without one has nothing to realize them into.
 #![cfg(target_os = "macos")]
 
 mod common;
@@ -10,31 +8,8 @@ use std::str::FromStr;
 use rosetta3::objc::{Refusal, host};
 use rosetta3::{Program, Vm, startup};
 
-/// Serializes every test that messages guest code.
-///
-/// Not a convenience. A guest `IMP` is reached from the host runtime with
-/// nothing on the stack belonging to this runtime, so the thunk finds its VM
-/// through the process-wide pointer [`rosetta3::thunk::publish`] sets - there is
-/// exactly one, and it is the last one published. Two tests publishing
-/// different VMs in parallel would have each other's thunks decline, which is
-/// the runtime behaving correctly and the test failing for an unrelated reason.
-///
-/// The same fact constrains real embedders, which is why it is stated here
-/// rather than worked around: **a process runs one Objective-C guest.**
 static PUBLISHED: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A VM that outlives the test, published for the process.
-///
-/// Both halves are required. Leaking, because registration installs thunks as
-/// `IMP`s in the *host's* runtime, which now holds code owned by this VM -
-/// dropping it would unmap the trampolines while `libobjc` still has them in a
-/// method list, and unlike an `atexit` handler a method can be reached by any
-/// later message.
-///
-/// Publishing, because that is the only way a thunk entered from host code
-/// finds a VM at all. `qsort`'s comparator is reached from inside a call this
-/// runtime made, so the thread-local answers; a message send is not, and
-/// neither is Foundation releasing a guest object on some other thread.
 fn vm_for(path: &str) -> &'static Vm {
     let program = Program::load_executable(path, &[])
         .unwrap_or_else(|e| panic!("linking {path} failed: {e}"));
@@ -46,10 +21,6 @@ fn vm_for(path: &str) -> &'static Vm {
     vm
 }
 
-/// The standard fixture, with the class name substituted in.
-///
-/// One of everything a `class_ro_t` can carry: an ivar, a property, an instance
-/// method, a class method, and a protocol.
 fn source(name: &str) -> String {
     format!(
         r#"
@@ -79,10 +50,6 @@ int main(void) {{ return 0; }}
     )
 }
 
-/// Hold the publish lock for the body of a test.
-///
-/// Poisoning is ignored: a panicking test has already failed, and denying the
-/// next one its lock would turn one failure into every failure.
 fn serialized() -> std::sync::MutexGuard<'static, ()> {
     PUBLISHED.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -92,15 +59,6 @@ fn fixture(name: &str) -> Option<&'static Vm> {
     Some(vm_for(&path))
 }
 
-/// `objc_msgSend`, as the prototype a given selector's type encoding describes.
-///
-/// Transmuting is not a shortcut here, it is the only way: `objc_msgSend` has
-/// whichever signature the method has. See [`host::objc_msgSend`].
-///
-/// # Safety
-///
-/// `T` must be a function type matching the selector's actual signature, with
-/// `(id, SEL)` first.
 unsafe fn msg_send<T: Copy>() -> T {
     assert_eq!(
         std::mem::size_of::<T>(),
@@ -112,12 +70,6 @@ unsafe fn msg_send<T: Copy>() -> T {
     unsafe { *(&p as *const *const () as *const T) }
 }
 
-/// [`msg_send`] for a message whose return this host sends to memory.
-///
-/// x86-64 has a second trampoline for exactly that case, and the ordinary one is
-/// wrong there: the caller's hidden buffer arrives in the register `objc_msgSend`
-/// reads the receiver from, so it looks the selector up on a stack address. arm64
-/// returns every struct this size in registers and has only the one trampoline.
 unsafe fn msg_send_stret<T: Copy>() -> T {
     assert_eq!(
         std::mem::size_of::<T>(),
@@ -146,15 +98,9 @@ fn sel(name: &str) -> host::Sel {
 
 fn class_named(name: &str) -> host::Class {
     let c = std::ffi::CString::new(name).unwrap();
-    // SAFETY: as above.
     unsafe { host::objc_getClass(c.as_ptr()) }
 }
 
-/// Allocate and initialise an instance of a registered guest class.
-///
-/// `alloc` and `init` are `NSObject`'s, so they run in the *host's* runtime
-/// against a class whose layout the host computed. Nothing guest-side is
-/// involved until a guest selector is sent to the result.
 fn new_instance(cls: host::Class) -> host::Class {
     // SAFETY: `cls` is a registered class; `alloc` and `init` are inherited
     // from `NSObject` and both return `id`.
@@ -399,10 +345,6 @@ fn a_category_on_a_host_class_reaches_guest_code() {
     assert_eq!(tripled(str_obj, sel("tripledLength")), 15);
 }
 
-/// A guest class deriving from another guest class. The registration order is
-/// not the list order, so a pass that walked `__objc_classlist` straight through
-/// would try to allocate the subclass against a superclass that does not exist
-/// yet.
 #[test]
 fn an_in_image_superclass_is_registered_first() {
     let _lock = serialized();
@@ -454,10 +396,6 @@ fn an_in_image_superclass_is_registered_first() {
     );
 }
 
-/// Selector uniquing rewrites the guest's own `__objc_selrefs` slots from
-/// pointers-to-strings into `SEL`s, which is what dyld's `libobjc` does on a
-/// real launch. Guest code loads straight out of those slots, so until this runs
-/// it is passing a `char *` where a `SEL` belongs.
 #[test]
 fn selector_reference_slots_are_uniqued_in_place() {
     let _lock = serialized();
@@ -517,10 +455,6 @@ fn a_guest_protocol_is_registered_and_adopted() {
     assert!(conforms(cls, sel("conformsToProtocol:"), proto));
 }
 
-/// Registration happens once. A second call must return the same maps rather
-/// than trying to allocate every class again, which the runtime would refuse
-/// for a name already in use - turning an idempotency bug into a pile of
-/// refusals rather than a crash, but a bug either way.
 #[test]
 fn registration_is_idempotent() {
     let _lock = serialized();
@@ -533,15 +467,6 @@ fn registration_is_idempotent() {
     assert!(vm.objc().is_some());
 }
 
-/// A class name already in use is refused **by name**, with nothing registered
-/// under it. Shadowing would make which class a name resolves to depend on load
-/// order, which is not a question this runtime should be answering.
-///
-/// Provoked by loading one guest *twice* rather than by writing a fixture that
-/// redeclares a Foundation class - clang rejects that outright, and the two
-/// cases are the same one to `objc_allocateClassPair`. It also documents a real
-/// limit: two guests in one process cannot both define a class name, because
-/// there is one host runtime between them.
 #[test]
 fn a_class_name_already_in_use_is_refused_by_name() {
     let _lock = serialized();
@@ -636,18 +561,6 @@ fn classes_are_registered_before_initializers_run() {
     assert!(rt.stats().classes > 0);
 }
 
-/// A guest method that returns a struct by value, which the two conventions
-/// disagree about in both directions at once.
-///
-/// The three cases are the three the classifications produce, and DELTARUNE's
-/// `-[Mac_RunnerAppDelegate windowWillResize:toSize:]` is the first: AppKit
-/// reads the answer from `v0`/`v1`, so a thunk that returned only an integer
-/// left the window a NaN size and AppKit trapped mid-resize.
-///
-/// - `NSSize` - two SSE eightbytes to the guest, an HFA of two to the host.
-/// - `NSRect` - MEMORY to the guest, so it fills a hidden buffer; an HFA of four
-///   in `v0`–`v3` to the host.
-/// - `NSRange` - two integer eightbytes in `rax`/`rdx`, two `x` registers.
 #[test]
 fn a_guest_method_returns_a_struct_the_host_reads_from_registers() {
     let _lock = serialized();

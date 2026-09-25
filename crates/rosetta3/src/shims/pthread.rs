@@ -1,5 +1,3 @@
-//! `pthread_create`, and the two stacks a guest thread really has.
-
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
 
@@ -298,7 +296,6 @@ mod tests {
         );
 
         let mut detach = 0;
-        // SAFETY: as above.
         unsafe {
             darwin::pthread::raw::pthread_attr_getdetachstate(host.as_mut_ptr(), &mut detach)
         };

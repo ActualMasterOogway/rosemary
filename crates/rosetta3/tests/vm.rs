@@ -1,9 +1,3 @@
-//! The mechanisms behind [`tests/run.rs`](run), checked one at a time.
-//!
-//! `run.rs` asks whether programs work; this asks *why*, so that a failure
-//! there has somewhere to point. Everything here drives the VM in-process,
-//! which is also the shape an embedder would use.
-
 mod common;
 
 use rosetta3::vm::GuestView;
@@ -11,15 +5,6 @@ use rosetta3::{Program, Vm, startup};
 
 use rosetta3::abi::GuestMemory;
 
-/// A VM that outlives the test, deliberately.
-///
-/// Every one of these fixtures registers an `atexit` handler, and forwarding
-/// `atexit` means the *host's* exit list now holds a thunk - code owned by this
-/// VM, pointing at guest memory owned by this VM. Dropping it would unmap both
-/// and leave the process to call them on the way out. So a VM that has run a
-/// guest is not droppable while the process lives, which is a fact about the
-/// design rather than a convenience for the tests: the driver leaks its VM for
-/// exactly the same reason.
 fn vm_for(path: &str) -> &'static Vm {
     let program = Program::load_executable(path, &[])
         .unwrap_or_else(|e| panic!("linking {path} failed: {e}"));

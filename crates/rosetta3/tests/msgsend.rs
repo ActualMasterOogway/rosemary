@@ -1,5 +1,3 @@
-//! Gated to macOS: every test here realizes guest classes in the *host*
-//! Objective-C runtime, and a host without one has nothing to realize them into.
 #![cfg(target_os = "macos")]
 
 mod common;
@@ -22,14 +20,6 @@ fn agrees(path: &str, args: &[&str]) -> Option<String> {
     Some(stdout)
 }
 
-/// The gate: an Objective-C program that sends messages runs, and prints what it
-/// prints natively.
-///
-/// Sixteen claims in one process - see [`common::OBJC_MESSAGES_M`] for what each
-/// line is for. Comparing the whole output rather than asserting line by line is
-/// deliberate: a runtime that got `super` wrong or resolved an override on the
-/// wrong class produces *plausible* output, and only the diff against the real
-/// thing says so.
 #[test]
 fn an_objective_c_program_sends_messages_and_prints_what_it_should() {
     let Some(path) = common::objc_messages_fixture("objc_messages", &[]) else {
@@ -73,13 +63,6 @@ fn an_objective_c_program_runs_with_builtin_hardening_enabled() {
     assert_eq!(output.stdout, native.stdout);
 }
 
-/// The same program at `-O2`, where clang **tail-jumps** to `objc_msgSend`.
-///
-/// A different path through the runtime for identical output: there is no return
-/// address to write, because the jump left the caller's on the stack, and a shim
-/// that pushed one anyway would return the method's result to the wrong frame.
-/// The optimiser also rewrites `[X alloc]` into `objc_alloc` and `[[X alloc]
-/// init]` into `objc_alloc_init`, which are entry points rather than messages.
 #[test]
 fn the_same_program_optimised_takes_the_tail_call_path() {
     let Some(path) = common::objc_messages_fixture("objc_messages_o2", &["-O2"]) else {
@@ -90,15 +73,6 @@ fn the_same_program_optimised_takes_the_tail_call_path() {
     };
 }
 
-/// Every import an Objective-C program makes is described.
-///
-/// The milestone-2 claim, applied to the family M6.3 added: nothing may be
-/// [`Classification::Unknown`], because unknown is the one outcome that becomes a
-/// wrong value in a register rather than a diagnostic. The Objective-C surface is
-/// where this is easiest to lose - a class reference is one import per class the
-/// program mentions.
-///
-/// [`Classification::Unknown`]: rosetta3::abi::Classification
 #[test]
 fn every_objective_c_import_is_classified() {
     use rosetta3::abi::Classification;
@@ -116,19 +90,6 @@ fn every_objective_c_import_is_classified() {
     assert!(unknown.is_empty(), "undescribed imports: {unknown:?}");
 }
 
-/// `objc_msgSend` is never inlined by the lifter.
-///
-/// It has no signature to inline *with* - it has whichever signature the method
-/// has - so promoting it would call the host's own trampoline with the guest's
-/// registers, which is a crash inside somebody else's assembly.
-///
-/// `objc_alloc_init` is here for a different reason and it is the more subtle
-/// one: it *has* an ordinary `id(Class)` signature, and it still may not be
-/// inlined, because it sends `init` - which for a guest class is a thunk back
-/// into the JIT, entered against a
-/// [stale guest stack pointer](rosetta3::objc::fast). Nothing in its signature
-/// says so, which is why the rule is a list of names rather than a property of
-/// the types.
 #[test]
 fn the_message_send_family_is_never_promoted_to_a_fast_import() {
     use rosetta3::abi::Classification;
@@ -142,19 +103,6 @@ fn the_message_send_family_is_never_promoted_to_a_fast_import() {
     }
 }
 
-/// A runtime entry point that cannot reach guest code *is* inlined.
-///
-/// The other half of the rule above, and the reason it is worth having its own
-/// test: "shimmed" and "slow" used to be the same statement, and this is where
-/// they came apart. `class_getName` is shimmed because the native provider
-/// denies the whole `_class_` family so [`rosetta3::objc::dispatch`] can claim
-/// the sends - not because calling the host's would be wrong. It reads a name
-/// out of a class and cannot dispatch, so it is inlined against a substituting
-/// function that translates the class and calls the host's.
-///
-/// Named as a classification rather than as a benchmark, because the failure it
-/// guards against is silent: a runtime entry point that quietly went back to
-/// being a bridged call would print exactly the same output.
 #[test]
 fn a_runtime_entry_point_that_cannot_dispatch_is_a_fast_import() {
     use rosetta3::abi::Classification;
@@ -168,15 +116,6 @@ fn a_runtime_entry_point_that_cannot_dispatch_is_a_fast_import() {
     }
 }
 
-/// Two of the three former refusals now *work*, and the third still says why.
-///
-/// This test used to assert all three were refused, and two of them moving is
-/// the whole of what [`rosetta3::abi::aggregate`] and the variadic re-send are
-/// for. `@throw` is served now too - `rosetta3::objcexc` binds it to the
-/// vendored `libc++abi` - but only for a program that *has* one, which this
-/// fixture, being C and Objective-C, does not. So what it still asserts is the
-/// property that has never changed: the refusal says so by name, with the
-/// program's output up to that point intact, rather than crashing.
 #[test]
 fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_itself() {
     let Some(path) = common::objc_refusals_fixture() else {
@@ -211,23 +150,6 @@ fn an_aggregate_return_and_a_variadic_method_both_work_and_throw_still_names_its
     );
 }
 
-/// An import nothing satisfied fails **by name**, not by address.
-///
-/// Before M6.3 the diagnostic for this was `no guest code at 0x0`: the slot the
-/// binder zeroed was not registered, so the recompiler followed the `__stubs`
-/// trampoline into it. The whole content of the failure is a symbol name, and
-/// that is what it says now. Provoked with a symbol the native provider denies
-/// on purpose - dyld introspection, which the whole `__dyld_` prefix refuses so
-/// that a shim has to decide what the guest is told.
-///
-/// The fixture used to call `_dyld_image_count`, and that stopped being a
-/// denied-and-unanswered symbol when [`rosetta3::shims::runtime`] began
-/// answering the image-list family for Unity's crash reporter. It moved to the
-/// vmaddr slide, and *that* stopped being one too - the whole image-list family
-/// is claimed now, because a guest crash reporter walks it. It is
-/// `_dyld_get_prog_image_header` today. **The test moving is the correct
-/// outcome each time**: the alternative is holding a shim back so a diagnostic
-/// keeps its example, which would be the tail wagging the dog.
 #[test]
 fn an_unsatisfied_import_names_itself_when_it_is_called() {
     const SRC: &str = r#"
@@ -260,18 +182,6 @@ fn the_slow_import_policy_sends_the_same_messages() {
     assert_eq!(fast_status, slow_status);
 }
 
-/// The **host** calls a guest method with an aggregate by value.
-///
-/// The direction every other aggregate test here has backwards. Guest->host is a
-/// marshaller reading the guest's registers; this is a compiled trampoline
-/// placing AAPCS64's `v0`–`v3` where SysV AMD64 expects an `NSRect` - which for
-/// thirty-two bytes is the guest's **stack**, not any register at all.
-///
-/// Checked against the same binary run natively, because the specification of
-/// "what does `setBounds:` receive" is what the platform does, not what this
-/// runtime believes. A trampoline forwarding registers only prints garbage for
-/// `bounds` and is right about everything else, which is exactly why the three
-/// shapes are separate lines.
 #[test]
 fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
     let Some(path) = common::objc_host_aggregate_fixture() else {
@@ -291,13 +201,6 @@ fn the_host_calls_a_guest_method_with_an_aggregate_by_value() {
     assert!(out.contains("scale 9.25\n"), "{out}");
 }
 
-/// A guest method the *encoding decoder* cannot classify is still reachable from the
-/// guest.
-///
-/// The send path may decode a method's type encoding only once it knows the `IMP` is
-/// not the guest's own. Decoding it first refuses every send of a guest method carrying
-/// a union - which is a method this runtime installs on purpose, because a guest sender
-/// never needed the signature.
 #[test]
 fn a_guest_method_whose_encoding_is_undecidable_is_still_sent() {
     let Some(path) = common::objc_guest_union_fixture() else {
@@ -333,19 +236,6 @@ fn a_loaded_image_declares_classes_and_the_guest_messages_them() {
     assert!(out.contains("plugin=48\n"), "{out}");
 }
 
-/// The promotion really fires on a linked program, not just in a unit test.
-///
-/// [`rosetta3::objc::fast::promotion`] declines unless the site resolved to
-/// *exactly* the address `dlsym` gives for the entry point - which is the whole
-/// equivalence argument, and which nothing in this repository can check without
-/// a real link. The synthetic provider defines these symbols from `dlsym`, so
-/// the two agree by construction; this is the test that says so rather than
-/// assuming it, because a provider that ever started wrapping one of them would
-/// silently make every promotion a call to the wrong function.
-///
-/// Asserts a non-empty intersection as well as the property, since a program
-/// that happened to import none of the promotable entries would pass a vacuous
-/// version of this and say nothing.
 #[test]
 fn a_linked_program_really_promotes_its_runtime_entry_points() {
     let Some(path) = common::objc_messages_fixture("objc_promote", &[]) else {
@@ -377,11 +267,6 @@ fn a_linked_program_really_promotes_its_runtime_entry_points() {
     );
 }
 
-/// An Objective-C `@throw` is a C++ throw, and this is the proof end to end.
-///
-/// Run natively as well as emulated, and required to agree. A runtime that
-/// caught with the wrong clause, or lost the object on the way into the
-/// handler, produces *plausible* output - only the diff against Apple's says so.
 #[test]
 fn objective_c_exceptions_throw_and_catch_as_they_do_natively() {
     let Some(path) = common::objc_exceptions_fixture() else {
@@ -400,17 +285,6 @@ fn objective_c_exceptions_throw_and_catch_as_they_do_natively() {
     assert_eq!(stdout, expected);
 }
 
-/// Every method encoding this tree writes by hand is one this tree can read.
-///
-/// The encodings in `crates/foundation` and `crates/appkit` are string literals
-/// beside each implementation, and a wrong one is not a compile error: it is a
-/// guest send *refused* months later, because `objc::dispatch` marshals a
-/// message by decoding exactly this string. So the decoder is pointed at all of
-/// them at once.
-///
-/// The stronger claim, and the one that catches a transposed argument: the
-/// number of types the encoding declares is the return value plus `self`,
-/// `_cmd`, and the arguments the selector's colons count.
 #[test]
 fn every_method_encoding_this_tree_installs_can_be_decoded() {
     foundation::bootstrap();
@@ -458,14 +332,6 @@ fn every_method_encoding_this_tree_installs_can_be_decoded() {
     assert!(checked > 200, "only {checked} encodings were checked");
 }
 
-/// An integer argument behind an aggregate the guest passed in memory.
-///
-/// `-[NSTrackingArea initWithRect:options:owner:userInfo:]`: SysV sends the
-/// thirty-two-byte `NSRect` to the stack and gives `options`, `owner` and
-/// `userInfo` the integer registers it skipped. Placing each argument where the
-/// convention puts it rather than behind the one before it is the whole of what
-/// this asserts - a marshaller that appends finds nowhere to put `options`,
-/// which is how this was first seen.
 #[test]
 fn an_argument_after_a_memory_aggregate_reaches_the_method() {
     let Some(path) = common::objc_after_memory_arg_fixture() else {

@@ -1,14 +1,3 @@
-//! `AudioUnitSetProperty`: a guest function pointer installed as a *property*.
-//!
-//! Every other AudioUnit entry point is an ordinary forwarded call. This one is
-//! not, because `kAudioUnitProperty_SetRenderCallback`'s "value" is an
-//! `AURenderCallbackStruct` - a guest function pointer inside a structure, which
-//! has to become a thunk before whatever implements the unit is handed it.
-//!
-//! Which implementation that is depends on the runtime: `crates/coreaudio` under
-//! `ROSETTA3_OBJC=builtin`, the host's AudioToolbox otherwise. The substitution
-//! is the same either way, which is why it is here and not in either of them.
-
 use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -162,7 +151,6 @@ unsafe fn apply(
             symbol: symbol.to_string(),
         });
     };
-    // SAFETY: the caller's obligation.
     Ok(unsafe { set(unit as *mut c_void, id, scope, element, data, size) })
 }
 

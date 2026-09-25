@@ -1,5 +1,3 @@
-//! Driving Apple's system tracer from inside the process it is tracing.
-
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Instant;

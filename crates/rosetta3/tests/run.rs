@@ -193,18 +193,6 @@ fn an_untranslatable_stop_names_itself_instead_of_crashing() {
     assert!(err.starts_with("rosetta3: /etc/hosts:"), "{err:?}");
 }
 
-/// The `v`-prefixed formatting family, checked against the same binary run
-/// natively.
-///
-/// The bug this exists to prevent was shipped and found by a real application:
-/// a signature was written for `vfprintf` and no shim, so the *guest's*
-/// `va_list` - SysV AMD64's two offsets, spill pointer and register save area -
-/// was handed to the host's `vfprintf`, which reads arm64's, which is a bare
-/// pointer. The result is not a wrong number, it is a fault inside `strlen`
-/// several frames from anything that names the cause. Comparing whole output
-/// against the native run is the only assertion worth making, for the same
-/// reason it is in `printf.rs`: the specification of `vsnprintf` is what a C
-/// library prints.
 #[test]
 fn the_va_list_family_prints_what_the_host_libc_prints() {
     let Some(path) = common::valist_fixture() else {
@@ -227,25 +215,6 @@ fn the_va_list_family_prints_what_the_host_libc_prints() {
     );
 }
 
-/// The guest loads an Intel dylib of its own, mid-run, and calls into it.
-///
-/// The host's `dlopen` cannot answer this: it looks at the file, finds no arm64
-/// slice, and refuses - correctly, to the wrong question. So the image is loaded
-/// through `machish` into this process, and everything downstream of that has to
-/// follow. What each line of the expected output would falsify:
-///
-/// - `plugin loaded 42` - the constructor ran before `dlopen` returned and its
-///   flat import resolved back into the main executable.
-/// - `len=6` - the `dlsym` result is a **guest** address the runtime entered
-///   through the JIT, and the `strlen` inside it reached the host's. That second
-///   half is the one with no safety net: the plugin did not exist when the
-///   lifter was configured, so its call sites are recognised by
-///   [`rosetta3::bridge::DynamicImports`] while the plugin is being lifted, or
-///   at the exit, or not at all. Not at all means decoding a `__stubs`
-///   trampoline as guest code and disassembling native arm64 as x86-64.
-/// - `missing=1 reported=1` - a name nothing defines is null *and* leaves a
-///   message, rather than being answered by the host's `dlsym` with some
-///   unrelated libSystem address.
 #[test]
 fn the_guest_loads_an_intel_dylib_of_its_own_and_calls_into_it() {
     let Some(path) = common::dlopen_fixture() else {
@@ -309,22 +278,6 @@ fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     assert_eq!(fast_out, slow_out);
 }
 
-/// The mode a guest passes to `open` is the mode the file gets - through the
-/// inlined call *and* through the bridged one.
-///
-/// `open`, `openat` and `sem_open` are described to the lifter as fixed-arity,
-/// with the arguments their ellipsis may carry always present, and are bound to
-/// wrappers of this runtime's that apply the `O_CREAT` rule themselves. See
-/// [`rosetta3::shims::openat`]. The permission bits on disk are what says the
-/// mode arrived where the signature claims: they are odd numbers no umask and no
-/// default produces, so a mode read from the wrong register - or from the stack,
-/// which is where a genuinely variadic callee would look - gives a file that
-/// fails this outright. The semaphore's count is the same claim for the pair of
-/// optional arguments.
-///
-/// `--slow` runs it a second time because the two routes place the same
-/// argument by different code: an absolute native call the lifter baked in, and
-/// the marshaller at a VM exit.
 #[test]
 fn the_mode_a_guest_opens_with_is_the_mode_the_file_gets() {
     let Some(path) = common::open_fixture() else {

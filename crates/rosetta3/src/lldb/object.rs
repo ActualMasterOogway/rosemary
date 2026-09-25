@@ -1,12 +1,3 @@
-//! The symbol file handed to LLDB, in whichever object format the debugger on
-//! this host reads: Mach-O on Darwin, ELF everywhere else.
-//!
-//! The shape is the same either way, and it is the one the GDB JIT interface
-//! makes useful: sections whose addresses are where the code really is, a
-//! symbol table naming them, and the DWARF carried in the file itself. Only the
-//! spelling differs, so callers describe a section by what it is for and let
-//! [`write`] pick the names, flags and header layout the host's LLDB expects.
-
 /// What a section is for.
 ///
 /// LLDB types a section by its name, and only the name its own reader

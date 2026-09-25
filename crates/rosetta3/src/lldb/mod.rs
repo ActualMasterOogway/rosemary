@@ -1,10 +1,3 @@
-//! Opt-in LLDB support for translated guest code.
-//!
-//! Every translation, and every image the runtime mapped itself, is handed to
-//! the debugger through the GDB JIT interface as a small symbol file: see
-//! [`object`] for the two formats that takes, and [`image`] for the mapped
-//! images. `gdb` reads the same interface and the same files.
-
 mod elf;
 mod image;
 mod macho;

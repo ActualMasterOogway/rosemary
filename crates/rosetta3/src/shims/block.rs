@@ -1,6 +1,3 @@
-//! A block handed to the host: the guest function pointer that travels inside a
-//! *literal*.
-
 use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;

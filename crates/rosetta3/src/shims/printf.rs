@@ -1,5 +1,3 @@
-//! The `printf` family: walking a SysV variadic argument list and rendering it.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};

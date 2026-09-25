@@ -1,11 +1,3 @@
-//! The Objective-C runtime this process calls, and which one that is.
-//!
-//! Every entry point below is resolved through [`symbol`], so the addresses this
-//! crate calls are the same ones [`crate::objc::dispatch::provider`] hands the
-//! guest. That identity is what [`crate::objc::fast`] proves before it inlines a
-//! runtime call into JIT'd code, and it would be quietly broken by a second way
-//! of reaching the runtime.
-
 use std::ffi::c_char;
 
 use static_init::dynamic;
@@ -196,7 +188,6 @@ macro_rules! entries {
                     Some(f) => f,
                     None => missing(stringify!($name)),
                 };
-                // SAFETY: the caller's obligation, stated above.
                 unsafe { f($($arg),*) }
             }
         )*

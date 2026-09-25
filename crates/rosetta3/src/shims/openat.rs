@@ -1,6 +1,3 @@
-//! `open`, `openat`, `sem_open` and `fcntl`: the variadics whose arity a flag word
-//! decides.
-
 use machish::resolve::SyntheticDylib;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -51,7 +48,6 @@ unsafe fn host_open(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    // SAFETY: the caller's obligation.
     unsafe { darwin::stat::open(path, flags, mode) }
 }
 
@@ -72,7 +68,6 @@ unsafe fn host_openat(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    // SAFETY: the caller's obligation.
     unsafe { darwin::stat::openat(dirfd, path, flags, mode) }
 }
 
@@ -207,7 +202,6 @@ pub fn fcntl(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemor
 /// As the caller of [`fcntl`].
 #[cfg(not(target_os = "macos"))]
 unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
-    // SAFETY: the caller's obligation.
     unsafe { darwin::fcntl::entry::fcntl(fd, cmd, arg) }
 }
 
@@ -219,7 +213,6 @@ unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
 /// As the caller of [`fcntl`].
 #[cfg(target_os = "macos")]
 unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
-    // SAFETY: the caller's obligation.
     unsafe { libc::fcntl(fd, cmd, arg) }
 }
 

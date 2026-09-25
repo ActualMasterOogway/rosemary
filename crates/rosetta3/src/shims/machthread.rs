@@ -1,5 +1,3 @@
-//! A guest thread's registers, and the stack they belong to.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

@@ -1,9 +1,3 @@
-//! `__tlv_bootstrap` must never be reached through the argument marshaller.
-//!
-//! A `_Thread_local` read is `leaq _x(%rip), %rdi; callq *(%rdi)` - the hottest
-//! shape of indirect call a real program has, and the one with no call site for
-//! the lifter to match. Every route to it is checked here.
-
 mod common;
 
 use common::{run_guest, run_guest_env};
@@ -132,13 +126,6 @@ fn the_answers_are_the_same_without_trampolines() {
     expect_routes(&out, &err);
 }
 
-/// The one that says the fast path was actually taken.
-///
-/// Without it the pair above would pass just as happily with every access
-/// serviced by the marshaller - which is exactly the regression this file
-/// exists to catch, since it is invisible in the output and shows up only as
-/// the program being slow. `reached` counts trampolines the guest entered, and
-/// a `_Thread_local` program has no other reason to enter one.
 #[test]
 fn the_trampoline_is_the_path_a_thread_local_read_took() {
     let Some(path) = common::tls_fixture() else {

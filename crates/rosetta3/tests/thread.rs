@@ -49,11 +49,6 @@ fn four_threads_get_four_independent_thread_local_counters() {
     );
 }
 
-/// The two halves of the previous test, stated as what they falsify.
-///
-/// Kept separate because the assertion above would also pass if `main`'s counter
-/// happened to be zero for the wrong reason, and because these are the sentences
-/// the milestone is written in.
 #[test]
 fn a_join_returns_the_guest_start_routines_own_value() {
     let Some(path) = common::thread_fixture() else {
@@ -123,13 +118,6 @@ fn mutexes_once_and_thread_specific_destructors_all_work() {
     }
 }
 
-/// The claims about *which* stack a guest thread's attributes describe, and
-/// about who may ask.
-///
-/// Stated line by line rather than only as native equality, because native
-/// equality is skipped on a host that cannot run x86-64 and these are the
-/// sentences the work is written in. See [`common::PTHREAD_STACK_C`] for what
-/// each field falsifies.
 #[test]
 fn a_guest_thread_runs_on_the_stack_its_attributes_asked_for() {
     let Some(path) = common::pthread_stack_fixture() else {
@@ -190,12 +178,6 @@ fn thread_stacks_agree_with_the_same_binary_run_natively() {
     assert_eq!(lines(&out), lines(&native_out), "stderr: {err}");
 }
 
-/// The strongest assertion available, and the only specification of `pthread`
-/// that is not a paraphrase: the same binary, run both ways, prints the same
-/// thing.
-///
-/// Skipped rather than failed when the host cannot execute an x86_64 binary
-/// natively - that is a property of the machine, not of this runtime.
 #[test]
 fn a_threaded_guest_agrees_with_the_same_binary_run_natively() {
     let Some(path) = common::pthread_sync_fixture() else {
@@ -237,15 +219,6 @@ fn an_imports_resolved_address_maps_back_to_its_symbol() {
     assert!(program.import_by_target(0xdead_beef).is_none());
 }
 
-/// The layout fact the whole pthread surface rests on, checked rather than
-/// trusted.
-///
-/// Every opaque pthread type is byte-identical on x86_64 and arm64 macOS, which
-/// is why a guest's `pthread_mutex_t` can be handed to the host's libpthread in
-/// place with no translation at all. If a future SDK ever changed one, every
-/// signature in `abi::table`'s pthread block would silently start corrupting a
-/// guest's stack - so the sizes are compared by compiling the same program for
-/// both architectures.
 #[test]
 fn pthread_types_agree_across_architectures() {
     const SIZES: &str = r#"

@@ -1,5 +1,3 @@
-//! The ABI seam: what it takes to *call* an intercepted import.
-
 use core::fmt;
 
 use machish::memory::AddressSpace;

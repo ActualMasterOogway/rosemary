@@ -1,13 +1,3 @@
-//! Servicing a guest event without a VM exit.
-//!
-//! Two shapes of host routine live here. A **bridge** is called for a `call` the
-//! recompiler intercepted - a registered import, or an indirect call through an
-//! address it could not resolve - and answers with a code saying whether the guest
-//! may carry on inline. A **callback** is called for the two events that used to be
-//! VM exits of their own, a `syscall` and an instruction the recompiler does not
-//! lift; it returns nothing, and steers the guest by the PC it leaves behind. See
-//! [`microlift::core::callback`].
-
 use std::sync::Arc;
 
 use microlift::arch::x86_64::context::{RegisterContext, X86_64Callbacks};

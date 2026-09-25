@@ -1,5 +1,3 @@
-//! The code cache: guest addresses to native translations.
-
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 

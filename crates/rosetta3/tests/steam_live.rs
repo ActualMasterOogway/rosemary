@@ -1,16 +1,3 @@
-//! The Steam bridge against the machine's **own** Steam client.
-//!
-//! `steam.rs` proves the marshalling with a stand-in whose vtables this tree
-//! wrote. This proves the thing that matters: that the vtable layout the
-//! generator derived from Valve's headers is the layout Valve's own
-//! `steamclient.so` has, and that a call placed by [`rosetta3::steam`] lands on
-//! the right method of the real client.
-//!
-//! It needs Steam installed and signed in, so it runs only when asked for by
-//! name - `ROSETTA3_STEAM_LIVE_TESTS=1 cargo test --release --test steam_live`.
-//! Nothing here writes to the account: it creates a pipe, connects to the
-//! signed-in user, and reads back who that is.
-
 use std::ffi::{CStr, CString, c_void};
 
 mod common;

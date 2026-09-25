@@ -1,12 +1,3 @@
-//! Blocks, with this tree's libclosure underneath them.
-//!
-//! Under `ROSETTA3_OBJC=builtin`, which is the whole point: `_Block_copy` is
-//! libSystem's on a Mac and *nothing's* off Darwin, so a guest that copies a
-//! block aborted on the Linux port. `objc::block` is the reimplementation, and
-//! these are the three things it has to get right - a stack block's captures
-//! travelling with it, one `__block` variable staying one variable across a
-//! copy, and a global block being left alone.
-
 mod common;
 
 use common::run_guest_env;

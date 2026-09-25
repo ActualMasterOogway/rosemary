@@ -1,41 +1,7 @@
-//! `std::string` across the seam: the guest's layout, not the host's.
-//!
-//! The bug these exist for is recorded in `shims::cxxstring` - libc++ lays
-//! `basic_string` out differently on x86-64 and arm64 macOS, so an import that
-//! was described *correctly* still handed the object to code reading different
-//! fields out of it.
-//!
-//! The assertion that matters is [`the_same_binary_agrees_with_itself`]: the
-//! identical x86-64 executable, run through this runtime and run directly (under
-//! Rosetta 2), must print the same bytes. That is the only oracle worth having
-//! here, because the specification of `std::string` is what libc++ does with it,
-//! and it is falsifiable in the exact way the original bug was not - the fixture
-//! prints the *object's own bytes*, so a layout that disagrees shows up as a
-//! diff rather than as a crash three functions later.
-
 mod common;
 
 use common::{build_cpp, run_guest, run_native};
 
-/// A C++ program that reaches the out-of-line half of `basic_string`.
-///
-/// Built at `-O0` deliberately: the optimiser inlines the short-string paths,
-/// and the entry points this is about are precisely the ones that survive as
-/// *imports*. Every operation in `steamclient.dylib`'s import list is here.
-///
-/// It prints three things per step, and each fails differently:
-///
-/// - **the characters**, which a wrong buffer pointer breaks;
-/// - **`size` and `capacity`**, read by the guest's own inlined accessors, which
-///   a wrong size or capacity word breaks;
-/// - **the twenty-four bytes of the object itself**, which is the only one of
-///   the three that catches a representation that is self-consistent and still
-///   not libc++'s - a short string stored long, or a capacity that lost its low
-///   bit to the long/short flag.
-///
-/// The crossings from short to long and back are what the sizes are chosen
-/// around: 22 is the last short string, 23 the first long one, and the growth
-/// steps land on 25, 31 and 47.
 const STRING_CPP: &str = r#"
 #include <cstdio>
 #include <cstring>
@@ -179,12 +145,6 @@ fn fixture() -> Option<String> {
         .clone()
 }
 
-/// The gate. One x86-64 binary, two ways of running it, byte-identical output.
-///
-/// Comparing against the *same binary* run natively, rather than against
-/// expected text written here, is what makes this a statement about libc++
-/// rather than about our reading of libc++. When Rosetta 2 is unavailable the
-/// test skips: an absent oracle is not a failure.
 #[test]
 fn the_same_binary_agrees_with_itself() {
     let Some(path) = fixture() else {
@@ -202,14 +162,6 @@ fn the_same_binary_agrees_with_itself() {
     );
 }
 
-/// The same program with every import serviced at a VM exit rather than inlined.
-///
-/// `--slow` is the project's standing check that "fast is an optimisation of
-/// slow"; here it also pins down something specific to this module, which is
-/// that a string entry point must *never* be promoted to a fast import. Being
-/// promoted would mean the lifter calling the host's libc++ directly, which is
-/// the bug this whole module is about, so the two runs agreeing is the
-/// observable form of `is_shimmed` being consulted.
 #[test]
 fn the_slow_path_agrees_too() {
     let Some(path) = fixture() else {
@@ -225,19 +177,6 @@ fn the_slow_path_agrees_too() {
     assert_eq!(fast, slow, "--slow differs\n{fast_err}{slow_err}");
 }
 
-/// Every `basic_string` entry point resolves into the **vendored libc++ image**,
-/// not to the host.
-///
-/// The structural form of the fix, and the one assertion that would still fail
-/// if `crate::cxxlib` quietly stopped answering: `the_same_binary_agrees_with_itself`
-/// compares output, and output can agree for the wrong reason - the host's
-/// libc++ gets short strings right often enough to look fine. This checks
-/// *where the call goes*.
-///
-/// Note what it does not say. It does not say the symbol is shimmed; the shim
-/// that used to own this surface is gone, and a string operation is now
-/// guest->guest, dispatched inside a library the guest linked against. That is
-/// the whole change.
 #[test]
 fn every_string_call_lands_in_the_vendored_libcxx() {
     let Some(path) = fixture() else {
@@ -277,15 +216,6 @@ fn every_string_call_lands_in_the_vendored_libcxx() {
     assert!(seen > 0, "the fixture imported no string entry points");
 }
 
-/// A C++ program reaching libc++ entry points that the signature table *does*
-/// describe, which is what makes them promotable.
-///
-/// `std::mutex::lock`/`unlock` are `sig!(V, P)` - one pointer, no return, no
-/// callback - so they classify `Fast`, and the vendored libc++ exports them, so
-/// they resolve into guest memory. That combination is the whole of
-/// [`no_inlined_import_targets_guest_memory`], and `STRING_CPP` does not produce
-/// it: `basic_string`'s entry points were removed from the table when the shim
-/// was, so nothing it imports is both described and guest-resolved.
 const MUTEX_CPP: &str = r#"
 #include <cstdio>
 #include <mutex>
@@ -308,26 +238,6 @@ fn mutex_fixture() -> Option<String> {
         .clone()
 }
 
-/// **No inlined import may target guest memory.**
-///
-/// A fast import is an absolute native `call` the lifter bakes into the
-/// translation, so its address has to be native code. A guest image is mapped
-/// `r--` and never executable - the no-`MAP_JIT` decision - so an inlined call
-/// to one faults on instruction fetch with the PC *equal to* the fault address,
-/// from a frame the backtrace cannot name, and only when that call site is
-/// finally reached.
-///
-/// This was unreachable until libc++ became a guest image. Before that every
-/// import of the main program resolved to a host function, and the runtime's
-/// other two paths - `Vm::call_site` and `Vm::dispatch_indirect` - already asked
-/// `is_guest_address` before treating an address as native. Promotion was the
-/// one that did not, and the symptom was DELTARUNE dying a few seconds after its
-/// window appeared, inside a `num_get` virtual call, with `--slow` making it go
-/// away and therefore looking like a lifting bug.
-///
-/// Checked to fail without the guard, not merely to pass with it: the first
-/// version of this test used `STRING_CPP`, promoted nothing that resolved into
-/// libc++, and passed just as happily with the fix reverted.
 #[test]
 fn no_inlined_import_targets_guest_memory() {
     let Some(path) = mutex_fixture() else {

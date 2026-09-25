@@ -1,7 +1,3 @@
-//! `rosetta3 prefix ...`, and what `rosetta3 run` does about the prefix before
-//! a guest starts. The mechanism is the `prefix` crate; this is the policy and
-//! the words. See `docs/prefixes.md`.
-
 use std::collections::HashSet;
 use std::ffi::{CString, OsString};
 use std::io::{BufRead, IsTerminal, Write};
@@ -144,25 +140,7 @@ fn say(line: &str) {
     println!("  {line}");
 }
 
-/// Settle which prefix a guest runs in, before anything can ask.
-///
-/// Off Darwin a guest runs *inside a prefix* by default: this host has no
-/// `/Users`, no `/Applications` and no `/Library`, and a Mac program that is
-/// told otherwise writes its files into a shape nothing else agrees about.
-///
-/// The prefix is made if it is not there - the one named by the variable just
-/// as much as the default one. A variable pointing at a directory that is not a
-/// prefix yet would otherwise give the guest a `/` with nothing in it, and fail
-/// far from here; `WINEPREFIX` creates for the same reason. A new prefix also
-/// gets its Darwin base, with the user's consent; an existing one has the
-/// system files a guest wrote to since the last start checked and healed.
-///
-/// macOS keeps its own Darwin root, which a second one would only hide.
-///
-/// The decision is recorded in the environment rather than passed down, for two
-/// reasons: `prefix` is a library and a caller that said nothing should get
-/// nothing, and a guest that spawns another Mach-O re-executes this command,
-/// which must land in the same prefix.
+/// Select or create the guest prefix and record it for child processes.
 pub fn settle_prefix() {
     if cfg!(target_os = "macos") {
         return;

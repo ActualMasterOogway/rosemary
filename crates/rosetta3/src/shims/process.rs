@@ -1,5 +1,3 @@
-//! Process queries whose host answers describe Rosetta 3 rather than the guest.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use super::bad_pointer;

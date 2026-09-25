@@ -1,21 +1,3 @@
-//! A framework's data globals are **variables**, not the objects they hold.
-//!
-//! `kCFRunLoopDefaultMode` is a `CFStringRef` variable: the guest loads the
-//! symbol's address out of its GOT and then loads the string out of that. A
-//! provider that defines the symbol as the string itself hands the guest the
-//! string's `isa`, and `kCFAllocatorDefault` - whose value is null - hands it
-//! address zero.
-//!
-//! Neither failure names a symbol. The first is a length read out of a class
-//! structure, which is a plausible number; the second is a segfault at zero
-//! inside whatever the guest called next. Both are what this fixture would have
-//! shown from the first run of the run loop, and what the in-crate tests could
-//! not: they call the accessors directly and never do the guest's second load.
-//!
-//! Under `ROSETTA3_OBJC=builtin` deliberately. These are the *reimplemented*
-//! frameworks' globals; under the native runtime the guest binds Apple's own,
-//! which are correct by construction and would prove nothing about this tree.
-
 mod common;
 
 use common::{build_native_with, globals_fixture, run_guest_env, run_native};

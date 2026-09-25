@@ -1,5 +1,3 @@
-//! Thread-local storage: `__tlv_bootstrap`, and the per-thread block behind it.
-
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

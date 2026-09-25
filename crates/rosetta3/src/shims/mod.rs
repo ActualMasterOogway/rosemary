@@ -1,14 +1,3 @@
-//! Hand-written implementations for imports that cannot be passed through.
-//!
-//! A shim exists because the call cannot be *forwarded*: it needs the guest's
-//! registers or the guest's memory, which a host function reached through an import
-//! slot has neither of. A call that can be forwarded but means something different on
-//! this host is a different problem, and belongs in [`darwin`].
-//!
-//! The families gated to macOS below are gated because what they bridge is macOS: a
-//! guest that imports `objc_msgSend` or `AudioUnitRender` on Linux is refused at the
-//! import, by name, rather than half an hour into its run.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};

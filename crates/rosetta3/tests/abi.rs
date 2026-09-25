@@ -1,20 +1,3 @@
-//! The marshaller against the real thing.
-//!
-//! Every case here synthesizes a guest register context the way an intercepted
-//! `CALL` would leave it, marshals it through [`rosetta3::abi::marshal`] into a
-//! **real host libSystem function**, and checks what came back. That is the
-//! only way this can be tested: the claim is about an ABI, and an ABI is only
-//! observable at the boundary with code that was compiled against it.
-//!
-//! Two things are being checked at once, and they fail differently:
-//!
-//! - **Placement.** An argument read from the wrong register gives a wrong
-//!   answer - `strncmp` comparing the wrong length, `ldexp` scaling by
-//!   garbage.
-//! - **Width.** A narrow argument or return that is not extended gives a
-//!   *right* answer for small values and a wrong one at the edges, which is why
-//!   the cases include negatives, `INT_MIN`, and values with dirty upper bits.
-
 mod common;
 
 use std::ffi::CString;
@@ -61,13 +44,6 @@ fn guest_stack() -> BufferSpace {
     space
 }
 
-/// Lay `args` out where SysV AMD64 says the guest would have left them.
-///
-/// Written independently of `CallAbi::place_args` on purpose: if both sides
-/// consulted the same placement code, agreeing would prove only that the code
-/// is deterministic. This is the convention as the psABI states it - integer
-/// and vector registers counted separately, the overflow going to the stack in
-/// argument order.
 fn context_for(args: &[A], mem: &mut BufferSpace) -> RegisterContext {
     let mut ctx = RegisterContext::new();
     ctx.rsp = STACK_BASE;
@@ -108,10 +84,6 @@ fn context_for(args: &[A], mem: &mut BufferSpace) -> RegisterContext {
     ctx
 }
 
-/// Call `symbol` through the marshaller and return the resulting context.
-///
-/// Skips (returns `None`) when the host does not export the symbol, which is
-/// the same posture the loader tests take toward a missing fixture.
 fn call(symbol: &str, args: &[A]) -> Option<RegisterContext> {
     let Lookup::Known(abi) = table::lookup(0, symbol) else {
         panic!("{symbol} is not in the table, so this case is testing nothing")
@@ -533,12 +505,6 @@ fn process_and_environment_queries() {
     }
 }
 
-/// A host function with more integer arguments than SysV has registers, so the
-/// last two arrive on the guest's stack.
-///
-/// Nothing in `libSystem` has this shape *and* a signature simple enough to be
-/// unambiguous, so it is defined here. The path it exercises is real: the guest
-/// spills at seven integer arguments while the host still has `x6` and `x7`.
 unsafe extern "C" fn eight_ints(
     a: i64,
     b: i64,
@@ -570,14 +536,6 @@ static EIGHT_INTS: FunctionAbi = FunctionAbi {
     variadic: false,
 };
 
-/// Twelve integer arguments and two doubles: the case the wider prototype
-/// exists for, in the shape `glTexImage2D` has it.
-///
-/// Four of these arrive on the *host's* stack, which is the half no register
-/// prototype could reach before. The two doubles are here so the test also
-/// shows that overflowing the integer bank does not disturb the vector one -
-/// AAPCS64 counts them separately, and a marshaller that packed the stack in
-/// declaration order rather than by class would put `x` and `y` there too.
 unsafe extern "C" fn twelve_ints_two_doubles(
     a: i64,
     b: i64,
@@ -651,14 +609,6 @@ fn twelve_integer_arguments_reach_the_hosts_own_stack() {
     assert_eq!(ctx.rax as i64, want);
 }
 
-/// The shape `glTexSubImage3D` has: eight arguments in `x0`–`x7`, then two
-/// four-byte arguments and a pointer on the stack.
-///
-/// Apple packs those three at `[sp]`, `[sp+4]` and `[sp+8]`. A prototype that
-/// declared them all `u64` would put them at `[sp]`, `[sp+8]` and `[sp+16]`,
-/// and every one of the three would be wrong - which is why `i`, `j` and the
-/// value behind `p` are weighted differently below: a single sum could be right
-/// by accident, and three distinguishable contributions cannot be.
 unsafe extern "C" fn eight_longs_int_int_ptr(
     a: i64,
     b: i64,
@@ -800,15 +750,6 @@ fn a_single_narrow_overflow_is_placed_and_extended() {
     assert_eq!(ctx.rax as i64, want);
 }
 
-/// The shape `-[NSBitmapImageRep
-/// initWithBitmapDataPlanes:...bitsPerPixel:]` has: thirteen integer
-/// arguments, and the one that spills first is a one-byte `BOOL` with a
-/// pointer behind it.
-///
-/// Apple puts the `BOOL` at `[sp]` and realigns the pointer to `[sp+8]`, which
-/// is where a `u64` declaration would have put it anyway - so this must go
-/// through the plain prototype rather than being refused. It was refused, and
-/// that is what left Subnautica with no window.
 unsafe extern "C" fn thirteen_with_a_bool_on_the_stack(
     a: i64,
     b: i64,

@@ -1,11 +1,3 @@
-//! BSD's `<err.h>`: `warn`, `warnx`, `err`, `errx` and their `v` and `c` forms.
-//!
-//! Variadic, so an emulated guest's call cannot be forwarded to the host's -
-//! the host would read its arguments from its own registers and stack. The
-//! message is rendered by [`super::printf`] and written the way Darwin's are:
-//! `progname: message`, then `: ` and the error text for the forms that report
-//! an error number, then a newline, to `stderr`.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use super::printf::{format_from, format_from_list, write_host};

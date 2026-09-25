@@ -1,5 +1,3 @@
-//! Shared lookup for the host functions hand-written shims forward to.
-
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};

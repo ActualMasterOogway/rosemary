@@ -1,12 +1,3 @@
-//! Publishing a *mapped* image to LLDB, as opposed to a translated region.
-//!
-//! The native backend maps the guest's own Mach-O images itself, so the host's
-//! dyld never hears about them and LLDB has nothing to symbolicate a frame in
-//! one against: a backtrace out of the program is a column of bare addresses.
-//! Each image is announced here through the same JIT interface [`super`] uses
-//! for translations - a symbol-only object whose sections carry the addresses
-//! the loader really mapped.
-
 use machish::report::{ImageReport, LinkReport};
 
 use super::object::{self, Kind};

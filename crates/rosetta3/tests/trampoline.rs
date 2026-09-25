@@ -1,24 +1,7 @@
-//! A guest that calls the host through pointers, both ways round.
-//!
-//! `rosetta3::trampoline` substitutes the value of an import slot and the answer
-//! `dlsym` gives, so that a call through a function *pointer* becomes the same
-//! inline call a call *site* already got. The property that makes that an
-//! optimisation rather than a change is the one these tests check: the program
-//! prints the same thing with the substitution and without it.
-//!
-//! `ROSETTA3_TRAMPOLINES=0` is the without. It is a real baseline rather than a
-//! debug switch - every path it turns off is a path that worked before this
-//! existed - which is what lets the two runs be compared line for line.
-
 mod common;
 
 use common::{run_guest, run_guest_env};
 
-/// What the fixture must print, whichever way the pointers were reached.
-///
-/// `same=1` is the load-bearing one: two routes to `strlen` - the import slot
-/// and `dlsym` - must produce one pointer. A substitution that made a stub per
-/// route would be observably wrong here, and nowhere else for a long time.
 fn expect(out: &str, err: &str) {
     assert!(out.contains("slot len=6\n"), "{out:?} (stderr: {err})");
     assert!(
@@ -58,12 +41,6 @@ fn the_answer_is_the_same_without_trampolines() {
     expect(&out, &err);
 }
 
-/// And that the pointers really were substituted, so the test above is
-/// measuring something.
-///
-/// Without this the pair would pass just as happily if the whole module had
-/// never run: three calls through pointers, all serviced the old way, all
-/// correct. `reached` is the number that says the guest actually entered a stub.
 #[test]
 fn the_stubs_are_the_path_the_guest_took() {
     let Some(path) = common::trampoline_fixture() else {

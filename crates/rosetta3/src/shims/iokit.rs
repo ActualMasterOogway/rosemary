@@ -1,5 +1,3 @@
-//! IOKit registrations whose callbacks must cross back into the guest.
-
 use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;

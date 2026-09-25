@@ -1,17 +1,3 @@
-//! CoreFoundation calls whose callback is inside a *structure*.
-//!
-//! The ordinary callback path does not reach these. `abi::table`'s `cbsig!`
-//! names a parameter *index*, and the marshaller substitutes a thunk for the
-//! register it arrives in - but `CFRunLoopSourceCreate` takes a
-//! `CFRunLoopSourceContext *`, and the guest function pointer is the tenth word
-//! of what that points at. Nothing looking at registers can see it.
-//!
-//! So the context is copied out of guest memory, its callback slots are
-//! replaced with trampolines, and the copy - which lives in *this* runtime's
-//! memory and is read only during the call - is what CoreFoundation is given.
-//! The guest's own structure is never rewritten: it is the caller's, it may be a
-//! stack local, and `CFRunLoopSourceCreate` is documented to copy it.
-
 use core::ffi::c_void;
 
 use microlift::arch::x86_64::context::RegisterContext;

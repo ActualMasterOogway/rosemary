@@ -1,5 +1,3 @@
-//! `setjmp` and `longjmp`, virtualized.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};

@@ -1,5 +1,3 @@
-//! `ROSETTA3_TRACE_CALL`: reporting an intercepted call by name.
-
 use microlift::arch::x86_64::context::RegisterContext;
 use static_init::dynamic;
 

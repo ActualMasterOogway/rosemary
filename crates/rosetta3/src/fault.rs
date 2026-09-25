@@ -1,5 +1,3 @@
-//! What a crashing guest says on its way out.
-
 use microlift::core::srcloc::{GuestCodeMap, GuestCodeRange};
 use static_init::dynamic;
 
@@ -502,7 +500,6 @@ fn stage(which: usize) {
 /// handler, where the only calls allowed are the async-signal-safe ones.
 fn thread_id() -> i32 {
     #[cfg(target_os = "linux")]
-    // SAFETY: `gettid` takes nothing, allocates nothing, and cannot fail.
     unsafe {
         libc::gettid()
     }
@@ -900,7 +897,6 @@ fn host_frame(context: *mut libc::c_void) -> Option<(u64, u64, Option<u64>)> {
     if context.is_null() {
         return None;
     }
-    // SAFETY: as above.
     let gp = unsafe {
         &(*(context as *const libc::ucontext_t))
             .uc_mcontext

@@ -1,5 +1,3 @@
-//! Backends that run a loaded program: emulated, or the host's own CPU.
-
 pub mod native;
 
 use std::sync::OnceLock;

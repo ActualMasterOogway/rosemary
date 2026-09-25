@@ -1,5 +1,3 @@
-//! Where a frame ends, on both graphics APIs a Mac program uses.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

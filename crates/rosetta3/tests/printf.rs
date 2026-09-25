@@ -1,17 +1,3 @@
-//! The `printf` shim, against the host's own `snprintf`.
-//!
-//! Every case renders the same format and arguments twice - once through the
-//! shim, once through the C library this process links against - and requires
-//! the bytes to be identical. That is the only assertion worth making here: the
-//! specification of `printf` is "what a C library prints", and a hand-written
-//! table of expected strings would only be testing this file's author against
-//! themselves.
-//!
-//! The arguments are placed in a synthetic guest register context exactly as a
-//! SysV AMD64 caller would leave them, so the ABI walk in
-//! [`rosetta3::shims::printf::VarArgs`] is under test alongside the rendering:
-//! the ninth integer argument really is on the guest stack.
-
 mod common;
 
 use std::ffi::CString;
@@ -119,11 +105,6 @@ fn shimmed(fmt: &str, args: &[V]) -> String {
     String::from_utf8(bytes).expect("output is ASCII in these cases")
 }
 
-/// What the host's own C library prints for the same call.
-///
-/// Built with an explicit `snprintf` per argument shape rather than a loop,
-/// because the whole point is to go through a real C variadic call - anything
-/// clever here would be reimplementing the thing under test.
 fn native(fmt: &str, args: &[V]) -> String {
     let cfmt = CString::new(fmt).unwrap();
     let mut buf = vec![0u8; 512];

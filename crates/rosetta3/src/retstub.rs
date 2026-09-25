@@ -1,5 +1,3 @@
-//! One byte of guest code that means "the call this runtime made is finished".
-
 use static_init::dynamic;
 
 /// The one-byte x86-64 breakpoint, which is the whole of the stub.

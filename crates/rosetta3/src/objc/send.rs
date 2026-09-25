@@ -1,5 +1,3 @@
-//! Sending messages, from this runtime rather than for the guest.
-
 use std::ffi::{CString, c_void};
 
 use super::host;
@@ -103,7 +101,6 @@ sender!(send4, A, B, C, D);
 ///
 /// The token must be popped, on the same thread, exactly once.
 pub unsafe fn pool_push() -> *mut c_void {
-    // SAFETY: public libobjc API, takes nothing.
     unsafe { host::objc_autoreleasePoolPush() }
 }
 
@@ -113,7 +110,6 @@ pub unsafe fn pool_push() -> *mut c_void {
 ///
 /// `token` must come from [`pool_push`] on this thread and be popped once.
 pub unsafe fn pool_pop(token: *mut c_void) {
-    // SAFETY: the caller's obligation, stated above.
     unsafe { host::objc_autoreleasePoolPop(token) }
 }
 

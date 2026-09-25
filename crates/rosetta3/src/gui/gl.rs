@@ -1,5 +1,3 @@
-//! The OpenGL backend: the overlay, drawn just before the guest's buffer swap.
-
 use std::collections::HashMap;
 use std::ffi::{CString, c_void};
 use std::sync::Mutex;
@@ -292,7 +290,6 @@ unsafe fn vao_usable(gl: &Gl) -> bool {
 ///
 /// A context must be current.
 unsafe fn checked(gl: &Gl, label: &'static str) {
-    // SAFETY: the caller's obligation.
     let error = unsafe { (gl.GetError)() };
     if error == NO_ERROR {
         return;
@@ -333,7 +330,6 @@ unsafe fn drain(gl: &Gl) -> u32 {
     // Bounded, because a driver that returns errors forever would otherwise
     // hang the render thread inside an overlay.
     for _ in 0..16 {
-        // SAFETY: the caller's obligation.
         let error = unsafe { (gl.GetError)() };
         if error == NO_ERROR {
             break;
@@ -357,7 +353,6 @@ unsafe fn describe(gl: &Gl, token: u32) -> String {
     if raw.is_null() {
         return "?".into();
     }
-    // SAFETY: as above.
     unsafe { std::ffi::CStr::from_ptr(raw.cast()) }
         .to_string_lossy()
         .into_owned()
@@ -433,7 +428,6 @@ fn current_context(fallback: usize) -> usize {
     let Some(get) = (unsafe { sys::function::<GetCurrent>("CGLGetCurrentContext") }) else {
         return fallback;
     };
-    // SAFETY: as above.
     match unsafe { get() } as usize {
         0 => fallback,
         current => current,
@@ -468,7 +462,6 @@ pub fn present(context: usize) {
         // one moment nothing has been saved yet and the probe can put its own
         // disturbance back.
         resources.vao_usable = unsafe { vao_usable(gl) };
-        // SAFETY: as above.
         unsafe { announce(gl, profile, resources.vao_usable) };
     }
     let Some(profile) = resources.profile else {
@@ -528,7 +521,6 @@ unsafe fn announce(gl: &Gl, profile: Profile, vao_usable: bool) {
     if !super::debugging() {
         return;
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         eprintln!(
             "rosetta3: gui  OpenGL {} / {} / GLSL {} -> the {} path, vertex array objects {}",
@@ -558,7 +550,6 @@ unsafe fn report(gl: &Gl, resources: &Resources, error: u32) {
     if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    // SAFETY: the caller's obligation.
     unsafe {
         eprintln!(
             "rosetta3: gui  the overlay left OpenGL error {error} on {} / {} ({} path); \
@@ -593,7 +584,6 @@ fn surface(gl: &Gl) -> Option<(f32, f32)> {
             false => unsafe { send0::<Id>(current, super::objc::sel("view")) },
         };
         if !view.is_null() {
-            // SAFETY: as above.
             let bounds = unsafe { send0::<sys::Rect>(view, super::objc::sel("bounds")) };
             let backing = unsafe {
                 send1::<sys::Rect, sys::Rect>(
@@ -1072,7 +1062,6 @@ unsafe fn draw_core(gl: &Gl, resources: &mut Resources, list: &DrawList) {
     // Built once per context, and **once** is the operative word: a failure
     // marks the context [`Setup::Failed`] and nothing is issued into it again.
     if resources.setup == Setup::Untried {
-        // SAFETY: the caller's obligation.
         resources.setup = match unsafe { build_program(gl, resources) } {
             true => Setup::Ready,
             false => Setup::Failed,
@@ -1214,7 +1203,6 @@ unsafe fn build_program(gl: &Gl, resources: &mut Resources) -> bool {
         let Ok(c) = CString::new(source) else {
             return 0;
         };
-        // SAFETY: as above.
         unsafe {
             let shader = create_shader(kind);
             if shader == 0 {

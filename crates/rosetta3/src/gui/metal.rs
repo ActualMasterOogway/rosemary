@@ -1,5 +1,3 @@
-//! The Metal backend: the overlay, encoded into the guest's own command buffer.
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;

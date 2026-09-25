@@ -1,14 +1,3 @@
-//! Calling a host function whose signature is only known at run time.
-//!
-//! Every Steamworks call the guest makes arrives here as a method id and a
-//! packed struct. The callee is a slot in the host client's vtable, so there is
-//! no Rust type to call it through: the arguments have to be placed in the
-//! registers and stack slots the System V ABI names, by hand.
-//!
-//! x86-64 only, which is the whole of it: a host `steamclient.so` is an x86-64
-//! ELF and there is no other kind to call. [`super::unavailable`] is what an
-//! aarch64 host says instead.
-
 /// What a call left behind: the four registers a return value can arrive in.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -326,7 +315,6 @@ mod tests {
             c: 0.0,
             d: false,
         };
-        // SAFETY: as above.
         let words: [u64; 2] = unsafe { core::mem::transmute(value) };
         let mut args = Args::default();
         for n in 1..=5u64 {

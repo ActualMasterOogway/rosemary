@@ -1,14 +1,3 @@
-//! An ELF `ET_REL` writer, the [`super::macho`] of every host whose debugger
-//! reads ELF rather than Mach-O.
-//!
-//! Compiled on every host so that both writers keep their tests wherever they
-//! are run; [`super::object::write`] picks between them.
-//!
-//! The mechanism is the one LLVM's own JIT uses on Linux: a relocatable object
-//! whose allocated sections already carry the addresses their contents ended up
-//! at, handed over through the GDB JIT interface. LLDB loads such a module at a
-//! slide of zero, so `sh_addr` *is* the load address, and the sections without
-//! `SHF_ALLOC` - the DWARF - are read out of the object itself.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

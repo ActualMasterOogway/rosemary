@@ -1,5 +1,3 @@
-//! `semctl`: a variadic whose fourth argument is a union one word wide.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

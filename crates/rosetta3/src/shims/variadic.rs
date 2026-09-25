@@ -1,16 +1,3 @@
-//! A variadic entry point for the frameworks' format methods.
-//!
-//! `crates/foundation` is written for the emulated backend, where a variadic
-//! message never reaches an `IMP` at all: `objc::dispatch` reads the format and
-//! the guest's variadic tail out of its registers, renders them, and re-sends
-//! the message with the result standing in for the format. A native image sends
-//! through `objc_msgSend` for real, so the method *is* reached - and an `IMP` is
-//! not variadic, so everything after the format is invisible to it.
-//!
-//! This installs the same rendering in front of each of those methods. What
-//! they receive is what they already expect: a rendered string with every `%`
-//! doubled, which their own `unescape_rendered` undoes.
-
 use std::sync::OnceLock;
 
 use crate::objc::host::{self, Imp, Sel};

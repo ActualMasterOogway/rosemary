@@ -184,25 +184,6 @@ fn an_uncaught_exception_terminates_exactly_as_it_does_natively() {
     );
 }
 
-/// A throw across a host frame still cannot be caught - and the diagnosis for it
-/// got **worse**, which is the honest cost of vendoring a real unwinder.
-///
-/// The comparator is called by the host's `qsort`, so the handler in `main` is
-/// on the far side of arm64 frames the guest's `libunwind` has never seen.
-/// Natively this works and prints `caught across a host frame`; here it does
-/// not, and that gap is unchanged.
-///
-/// What changed is what the guest is *told*. This project's own unwinder
-/// recognised the case and refused it by name - "unwinding host frames" - and
-/// the real `libc++abi` cannot, because from inside it there is nothing unusual
-/// happening: it searched, found no handler, and terminated exactly as the
-/// standard says. So the program now dies with `libc++abi: terminating due to
-/// uncaught exception`, which is indistinguishable from a genuinely uncaught
-/// throw.
-///
-/// This test records that rather than hiding it. Closing it means teaching
-/// [`rosetta3::unwind`]'s frame walk to recognise the boundary and say so, which
-/// is work the vendoring deliberately deferred.
 #[test]
 fn a_throw_across_a_host_frame_is_still_not_caught() {
     let Some(path) = unwind_refusals_fixture() else {

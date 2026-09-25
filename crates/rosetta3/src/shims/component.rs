@@ -1,11 +1,3 @@
-//! The Carbon Component Manager, answered by the AudioComponent registry.
-//!
-//! The three legacy spellings are the modern three under old names, so each is
-//! forwarded to whichever registry this run's frameworks are: `crates/coreaudio`
-//! under `ROSETTA3_OBJC=builtin`, the host's AudioToolbox otherwise. A guest
-//! that opens its output unit the 1994 way then gets the same unit one that uses
-//! the modern names does, and not a second registry beside it.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

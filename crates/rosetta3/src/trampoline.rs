@@ -1,5 +1,3 @@
-//! Five bytes of x86-64 that turn a host function pointer back into an import.
-
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 

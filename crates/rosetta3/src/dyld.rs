@@ -1,6 +1,3 @@
-//! Guest-initiated `dlopen`/`dlsym`: loading an Intel image after the guest has started
-//! running.
-
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::ops::Range;

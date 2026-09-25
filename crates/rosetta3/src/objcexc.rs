@@ -1,22 +1,3 @@
-//! Objective-C exceptions, as C++ ones.
-//!
-//! On 64-bit macOS an `@throw` *is* a C++ throw: clang emits the same landing
-//! pads, the same LSDA, and a personality routine that is `__gxx_personality_v0`
-//! under another name. libobjc's part is three pieces of glue and one data
-//! structure, and this module is those.
-//!
-//! The data structure is the reason it lives here rather than in
-//! [`crate::unwind`]. `_OBJC_EHTYPE_$_NSException` is a `type_info`, and matching
-//! it is what the vendored `libc++abi` already does - so the record this
-//! publishes is a real `__si_class_type_info` whose `__base_type` is the
-//! superclass's record. `@catch (NSException *e)` then takes a subclass because
-//! libc++abi walks base classes, not because anything here re-implements
-//! `isKindOfClass:`.
-//!
-//! What it replaces is worse than a gap: an unresolved `_OBJC_EHTYPE_$_Foo`
-//! binds to zero, and a zero entry in the LSDA's type table is `catch (...)`. So
-//! the guest's `@catch (NSException *)` was silently catching C++ exceptions.
-
 use std::ffi::{CString, c_char};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};

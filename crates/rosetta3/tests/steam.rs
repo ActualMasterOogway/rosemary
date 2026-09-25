@@ -1,19 +1,3 @@
-//! The host half of the Steam bridge, driven the way the generated dylib drives
-//! it.
-//!
-//! The guest half is exercised by `tools/steamclient/smoke_test.py`, which
-//! calls the generated vtables and checks the arguments land at the recorded
-//! offsets. This is the other end: a stand-in `steamclient.so` whose interfaces
-//! have the vtable shape the real client's do, and [`rosetta3::steam::dispatch`]
-//! called with the packed structs the generated code sends.
-//!
-//! Both halves use the **real** dispatch table, so a generation that moved a
-//! vtable index or a parameter offset fails here.
-//!
-//! Skipped where there is no generated table (it is derived from headers Valve
-//! ships and is not checked in) and where no host C++ compiler can build the
-//! stand-in.
-
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,12 +6,6 @@ mod common;
 
 use common::steam::{call, create_interface, generated, method_id, params_with};
 
-/// Enough of two Steamworks interfaces to be called through: the vtable slots
-/// up to the ones under test, in the order the SDK declares them.
-///
-/// Every method answers with a value derived from all of its arguments, so a
-/// misplaced register or a truncated field changes the answer rather than
-/// going unnoticed.
 const FAKE_CLIENT: &str = r#"
 #include <cstdint>
 #include <cstring>
@@ -126,10 +104,6 @@ fn build_fake_client() -> Option<PathBuf> {
     None
 }
 
-/// One test, not several: the bridge loads its client once per process, from
-/// the environment as it stands at the first dispatch. Tests in a binary share
-/// that process and run in parallel, so a second test would be a race over
-/// which configuration the bridge came up with.
 #[test]
 fn bridges_guest_calls_onto_a_host_steam_client() {
     let Some(generated) = generated() else {
@@ -265,13 +239,6 @@ fn bridges_guest_calls_onto_a_host_steam_client() {
     );
 }
 
-/// `CIPCToolMachClient`, as `libsteam_api` implements it: look the service up,
-/// ask its version, then ask where Steam is and what its process id is.
-///
-/// Byte for byte the messages Valve's code sends - the sizes, the disposition
-/// bits, the command words and the offsets it reads the answers back from are
-/// all fixed by a library this tree cannot change, so a test that built them
-/// any other way would not be testing anything.
 #[cfg(not(target_os = "macos"))]
 fn answers_the_questions_libsteam_api_asks_the_name_server(generated: &std::path::Path) {
     use darwin::mach::bootstrap::{BOOTSTRAP_PORT, bootstrap_look_up};

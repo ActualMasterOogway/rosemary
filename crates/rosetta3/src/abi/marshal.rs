@@ -1,13 +1,3 @@
-//! Reading arguments out of a guest register context and making the host call.
-//!
-//! The host call is made by transmuting the callee to a Rust prototype wide enough to
-//! cover the signature and letting the compiler place the arguments - so the host's
-//! convention is spelled by the compiler and not by this file. What this file decides
-//! is which prototype, and that is where the two hosts part company: the AAPCS64
-//! vocabulary of HFAs and `x` register pairs on one, eightbytes on the other. The
-//! guest's side is SysV AMD64 throughout, which on an x86-64 host makes the two halves
-//! the same convention.
-
 use iced_x86::Register;
 
 use microlift::arch::x86_64::abi::x86_reg;

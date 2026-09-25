@@ -1,5 +1,3 @@
-//! The x86-64 stack probe emitted by Clang for large dynamic frames.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use super::bad_pointer;

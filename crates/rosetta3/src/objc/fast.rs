@@ -1,5 +1,3 @@
-//! The Objective-C runtime entry points that need no exit at all.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use static_init::dynamic;

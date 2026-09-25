@@ -1,8 +1,3 @@
-//! Symbols this runtime resolves for **itself**, against the host process.
-//!
-//! Distinct from `shims::host`, which answers the same question on a guest
-//! import's behalf and refuses by name when it cannot.
-
 use std::ffi::{CString, c_void};
 
 /// `dlsym(RTLD_DEFAULT, name)`, or `None` for a name nothing loaded exports.

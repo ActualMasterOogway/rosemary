@@ -1,12 +1,3 @@
-//! The guest's C++ runtime, run as **guest code** rather than emulated.
-//!
-//! It stands in for the host's `libc++` even on macOS, where the real one is on
-//! disk and would link. The allocator interposes ([`crate::interpose`]) have to
-//! reach the `operator new`/`operator delete` the guest calls, and a system
-//! `libc++` is not an image this runtime binds - its `malloc` was resolved by
-//! dyld before the process started, so a guest object allocated inside libc++
-//! and freed by the interposed `free` crosses allocators.
-
 use machish::error::Result;
 use machish::exports::ExportTable;
 use machish::image::MachObject;

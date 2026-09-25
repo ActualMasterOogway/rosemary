@@ -1,5 +1,3 @@
-//! Structs by value, across two conventions that disagree about them.
-
 use super::ArgType as T;
 
 /// The eightbyte, which is SysV AMD64's unit of classification.

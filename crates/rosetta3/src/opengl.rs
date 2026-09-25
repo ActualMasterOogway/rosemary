@@ -1,5 +1,3 @@
-//! `OpenGL.framework`, bound to the GL library SDL is using.
-
 use std::ffi::CString;
 
 use machish::resolve::{LazyDylib, NativeDylibProvider, Resolved};

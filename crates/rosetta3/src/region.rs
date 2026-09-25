@@ -1,5 +1,3 @@
-//! Which bytes to lift, given an address control is about to reach.
-
 use std::collections::BTreeSet;
 use std::ops::Range;
 

@@ -1,5 +1,3 @@
-//! Starting the program: initializers, then `main`.
-
 use crate::exec::Execution;
 use crate::vm::VmError;
 

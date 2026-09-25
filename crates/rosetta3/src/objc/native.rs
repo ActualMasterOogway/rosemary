@@ -1,5 +1,3 @@
-//! Handing a host-architecture image to libobjc the way dyld would.
-
 use std::ffi::{CString, c_char, c_void};
 
 use machish::report::LinkReport;

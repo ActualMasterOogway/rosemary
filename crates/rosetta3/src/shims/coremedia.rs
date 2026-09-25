@@ -1,6 +1,3 @@
-//! CoreMedia, VideoToolbox and the two frameworks beside them, where a **`CMTime`
-//! travels by value**.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{Callbacks, GuestMemory, Result};

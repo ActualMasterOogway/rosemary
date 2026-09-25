@@ -1,5 +1,3 @@
-//! Where the *guest* spends its time.
-
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::Write as _;
@@ -430,13 +428,11 @@ fn sweep_forever(period: Duration, every: Option<Duration>) {
     // Jitter, up to a tenth of the period.
     let spread = period / 10 + 1;
     let mut jitter = Xorshift::seeded();
-    // SAFETY: `mach_absolute_time` reads the clock and takes nothing.
     let mut next = unsafe { mach_absolute_time() };
     let mut last_report = Instant::now();
     let mine = crate::thread::key();
     loop {
         next += period;
-        // SAFETY: as above.
         let now = unsafe { mach_absolute_time() };
         // A sweep that took longer than its own period has nothing to make up
         // by spinning - the samples it missed are gone - so the deadline is

@@ -1,5 +1,3 @@
-//! Host frameworks, resolved at the moment the overlay first needs them.
-
 use std::ffi::{CString, c_void};
 
 /// The frameworks the overlay may have to bring in itself, by absolute path.
@@ -40,7 +38,6 @@ pub fn symbol(name: &str) -> Option<*mut c_void> {
         return Some(found);
     }
     load_frameworks();
-    // SAFETY: as above.
     let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
     (!found.is_null()).then_some(found)
 }

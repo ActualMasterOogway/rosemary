@@ -1,5 +1,3 @@
-//! Objective-C type encodings, read as signatures.
-
 use crate::abi::ArgType as T;
 use crate::abi::aggregate::{Aggregate, Leaf, Shape, width_of};
 

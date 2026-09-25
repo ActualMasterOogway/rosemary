@@ -1,5 +1,3 @@
-//! One guest thread per host thread, and the state that makes that true.
-
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::ffi::c_void;
 use std::ops::Range;

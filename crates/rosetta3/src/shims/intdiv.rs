@@ -1,6 +1,3 @@
-//! `div`, `ldiv`, `lldiv` and `imaxdiv`: quotient and remainder, returned as a struct
-//! by value.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};

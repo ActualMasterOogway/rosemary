@@ -23,15 +23,6 @@ fn load(path: &str) -> Option<Program> {
     Some(Program::load(path, &[]).unwrap_or_else(|e| panic!("linking {path} failed: {e}")))
 }
 
-/// Whether this host has a Mach-O at `path` to use as a fixture.
-///
-/// Two ways to have none, and the second is the one that matters: the file may be
-/// missing, or - on a host that is not a Mac - it may be there and be an ELF. These
-/// tests read *this machine's own* `/bin/ls`, so on Linux the honest answer is that
-/// there is not one, and the gate skips rather than failing over a magic number.
-///
-/// Spelled out here rather than taken from `tests/common`, which this file
-/// deliberately does not pull in.
 fn host_macho(path: &str) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;

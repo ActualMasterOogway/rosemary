@@ -1,5 +1,3 @@
-//! The guest's stack, and the process arguments laid out on it.
-
 use std::ffi::{CString, OsString};
 use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;

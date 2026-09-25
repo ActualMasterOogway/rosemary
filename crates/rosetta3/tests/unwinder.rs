@@ -1,23 +1,7 @@
-//! A throw has to reach the vendored unwinder, not the host's.
-//!
-//! `_Unwind_RaiseException` walks the *guest's* stack: it reads guest frames,
-//! guest `__unwind_info`, guest LSDAs. The host's copy would walk the host's,
-//! so the one binding that must never reach the host is this one.
-//!
-//! Nothing in the graph names the unwinder, though. The vendored `libc++abi`
-//! records its `_Unwind_*` imports against `libSystem`, which on a real system
-//! re-exports the unwinder and here is not loaded at all - so the unwinder
-//! enters the graph only because [`rosetta3::cxxlib`] says it does. When that
-//! stopped being true, every throw ended at an unsigned host import.
-
 mod common;
 
 use common::{build_cpp, run_guest, run_native};
 
-/// A program whose only requirement is that it throws across a frame with a
-/// destructor in it, so the throw goes the full `_Unwind_RaiseException` ->
-/// personality -> cleanup -> `_Unwind_Resume` route rather than being folded
-/// into a local jump.
 const THROW_CPP: &str = r#"
 #include <cstdio>
 #include <stdexcept>

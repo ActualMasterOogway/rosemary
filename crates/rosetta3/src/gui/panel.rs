@@ -1,5 +1,3 @@
-//! What the overlay actually says, and the windows it says it in.
-
 use std::time::{Duration, Instant};
 
 use super::draw::{Color, DrawList, Ui, bytes, color, duration, grouped, rate};

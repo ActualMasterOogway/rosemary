@@ -1,5 +1,3 @@
-//! `rosetta3 run [--slow] [--native|--emulated] [--objc-debug] <path> [args...]`.
-
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::process::ExitCode;

@@ -1,31 +1,3 @@
-//! What microlift *emits* for a stretch of guest code, as arm64.
-//!
-//! A profile names a hot guest instruction and stops there. Whether that
-//! instruction is hot because the guest runs it a lot or because its
-//! translation is bad is a different question, and the only thing that answers
-//! it is the host code - which lives in an anonymous mapping, in a process that
-//! is busy, and is gone when the run ends.
-//!
-//! This lifts raw guest bytes with the same [`LifterConfig`] and the same
-//! optimisation level [`crate::cache`] uses, compiles them, and prints the
-//! result annotated by the guest instruction each host instruction came from.
-//! Nothing is executed.
-//!
-//! ```sh
-//! cargo run --release --example liftdump -- <hex-bytes> [guest-va]
-//! cargo run --release --example liftdump -- --file <raw> <guest-va> [length]
-//! ```
-//!
-//! Two caveats on reading the output, both of which matter:
-//!
-//! - The **prologue, the entry dispatch and the epilogue** appear under
-//!   `[no source]`, and in a short region they are most of it. They are also
-//!   real: a region entry pays them, and the profile's "inside a region, with no
-//!   guest instruction" bucket is largely them.
-//! - The raw-object path compiles with the shared flags but **not** the host ISA
-//!   tuning ([`rosetta3::jit::OptLevel::isa_settings`]), so a lowering that
-//!   depends on `has_lse` or `has_dotprod` is shown in its baseline form.
-
 use microlift::arch::x86_64::X86_64;
 use microlift::backend::ArtifactBackend;
 use microlift::core::lift_to_code;

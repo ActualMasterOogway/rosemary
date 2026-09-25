@@ -1,5 +1,3 @@
-//! zlib's four initialisers: the guest function pointers that travel *inside* a struct.
-
 use core::ffi::{c_char, c_int, c_void};
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -304,7 +302,6 @@ mod tests {
                     len: data.len(),
                 });
             }
-            // SAFETY: as above.
             unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), va as *mut u8, data.len()) };
             Ok(())
         }
@@ -373,7 +370,6 @@ mod tests {
         inflate_init("_inflateInit_", &mut ctx, &mut Identity, &callbacks).expect("re-init");
         assert_eq!(strm.zalloc, installed_alloc);
         assert_eq!(strm.zfree, installed_free);
-        // SAFETY: as above.
         unsafe { inflateEnd(&raw mut strm as *mut c_void) };
     }
 

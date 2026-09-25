@@ -1,16 +1,3 @@
-//! Putting the whole guest on this host's `malloc`, so the host's own
-//! corruption checks apply.
-//!
-//! This is the other half. Every entry point the guest imports from its own
-//! allocator is rebound to a host equivalent as well, so one allocator owns
-//! every block, and a double free stops being a live block quietly pushed onto
-//! a free list and becomes `free(): double free detected in tcache 2` naming
-//! the call.
-//!
-//! Not a mode to run in - the allocator a program ships is usually the faster
-//! one and always the one it was tested against. It is the lever to reach for
-//! when the heap is corrupt and nothing says where.
-
 use std::ffi::c_void;
 
 use machish::memory::Regions;
@@ -56,7 +43,6 @@ unsafe extern "C" fn realloc_aligned(
     let old = unsafe { libc::malloc_usable_size(p) };
     #[cfg(target_os = "macos")]
     let old = unsafe { libc::malloc_size(p) };
-    // SAFETY: as above.
     let fresh = unsafe { malloc_aligned(newsize, alignment) };
     if fresh.is_null() {
         return fresh;

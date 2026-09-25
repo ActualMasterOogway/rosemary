@@ -1,5 +1,3 @@
-//! Two global hotkeys, and why they are Carbon's.
-
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -239,7 +237,6 @@ fn poll() {
                 // first, a virtual key code.
                 let shift = unsafe { flags_state(HID_STATE) } & CG_SHIFT != 0;
                 for (slot, key) in Key::ALL.into_iter().enumerate() {
-                    // SAFETY: as above.
                     let down = shift && unsafe { key_state(HID_STATE, key.code() as u16) } != 0;
                     // The edge is tracked either way, so that going quiet
                     // because Carbon is working does not leave a stale edge to

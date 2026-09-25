@@ -1,21 +1,3 @@
-//! A `CFString` converted to bytes, which is how a Cocoa guest reads any name.
-//!
-//! The entry for `CFStringGetCString` declared three parameters where the
-//! function has four, so the host read whatever the guest left in `x3` as the
-//! encoding and answered `false`. Nothing failed at the call: the conversion
-//! produced an empty string, and Unity appended that empty string to
-//! `Contents/MacOS/` to build a plugin path - so every `.bundle` plugin in
-//! Subnautica Below Zero was `dlopen`ed as a directory and came back as
-//! `DllNotFoundException`.
-//!
-//! What each test would falsify:
-//!
-//! - **the conversion succeeds and produces the right bytes**, which is the
-//!   whole of the bug;
-//! - **both architectures agree** - the same source built for arm64 prints the
-//!   same line, so the length and the buffer size are checked too and not just
-//!   the string.
-
 mod common;
 
 use common::{build_native_with, cfstring_fixture, run_guest, run_native};

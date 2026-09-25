@@ -1,5 +1,3 @@
-//! The execution loop: lift, enter, service the exit, repeat.
-
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};

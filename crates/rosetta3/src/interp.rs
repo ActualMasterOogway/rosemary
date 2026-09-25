@@ -1,10 +1,3 @@
-//! The instructions the recompiler hands back for the host to perform.
-//!
-//! Microlift calls this inline, in place of what used to be an
-//! `UnimplementedInstruction` VM exit: the whole guest state is in the context
-//! and the PC points *at* the instruction, which this module performs and steps
-//! over. See [`microlift::core::callback`].
-
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
 
 use microlift::arch::x86_64::context::RegisterContext;

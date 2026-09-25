@@ -1,9 +1,3 @@
-//! A Mach-O `MH_OBJECT` writer with exactly one customer: the symfile this runtime
-//! hands LLDB for a translated region, on a host whose debugger reads Mach-O.
-//!
-//! Compiled on every host, so that the format this tree is *about* keeps its
-//! tests wherever they are run; [`super::object::write`] picks between this and
-//! [`super::elf`] by the host's own debugger.
 #![allow(dead_code)]
 
 use super::object::{Kind, Section, Sym};

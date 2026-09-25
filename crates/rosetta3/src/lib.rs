@@ -15,16 +15,6 @@
     clippy::unnecessary_cast
 )]
 
-//! Rosetta 3: the driver that joins [`machish`] to [`microlift`].
-//!
-//! [`Vm`] lifts and runs guest regions, servicing exits between them. Guest
-//! threads share translations and callback thunks while [`thread`] and [`tls`]
-//! keep their state separate.
-//!
-//! Mach-O records no import signatures. [`abi`] describes supported calls;
-//! unknown signatures are refused. [`shims`] handles calls requiring guest
-//! state. [`jmpbuf`] handles stack operations that cannot use host frames.
-
 pub mod abi;
 pub mod atomic128;
 pub mod audit;

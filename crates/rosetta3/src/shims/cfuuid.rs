@@ -1,5 +1,3 @@
-//! `CFUUIDBytes`: sixteen bytes both ABIs agree about, and neither table can name.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{GuestMemory, Result};

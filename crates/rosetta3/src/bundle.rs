@@ -1,5 +1,3 @@
-//! Making the guest's `.app` the process's main bundle.
-
 use std::path::{Path, PathBuf};
 
 /// Set in the re-executed process, so it never re-executes again.

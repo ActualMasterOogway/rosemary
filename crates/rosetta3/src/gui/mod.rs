@@ -1,5 +1,3 @@
-//! An in-process profiling overlay, drawn on the guest's own window.
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 

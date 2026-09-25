@@ -1,10 +1,3 @@
-//! Windows: how they are arranged, and the drag that rearranges them.
-//!
-//! Every section of the overlay is a [`View`] living in a [`Leaf`]. Leaves are
-//! tabbed groups; a [`Split`] puts two nodes side by side; a node hangs either
-//! off one of the four surface edges or off a free-floating rectangle. That is
-//! the whole model, and every gesture below is a transformation of it.
-
 use std::sync::Mutex;
 
 use super::draw::{DrawList, Input, Rect, Ui, color, hit};

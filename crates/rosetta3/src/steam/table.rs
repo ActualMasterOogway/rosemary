@@ -1,14 +1,3 @@
-//! The dispatch table the generator emits beside the guest dylib.
-//!
-//! The guest half knows every signature at compile time - the C++ compiler
-//! classified each argument when it built the vtables. The host half calls
-//! through a pointer it only learns at run time, so it needs the same
-//! classification as data. Recomputing it here from the Steamworks headers
-//! would be a second implementation of the thing that must not disagree, so
-//! `gen_steamclient.py` writes it out instead and this reads it back.
-//!
-//! The format is described where it is written, in `write_dispatch_table`.
-
 /// How a value reaches the host's callee. See `BY_VALUE_CLASSES` in the
 /// generator, which is where the classification is decided.
 pub mod class {

@@ -1,5 +1,3 @@
-//! libcurl's two variadic setters, whose *argument's meaning is the previous argument*.
-
 use core::ffi::{c_int, c_void};
 
 use microlift::arch::x86_64::context::RegisterContext;

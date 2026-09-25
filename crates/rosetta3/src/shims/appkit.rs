@@ -1,5 +1,3 @@
-//! AppKit's plain C functions that take an `NSRect` **by value**.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use super::coregraphics::{CgPoint, CgRect, rect_argument};

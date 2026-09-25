@@ -1,5 +1,3 @@
-//! Unwinding a guest stack: C++ exceptions, without the host's unwinder.
-
 use machish::image::UnwindEntry;
 use microlift::arch::x86_64::context::RegisterContext;
 

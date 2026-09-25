@@ -1,6 +1,3 @@
-//! Honouring `__DATA,__interpose`: a guest image that replaces a function every other
-//! image calls.
-
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

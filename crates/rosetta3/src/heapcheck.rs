@@ -1,28 +1,3 @@
-//! Catching a block freed by an allocator that did not make it, at the free.
-//!
-//! A guest that ships an allocator has two of them once this runtime is in the
-//! picture, and `interpose::adopt_guest_allocator` is the claim that every
-//! pointer crossing between them goes through a registry. This is what tests
-//! the claim: the guest's `free` is replaced by one that asks the guest's own
-//! allocator whether it owns the pointer first, and says where the call came
-//! from when it does not.
-//!
-//! Worth the machinery because of what getting it wrong looks like without it.
-//! mimalloc accepts a foreign pointer, works out which of its pages "owns" it
-//! from the pointer's own bits, and pushes it onto that page's free list - so
-//! the list now has a live block on it and the fault is thousands of
-//! allocations later, on another thread, in code that has nothing to do with
-//! the free. Every report of this bug so far has been that fault.
-//!
-//! The foreign free is **not performed**. Leaking the block is the lesser
-//! wrong: the point of the lever is to find out whether the crossing is the
-//! cause, and a run that leaks and survives says so where one that leaks and
-//! still corrupts says the opposite.
-//!
-//! x86-64 only, because the trampoline that recovers the caller's return
-//! address is written in its calling convention. Elsewhere the lever is absent
-//! rather than silently doing nothing.
-
 use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::sync::Mutex;

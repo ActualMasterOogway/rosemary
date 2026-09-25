@@ -1,15 +1,3 @@
-//! The native backend: a host-architecture program, loaded by machish and run.
-//!
-//! Every claim here is differential - the same binary run twice, once by the
-//! kernel and once by this runtime - because that is the only comparison that
-//! cannot be satisfied by a loader which merely does not crash.
-//!
-//! - **hello** - the link produced something callable, and `argv` reached it.
-//! - **constructors** - `__mod_init_func` ran, in order, before `main`.
-//! - **C++** - the host's own libc++ was reached, not the vendored guest copy.
-//! - **selection** - a binary goes to the backend that can actually run it,
-//!   `/bin/ls`'s arm64e slice included.
-
 mod common;
 
 use common::{build_native, build_native_with, run_guest_with, run_native};
@@ -44,10 +32,6 @@ fn a_native_exit_status_reaches_the_shell() {
     assert_eq!(status, Some(1), "stderr: {err}");
 }
 
-/// `-no_new_main` asks Apple's linker for the pre-10.8 entry sequence: an
-/// `LC_UNIXTHREAD` command whose entry reads the kernel argument frame at the
-/// stack pointer. That is observably different from calling an `LC_MAIN`
-/// entry with the arguments in registers.
 #[test]
 fn a_native_unix_thread_entry_matches_the_kernels_own_run_of_it() {
     let Some(path) =
@@ -117,14 +101,6 @@ int main() {
 }
 "#;
 
-/// A throw under the native backend has to find the guest's `__unwind_info`.
-///
-/// The vendored `libunwind` asks `_dyld_find_unwind_sections` for every frame it
-/// walks, and dyld knows nothing of the images this runtime mapped - so its
-/// answer is "no unwind info" and the throw reaches `terminate` with no handler
-/// found. The destructor count is in the output because it is what separates a
-/// caught exception from a two-phase walk that found the handler but skipped
-/// cleanup.
 #[test]
 fn a_native_cxx_program_unwinds_through_its_own_frames() {
     let Some(path) = build_native_with("native_throw", THROW_CXX, &["-x", "c++", "-lc++"]) else {
@@ -168,12 +144,6 @@ int main() {
 }
 "#;
 
-/// Whether the guest architecture this runtime emulates is also the host's.
-///
-/// The whole of this file's engine-selection half turns on it. On arm64 the two
-/// backends take disjoint sets of binaries and forcing the wrong one is always a
-/// refusal; on x86-64 every x86-64 binary is eligible for both, so the same
-/// commands succeed and the refusals under test do not exist to be provoked.
 const HOST_RUNS_X86_64: bool = cfg!(target_arch = "x86_64");
 
 #[test]

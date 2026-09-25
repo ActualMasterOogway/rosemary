@@ -1,5 +1,3 @@
-//! `NSLog`, which is `printf` with two Cocoa-shaped complications.
-
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
@@ -378,7 +376,6 @@ mod tests {
         if !foundation() {
             return;
         }
-        // SAFETY: as above.
         let object_class = unsafe { crate::objc::host::objc_getClass(c"NSObject".as_ptr()) };
         if object_class.is_null() {
             return;

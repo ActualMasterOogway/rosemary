@@ -1,26 +1,3 @@
-//! Standing in for Steam's Mach IPC tool, which is how a macOS game finds Steam
-//! at all.
-//!
-//! Valve's `libsteam_api.dylib` does not look for `steamclient.dylib` on disk.
-//! It asks the bootstrap name server for `com.valvesoftware.steam.ipctool` - a
-//! service the running Steam client publishes - and sends it two messages: one
-//! asking its protocol version, one asking where Steam is installed and what
-//! its process id is. Only then does it build `<that directory>/steamclient.dylib`
-//! and `dlopen` it, and only if `kill(pid, 0)` says that process is alive.
-//!
-//! There is no macOS Steam here to publish that service, so nothing answers,
-//! `SteamAPI_Init` reports `ipcserver init failed`, and the bridge never gets a
-//! chance to be used. This publishes the service and answers those two
-//! questions: the directory holding the generated `steamclient.dylib`, and the
-//! host's own Steam process.
-//!
-//! It is the Mach analogue of what Proton writes into the Windows registry.
-//! Only the name server changes hands - the guest still asks the question its
-//! own way, and everything after the answer is Valve's code doing what it
-//! always does.
-//!
-//! Linux only: on a Mac, launchd and the real Steam client own this name.
-
 #![cfg(not(target_os = "macos"))]
 
 use std::ffi::CString;
@@ -165,7 +142,6 @@ fn steam_pid() -> u32 {
             return pid as u32;
         }
     }
-    // SAFETY: `getpid` takes no argument and cannot fail.
     unsafe { libc::getpid() as u32 }
 }
 

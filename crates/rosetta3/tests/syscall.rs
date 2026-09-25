@@ -1,12 +1,3 @@
-//! A guest `syscall` stops the guest, by name.
-//!
-//! Microlift services a `syscall` through a host callback rather than a VM exit,
-//! so the refusal has to travel back out of an `extern "C"` frame that cannot
-//! return one: the callback parks the error and steers the guest to a dispatch
-//! the run loop answers. What this would falsify is that path - a callback whose
-//! error is dropped resumes the guest past an unserviced syscall, which is a
-//! program that carries on wrong instead of stopping.
-
 mod common;
 
 use common::{run_guest, syscall_fixture};

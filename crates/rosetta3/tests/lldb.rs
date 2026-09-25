@@ -1,35 +1,3 @@
-//! Translated code is visible to a real LLDB.
-//!
-//! Every one of these drives the `lldb` on this machine, because the previous
-//! implementation of this feature passed every test that did not: it built a
-//! Mach-O, it filled in DWARF, it walked the JIT ABI correctly - and LLDB
-//! showed nothing whatsoever, for two reasons neither of which is observable
-//! from inside the process. The plugin that reads the JIT interface is off by
-//! default on macOS, and the object named its code with an absolute symbol,
-//! which LLDB loads at no address at all.
-//!
-//! The symbol file is Mach-O or ELF depending on the host, and the two formats
-//! disagree about what a symbol's value means, so every assertion below is
-//! about the host it runs on. Only the last pair of tests can run on a host
-//! that cannot build a Mach-O guest to fault inside: they publish a region by
-//! hand instead.
-//!
-//! So the assertions here are about what a debugger *says*, not about what this
-//! crate emitted. What each would falsify:
-//!
-//! - **the plugin's macOS default is still what it is** - the test that turns
-//!   it on and the one that leaves it off, together, are the reason the notice
-//!   `crate::lldb` prints exists; if Apple ever flips the default, the second
-//!   test fails and the notice can go;
-//! - **LLDB parses the symfile** - anything malformed shows up as "failed to
-//!   load module for JIT entry", which is what the object crate's output
-//!   *avoided* while still being useless;
-//! - **the code gets a load address**, which is the bug that made the previous
-//!   version report nothing;
-//! - **a frame in translated code is symbolicated** - the entire point: a stop
-//!   inside a lift names the guest function and a line of x86-64, instead of a
-//!   bare `pc` in an anonymous mapping.
-
 mod common;
 
 use std::io::{BufRead, BufReader};
@@ -37,11 +5,6 @@ use std::process::{Command, Stdio};
 
 use common::{build_x86_64, driver, fault_fixture};
 
-/// Whether this host has an `lldb` that can debug what we just built.
-///
-/// The opt-in is macOS's alone: debugging there prompts for developer tools
-/// access, which a non-interactive test run cannot answer. Elsewhere a debugger
-/// on a child of the test is ordinary and needs no permission.
 fn have_lldb() -> bool {
     let allowed = cfg!(not(target_os = "macos"))
         || std::env::var_os("ROSETTA3_ENABLE_PRIVILEGED_TESTS").is_some();
@@ -53,13 +16,6 @@ fn have_lldb() -> bool {
             .unwrap_or(false)
 }
 
-/// Run the driver under `lldb` on the faulting fixture, with `commands` issued
-/// after the process stops, and return everything LLDB printed.
-///
-/// The fault fixture earns its place here: it stops the process *inside*
-/// translated code, at an address LLDB has to resolve through what this module
-/// published, without needing a breakpoint on generated code that no test could
-/// name ahead of time.
 fn lldb_at_the_fault(settings: &[&str], commands: &[&str]) -> Option<String> {
     let path = fault_fixture()?;
 
@@ -261,12 +217,6 @@ fn the_listing_is_the_x86_64_the_region_was_lifted_from() {
     std::fs::remove_dir_all(directory).ok();
 }
 
-/// A guest with a lot of functions in it and a long tail, so a debugger can
-/// arrive after everything has already been compiled.
-///
-/// Thirty of them, and mutually recursive so none is folded away: the point is
-/// to have many *regions* registered before the attach, because a chain of one
-/// would pass whether or not the list is really a list.
 fn many_regions() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     BUILT
@@ -402,13 +352,6 @@ const HOST_BOUNDS: &[(u32, u32)] = &[(0, 3), (3, 6), (6, 7)];
 /// produces, so the symbol a debugger shows is the one a real stop would show.
 const REGION: &str = "guest_fault+0x470";
 
-/// The debuggee for the test below, and not a test itself: it publishes a region
-/// of host code the way a lift does and then runs it, which faults.
-///
-/// It is `#[ignore]`d so an ordinary run never executes it, and re-entered by
-/// name under LLDB. This is what makes the round trip testable on a host that
-/// cannot build a Mach-O guest to fault inside: nothing here needs one - the
-/// bytes, the map and the addresses are all this test's own.
 #[test]
 #[ignore = "the debuggee of lldb_symbolicates_a_published_region; faults on purpose"]
 fn publish_a_region_and_fault() {
@@ -464,11 +407,6 @@ fn guest_instruction_starts() -> [u64; 3] {
     [GUEST_VA, GUEST_VA + 3, GUEST_VA + 6]
 }
 
-/// Run this test binary's own debuggee under `lldb`, with `commands` issued
-/// after it stops, and return everything LLDB printed.
-///
-/// `--exact` so no other test comes with it, and `--test-threads=1` so the
-/// fault is on the thread LLDB reports as stopped.
 fn lldb_at_the_published_region(settings: &[&str], commands: &[&str]) -> String {
     let exe = std::env::current_exe().expect("the path of this test binary");
 

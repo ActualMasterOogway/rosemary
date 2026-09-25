@@ -1,6 +1,3 @@
-//! CoreGraphics and CoreVideo entry points that pass or return a **struct by value**,
-//! which is the one thing the signature table cannot name.
-
 use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
