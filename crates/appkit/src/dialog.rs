@@ -141,6 +141,11 @@ impl Dialog {
         // Hints SDL reads as video starts, which this may be the first to do.
         crate::decor::install();
         let started_video = !sdl3::video::video_up();
+        // Before asking for the driver, which SDL cannot name until video is
+        // up: the first dialog of a process would otherwise lose its corners.
+        if !sdl3::video::init_video() {
+            return None;
+        }
 
         let transparent = sdl3::video::is_wayland();
         let alert = Alert {

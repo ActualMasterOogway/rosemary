@@ -1731,7 +1731,7 @@ pub mod video {
     /// SDL refuses to create a window without it, and there is no earlier point
     /// to do it from: a program that never opens a window should not have paid
     /// for a display connection.
-    fn init_video() -> bool {
+    pub fn init_video() -> bool {
         let mut up = VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner());
         if !*up {
             *up = super::init(super::init::VIDEO).is_ok();
@@ -2836,7 +2836,8 @@ pub mod video {
         unsafe { f(name.as_ptr(), value.as_ptr()) }
     }
 
-    /// Whether SDL's video driver is Wayland's.
+    /// Whether SDL's video driver is Wayland's. False until video has
+    /// started, as SDL has no driver to name before then.
     pub fn is_wayland() -> bool {
         let Some(f) = api().and_then(|a| a.SDL_GetCurrentVideoDriver) else {
             return false;
