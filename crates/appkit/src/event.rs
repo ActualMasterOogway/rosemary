@@ -217,8 +217,17 @@ fn trace_views() {
 }
 
 pub(crate) fn deliver(event: sdl3::video::Event) {
+    if !crate::dialog::deliver_modal(&event) {
+        deliver_past_modal(event);
+    }
+}
+
+/// [`deliver`] for the modal dialog's own loop, which has already had its
+/// turn at `event`: queueing it for the dialog again would hand it straight
+/// back, and the loop would never wait for input again.
+pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
     use sdl3::video::Event;
-    if crate::dialog::deliver_modal(&event) || crate::dialog::deliver(&event) {
+    if crate::dialog::deliver(&event) {
         return;
     }
     match event {
