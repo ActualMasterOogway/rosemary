@@ -412,6 +412,17 @@ fn is_fullscreen(sdl: sdl3::Window) -> bool {
     !sdl.is_null() && sdl3::video::window_flags(sdl) & sdl3::video::flags::FULLSCREEN != 0
 }
 
+/// Whether a titled toplevel is in full screen, where its chrome is hidden
+/// until the pointer asks for it. Cheaper than [`facts`], for pointer motion.
+pub(crate) fn is_full_screen_titled(object: Id) -> bool {
+    // SAFETY: null or an object this runtime allocated.
+    let sdl = unsafe { sdl_window(object) };
+    !sdl.is_null()
+        && window_of(object).style_mask & style::TITLED != 0
+        && presentation_of_sdl(sdl) == Presentation::Toplevel
+        && is_fullscreen(sdl)
+}
+
 /// What `crate::decor` draws a window's chrome from.
 pub(crate) fn facts(object: Id) -> Option<crate::decor::Facts> {
     // SAFETY: null or an object this runtime allocated.

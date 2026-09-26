@@ -254,6 +254,8 @@ fn target_window() -> Option<sdl3::Window> {
         "main" => main_window(),
         // The innermost open menu of the chrome's, which is no NSWindow.
         "menu" => crate::decor::menu_popup(),
+        // The titlebar a full-screen window slides in at the top edge.
+        "reveal" => crate::decor::reveal_popup(),
         // The most recently shown window, which is the menu or dialog that has
         // just opened: the one a script has to drive to answer whether a popup
         // responds to the pointer at all.
