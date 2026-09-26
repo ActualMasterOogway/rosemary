@@ -296,6 +296,11 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             if !entered {
                 crate::decor::pointer_left(window);
             }
+            // A menu's popup is chrome from its first pixel; anything else
+            // is decided by the moves that follow.
+            if entered {
+                crate::cursor::set_over_chrome(crate::decor::is_chrome_popup(window));
+            }
             // A resize is performed from outside the client area. SDL reports
             // the resulting leave and re-entry as window events rather than
             // mouse-motion events; dropping them leaves an NSTrackingArea
@@ -408,7 +413,9 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             if take_warp_echo(x, y) {
                 return;
             }
-            if crate::decor::pointer_moved(id, x, y) {
+            let on_chrome = crate::decor::pointer_moved(id, x, y);
+            crate::cursor::set_over_chrome(on_chrome);
+            if on_chrome {
                 return;
             }
             // A window being dragged by `-performWindowDragWithEvent:` consumes

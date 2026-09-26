@@ -837,6 +837,12 @@ pub(crate) fn pointer_moved(id: u32, x: f32, y: f32) -> bool {
     true
 }
 
+/// Whether `id` is one of the chrome's own popups: an open menu or the
+/// full-screen reveal.
+pub(crate) fn is_chrome_popup(id: u32) -> bool {
+    tracking_popup(id) || reveal_of_popup(id).is_some()
+}
+
 /// The pointer left a window.
 pub(crate) fn pointer_left(id: u32) {
     let window = match reveal_of_popup(id) {
