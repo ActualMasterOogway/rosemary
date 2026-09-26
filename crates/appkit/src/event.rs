@@ -22,7 +22,10 @@ pub fn pump(app: Id) {
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
-    for hook in PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+    // Copied out first: a guard in the loop's head would be held across every
+    // hook, and a hook that runs guest code can turn this pump again.
+    let hooks = PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for hook in hooks {
         hook();
     }
     crate::application::check_last_window_closed();
@@ -215,7 +218,7 @@ fn trace_views() {
 
 pub(crate) fn deliver(event: sdl3::video::Event) {
     use sdl3::video::Event;
-    if crate::dialog::deliver(&event) {
+    if crate::dialog::deliver_modal(&event) || crate::dialog::deliver(&event) {
         return;
     }
     match event {

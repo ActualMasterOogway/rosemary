@@ -24,6 +24,11 @@ pub struct Window {
     /// whether it may go full screen.
     collection_behavior: usize,
     first_responder: Id,
+    /// `-initialFirstResponder`, a nib outlet and so not retained: made the
+    /// first responder when the window is first ordered front without one.
+    initial_first_responder: Id,
+    /// `-setNextResponder:`, unretained; a window has none until given one.
+    next_responder: Id,
     minimum: NSSize,
     maximum: NSSize,
     fullscreen: usize,
@@ -1206,6 +1211,12 @@ unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: 
     if want != Presentation::Tooltip {
         KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
     }
+    let window = window_of(receiver);
+    if window.first_responder.is_null() && !window.initial_first_responder.is_null() {
+        let initial = window.initial_first_responder;
+        // SAFETY: this window, and a responder the guest named.
+        unsafe { make_first_responder(receiver, objc::sel::get("makeFirstResponder:"), initial) };
+    }
     // Where the window actually ended up. On a Mac a window is placed exactly
     // where it was asked to be, so a toolkit has no reason to look again; here
     // the compositor chooses, and a toolkit which never hears about it maps
@@ -1621,6 +1632,29 @@ unsafe extern "C" fn first_responder(receiver: Id, _sel: Sel) -> Id {
         true => receiver,
         false => window.first_responder,
     }
+}
+
+pub(crate) fn is_window(object: Id) -> bool {
+    // SAFETY: null or an object this runtime allocated, which every caller has.
+    unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+        objc::class::lookup(c"NSWindow").is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+    })
+}
+
+unsafe extern "C" fn next_responder(receiver: Id, _sel: Sel) -> Id {
+    window_of(receiver).next_responder
+}
+
+unsafe extern "C" fn set_next_responder(receiver: Id, _sel: Sel, responder: Id) {
+    window_of(receiver).next_responder = responder;
+}
+
+unsafe extern "C" fn set_initial_first_responder(receiver: Id, _sel: Sel, responder: Id) {
+    window_of(receiver).initial_first_responder = responder;
+}
+
+unsafe extern "C" fn initial_first_responder(receiver: Id, _sel: Sel) -> Id {
+    window_of(receiver).initial_first_responder
 }
 
 unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id) -> u8 {
@@ -2095,6 +2129,10 @@ pub(crate) fn install() {
         "setCollectionBehavior:" => set_collection_behavior, c"v24@0:8Q16";
         "firstResponder" => first_responder, c"@16@0:8";
         "makeFirstResponder:" => make_first_responder, c"c24@0:8@16";
+        "initialFirstResponder" => initial_first_responder, c"@16@0:8";
+        "nextResponder" => next_responder, c"@16@0:8";
+        "setNextResponder:" => set_next_responder, c"v24@0:8@16";
+        "setInitialFirstResponder:" => set_initial_first_responder, c"v24@0:8@16";
         "toggleFullScreen:" => toggle_full_screen, c"v24@0:8@16";
         "validateMenuItem:" => validate_menu_item, c"c24@0:8@16";
         "isInFullScreenMode" => is_full_screen, c"c16@0:8";

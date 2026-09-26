@@ -243,6 +243,10 @@ fn target() -> Option<u32> {
 fn target_window() -> Option<sdl3::Window> {
     static WHICH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let which = WHICH.get_or_init(|| std::env::var(WINDOW_ENV).unwrap_or_default());
+    // A modal dialog is the only window taking input while it is up.
+    if let Some(dialog) = crate::dialog::modal_window() {
+        return Some(dialog);
+    }
     let chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match chosen.as_deref().unwrap_or(which) {
         // SAFETY: null or a window this crate made.
