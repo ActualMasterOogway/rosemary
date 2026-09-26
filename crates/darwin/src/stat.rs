@@ -1,6 +1,9 @@
 #![cfg(not(target_os = "macos"))]
 
-use std::{ffi::{CStr, c_char, c_int}, mem::MaybeUninit};
+use std::{
+    ffi::{CStr, c_char, c_int},
+    mem::MaybeUninit,
+};
 
 /// Darwin's `struct stat` as an x86-64 guest sees it - the `_DARWIN_FEATURE_64_BIT_INODE`
 /// layout, which is the only one arm64 and modern x86-64 code has.
