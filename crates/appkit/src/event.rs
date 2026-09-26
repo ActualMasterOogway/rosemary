@@ -25,6 +25,7 @@ pub fn pump(app: Id) {
     for hook in PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         hook();
     }
+    crate::application::check_last_window_closed();
     crate::backing::pump();
 }
 
@@ -234,11 +235,23 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
                 }
             }
         }
+        // The compositor's close button, or its shortcut, which is what the
+        // title bar's close button is on a Mac: `-performClose:`, so the
+        // delegate may refuse and `-close` does the rest.
         Event::WindowClosed { window } => {
             if crate::decor::window_closed(window) {
                 return;
             }
-            post(window, window::WILL_CLOSE);
+            let object = object_for(window);
+            if !object.is_null() {
+                // SAFETY: `-performClose:` is `void (id, SEL, id)` on a window
+                // this crate made.
+                unsafe {
+                    let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
+                        std::mem::transmute(objc::msg::entry());
+                    f(object, objc::sel::get("performClose:"), object);
+                }
+            }
         }
         Event::WindowHitTest { window } => crate::decor::hit_test_pressed(window),
         Event::WindowState { window } => {
@@ -992,6 +1005,12 @@ fn post(id: u32, name: &str) {
         }
         return;
     }
+    post_for(object, name);
+}
+
+/// Send the window notification `name` about `object` to its delegate and to
+/// observers.
+pub(crate) fn post_for(object: Id, name: &str) {
     let delegate = window::delegate_of(object);
     if tracing() {
         eprintln!("rosetta3: appkit: {name}: window {object:p}, delegate {delegate:p}");

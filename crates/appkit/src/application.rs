@@ -445,6 +445,54 @@ unsafe extern "C" fn terminate(receiver: Id, _sel: Sel, _sender: Id) {
     std::process::exit(0);
 }
 
+/// Set by `-[NSWindow close]` and taken by the event pump.
+static WINDOW_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A window closed; whether the application follows it is decided on the next
+/// turn of the event pump, as Apple defers it, so the program finishes the
+/// close it is in the middle of before `-terminate:` can end the process.
+pub(crate) fn window_closed() {
+    WINDOW_CLOSED.store(true, Ordering::Release);
+}
+
+/// Terminate if a window closed, none is left on screen, and the delegate's
+/// `-applicationShouldTerminateAfterLastWindowClosed:` says to.
+pub(crate) fn check_last_window_closed() {
+    if !WINDOW_CLOSED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let app = shared();
+    if app.is_null()
+        || crate::window::all()
+            .into_iter()
+            .any(crate::window::is_shown)
+    {
+        return;
+    }
+    // SAFETY: an application.
+    let delegate = unsafe { (*(app as *const Application)).delegate };
+    let sel = objc::sel::get("applicationShouldTerminateAfterLastWindowClosed:");
+    // SAFETY: null or a live object this runtime allocated.
+    let Some(method) = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel))
+    else {
+        return;
+    };
+    // SAFETY: the method is `BOOL (id, SEL, NSApplication *)`.
+    let quit = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> u8 =
+            std::mem::transmute(method.implementation());
+        f(delegate, sel, app)
+    };
+    if quit != 0 {
+        // SAFETY: `-terminate:` is `void (id, SEL, id)`; sent so a subclass's
+        // override runs.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            f(app, objc::sel::get("terminate:"), app);
+        }
+    }
+}
+
 /// `-activateIgnoringOtherApps:`, which has nothing to activate yet.
 ///
 /// Present rather than absent because every Cocoa `main` calls it, and a refusal

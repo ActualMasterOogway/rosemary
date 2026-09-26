@@ -1249,9 +1249,13 @@ unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
+/// `-close`: the delegate hears `-windowWillClose:` while the window is still
+/// on screen, and the application then decides whether that was its last one.
 unsafe extern "C" fn close(receiver: Id, sel: Sel) {
+    crate::event::post_for(receiver, WILL_CLOSE);
     // SAFETY: `-orderOut:` is `void (id, SEL, id)`.
     unsafe { order_out(receiver, sel, std::ptr::null_mut()) };
+    crate::application::window_closed();
 }
 
 /// Consult the delegate before closing, falling back to the window itself.
@@ -2309,6 +2313,35 @@ mod tests {
             send(plain, sel, std::ptr::null_mut());
             assert_eq!(window_of(plain).shown, 0);
         }
+    }
+
+    #[test]
+    fn close_tells_the_delegate_the_window_will_close() {
+        crate::bootstrap();
+        static TOLD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn will_close(_receiver: Id, _sel: Sel, notification: Id) {
+            assert!(!notification.is_null());
+            TOLD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let class =
+            objc::class::allocate_pair(objc::class::lookup(c"NSObject"), c"WillCloseDelegate", 0)
+                .unwrap();
+        class.add_method(
+            objc::sel::get("windowWillClose:"),
+            will_close as objc::class::Imp,
+            c"v24@0:8@16",
+        );
+        objc::class::register_pair(class);
+        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+        window_of(window).delegate = objc::object::create_instance(class, 0);
+        window_of(window).shown = 1;
+        // SAFETY: a live runtime window; `-close` is `void (id, SEL)`.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+            send(window, objc::sel::get("close"));
+        }
+        assert_eq!(TOLD.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(window_of(window).shown, 0);
     }
 
     static REDIRECT: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
