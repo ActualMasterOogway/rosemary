@@ -274,6 +274,13 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 post(window, name);
             }
         }
+        // A program that keeps its own copy of where its window is - a Win32
+        // layer mapping client rectangles to the desktop does - learns of a move
+        // from this alone. On Wayland SDL first reports the position it was
+        // asked for and corrects it once the compositor has placed the window;
+        // a missed correction leaves that copy out by the difference, and every
+        // pointer position the program checks against it with it.
+        Event::WindowMoved { window } => post(window, window::DID_MOVE),
         Event::WindowResized { window, .. } => {
             // The content view follows the window, as it does on
             // `-setContentView:` and for the same reason: a view that kept its
@@ -331,6 +338,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 // SDL drops relative mouse mode when focus goes, and a window
                 // made while the guest was disassociated never entered it.
                 crate::screen::apply_mouse_association();
+                // SAFETY: a window this crate made.
+                let sdl = unsafe { window::sdl_window(object) };
+                if !sdl.is_null() {
+                    crate::screen::confine_pointer(sdl);
+                }
             }
             post(
                 window,

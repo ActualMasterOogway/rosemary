@@ -1055,6 +1055,25 @@ pub fn mouse_is_associated() -> bool {
     ASSOCIATED.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// `ROSETTA3_CONFINE_POINTER=1`: keep the pointer inside whichever window has
+/// focus.
+///
+/// FIXME (ACCURACY): a workaround, not AppKit. Some ports confine the cursor
+/// with a Win32 `ClipCursor` emulation that only clamps once and relies on
+/// macOS delivering drags outside the window to warp it back; Wayland neither
+/// delivers those nor lets a warp reach a pointer outside the window. Life Is
+/// Strange's drag interactions stop short without this, on macOS too.
+pub const CONFINE_ENV: &str = "ROSETTA3_CONFINE_POINTER";
+
+/// Confine the pointer to `window` if [`CONFINE_ENV`] asks for it.
+pub fn confine_pointer(window: sdl3::Window) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var_os(CONFINE_ENV).is_some_and(|v| v != "0"));
+    if on {
+        sdl3::video::set_mouse_grab(window, true);
+    }
+}
+
 /// Put every window into relative mouse mode, or take it out, to match the last
 /// [`CGAssociateMouseAndMouseCursorPosition`].
 ///
