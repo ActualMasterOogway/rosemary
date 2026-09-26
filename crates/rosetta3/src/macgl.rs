@@ -5,9 +5,11 @@
 //! newest core context instead, and a Mac program was never tested against
 //! what that advertises: Feral's GL layer switches to direct state access when
 //! it sees `GL_ARB_direct_state_access`, and on that path unmaps buffers through
-//! the wrong entry point. So a core context reports the Mac's version and the
-//! Mac's extensions - those the host also has - and the driver is unchanged
-//! underneath. Compatibility contexts are passed through as they are.
+//! the wrong entry point. So a core context reports the Mac's extensions -
+//! those the host also has - and, where the driver's version is newer, the
+//! Mac's version, and the driver is unchanged underneath. That holds whatever
+//! version the driver made: NVIDIA's 4.1 or 3.2 still lists every extension it
+//! has. Compatibility contexts are passed through as they are.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
@@ -112,30 +114,38 @@ fn parse_version(text: &str) -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-/// Whether the current context is a core profile newer than the Mac's. Asked
-/// in an order that raises no GL error: the profile mask is only queried where
-/// the version says it exists.
-fn capped() -> bool {
+/// The driver's version, if the current context is a core profile. Asked in an
+/// order that raises no GL error: the profile mask is only queried where the
+/// version says it exists.
+fn core_version() -> Option<(u32, u32)> {
     let (Some(get_string), Some(get_integerv)) = (real_get_string(), real_get_integerv()) else {
-        return false;
+        return None;
     };
     // SAFETY: a GL enumerator, answered with a static string or null.
     let text = unsafe { get_string(VERSION) };
     if text.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: the driver's NUL-terminated string.
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    let Some(version) = parse_version(&text) else {
-        return false;
-    };
-    if version <= MAC_CORE {
-        return false;
+    let version = parse_version(&text)?;
+    if version < (3, 2) {
+        return None;
     }
     let mut mask = 0;
-    // SAFETY: a writable int; the mask exists in every version above 3.2.
+    // SAFETY: a writable int; the mask exists from 3.2 on.
     unsafe { get_integerv(CONTEXT_PROFILE_MASK, &mut mask) };
-    mask & CONTEXT_CORE_PROFILE_BIT != 0
+    (mask & CONTEXT_CORE_PROFILE_BIT != 0).then_some(version)
+}
+
+/// Whether the current context lists the Mac's extensions.
+fn filtered() -> bool {
+    core_version().is_some()
+}
+
+/// Whether the current context also reports the Mac's version.
+fn capped() -> bool {
+    core_version().is_some_and(|version| version > MAC_CORE)
 }
 
 /// `text` with its leading version number replaced by the Mac's.
@@ -188,6 +198,12 @@ unsafe extern "C" fn get_string(name: u32) -> *const c_char {
     let Some(real) = real_get_string() else {
         return std::ptr::null();
     };
+    // A core context has no extension string; NVIDIA's answers with every
+    // extension anyway. The driver raises the `GL_INVALID_ENUM` a Mac's would.
+    if name == EXTENSIONS && filtered() {
+        // SAFETY: an enumerator no driver accepts.
+        return unsafe { real(0) };
+    }
     // SAFETY: the guest's call, passed on.
     let answer = unsafe { real(name) };
     if answer.is_null() || !matches!(name, VERSION | SHADING_LANGUAGE_VERSION) || !capped() {
@@ -206,7 +222,7 @@ unsafe extern "C" fn get_stringi(name: u32, index: u32) -> *const c_char {
     let Some(real) = real_get_stringi() else {
         return std::ptr::null();
     };
-    if name != EXTENSIONS || !capped() {
+    if name != EXTENSIONS || !filtered() {
         // SAFETY: the guest's call, passed on.
         return unsafe { real(name, index) };
     }
@@ -225,14 +241,12 @@ unsafe extern "C" fn get_integerv(name: u32, out: *mut i32) {
     };
     // SAFETY: the guest's call, passed on.
     unsafe { real(name, out) };
-    if out.is_null() || !matches!(name, NUM_EXTENSIONS | MAJOR_VERSION | MINOR_VERSION) || !capped()
-    {
-        return;
-    }
     let value = match name {
-        NUM_EXTENSIONS => mac_extension_indices().len() as i32,
-        MAJOR_VERSION => MAC_CORE.0 as i32,
-        _ => MAC_CORE.1 as i32,
+        _ if out.is_null() => return,
+        NUM_EXTENSIONS if filtered() => mac_extension_indices().len() as i32,
+        MAJOR_VERSION if capped() => MAC_CORE.0 as i32,
+        MINOR_VERSION if capped() => MAC_CORE.1 as i32,
+        _ => return,
     };
     // SAFETY: the guest's writable int, just written by the driver.
     unsafe { out.write(value) };
