@@ -232,6 +232,7 @@ struct Api {
     SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
+    SDL_GetKeyFromScancode: Option<unsafe extern "C" fn(u32, u16, bool) -> u32>,
     SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetSystemTheme: Option<unsafe extern "C" fn() -> c_int>,
     SDL_GetCurrentVideoDriver: Option<unsafe extern "C" fn() -> *const c_char>,
@@ -447,6 +448,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowRelativeMouseMode,
             SDL_GetWindowRelativeMouseMode,
             SDL_GetModState,
+            SDL_GetKeyFromScancode,
             SDL_SetHint,
             SDL_GetSystemTheme,
             SDL_GetCurrentVideoDriver,
@@ -2785,6 +2787,16 @@ pub mod video {
         api()
             .and_then(|a| a.SDL_GetModState)
             .map_or(0, |f| unsafe { f() })
+    }
+
+    /// The keycode the current layout produces for `scancode` with `modifiers`
+    /// held, or `None` when SDL cannot say.
+    pub fn key_from_scancode(scancode: u32, modifiers: u16) -> Option<u32> {
+        let f = api()?.SDL_GetKeyFromScancode?;
+        // Not `key_event`: that asks for what a key event would carry, which
+        // SDL leaves unshifted by default, so Shift-/ would still be "/".
+        // SAFETY: plain values in, a keycode out.
+        Some(unsafe { f(scancode, modifiers, false) })
     }
 
     /// The pointer in desktop coordinates, and which buttons are down.

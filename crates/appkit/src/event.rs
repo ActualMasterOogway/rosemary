@@ -342,9 +342,12 @@ pub(crate) fn deliver(event: sdl3::video::Event) {
             if crate::decor::key(scancode, down) {
                 return;
             }
+            let text = crate::keymap::characters(
+                scancode,
+                crate::keymap::typed_key(scancode, key, modifiers),
+            );
             let modifiers = crate::keymap::modifiers(modifiers);
             let code = crate::keymap::virtual_key(scancode);
-            let text = crate::keymap::characters(scancode, key);
             if down && !crate::keymap::is_modifier(scancode) {
                 let window = object_for(id);
                 crate::text::begin_key_interpretation(responder_of(window));
