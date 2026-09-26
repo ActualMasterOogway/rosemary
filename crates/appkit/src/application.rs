@@ -200,6 +200,9 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
         unsafe { send_if_implemented(delegate, selector, notification) };
         foundation::notification::post(name, receiver, std::ptr::null_mut());
     }
+    // After the delegate has built its menus, and before any key press, so
+    // Control-Command-F works without the menu having been opened.
+    crate::menu::add_full_screen_item();
 }
 
 /// The URLs this launch was asked to open, in the order they were given.

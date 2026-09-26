@@ -1080,10 +1080,13 @@ fn panel_item(item: Id) -> Item {
         return Item::separator();
     }
     let submenu = !crate::menu::submenu_of(item).is_null();
+    // Validation first: a validator may retitle the item, as a window does
+    // "Enter Full Screen".
+    let enabled = crate::menu::is_item_enabled(item);
     Item {
         title: crate::menu::display_title(item),
         shortcut: crate::menu::shortcut_label(item),
-        enabled: crate::menu::is_item_enabled(item),
+        enabled,
         state: match crate::menu::state_of(item) {
             1 => chrome::menu::State::On,
             -1 => chrome::menu::State::Mixed,

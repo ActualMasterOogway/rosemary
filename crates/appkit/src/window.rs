@@ -1739,6 +1739,48 @@ unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
     }
 }
 
+/// The `NSWindowCollectionBehavior` bits that decide full screen.
+mod behavior {
+    pub const FULL_SCREEN_PRIMARY: usize = 1 << 7;
+    pub const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    pub const FULL_SCREEN_NONE: usize = 1 << 9;
+}
+
+/// Whether the window may go full screen: one that opted in, or, as AppKit has
+/// defaulted to since 10.11, any resizable window that did not opt out.
+fn can_go_full_screen(window: &Window) -> bool {
+    use behavior::*;
+    let behavior = window.collection_behavior;
+    behavior & (FULL_SCREEN_NONE | FULL_SCREEN_AUXILIARY) == 0
+        && (behavior & FULL_SCREEN_PRIMARY != 0 || window.style_mask & style::RESIZABLE != 0)
+}
+
+/// `-validateMenuItem:`: AppKit's window retitles the full-screen item for the
+/// way it would go, and enables it only for a window that can go full screen.
+/// Every other item the window is sent stays enabled.
+unsafe extern "C" fn validate_menu_item(receiver: Id, _sel: Sel, item: Id) -> u8 {
+    // SAFETY: a menu item answers `-action`, which is `SEL (id, SEL)`.
+    let action = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> Sel = std::mem::transmute(objc::msg::entry());
+        f(item, objc::sel::get("action"))
+    };
+    if !std::ptr::eq(action, objc::sel::get("toggleFullScreen:")) {
+        return 1;
+    }
+    let window = window_of(receiver);
+    let title = foundation::string::from_str(match window.fullscreen != 0 {
+        true => "Exit Full Screen",
+        false => "Enter Full Screen",
+    });
+    // SAFETY: `-setTitle:` is `void (id, SEL, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(item, objc::sel::get("setTitle:"), title);
+    }
+    objc::arc::release(title);
+    (window.fullscreen != 0 || can_go_full_screen(window)) as u8
+}
+
 unsafe extern "C" fn is_full_screen(receiver: Id, _sel: Sel) -> u8 {
     (window_of(receiver).fullscreen != 0) as u8
 }
@@ -2043,6 +2085,7 @@ pub(crate) fn install() {
         "firstResponder" => first_responder, c"@16@0:8";
         "makeFirstResponder:" => make_first_responder, c"c24@0:8@16";
         "toggleFullScreen:" => toggle_full_screen, c"v24@0:8@16";
+        "validateMenuItem:" => validate_menu_item, c"c24@0:8@16";
         "isInFullScreenMode" => is_full_screen, c"c16@0:8";
         "minSize" => min_size, c"{CGSize=dd}16@0:8";
         "setMinSize:" => set_min_size, c"v32@0:8{CGSize=dd}16";
