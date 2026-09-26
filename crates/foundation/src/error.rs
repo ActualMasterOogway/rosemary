@@ -75,9 +75,8 @@ unsafe fn from_parts(domain: Id, code: i64, info: Id) -> Id {
         .then(|| {
             let key = crate::string::from_str("NSLocalizedDescription");
             // SAFETY: a dictionary and a key this call owns.
-            let value = unsafe {
-                corefoundation::api::CFDictionaryGetValue(info as _, key as _) as Id
-            };
+            let value =
+                unsafe { corefoundation::api::CFDictionaryGetValue(info as _, key as _) as Id };
             unsafe { corefoundation::api::CFRelease(key as _) };
             unsafe { string_text(value) }
         })
@@ -93,12 +92,24 @@ unsafe fn from_parts(domain: Id, code: i64, info: Id) -> Id {
     })
 }
 
-unsafe extern "C" fn error_with_domain(_class: Id, _sel: Sel, domain: Id, code: i64, info: Id) -> Id {
+unsafe extern "C" fn error_with_domain(
+    _class: Id,
+    _sel: Sel,
+    domain: Id,
+    code: i64,
+    info: Id,
+) -> Id {
     // SAFETY: the caller's string and dictionary.
     objc::arc::autorelease(unsafe { from_parts(domain, code, info) })
 }
 
-unsafe extern "C" fn init_with_domain(receiver: Id, _sel: Sel, domain: Id, code: i64, info: Id) -> Id {
+unsafe extern "C" fn init_with_domain(
+    receiver: Id,
+    _sel: Sel,
+    domain: Id,
+    code: i64,
+    info: Id,
+) -> Id {
     objc::arc::release(receiver);
     // SAFETY: as above.
     unsafe { from_parts(domain, code, info) }

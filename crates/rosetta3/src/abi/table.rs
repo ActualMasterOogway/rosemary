@@ -284,7 +284,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioUnitSetParameter", I32, P, U32, U32, U32, F32, U32),
     // The listener is never called, so it need not cross as a thunk.
     sig!("AudioUnitAddPropertyListener", I32, P, U32, P, P),
-    sig!("AudioUnitRemovePropertyListenerWithUserData", I32, P, U32, P, P),
+    sig!(
+        "AudioUnitRemovePropertyListenerWithUserData",
+        I32,
+        P,
+        U32,
+        P,
+        P
+    ),
     sig!("AudioUnitReset", I32, P, U32, U32),
     //
     // `FillComplexBuffer`'s second argument is the guest's input callback, which
@@ -409,7 +416,17 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFURLGetFSRef", BOOL, P, P),
     sig!("CFRunLoopTimerGetContext", V, P, P),
     sig!("CFURLCreateBookmarkData", P, P, P, U64, P, P, P),
-    sig!("CFURLCreateByResolvingBookmarkData", P, P, P, U64, P, P, P, P),
+    sig!(
+        "CFURLCreateByResolvingBookmarkData",
+        P,
+        P,
+        P,
+        U64,
+        P,
+        P,
+        P,
+        P
+    ),
     sig!("CFURLWriteBookmarkDataToFile", BOOL, P, P, U64, P),
     sig!("CFURLCreateBookmarkDataFromFile", P, P, P, P),
     sig!("CFUUIDGetTypeID", U64),

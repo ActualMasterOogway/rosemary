@@ -399,8 +399,11 @@ pub unsafe extern "C" fn CFStringGetCString(
             return 0;
         }
         e if crate::eightbit::is_table(e) => {
-            let encoded: Option<Vec<u8>> =
-                s.units().into_iter().map(|u| crate::eightbit::encode(u, e)).collect();
+            let encoded: Option<Vec<u8>> = s
+                .units()
+                .into_iter()
+                .map(|u| crate::eightbit::encode(u, e))
+                .collect();
             match encoded {
                 Some(bytes) => bytes,
                 None => return 0,
@@ -583,7 +586,9 @@ unsafe fn get_bytes_by_character(
             && (0xDC00..0xE000).contains(&units[at + 1]);
         let span = 1 + pair as usize;
         let piece: Option<Vec<u8>> = match encoding {
-            string::encoding::UTF8 => Some(String::from_utf16_lossy(&units[at..at + span]).into_bytes()),
+            string::encoding::UTF8 => {
+                Some(String::from_utf16_lossy(&units[at..at + span]).into_bytes())
+            }
             _ if pair => None,
             code => crate::eightbit::encode(units[at], code).map(|b| vec![b]),
         };
@@ -1812,7 +1817,8 @@ pub unsafe extern "C" fn CFURLCreateFromFSRef(
     };
     let path = String::from_utf8_lossy(&bytes[..end]);
     // The path is the guest's spelling; the host's answers whether it is a folder.
-    let directory = std::fs::metadata(prefix::ns::host_path(&path)).is_ok_and(|metadata| metadata.is_dir());
+    let directory =
+        std::fs::metadata(prefix::ns::host_path(&path)).is_ok_and(|metadata| metadata.is_dir());
     crate::url::new_file_url(&path, directory)
 }
 
@@ -2852,7 +2858,10 @@ pub unsafe extern "C" fn CFRunLoopRemoveTimer(loop_: CFTypeRef, timer: CFTypeRef
 ///
 /// The `info` word as given. The context's retain, release and description
 /// callbacks are not kept past creation, so they come back null.
-pub unsafe extern "C" fn CFRunLoopTimerGetContext(timer: CFTypeRef, context: *mut CFRunLoopTimerContext) {
+pub unsafe extern "C" fn CFRunLoopTimerGetContext(
+    timer: CFTypeRef,
+    context: *mut CFRunLoopTimerContext,
+) {
     let (Some(t), false) = (unsafe { borrow::<Timer>(timer) }, context.is_null()) else {
         return;
     };

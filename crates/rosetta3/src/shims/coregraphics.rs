@@ -136,8 +136,16 @@ fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMem
 /// rectangle with a negative size equals the one it describes.
 fn rect_equal(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let standard = |r: CgRect| {
-        let (x, width) = if r.width < 0.0 { (r.x + r.width, -r.width) } else { (r.x, r.width) };
-        let (y, height) = if r.height < 0.0 { (r.y + r.height, -r.height) } else { (r.y, r.height) };
+        let (x, width) = if r.width < 0.0 {
+            (r.x + r.width, -r.width)
+        } else {
+            (r.x, r.width)
+        };
+        let (y, height) = if r.height < 0.0 {
+            (r.y + r.height, -r.height)
+        } else {
+            (r.y, r.height)
+        };
         [x, y, width, height]
     };
     let a = standard(rect_argument(symbol, ctx, mem, 0)?);

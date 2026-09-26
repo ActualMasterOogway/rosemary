@@ -317,7 +317,10 @@ pub unsafe extern "C" fn CGGetDisplayTransferByTable(
 ) -> i32 {
     let size = capacity.min(1024) as usize;
     let tables = GAMMA.lock().unwrap_or_else(|e| e.into_inner());
-    let set = tables.iter().find(|(d, _)| *d == display).map(|(_, t)| t.clone());
+    let set = tables
+        .iter()
+        .find(|(d, _)| *d == display)
+        .map(|(_, t)| t.clone());
     drop(tables);
     // Identity until a program sets one, sampled to the caller's size.
     let sample = |channel: usize, at: usize| -> f32 {

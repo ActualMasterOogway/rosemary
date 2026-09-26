@@ -387,7 +387,10 @@ struct NotificationPort {
 /// `GetMachPort`, `AddMatchingNotification` - are made without checking, and a
 /// null here faults inside the first of them rather than saying anything.
 pub unsafe extern "C" fn IONotificationPortCreate(_port: u32) -> *mut c_void {
-    Box::into_raw(Box::new(NotificationPort { source: std::ptr::null() })).cast()
+    Box::into_raw(Box::new(NotificationPort {
+        source: std::ptr::null(),
+    }))
+    .cast()
 }
 
 /// `void IONotificationPortDestroy(IONotificationPortRef)`.
@@ -431,7 +434,8 @@ pub unsafe extern "C" fn IONotificationPortGetRunLoopSource(port: *mut c_void) -
             perform: None,
         };
         // SAFETY: a context that outlives the call, which copies it.
-        port.source = unsafe { corefoundation::api::CFRunLoopSourceCreate(std::ptr::null(), 0, &context) };
+        port.source =
+            unsafe { corefoundation::api::CFRunLoopSourceCreate(std::ptr::null(), 0, &context) };
     }
     port.source
 }
@@ -474,7 +478,11 @@ pub unsafe extern "C" fn IOServiceNameMatching(name: *const c_char) -> CFTypeRef
 }
 
 /// `CFMutableDictionaryRef IOBSDNameMatching(mach_port_t, uint32_t, const char *)`.
-pub unsafe extern "C" fn IOBSDNameMatching(_port: u32, _options: u32, name: *const c_char) -> CFTypeRef {
+pub unsafe extern "C" fn IOBSDNameMatching(
+    _port: u32,
+    _options: u32,
+    name: *const c_char,
+) -> CFTypeRef {
     // SAFETY: the caller's C string.
     unsafe { matching_on(b"BSD Name", name) }
 }
@@ -559,7 +567,10 @@ pub unsafe extern "C" fn IORegisterForSystemPower(
 
 /// `IOReturn IOAllowPowerChange(io_connect_t, intptr_t)` and
 /// `IOCancelPowerChange`: answers to a notification that never comes.
-pub unsafe extern "C" fn IOAllowPowerChange(_kernel_port: IoObject, _notification: isize) -> IOReturn {
+pub unsafe extern "C" fn IOAllowPowerChange(
+    _kernel_port: IoObject,
+    _notification: isize,
+) -> IOReturn {
     SUCCESS
 }
 

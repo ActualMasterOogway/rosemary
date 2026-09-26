@@ -380,7 +380,9 @@ unsafe extern "C" fn data_with_contents_of_file_options(
         // `NSError **`.
         unsafe {
             *error = match data.is_null() {
-                true => crate::error::make("NSCocoaErrorDomain", 260, "The file couldn't be opened."),
+                true => {
+                    crate::error::make("NSCocoaErrorDomain", 260, "The file couldn't be opened.")
+                }
                 false => std::ptr::null_mut(),
             };
         }
@@ -1014,7 +1016,12 @@ unsafe extern "C" fn data_init_with_data(receiver: Id, _sel: Sel, other: Id) -> 
     replace_receiver(receiver, unsafe { data_contents(other) }.to_vec())
 }
 
-unsafe extern "C" fn data_init_with_bytes(receiver: Id, _sel: Sel, bytes: *const u8, length: usize) -> Id {
+unsafe extern "C" fn data_init_with_bytes(
+    receiver: Id,
+    _sel: Sel,
+    bytes: *const u8,
+    length: usize,
+) -> Id {
     // SAFETY: the caller says `bytes` covers `length` bytes.
     replace_receiver(receiver, unsafe { raw(bytes, length) }.to_vec())
 }
@@ -1038,7 +1045,12 @@ unsafe extern "C" fn data_init_no_copy_free(
     replace_receiver(receiver, copy)
 }
 
-unsafe extern "C" fn data_init_no_copy(receiver: Id, sel: Sel, bytes: *mut u8, length: usize) -> Id {
+unsafe extern "C" fn data_init_no_copy(
+    receiver: Id,
+    sel: Sel,
+    bytes: *mut u8,
+    length: usize,
+) -> Id {
     // SAFETY: forwarded; `-initWithBytesNoCopy:length:` frees when done.
     unsafe { data_init_no_copy_free(receiver, sel, bytes, length, true) }
 }
@@ -1079,7 +1091,11 @@ unsafe extern "C" fn data_copy(receiver: Id, _sel: Sel) -> Id {
     collections::new_data(unsafe { data_contents(receiver) }.to_vec()) as Id
 }
 
-unsafe extern "C" fn data_copy_with_zone(receiver: Id, sel: Sel, _zone: *mut std::ffi::c_void) -> Id {
+unsafe extern "C" fn data_copy_with_zone(
+    receiver: Id,
+    sel: Sel,
+    _zone: *mut std::ffi::c_void,
+) -> Id {
     // SAFETY: forwarded.
     unsafe { data_copy(receiver, sel) }
 }
@@ -1124,7 +1140,10 @@ unsafe extern "C" fn data_get_bytes(receiver: Id, sel: Sel, out: *mut u8) {
 /// `receiver` is a data object.
 unsafe fn data_range<'a>(receiver: Id, location: usize, length: usize, what: &str) -> &'a [u8] {
     let bytes = unsafe { data_contents(receiver) };
-    match location.checked_add(length).filter(|end| *end <= bytes.len()) {
+    match location
+        .checked_add(length)
+        .filter(|end| *end <= bytes.len())
+    {
         Some(end) => &bytes[location..end],
         None => objc::fail!(
             "{what}: range {{{location}, {length}}} exceeds data length {}",
@@ -1150,7 +1169,9 @@ unsafe extern "C" fn data_get_bytes_range(
 
 unsafe extern "C" fn data_subdata(receiver: Id, _sel: Sel, location: usize, length: usize) -> Id {
     // SAFETY: a data object.
-    autoreleased_data(unsafe { data_range(receiver, location, length, "-subdataWithRange:") }.to_vec())
+    autoreleased_data(
+        unsafe { data_range(receiver, location, length, "-subdataWithRange:") }.to_vec(),
+    )
 }
 
 unsafe extern "C" fn data_set_length(receiver: Id, _sel: Sel, length: usize) {
@@ -1184,7 +1205,14 @@ unsafe extern "C" fn data_replace_bytes(
     with: *const u8,
 ) {
     // SAFETY: a data object; `with` covers `length` bytes by contract.
-    unsafe { data_range(receiver, location, length, "-replaceBytesInRange:withBytes:") };
+    unsafe {
+        data_range(
+            receiver,
+            location,
+            length,
+            "-replaceBytesInRange:withBytes:",
+        )
+    };
     let replacement = unsafe { raw(with, length) }.to_vec();
     if let Some(bytes) = unsafe { collections::data(receiver as CFTypeRef) } {
         bytes[location..location + length].copy_from_slice(&replacement);

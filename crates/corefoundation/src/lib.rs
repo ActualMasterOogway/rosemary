@@ -12,8 +12,8 @@ pub mod base;
 pub mod calendar;
 pub mod callbacks;
 pub mod collections;
-pub mod eightbit;
 mod diskarbitration;
+pub mod eightbit;
 /// Only on Darwin: nowhere else is there another CoreFoundation to meet.
 #[cfg(target_os = "macos")]
 pub mod foreign;
