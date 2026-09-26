@@ -60,9 +60,8 @@ fn asker(gui: bool) -> impl FnMut(&Request) -> Answer {
                 return ask_on_terminal(request);
             }
             eprintln!(
-                "rosetta3: the Darwin base is not cached, and there is nobody to ask before \
-                 downloading it. Run `rosetta3 prefix create`, or set \
-                 ROSETTA3_PREFIX_SETUP=download."
+                "rosetta3: couldn't show a download dialog for the Darwin base system. \
+                Run `rosetta3 prefix create`, or set ROSETTA3_PREFIX_SETUP=download."
             );
             Answer::Decline
         }
@@ -76,7 +75,7 @@ fn question(request: &Request) -> String {
         .unwrap_or_else(|| "an unknown amount".into());
     format!(
         "This prefix needs a Darwin base system:\n  {}\n\n\
-         That is {size} from\n  {}\n\n\
+         This will download {size} from\n  {}\n\n\
          It is checked against hashes built into Rosetta 3 before anything uses it, \
          and kept in a cache so it never has to be downloaded again.",
         request.spec.describe(),
