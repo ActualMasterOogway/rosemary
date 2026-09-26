@@ -213,6 +213,8 @@ exports::exports! {
         "CFDataCreateMutable" => api::CFDataCreateMutable,
         "CFDataGetBytes" => api::CFDataGetBytes,
         "CFStringGetSystemEncoding" => api::CFStringGetSystemEncoding,
+        "CFStringConvertWindowsCodepageToEncoding" => api::CFStringConvertWindowsCodepageToEncoding,
+        "CFStringConvertIANACharSetNameToEncoding" => api::CFStringConvertIANACharSetNameToEncoding,
         "CFArrayContainsValue" => api::CFArrayContainsValue,
         "CFArrayAppendArray" => api::CFArrayAppendArray,
         "CFRunLoopRemoveSource" => api::CFRunLoopRemoveSource,
@@ -224,6 +226,7 @@ exports::exports! {
         "CFRunLoopRemoveTimer" => api::CFRunLoopRemoveTimer,
         "CFRunLoopTimerInvalidate" => api::CFRunLoopTimerInvalidate,
         "CFRunLoopTimerIsValid" => api::CFRunLoopTimerIsValid,
+        "CFRunLoopGetNextTimerFireDate" => api::CFRunLoopGetNextTimerFireDate,
     }
     groups {
         calendar,

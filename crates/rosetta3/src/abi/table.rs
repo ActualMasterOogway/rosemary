@@ -526,6 +526,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRunLoopAddSource", V, P, P, P),
     sig!("CFRunLoopGetCurrent", P),
     sig!("CFRunLoopGetMain", P),
+    sig!("CFRunLoopGetNextTimerFireDate", F64, P, P),
     // `void CFRunLoopRun(void)` - no parameters.
     sig!("CFRunLoopRun", V),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
@@ -589,6 +590,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringConvertEncodingToNSStringEncoding", U64, U32),
     sig!("CFStringConvertIANACharSetNameToEncoding", U32, P),
     sig!("CFStringConvertNSStringEncodingToEncoding", U32, U64),
+    sig!("CFStringConvertWindowsCodepageToEncoding", U32, U32),
     sig!("CFStringCreateWithCharacters", P, P, P, I64),
     sig!("CFStringCreateWithCharactersNoCopy", P, P, P, I64, P),
     sig!("CFStringCreateWithCString", P, P, P, U32),
@@ -854,6 +856,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGShieldingWindowLevel", I32),
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
     sig!("CGWarpMouseCursorPosition", I32, F64, F64),
+    sig!("CGSetLocalEventsSuppressionInterval", I32, F64),
     sig!("CGWindowLevelForKey", I32, I32),
     sig!("CGColorGetConstantColor", P, P),
     sig!("CGColorCreateCopy", P, P),
@@ -1256,6 +1259,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecItemCopyMatching", I32, P, P),
     sig!("SecItemDelete", I32, P),
     sig!("SecItemUpdate", I32, P, P),
+    sig!("SecCertificateCreateWithData", P, P, P),
+    sig!("SecPolicyCreateBasicX509", P),
+    sig!("SecTrustCreateWithCertificates", I32, P, P, P),
+    sig!("SecTrustSetOptions", I32, P, U32),
+    sig!("SecTrustEvaluate", I32, P, P),
+    sig!("SecRandomCopyBytes", I32, P, U64, P),
     //
     // `SCDynamicStoreCreate`'s third argument is a callback the host invokes on
     // the run loop when a watched key changes; its fourth is an

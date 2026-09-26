@@ -982,6 +982,25 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     0
 }
 
+/// `CGError CGSetLocalEventsSuppressionInterval(CFTimeInterval)`.
+///
+/// How long real mouse input is ignored after a warp. [`CGWarpMouseCursorPosition`]
+/// never suppresses anything, which is the interval games set - zero, so mouse
+/// look keeps its deltas. Any other interval is reported once rather than kept.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32 {
+    static TOLD: std::sync::Once = std::sync::Once::new();
+    if seconds != 0.0 {
+        TOLD.call_once(|| {
+            eprintln!(
+                "rosetta3: appkit: CGSetLocalEventsSuppressionInterval({seconds}) is not honoured; \
+                 input is never suppressed after a warp"
+            )
+        });
+    }
+    0
+}
+
 fn local_warp_point(point: (f32, f32), origin: (i32, i32)) -> (f32, f32) {
     (point.0 - origin.0 as f32, point.1 - origin.1 as f32)
 }

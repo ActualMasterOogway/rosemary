@@ -70,6 +70,7 @@ pub mod objcexc;
 
 /// `OpenGL.framework`, bound to the GL library SDL is using.
 pub mod glsl;
+pub mod macgl;
 pub mod openal;
 pub mod opengl;
 
