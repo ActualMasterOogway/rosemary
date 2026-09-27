@@ -3063,6 +3063,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("thread_set_state", I32, U32, I32, P, U32),
     sig!("thread_suspend", I32, U32),
     sig!("time", I64, P),
+    sig!("timingsafe_bcmp", I32, P, P, U64),
     sig!("timegm", I64, P),
     // The other spellings; see `_tlv_bootstrap` and `_tlv_atexit` above.
     cbsig!([0], "tlv_atexit", V, P, P),
