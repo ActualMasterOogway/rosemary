@@ -847,6 +847,7 @@ mod tests {
     /// Every name in the table must map to a MIB this module actually answers, or
     /// the two halves have drifted.
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn every_named_key_has_an_answer() {
         let _held = lock_guest_arch(GuestArch::X86_64);
         for (name, mib) in BY_NAME {

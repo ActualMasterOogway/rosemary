@@ -3884,12 +3884,24 @@ mod tests {
         // these declare more arguments than the prototype has, deliberately.
         const SPLIT_AGGREGATES: &[&str] = &[
             "CFArrayApplyFunction",
+            "CFDataDeleteBytes",
+            "CFDataReplaceBytes",
             "CFStringGetBytes",
+            "CFStringCompareWithOptions",
+            "CFStringFindWithOptions",
+            "CFStringCreateWithSubstring",
+            "CFStringGetCharacters",
+            "CFStringDelete",
+            "CFStringReplace",
+            "CFStringFindAndReplace",
             "cabs",
             // A `CGPoint` written out as its two `double`s.
             "CGDisplayMoveCursorToPoint",
             "CGWarpMouseCursorPosition",
         ];
+        // Clang treats these names as its three-argument builtins. The runtime
+        // table describes compiler-rt's four-argument generic functions.
+        const COMPILER_RT_GENERIC: &[&str] = &["__atomic_load", "__atomic_store"];
 
         let mut source = String::from(HEADERS);
         source.push_str("void probe(void) {\n");
@@ -3898,7 +3910,11 @@ mod tests {
         for abi in SIGNATURES {
             // A `$`-suffixed spelling is not a C identifier, and a variadic's
             // last "parameter" is the ellipsis its shim consumes.
-            if abi.name.contains('$') || abi.variadic || SPLIT_AGGREGATES.contains(&abi.name) {
+            if abi.name.contains('$')
+                || abi.variadic
+                || SPLIT_AGGREGATES.contains(&abi.name)
+                || COMPILER_RT_GENERIC.contains(&abi.name)
+            {
                 continue;
             }
             let args = vec!["0"; abi.types.len() - 1].join(",");

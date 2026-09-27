@@ -650,8 +650,8 @@ fn life(cookie: &Cookie) -> String {
 fn attributes(header: &str) -> String {
     let mut parts = header.split(';');
     let first = parts.next().unwrap_or_default();
-    let name = first.split_once('=').map_or(first, |(name, _)| name);
-    std::iter::once(format!("{}=<{} bytes>", name.trim(), first.len()))
+    let (name, value) = first.split_once('=').unwrap_or((first, ""));
+    std::iter::once(format!("{}=<{} bytes>", name.trim(), value.len()))
         .chain(parts.map(|a| a.trim().to_string()))
         .collect::<Vec<_>>()
         .join("; ")
