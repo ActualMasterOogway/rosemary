@@ -128,12 +128,7 @@ impl Native {
         crate::opengl::deny_host_gl(&mut host);
 
         let eager = eager_binding_shims();
-        // The thread-local bootstrap comes from here rather than from a
-        // provider of its own: `HostProviders::chain` reaches the same one for
-        // a `dlopen`ed image, and a name two providers answer differently is a
-        // name that is right on one link path and wrong on the other - which is
-        // exactly how a `dlopen`ed `__thread_vars` ended up bound to the plain
-        // `bootstrap` and losing the guest's registers.
+        // Share the TLV provider with the dlopen path.
         let runtime = crate::shims::runtime::provider();
         let platform = darwin::provider();
         let objc = crate::objc::dispatch::provider();

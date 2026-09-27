@@ -215,19 +215,7 @@ pub fn collect_thread_locals<S: MachSpec>(
     Ok(out)
 }
 
-/// Every `__thread_bss_init_func` entry, slid, in section order - the
-/// functions that construct a thread's zero-initialised thread-locals.
-///
-/// Read from memory, where the rebase pass has already slid the stored
-/// pointers, exactly as for `__mod_term_func`: these are addresses of
-/// functions in the same image, not imports, so the slide is the whole of the
-/// fixup. `slide` locates the section, not its contents.
-///
-/// The order is the section's, and it is *not* the order to call them in - see
-/// [`ImageReport::tlv_init_funcs`], which is where the contract is written
-/// down.
-///
-/// [`ImageReport::tlv_init_funcs`]: crate::report::ImageReport::tlv_init_funcs
+/// Read already-rebased TLV constructor pointers in section order.
 pub fn collect_tlv_init_funcs<S: MachSpec>(
     obj: &MachObject<'_, S>,
     mem: &dyn AddressSpace,
@@ -242,7 +230,7 @@ pub fn collect_tlv_init_funcs<S: MachSpec>(
         let count = usize::try_from(sect.entry_count(POINTER_SIZE)).unwrap_or(0);
         out.extend(read_words(mem, sect.addr.wrapping_add(slide), count)?);
     }
-    // A null entry is padding, not something to call.
+    // Null entries are padding.
     out.retain(|&at| at != 0);
     Ok(out)
 }
