@@ -204,6 +204,48 @@ pub unsafe extern "C" fn lchown(path: *const c_char, uid: libc::uid_t, gid: libc
     })
 }
 
+/// `int lchflags(const char *, uint32_t)`
+///
+/// The host has no equivalent operation for symlink flags. Still resolve the
+/// guest path and report ordinary lookup errors before returning unsupported.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string.
+pub unsafe extern "C" fn lchflags(path: *const c_char, _flags: u32) -> c_int {
+    with_fallback(path, |path| {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `path` is a NUL-terminated path and `stat` is writable.
+        let rc = unsafe { libc::lstat(path, stat.as_mut_ptr()) };
+        if rc != 0 {
+            return (rc, false);
+        }
+        crate::errno::set(libc::ENOTSUP);
+        (-1, false)
+    })
+}
+
+/// `int undelete(const char *)`
+///
+/// Recovery is not supported, but validate the path as an existing object so
+/// missing paths retain the usual filesystem error. This never changes files.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string.
+pub unsafe extern "C" fn undelete(path: *const c_char) -> c_int {
+    with_fallback(path, |path| {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `path` is a NUL-terminated path and `stat` is writable.
+        let rc = unsafe { libc::lstat(path, stat.as_mut_ptr()) };
+        if rc != 0 {
+            return (rc, false);
+        }
+        crate::errno::set(libc::ENOTSUP);
+        (-1, false)
+    })
+}
+
 /// `int truncate(const char *, off_t)`
 ///
 /// # Safety
@@ -408,6 +450,8 @@ exports::exports! {
         "chmod" => chmod,
         "chown" => chown,
         "lchown" => lchown,
+        "lchflags" => lchflags,
+        "undelete" => undelete,
         "truncate" => truncate,
         "link" => link,
         "rename" => rename,
