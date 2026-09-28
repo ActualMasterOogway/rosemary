@@ -70,8 +70,15 @@ pub fn create(directory: &Path) -> std::io::Result<bool> {
         "System/Library",
         "usr/lib",
         "private/tmp",
+        "Volumes",
     ] {
         std::fs::create_dir_all(drive.join(relative))?;
+    }
+    for linked_directory in [
+        ("private/tmp", "tmp"),
+    ] {
+        // `original` should not be absolute because that would make the prefix unmovable from folder to folder
+        std::os::unix::fs::symlink(linked_directory.0, drive.join(linked_directory.1))?;
     }
     // The `~/Library` subtree every Mac ships. `foundation::paths` creates
     // these too, for a guest that runs before anything made a prefix; listing

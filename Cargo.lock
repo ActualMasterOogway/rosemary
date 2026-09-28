@@ -1344,6 +1344,7 @@ dependencies = [
  "flate2",
  "libc",
  "sha2",
+ "static_init",
  "tar",
  "ureq",
 ]

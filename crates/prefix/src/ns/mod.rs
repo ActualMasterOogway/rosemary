@@ -3,6 +3,7 @@ mod guard;
 pub mod mount;
 
 pub use guard::{may_write, may_write_at};
+use static_init::dynamic;
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
@@ -113,9 +114,9 @@ fn host_home() -> Option<&'static Path> {
 /// the first thing to look at: it shows the exact pair of spellings, which is
 /// what a wrong answer here looks like.
 fn tracing() -> bool {
-    static ON: LazyLock<bool> = LazyLock::new(|| {
-        std::env::var_os("ROSETTA3_TRACE_PREFIX").is_some_and(|v| v != "0" && !v.is_empty())
-    });
+    #[dynamic]
+    static ON: bool =
+        std::env::var_os("ROSETTA3_TRACE_PREFIX").is_some_and(|v| v != "0" && !v.is_empty());
     *ON
 }
 

@@ -39,19 +39,16 @@ impl Table {
                 guest: "/".to_string(),
                 host: root.to_path_buf(),
             },
-            // Darwin's `/tmp` is a symlink to `/private/tmp`, and software
-            // that resolves one and compares it against the other has to get
-            // the same answer, so both name one directory.
-            Mount {
-                guest: "/tmp".to_string(),
-                host: root.join("private/tmp"),
-            },
             // The guest needs this host's real character devices: `/dev/null`,
             // `/dev/urandom` and the rest are the kernel's, not files a rootfs
             // could carry.
             Mount {
                 guest: "/dev".to_string(),
                 host: PathBuf::from("/dev"),
+            },
+            Mount {
+                guest: "/etc/resolv.conf".to_string(),
+                host: PathBuf::from("/etc/resolv.conf"),
             },
             // The escape hatch, and the reason `to_guest` is total: every host
             // path has a guest spelling under here, which is how a guest
