@@ -28,7 +28,7 @@ fn host_at(dirfd: c_int, path: *const c_char) -> Option<CString> {
     }
     // Relative paths under a real descriptor need an absolute spelling for
     // `std::fs`; the procfs fd link keeps lookup anchored to that descriptor.
-    CString::new(format!("/proc/self/fd/{dirfd}/{}", path.to_bytes())).ok()
+    CString::new(format!("/proc/self/fd/{dirfd}/{}", path.to_str().ok()?)).ok()
 }
 
 /// Run `ask` on the host spelling of both paths, folding `from` on `ENOENT`.
