@@ -2984,6 +2984,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strptime", P, P, P, P),
     sig!("strrchr", P, P, I32),
     sig!("strspn", U64, P, P),
+    sig!("strsep", P, P, P),
     // `char *strsignal(int)`. A **pointer** return, and the reason to say so.
     sig!("strsignal", P, I32),
     //
