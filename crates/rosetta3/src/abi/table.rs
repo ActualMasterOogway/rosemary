@@ -879,6 +879,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGColorCreateCopy", P, P),
     sig!("CGColorRelease", V, P),
     sig!("CGColorRetain", P, P),
+    sig!("NXGetArchInfoFromCpuType", P, I32, I32),
     sig!("SCDynamicStoreCopyMultiple", P, P, P, P),
     sig!("SCDynamicStoreCopyKeyList", P, P, P),
     sig!("SCDynamicStoreGetTypeID", U64),
@@ -1706,6 +1707,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("fabsf", F32, F32),
     sig!("fchmod", I32, I32, U32),
     sig!("fclose", I32, P),
+    sig!("clonefileat", I32, I32, P, I32, P, I32),
     vsig!("fcntl", I32, I32, I32),
     // `copyfile(const char *, const char *, copyfile_state_t,
     // copyfile_flags_t)`: the state is an opaque pointer and Darwin's flag
