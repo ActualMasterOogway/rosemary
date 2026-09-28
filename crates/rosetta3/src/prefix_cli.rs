@@ -194,8 +194,8 @@ fn check_at_startup(prefix: &Prefix) {
         return;
     }
     let root = prefix.drive();
-    let problems = match verify::compare(&root, &provisioned.manifest, true, &Scope::Paths(&dirty))
-    {
+    let expected = prefix::layout::expected_manifest(&provisioned.manifest);
+    let problems = match verify::compare(&root, &expected, true, &Scope::Paths(&dirty)) {
         Ok(problems) => problems,
         Err(e) => {
             eprintln!("rosetta3: prefix: checking the system files failed: {e}");
@@ -566,9 +566,10 @@ fn check(prefix: &Prefix) -> Result<ExitCode, String> {
     println!("prefix:   {}", prefix.directory().display());
     describe_base(&provisioned);
     println!("system integrity:");
-    let problems = verify::compare(&prefix.drive(), &provisioned.manifest, true, &Scope::All)
+    let expected = prefix::layout::expected_manifest(&provisioned.manifest);
+    let problems = verify::compare(&prefix.drive(), &expected, true, &Scope::All)
         .map_err(|e| e.to_string())?;
-    report(&problems, provisioned.manifest.entries.len());
+    report(&problems, expected.entries.len());
     println!("  unexpected: not checked (a prefix holds the user's own files)");
     println!("user state: not checked");
     if problems.is_empty() {
@@ -592,8 +593,9 @@ fn repair(prefix: &Prefix, flags: &Flags, reset: bool) -> Result<ExitCode, Strin
         Err(e) => return Err(e.to_string()),
     };
     let root = prefix.drive();
-    let found = verify::compare(&root, &provisioned.manifest, !reset, &Scope::All)
-        .map_err(|e| e.to_string())?;
+    let expected = prefix::layout::expected_manifest(&provisioned.manifest);
+    let found =
+        verify::compare(&root, &expected, !reset, &Scope::All).map_err(|e| e.to_string())?;
     let mut problems: Vec<Problem> = prefix::repair::actionable(&found).cloned().collect();
     if reset {
         problems.extend(
@@ -605,7 +607,7 @@ fn repair(prefix: &Prefix, flags: &Flags, reset: bool) -> Result<ExitCode, Strin
     if problems.is_empty() {
         println!(
             "nothing to repair: {} entries match the base",
-            provisioned.manifest.entries.len()
+            expected.entries.len()
         );
         let _ = system::clear_dirty(prefix);
         return Ok(ExitCode::SUCCESS);
@@ -629,8 +631,7 @@ fn repair(prefix: &Prefix, flags: &Flags, reset: bool) -> Result<ExitCode, Strin
     for (path, to) in &outcome.displaced {
         println!("moved aside: {path} -> {}", to.display());
     }
-    let after = verify::compare(&root, &provisioned.manifest, true, &Scope::All)
-        .map_err(|e| e.to_string())?;
+    let after = verify::compare(&root, &expected, true, &Scope::All).map_err(|e| e.to_string())?;
     if !after.is_empty() {
         return Err(format!(
             "still different after the repair: {}",
@@ -643,7 +644,7 @@ fn repair(prefix: &Prefix, flags: &Flags, reset: bool) -> Result<ExitCode, Strin
         outcome.restored.len(),
         methods(&outcome),
         outcome.displaced.len(),
-        provisioned.manifest.entries.len()
+        expected.entries.len()
     );
     Ok(ExitCode::SUCCESS)
 }

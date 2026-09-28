@@ -414,7 +414,8 @@ pub fn install(
     write_atomically(&control.join("manifest.yaml"), &obtained.manifest_raw)?;
 
     let root = prefix.drive();
-    let mut problems = verify::compare(&root, &obtained.manifest, true, &Scope::All)?;
+    let expected = layout::expected_manifest(&obtained.manifest);
+    let mut problems = verify::compare(&root, &expected, true, &Scope::All)?;
     let hardlinks = options.policy == SystemFiles::Immutable;
     let was_hardlinked = state
         .base
@@ -424,12 +425,12 @@ pub fn install(
         // Leaving `immutable`: every file is still the cache's own inode, and a
         // guest now allowed to write one in place would corrupt the shared
         // base. They all get their own copy.
-        problems = unlink_everything(&obtained.manifest, problems);
+        problems = unlink_everything(&expected, problems);
     }
     let outcome = repair::apply(
         prefix,
         &root,
-        &obtained.manifest,
+        &expected,
         &obtained.tree,
         &problems,
         hardlinks,
@@ -594,10 +595,11 @@ pub fn repair(
     }
     let _lock = repair::lock(prefix)?;
     let hardlinks = provisioned.policy == SystemFiles::Immutable;
+    let expected = layout::expected_manifest(&provisioned.manifest);
     Ok(repair::apply(
         prefix,
         &prefix.drive(),
-        &provisioned.manifest,
+        &expected,
         &obtained.tree,
         problems,
         hardlinks,

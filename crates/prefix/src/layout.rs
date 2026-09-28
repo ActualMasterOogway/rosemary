@@ -1,11 +1,82 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::format::manifest::{DIR_MODE, Entry, Kind, Manifest};
+
 /// The directory holding the prefix's own bookkeeping.
 pub const CONTROL: &str = ".rosetta3";
 
 /// The directory that is the guest's `/`.
 pub const DRIVE: &str = "root";
+
+/// Prefix-owned paths expected alongside the downloaded MiniDarwin base.
+/// The user's files inside these directories are not part of the base.
+const DIRECTORIES: &[&str] = &[
+    "/Applications",
+    "/Library",
+    "/System",
+    "/System/Library",
+    "/usr",
+    "/usr/lib",
+    "/private",
+    "/private/tmp",
+    "/Volumes",
+];
+const SYMLINKS: &[(&str, &str)] = &[("/tmp", "private/tmp")];
+const USER_DIRECTORIES: &[&str] = &[
+    "Library",
+    "Library/Application Support",
+    "Library/Caches",
+    "Library/Logs",
+    "Library/Preferences",
+    "Library/Saved Application State",
+];
+
+/// Add prefix-owned layout paths to a base manifest for prefix checks and
+/// repairs. The downloaded manifest itself remains unchanged and hashable.
+pub fn expected_manifest(base: &Manifest) -> Manifest {
+    let mut entries = base.entries.clone();
+    for path in DIRECTORIES {
+        if !base.contains(path) {
+            entries.push(directory_entry(path.to_string()));
+        }
+    }
+    if !base.contains("/Users") {
+        entries.push(directory_entry("/Users".into()));
+    }
+    let home = format!("/Users/{}", user_name());
+    if !base.contains(&home) {
+        entries.push(directory_entry(home.clone()));
+    }
+    for relative in USER_DIRECTORIES {
+        let path = format!("{home}/{relative}");
+        if !base.contains(&path) {
+            entries.push(directory_entry(path));
+        }
+    }
+    for (path, target) in SYMLINKS {
+        if !base.contains(path) {
+            entries.push(Entry {
+                path: (*path).into(),
+                kind: Kind::Symlink {
+                    target: (*target).into(),
+                },
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Manifest::new(base.identity.clone(), base.build.clone(), entries)
+}
+
+fn directory_entry(path: String) -> Entry {
+    Entry {
+        path,
+        kind: Kind::Directory {
+            mode: DIR_MODE,
+            digest: String::new(),
+        },
+    }
+}
 
 /// What `ROSETTA3_PREFIX` asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,32 +135,17 @@ pub fn create(directory: &Path) -> std::io::Result<bool> {
     }
     let drive = directory.join(DRIVE);
     let user = user_name();
-    for relative in [
-        "Applications",
-        "Library",
-        "System/Library",
-        "usr/lib",
-        "private/tmp",
-        "Volumes",
-    ] {
-        std::fs::create_dir_all(drive.join(relative))?;
+    for path in DIRECTORIES {
+        std::fs::create_dir_all(drive.join(path.trim_start_matches('/')))?;
     }
-    for linked_directory in [
-        ("private/tmp", "tmp"),
-    ] {
+    for (path, target) in SYMLINKS {
         // `original` should not be absolute because that would make the prefix unmovable from folder to folder
-        std::os::unix::fs::symlink(linked_directory.0, drive.join(linked_directory.1))?;
+        std::os::unix::fs::symlink(target, drive.join(path.trim_start_matches('/')))?;
     }
     // The `~/Library` subtree every Mac ships. `foundation::paths` creates
     // these too, for a guest that runs before anything made a prefix; listing
     // them here is what makes a fresh prefix complete on its own.
-    for relative in [
-        "Library/Application Support",
-        "Library/Caches",
-        "Library/Logs",
-        "Library/Preferences",
-        "Library/Saved Application State",
-    ] {
+    for relative in USER_DIRECTORIES {
         std::fs::create_dir_all(drive.join("Users").join(&user).join(relative))?;
     }
     std::fs::create_dir_all(directory.join(CONTROL))?;
@@ -186,6 +242,7 @@ pub fn user_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verify::{Difference, Scope, compare};
 
     #[test]
     fn the_variable_can_turn_the_prefix_off() {
@@ -233,6 +290,53 @@ mod tests {
         // Making one twice is not an error and does not write again.
         assert!(!create(&at).expect("the second call is a no-op"));
 
+        let _ = std::fs::remove_dir_all(&at);
+    }
+
+    #[test]
+    fn layout_damage_is_verified_and_repaired_with_the_base() {
+        let at = crate::verify::tests::scratch("layout-repair");
+        let prefix = Prefix::at(at.join("prefix"));
+        let base = at.join("base");
+        std::fs::create_dir(&base).unwrap();
+        let manifest = crate::verify::tests::materialise_sample(&base);
+        create(prefix.directory()).unwrap();
+        let expected = expected_manifest(&manifest);
+        let root = prefix.drive();
+        let initial = compare(&root, &expected, true, &Scope::All).unwrap();
+        crate::repair::apply(&prefix, &root, &expected, &base, &initial, false).unwrap();
+
+        std::fs::remove_dir(root.join("Applications")).unwrap();
+        std::fs::remove_file(root.join("tmp")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.join("tmp")).unwrap();
+        std::fs::write(root.join("Library/my-file"), b"user data").unwrap();
+        let damage = compare(&root, &expected, true, &Scope::All).unwrap();
+        assert!(
+            damage
+                .iter()
+                .any(|p| { p.path == "/Applications" && p.kind == Difference::Missing })
+        );
+        assert!(
+            damage
+                .iter()
+                .any(|p| { p.path == "/tmp" && p.kind == Difference::Modified })
+        );
+        let reset_damage = compare(&root, &expected, false, &Scope::All).unwrap();
+        assert!(
+            crate::repair::strays(&reset_damage, &manifest)
+                .iter()
+                .all(|p| p.path != "/Library/my-file")
+        );
+        crate::repair::apply(&prefix, &root, &expected, &base, &damage, false).unwrap();
+        assert_eq!(compare(&root, &expected, true, &Scope::All).unwrap(), []);
+        assert_eq!(
+            std::fs::read(root.join("Library/my-file")).unwrap(),
+            b"user data"
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("tmp")).unwrap(),
+            Path::new("private/tmp")
+        );
         let _ = std::fs::remove_dir_all(&at);
     }
 

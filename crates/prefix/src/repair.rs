@@ -279,8 +279,8 @@ fn annotate(error: io::Error, at: &Path) -> io::Error {
 }
 
 /// The unexpected paths `reset-system` moves aside: those directly inside a
-/// directory the base owns. `/Users` and `/Applications` sit in `/`, which no
-/// manifest lists, and are never touched.
+/// directory the downloaded base owns. Prefix layout directories can hold user
+/// files, so their extra contents are never moved aside.
 pub fn strays<'a>(problems: &'a [Problem], manifest: &Manifest) -> Vec<&'a Problem> {
     problems
         .iter()
