@@ -134,6 +134,7 @@ pub(crate) unsafe extern "C" fn order_front_with_options(_receiver: Id, _sel: Se
         buttons: vec!["OK".to_string()],
         cancel: None,
         application_icon: true,
+        ..Default::default()
     };
     match crate::dialog::show(&request, |_| OPEN.store(0, Ordering::Release)) {
         Some(id) => OPEN.store(id, Ordering::Release),

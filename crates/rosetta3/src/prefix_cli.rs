@@ -98,6 +98,7 @@ fn ask_with_dialog(request: &Request) -> Option<Answer> {
         buttons: vec!["Download".to_string(), "Not Now".to_string()],
         cancel: Some(1),
         application_icon: false,
+        ..Default::default()
     };
     Some(match appkit::dialog::run(&request)? {
         0 => Answer::Download,
@@ -141,7 +142,7 @@ pub fn settle_prefix() {
     {
         return;
     }
-    let Some(directory) = named.map(PathBuf::from).or_else(default_prefix) else {
+    let Some(directory) = named.clone().map(PathBuf::from).or_else(default_prefix) else {
         // No `$HOME` and no `$XDG_DATA_HOME` is a host this cannot place a
         // prefix on. Running without one is what happened before prefixes
         // existed, and is better than refusing to start.
@@ -161,7 +162,13 @@ pub fn settle_prefix() {
                 eprintln!("rosetta3: the prefix has no Darwin base: {e}");
             }
         }
-        Ok(false) => check_at_startup(&Prefix::at(&directory)),
+        Ok(false) => {
+            let prefix = Prefix::at(&directory);
+            if named.is_none() {
+                offer_update(&prefix);
+            }
+            check_at_startup(&prefix);
+        }
         Err(e) => {
             eprintln!(
                 "rosetta3: {}: {e}; running without a prefix",
@@ -175,6 +182,142 @@ pub fn settle_prefix() {
     // SAFETY: before any thread has been started; the string is copied by the
     // call.
     unsafe { std::env::set_var("ROSETTA3_PREFIX", &directory) };
+}
+
+const UPDATE_TIP: &str = "Tip: You can update manually with `rosetta3 prefix update`. You are responsible for future MiniDarwin updates.";
+
+fn offer_update(prefix: &Prefix) {
+    let state_path = prefix::layout::state_path(prefix.directory());
+    let Ok(mut state) = State::read(&state_path) else {
+        return;
+    };
+    let Some(base) = &state.base else { return };
+    let Ok(chosen) = Chosen::pinned(&base.arch) else {
+        return;
+    };
+    if !update_needed(&state, chosen.spec.manifest.sha256.as_deref()) {
+        return;
+    }
+    let from = base.tag.clone().unwrap_or_else(|| {
+        format!(
+            "release {}",
+            base.sequence.map_or("?".into(), |n| n.to_string())
+        )
+    });
+    let to = chosen.spec.describe();
+    let choice = match setup() {
+        Setup::Download => Some((true, false)),
+        Setup::Fail => None,
+        Setup::Ask => ask_update(&from, &chosen.spec),
+    };
+    let Some((update, skip)) = choice else { return };
+    if skip {
+        state.skip_update_prompts = true;
+        if let Err(e) = state.write(&state_path) {
+            eprintln!("rosetta3: prefix: could not save update preference: {e}");
+        }
+        eprintln!("rosetta3: {UPDATE_TIP}");
+    }
+    if !update {
+        return;
+    }
+    let result = (|| -> Result<(), String> {
+        let cache = Cache::from_env().ok_or("no $HOME, so there is nowhere to cache a base")?;
+        let obtained = provision::obtain(&cache, &chosen, &mut |_| Answer::Download, &mut |line| {
+            eprintln!("rosetta3: {line}")
+        })
+        .map_err(|e| e.to_string())?;
+        let installed = provision::install(
+            prefix,
+            &cache,
+            &chosen,
+            &obtained,
+            &Options {
+                policy: provision::load(prefix).map_err(|e| e.to_string())?.policy,
+                allow_downgrade: false,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        eprintln!(
+            "rosetta3: prefix: updated MiniDarwin to {to} ({} paths changed)",
+            installed.outcome.restored.len()
+        );
+        Ok(())
+    })();
+    if let Err(e) = result {
+        eprintln!(
+            "rosetta3: prefix: MiniDarwin update failed: {e}; run `rosetta3 prefix update` to retry"
+        );
+    }
+}
+
+fn update_needed(state: &State, pinned_manifest: Option<&str>) -> bool {
+    let Some(base) = &state.base else {
+        return false;
+    };
+    !state.skip_update_prompts
+        && base.trust == Trust::Pinned
+        && pinned_manifest.is_some_and(|sha| sha != base.manifest_sha256)
+}
+
+fn ask_update(from: &str, spec: &prefix::format::Spec) -> Option<(bool, bool)> {
+    let size = spec
+        .artifact
+        .size
+        .map(|bytes| format!("{:.1} MB", bytes as f64 / 1e6))
+        .unwrap_or_else(|| "an unknown amount".into());
+    let source = spec
+        .artifact
+        .sources
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(no source)");
+    let summary = format!(
+        "This prefix has {from}. This build ships with {}. Updating may download {size} from\n{source}",
+        spec.describe()
+    );
+    if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let request = appkit::dialog::Request {
+            title: "Rosetta 3".into(),
+            message: "Update the MiniDarwin base system?".into(),
+            informative: summary.clone(),
+            buttons: vec!["Update".into(), "Not Now".into()],
+            cancel: Some(1),
+            checkbox: Some("Don't remind me about updates again".into()),
+            checkbox_tip: UPDATE_TIP.into(),
+            ..Default::default()
+        };
+        if let Some((button, checked)) = appkit::dialog::run_with_checkbox(&request) {
+            return Some((button == 0, checked));
+        }
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return None;
+    }
+    eprintln!("rosetta3: {}", summary.replace('\n', "\n          "));
+    let mut skip = false;
+    loop {
+        eprint!(
+            "Update MiniDarwin? [y]es, [n]ot now, [t]oggle [{}] Don't remind me again: ",
+            if skip { 'x' } else { ' ' }
+        );
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_err() {
+            return None;
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "t" => {
+                skip = !skip;
+                if skip {
+                    eprintln!("rosetta3: {UPDATE_TIP}");
+                }
+            }
+            "y" | "yes" => return Some((true, skip)),
+            "" | "n" | "no" => return Some((false, skip)),
+            _ => eprintln!("rosetta3: enter y, n, or t"),
+        }
+    }
 }
 
 /// The cheap check a start makes: nothing, unless a guest was seen writing a
@@ -791,5 +934,40 @@ fn cache_command(args: &[String]) -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prefix::state::Base;
+
+    #[test]
+    fn prompts_only_for_outdated_pinned_bases_with_updates_enabled() {
+        let mut state = State {
+            base: Some(Base {
+                project: "minidarwin".into(),
+                arch: "x86_64".into(),
+                sequence: Some(1),
+                tag: None,
+                tree: "tree".into(),
+                manifest_sha256: "old".into(),
+                artifact_sha256: None,
+                trust: Trust::Pinned,
+                policy: Policy::Strict,
+                materialised: vec![],
+            }),
+            ..State::default()
+        };
+        assert!(update_needed(&state, Some("new")));
+        assert!(!update_needed(&state, Some("old")));
+        assert!(!update_needed(&state, None));
+        state.skip_update_prompts = true;
+        assert!(!update_needed(&state, Some("new")));
+        state.skip_update_prompts = false;
+        state.base.as_mut().unwrap().trust = Trust::User;
+        assert!(!update_needed(&state, Some("new")));
+        state.base = None;
+        assert!(!update_needed(&state, Some("new")));
     }
 }

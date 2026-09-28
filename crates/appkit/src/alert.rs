@@ -60,6 +60,7 @@ pub fn run_alert_panel(
         buttons: buttons.iter().map(|(title, _)| title.clone()).collect(),
         cancel: None,
         application_icon: true,
+        ..Default::default()
     };
     match crate::dialog::run(&request) {
         Some(chosen) => buttons[chosen].1,
@@ -198,6 +199,7 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
         },
         cancel: None,
         application_icon: true,
+        ..Default::default()
     };
     // With no dialog to show, the second button is the one that declines;
     // with fewer than two there is nothing to decline with.

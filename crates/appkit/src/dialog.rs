@@ -22,6 +22,9 @@ pub struct Request {
     pub cancel: Option<usize>,
     /// Show the application's icon, as `NSAlert` does.
     pub application_icon: bool,
+    /// Optional checkbox and text shown when it is selected.
+    pub checkbox: Option<String>,
+    pub checkbox_tip: String,
 }
 
 /// The button areas of each open dialog's window, for [`hit_test`], which
@@ -73,6 +76,7 @@ struct Dialog {
     cancel: Option<usize>,
     /// The button a press began on, which a release has to end on too.
     armed: Option<usize>,
+    armed_checkbox: bool,
     /// A modal dialog holds the pointer shown for as long as it is up; a
     /// modeless one only while the pointer is over it, so a game that hid the
     /// pointer keeps it hidden over its own window.
@@ -122,7 +126,10 @@ impl Dialog {
     fn button_at(&self, x: f32, y: f32) -> Option<usize> {
         self.alert
             .hit(&self.layout, Point::new(x, y))
-            .map(|Part::Button(at)| at)
+            .and_then(|part| match part {
+                Part::Button(at) => Some(at),
+                Part::Checkbox => None,
+            })
     }
 
     fn set_pressed(&mut self, pressed: Option<usize>) {
@@ -158,6 +165,9 @@ impl Dialog {
             },
             pressed: None,
             rounded: transparent,
+            checkbox: request.checkbox.clone(),
+            checkbox_checked: false,
+            checkbox_tip: request.checkbox_tip.clone(),
         };
         let theme = theme();
         let layout = alert.layout(Rect::default(), &theme);
@@ -192,10 +202,15 @@ impl Dialog {
         }
         crate::icon::apply(window);
         center(window, parent, size.width, size.height);
-        BUTTONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((window as usize, layout.buttons.clone()));
+        BUTTONS.lock().unwrap_or_else(|e| e.into_inner()).push((
+            window as usize,
+            layout
+                .buttons
+                .iter()
+                .copied()
+                .chain(layout.checkbox.map(|c| c.bounds))
+                .collect(),
+        ));
         sdl3::video::set_window_hit_test(window, Some(hit_test));
         sdl3::video::show_window(window);
         sdl3::video::raise_window(window);
@@ -208,6 +223,7 @@ impl Dialog {
             theme,
             cancel,
             armed: None,
+            armed_checkbox: false,
             modal,
             showed_cursor: false,
             started_video,
@@ -250,6 +266,15 @@ impl Dialog {
                 y,
                 ..
             } if ours(window) => {
+                let checkbox =
+                    self.alert.hit(&self.layout, Point::new(*x, *y)) == Some(Part::Checkbox);
+                if *down {
+                    self.armed_checkbox = checkbox;
+                } else if std::mem::take(&mut self.armed_checkbox) && checkbox {
+                    self.alert.checkbox_checked = !self.alert.checkbox_checked;
+                    self.paint();
+                    return Outcome::Handled;
+                }
                 let at = self.button_at(*x, *y);
                 if *down {
                     self.armed = at;
@@ -397,17 +422,23 @@ pub(crate) fn deliver_modal(event: &sdl3::video::Event) -> bool {
 /// does. Input meant for the program's other windows is dropped meanwhile;
 /// the rest of what happens to them is still delivered.
 pub fn run(request: &Request) -> Option<usize> {
+    run_with_checkbox(request).map(|(answer, _)| answer)
+}
+
+/// Show a modal dialog and return the button and optional checkbox state.
+pub fn run_with_checkbox(request: &Request) -> Option<(usize, bool)> {
     let mut dialog = Dialog::open(request, true)?;
     let outer = MODAL.replace(Some((dialog.window, Default::default())));
     let (answer, quit) = modal_loop(&mut dialog);
     MODAL.set(outer);
     let started_video = dialog.started_video;
+    let checked = dialog.alert.checkbox_checked;
     dialog.close();
     if quit && !started_video {
         // The quit was the program's, and only postponed.
         crate::event::deliver(sdl3::video::Event::Quit);
     }
-    Some(answer)
+    Some((answer, checked))
 }
 
 /// A dialog up without a caller waiting on it, and what to do with its answer.

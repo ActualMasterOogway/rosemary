@@ -66,6 +66,7 @@ pub fn provisioned(name: &str, policy: SystemFiles) -> Prefix {
             materialised: vec!["copy".into()],
         }),
         accepted_sequence: None,
+        skip_update_prompts: false,
     };
     state.write(&prefix::layout::state_path(&at)).unwrap();
     // SAFETY: before the namespace or any other thread reads the environment.

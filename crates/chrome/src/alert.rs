@@ -1,7 +1,9 @@
 //! A modal alert, after a current Mac's: the icon, the message in bold and the
 //! informative text under it, all centred, then the buttons.
 
+use crate::checkbox::{Checkbox, CheckboxLayout};
 use crate::geometry::{Point, Rect};
+use crate::menu::State;
 use crate::paint::{Canvas, Image};
 use crate::text::Font;
 use crate::theme::Theme;
@@ -18,11 +20,15 @@ pub struct Alert {
     pub pressed: Option<usize>,
     /// Whether the window has room around the corners for them to be round.
     pub rounded: bool,
+    pub checkbox: Option<String>,
+    pub checkbox_checked: bool,
+    pub checkbox_tip: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Button(usize),
+    Checkbox,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,6 +46,8 @@ pub struct AlertLayout {
     pub lines: Vec<Line>,
     /// One per button, in the order they were given.
     pub buttons: Vec<Rect>,
+    pub checkbox: Option<CheckboxLayout>,
+    pub tip: Vec<Line>,
 }
 
 const TOP: f32 = 20.0;
@@ -48,6 +56,8 @@ const BOTTOM: f32 = 16.0;
 const AFTER_ICON: f32 = 12.0;
 const BEFORE_INFORMATIVE: f32 = 6.0;
 const BEFORE_BUTTONS: f32 = 20.0;
+const BEFORE_CHECKBOX: f32 = 12.0;
+const CHECKBOX_ALERT_MIN_WIDTH: f32 = 440.0;
 const BUTTON_GAP: f32 = 8.0;
 const BUTTON_RADIUS: f32 = 6.0;
 /// Room a button's title needs on each side before the buttons stack.
@@ -83,7 +93,17 @@ impl View for Alert {
 
     /// Only `bounds`' origin is used: an alert is as tall as what it says.
     fn layout(&self, bounds: Rect, theme: &Theme) -> AlertLayout {
-        let width = theme.alert_width;
+        let width = self.checkbox.as_ref().map_or(theme.alert_width, |title| {
+            let control = Checkbox {
+                title: title.clone(),
+                ..Checkbox::default()
+            };
+            let natural = control.layout(Rect::default(), theme).bounds.width;
+            theme
+                .alert_width
+                .max(CHECKBOX_ALERT_MIN_WIDTH)
+                .max(natural + 2.0 * SIDE + 16.0)
+        });
         let text_width = width - 2.0 * SIDE;
         let (x, mut y) = (bounds.x, bounds.y + TOP);
 
@@ -124,6 +144,32 @@ impl View for Alert {
             let size = theme.alert_informative_size;
             text(Font::system(400), &self.informative, size, false, &mut y);
         }
+        let checkbox = self.checkbox.as_ref().map(|title| {
+            y += BEFORE_CHECKBOX;
+            let control = Checkbox {
+                title: title.clone(),
+                ..Checkbox::default()
+            };
+            let layout = control.layout(Rect::new(x + SIDE, y, text_width, 0.0), theme);
+            y = layout.bounds.bottom();
+            layout
+        });
+        let mut tip = Vec::new();
+        if checkbox.is_some() && !self.checkbox_tip.is_empty() {
+            y += BEFORE_INFORMATIVE;
+            if let Some(font) = Font::system(400) {
+                let size = theme.alert_informative_size;
+                let height = (size * 1.25).round();
+                for line in cap(font.wrap(&self.checkbox_tip, size, text_width), MAX_LINES) {
+                    tip.push(Line {
+                        origin: Point::new(x + SIDE, font.centered_baseline(size, y, height)),
+                        text: line,
+                        bold: false,
+                    });
+                    y += height;
+                }
+            }
+        }
         y += BEFORE_BUTTONS;
 
         // Two buttons share a row, the default on the right, when both titles
@@ -159,6 +205,8 @@ impl View for Alert {
             icon,
             lines,
             buttons,
+            checkbox,
+            tip,
         }
     }
 
@@ -182,6 +230,31 @@ impl View for Alert {
             };
             if let Some(font) = Font::system(weight) {
                 canvas.draw_text(&line.text, &font, size, line.origin, theme.alert_text);
+            }
+        }
+        if let (Some(title), Some(placement)) = (&self.checkbox, &layout.checkbox) {
+            Checkbox {
+                title: title.clone(),
+                state: if self.checkbox_checked {
+                    State::On
+                } else {
+                    State::Off
+                },
+                ..Checkbox::default()
+            }
+            .paint(canvas, placement, theme);
+        }
+        if self.checkbox_checked
+            && let Some(font) = Font::system(400)
+        {
+            for line in &layout.tip {
+                canvas.draw_text(
+                    &line.text,
+                    &font,
+                    theme.alert_informative_size,
+                    line.origin,
+                    theme.alert_text,
+                );
             }
         }
 
@@ -209,6 +282,13 @@ impl View for Alert {
     }
 
     fn hit(&self, layout: &AlertLayout, point: Point) -> Option<Part> {
+        if layout
+            .checkbox
+            .as_ref()
+            .is_some_and(|box_layout| box_layout.bounds.contains(point))
+        {
+            return Some(Part::Checkbox);
+        }
         layout
             .buttons
             .iter()
@@ -273,6 +353,50 @@ mod tests {
     fn escape_answers_the_button_titled_cancel() {
         assert_eq!(alert(&["OK", "Cancel"]).cancel_button(), Some(1));
         assert_eq!(alert(&["OK"]).cancel_button(), None);
+    }
+
+    #[test]
+    fn checkbox_has_its_own_hit_area_and_tip_space() {
+        let alert = Alert {
+            checkbox: Some("Don't remind me".into()),
+            checkbox_tip: "Update manually later.".into(),
+            ..alert(&["Update", "Not Now"])
+        };
+        let layout = laid_out(&alert);
+        let checkbox = layout.checkbox.unwrap();
+        assert_eq!(
+            alert.hit(&layout, checkbox.box_rect.center()),
+            Some(Part::Checkbox)
+        );
+        assert!(!layout.tip.is_empty());
+        assert!(layout.buttons[0].y > checkbox.bounds.bottom());
+    }
+
+    #[test]
+    fn update_checkbox_label_fits_inside_the_alert() {
+        let Some(font) = Font::system(400) else {
+            return;
+        };
+        let theme = Theme::light();
+        let alert = Alert {
+            checkbox: Some("Don't remind me about updates again".into()),
+            ..alert(&["Update", "Not Now"])
+        };
+        let layout = alert.layout(Rect::default(), &theme);
+        let checkbox = layout.checkbox.unwrap();
+        let label_width =
+            font.measure(alert.checkbox.as_deref().unwrap(), theme.checkbox_text_size);
+        assert!(layout.bounds.width >= CHECKBOX_ALERT_MIN_WIDTH);
+        assert!(checkbox.label.width >= label_width);
+        assert_eq!(
+            font.truncate(
+                alert.checkbox.as_deref().unwrap(),
+                theme.checkbox_text_size,
+                checkbox.label.width,
+            ),
+            alert.checkbox.as_deref().unwrap()
+        );
+        assert!(checkbox.bounds.right() < layout.bounds.right());
     }
 
     #[test]

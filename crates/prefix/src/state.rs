@@ -48,6 +48,8 @@ pub struct State {
     /// The highest pinned `release.sequence` this prefix has accepted: an
     /// automatic update to a lower one is a rollback, and refused.
     pub accepted_sequence: Option<u64>,
+    /// The user chose to manage MiniDarwin updates manually.
+    pub skip_update_prompts: bool,
 }
 
 impl State {
@@ -71,6 +73,7 @@ impl State {
             runtime_version,
             base,
             accepted_sequence: number(map.get("accepted_sequence")),
+            skip_update_prompts: matches!(map.get("skip_update_prompts"), Some(Value::Bool(true))),
         })
     }
 
@@ -110,6 +113,9 @@ impl State {
         }
         if let Some(sequence) = self.accepted_sequence {
             out.push(format!("accepted_sequence: {sequence}"));
+        }
+        if self.skip_update_prompts {
+            out.push("skip_update_prompts: true".into());
         }
         out.push(String::new());
         out.join("\n")
@@ -187,6 +193,7 @@ mod tests {
                 materialised: vec!["reflink".into(), "copy".into()],
             }),
             accepted_sequence: Some(3),
+            skip_update_prompts: true,
         };
         let at = crate::verify::tests::scratch("state");
         let path = at.join("state.yaml");
@@ -209,6 +216,7 @@ mod tests {
         let state = State::read(&path).unwrap();
         assert_eq!(state.runtime_version.as_deref(), Some("0.1.0"));
         assert_eq!(state.base, None);
+        assert!(!state.skip_update_prompts);
         let _ = std::fs::remove_dir_all(&at);
     }
 }
