@@ -1,7 +1,7 @@
 use crate::geometry::{Point, Rect, Size};
 use crate::text::Font;
 
-/// A colour with straight (not premultiplied) alpha.
+/// A color with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,

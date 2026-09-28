@@ -65,10 +65,22 @@ pub struct Theme {
     pub alert_button: Color,
     pub alert_button_pressed: Color,
     pub alert_button_text: Color,
-    /// The default button, in the accent colour.
+    /// The default button, in the accent color.
     pub alert_default: Color,
     pub alert_default_pressed: Color,
     pub alert_default_text: Color,
+
+    pub checkbox_size: f32,
+    pub checkbox_height: f32,
+    pub checkbox_gap: f32,
+    pub checkbox_text_size: f32,
+    pub checkbox_background: Color,
+    pub checkbox_border: Color,
+    pub checkbox_text: Color,
+    pub checkbox_disabled_text: Color,
+    pub checkbox_accent: Color,
+    pub checkbox_pressed: Color,
+    pub checkbox_mark: Color,
 }
 
 impl Theme {
@@ -128,6 +140,17 @@ impl Theme {
             alert_default: Color::rgb(0x00, 0x7A, 0xFF),
             alert_default_pressed: Color::rgb(0x00, 0x62, 0xD4),
             alert_default_text: Color::rgb(0xFF, 0xFF, 0xFF),
+            checkbox_size: 14.0,
+            checkbox_height: 20.0,
+            checkbox_gap: 6.0,
+            checkbox_text_size: 13.0,
+            checkbox_background: Color::rgb(0xFF, 0xFF, 0xFF),
+            checkbox_border: Color::rgba(0, 0, 0, 0.32),
+            checkbox_text: Color::rgba(0, 0, 0, 0.85),
+            checkbox_disabled_text: Color::rgba(0, 0, 0, 0.3),
+            checkbox_accent: Color::rgb(0x00, 0x7A, 0xFF),
+            checkbox_pressed: Color::rgb(0x00, 0x62, 0xD4),
+            checkbox_mark: Color::rgb(0xFF, 0xFF, 0xFF),
         }
     }
 
@@ -159,6 +182,12 @@ impl Theme {
             alert_button_text: Color::rgba(255, 255, 255, 0.88),
             alert_default: Color::rgb(0x0A, 0x84, 0xFF),
             alert_default_pressed: Color::rgb(0x40, 0x9C, 0xFF),
+            checkbox_background: Color::rgb(0x4A, 0x4A, 0x4A),
+            checkbox_border: Color::rgba(255, 255, 255, 0.32),
+            checkbox_text: Color::rgba(255, 255, 255, 0.88),
+            checkbox_disabled_text: Color::rgba(255, 255, 255, 0.3),
+            checkbox_accent: Color::rgb(0x0A, 0x84, 0xFF),
+            checkbox_pressed: Color::rgb(0x40, 0x9C, 0xFF),
             ..Theme::light()
         }
     }
