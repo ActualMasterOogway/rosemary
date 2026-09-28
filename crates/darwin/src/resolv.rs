@@ -1,12 +1,30 @@
 use std::ffi::c_int;
 
 unsafe extern "C" fn res_9_init() -> c_int {
-    unsafe { libc::res_init() }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { host_res_init() }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        unsafe { libc::res_init() }
+    }
 }
 
-// FIXME (ACCURACY): stub!
-unsafe extern "C" fn res_9_close() -> c_int {
-    0
+unsafe extern "C" fn res_9_close() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        host_res_close()
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "resolv")]
+unsafe extern "C" {
+    #[link_name = "res_9_init"]
+    fn host_res_init() -> c_int;
+    #[link_name = "res_9_close"]
+    fn host_res_close();
 }
 
 exports::exports! {

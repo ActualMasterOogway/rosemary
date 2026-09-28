@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 pub const CTL_KERN: i32 = 1;
 pub const CTL_HW: i32 = 6;
 pub const CTL_USER: i32 = 8;
+const CTL_SYSCTL: i32 = 0;
+const CTL_MACHDEP: i32 = 7;
 
 /// `CTL_KERN` second-level identifiers, for the keys answered here.
 pub const KERN_OSTYPE: i32 = 1;
@@ -13,6 +15,8 @@ pub const KERN_VERSION: i32 = 4;
 pub const KERN_HOSTNAME: i32 = 10;
 pub const KERN_ARGMAX: i32 = 8;
 pub const KERN_OSVERSION: i32 = 65;
+const KERN_OSPRODUCTVERSION: i32 = 138;
+const KERN_OSPRODUCTVERSIONCOMPAT: i32 = 137;
 
 /// `CTL_USER` second-level identifiers.
 pub const USER_CS_PATH: i32 = 1;
@@ -27,6 +31,13 @@ pub const HW_MACHINE_ARCH: i32 = 12;
 pub const HW_CACHELINE: i32 = 16;
 pub const HW_MEMSIZE: i32 = 24;
 pub const HW_AVAILCPU: i32 = 25;
+const HW_OPTIONAL: i32 = 102;
+const HW_CPUTYPE: i32 = 109;
+const HW_CPUSUBTYPE: i32 = 110;
+const HW_CPUFAMILY: i32 = 112;
+const HW_CPUSUBFAMILY: i32 = 113;
+
+const SYSCTL_PROC_TRANSLATED: i32 = 100;
 
 /// The architecture the **guest** believes it is running on.
 ///
@@ -109,8 +120,7 @@ pub fn guest_arch() -> GuestArch {
 
 /// One key's answer.
 ///
-/// On macOS only [`Value::Str`] is ever built - every numeric key is forwarded to the
-/// host's own `sysctl` - so the integer forms are dead there by construction.
+/// Numeric guest properties are answered here on every host.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 enum Value {
     Str(String),
@@ -142,6 +152,12 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
     match mib {
         [CTL_HW, HW_MACHINE] => Some(Value::Str(arch.machine().to_string())),
         [CTL_HW, HW_MACHINE_ARCH] => Some(Value::Str(arch.machine_arch().to_string())),
+        [CTL_SYSCTL, SYSCTL_PROC_TRANSLATED] => {
+            Some(Value::U32(u32::from(IS_TRANSLATED.load(Ordering::SeqCst))))
+        }
+        [CTL_HW, HW_OPTIONAL, 144] => Some(Value::U32(u32::from(arch == GuestArch::Arm64))),
+        [CTL_HW, HW_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
+        [CTL_HW, HW_CPUSUBTYPE] => Some(Value::U32(arch.cpu_subtype() as u32)),
         _ => None,
     }
 }
@@ -170,7 +186,10 @@ fn host_value(mib: &[i32]) -> Option<Value> {
         // `_PATH_STDPATH`: where a Darwin userland keeps its utilities, which
         // is also where a prefix's base puts them. `whereis` searches it.
         [CTL_USER, USER_CS_PATH] => Some(Value::Str("/usr/bin:/bin:/usr/sbin:/sbin".to_string())),
-        _ => None,
+        _ => BY_NAME
+            .iter()
+            .find(|(_, known_mib)| *known_mib == mib)
+            .and_then(|(name, _)| named(name)),
     }
 }
 
@@ -393,10 +412,7 @@ unsafe fn fallback(
     }
 }
 
-/// The `sysctlbyname` names this module knows, and their MIBs.
-///
-/// Only the keys with a numeric MIB. A name with no MIB - `kern.osproductversion` and
-/// the rest of the string-only space - is answered by [`NAMED`].
+/// The names this module knows and their Darwin MIBs.
 const BY_NAME: &[(&str, &[i32])] = &[
     ("kern.ostype", &[CTL_KERN, KERN_OSTYPE]),
     ("kern.osrelease", &[CTL_KERN, KERN_OSRELEASE]),
@@ -405,6 +421,15 @@ const BY_NAME: &[(&str, &[i32])] = &[
     ("kern.osversion", &[CTL_KERN, KERN_OSVERSION]),
     ("kern.hostname", &[CTL_KERN, KERN_HOSTNAME]),
     ("kern.argmax", &[CTL_KERN, KERN_ARGMAX]),
+    ("kern.osproductversion", &[CTL_KERN, KERN_OSPRODUCTVERSION]),
+    (
+        "kern.osproductversioncompat",
+        &[CTL_KERN, KERN_OSPRODUCTVERSIONCOMPAT],
+    ),
+    (
+        "sysctl.proc_translated",
+        &[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED],
+    ),
     ("hw.machine", &[CTL_HW, HW_MACHINE]),
     ("hw.machinearch", &[CTL_HW, HW_MACHINE_ARCH]),
     ("hw.model", &[CTL_HW, HW_MODEL]),
@@ -414,22 +439,39 @@ const BY_NAME: &[(&str, &[i32])] = &[
     ("hw.pagesize", &[CTL_HW, HW_PAGESIZE]),
     ("hw.cachelinesize", &[CTL_HW, HW_CACHELINE]),
     ("hw.memsize", &[CTL_HW, HW_MEMSIZE]),
+    ("hw.optional.arm64", &[CTL_HW, HW_OPTIONAL, 144]),
+    ("hw.cputype", &[CTL_HW, HW_CPUTYPE]),
+    ("hw.cpusubtype", &[CTL_HW, HW_CPUSUBTYPE]),
+    ("hw.cpufamily", &[CTL_HW, HW_CPUFAMILY]),
+    ("hw.cpusubfamily", &[CTL_HW, HW_CPUSUBFAMILY]),
+    ("machdep.cpu.brand_string", &[CTL_MACHDEP, 100, 104]),
+    ("hw.optional.sse", &[CTL_HW, HW_OPTIONAL, 103]),
+    ("hw.optional.sse2", &[CTL_HW, HW_OPTIONAL, 104]),
+    ("hw.optional.floatingpoint", &[CTL_HW, HW_OPTIONAL, 101]),
+    ("hw.optional.neon", &[CTL_HW, HW_OPTIONAL, 131]),
+    // Darwin has no AdvSIMD MIB on this host; Linux needs a private ID for
+    // name-to-MIB round trips of the alias it emulates.
+    #[cfg(not(target_os = "macos"))]
+    ("hw.optional.AdvSIMD", &[CTL_HW, HW_OPTIONAL, 0x7fff_0001]),
+    ("hw.optional.sse3", &[CTL_HW, HW_OPTIONAL, 105]),
+    ("hw.optional.supplementalsse3", &[CTL_HW, HW_OPTIONAL, 106]),
+    ("hw.optional.sse4_1", &[CTL_HW, HW_OPTIONAL, 107]),
+    ("hw.optional.sse4_2", &[CTL_HW, HW_OPTIONAL, 108]),
+    ("hw.optional.avx1_0", &[CTL_HW, HW_OPTIONAL, 111]),
+    ("hw.optional.avx2_0", &[CTL_HW, HW_OPTIONAL, 116]),
+    ("hw.optional.avx512f", &[CTL_HW, HW_OPTIONAL, 124]),
+    ("hw.optional.f16c", &[CTL_HW, HW_OPTIONAL, 113]),
+    ("hw.optional.fma", &[CTL_HW, HW_OPTIONAL, 115]),
     ("user.cs_path", &[CTL_USER, USER_CS_PATH]),
 ];
 
-/// String-only keys, which have no MIB and are reachable by name alone.
+/// Values supplied on non-macOS hosts after resolving a name or MIB.
 #[cfg(not(target_os = "macos"))]
 fn named(name: &str) -> Option<Value> {
     match name {
         "kern.osproductversion" => Some(Value::Str(env_or("ROSETTA3_MACOS_VERSION", "15.0"))),
         "kern.osproductversioncompat" => Some(Value::Str(env_or("ROSETTA3_MACOS_VERSION", "15.0"))),
-        "sysctl.proc_translated" => Some(Value::U32(u32::from(
-            IS_TRANSLATED.load(Ordering::SeqCst),
-        ))),
-        "hw.optional.arm64" => Some(Value::U32(u32::from(guest_arch() == GuestArch::Arm64))),
         "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
-        "hw.cputype" => Some(Value::U32(guest_arch().cpu_type() as u32)),
-        "hw.cpusubtype" => Some(Value::U32(guest_arch().cpu_subtype() as u32)),
         "hw.cpufamily" | "hw.cpusubfamily" => Some(Value::U32(0)),
         _ => optional_feature(name),
     }
@@ -631,9 +673,14 @@ unsafe extern "C" fn sysctlnametomib(
         .to_string_lossy()
         .into_owned();
     let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) else {
-        say_unanswered(&format_args!("name {key:?} as a mib"));
-        crate::errno::set(libc::ENOENT);
-        return -1;
+        #[cfg(target_os = "macos")]
+        return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
+        #[cfg(not(target_os = "macos"))]
+        {
+            say_unanswered(&format_args!("name {key:?} as a mib"));
+            crate::errno::set(libc::ENOENT);
+            return -1;
+        }
     };
     // SAFETY: the caller states `sizep` is a writable `size_t`.
     let available = unsafe { *sizep };
@@ -721,6 +768,37 @@ mod tests {
             bytes.pop();
         }
         String::from_utf8(bytes).ok()
+    }
+
+    fn ask_name(name: &str) -> Option<Vec<u8>> {
+        let name = std::ffi::CString::new(name).unwrap();
+        let mut len: libc::size_t = 0;
+        let rc = unsafe {
+            sysctlbyname(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let rc = unsafe {
+            sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0).then(|| {
+            buf.truncate(len);
+            buf
+        })
     }
 
     #[test]
@@ -811,6 +889,36 @@ mod tests {
     }
 
     #[test]
+    fn proc_translated_agrees_by_name_and_resolved_mib() {
+        let _held = ARCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let name = std::ffi::CString::new("sysctl.proc_translated").unwrap();
+        let mut mib = [0i32; 24];
+        let mut len = mib.len();
+        assert_eq!(
+            unsafe { sysctlnametomib(name.as_ptr(), mib.as_mut_ptr(), &mut len) },
+            0
+        );
+        assert_eq!(&mib[..len], &[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED]);
+
+        for translated in [false, true] {
+            set_is_translated(translated);
+            let expected = u32::from(translated).to_ne_bytes().to_vec();
+            assert_eq!(ask_name("sysctl.proc_translated"), Some(expected.clone()));
+            assert_eq!(ask(&mib[..len]), Some(expected));
+        }
+        set_is_translated(false);
+    }
+
+    #[test]
+    fn guest_cpu_properties_agree_by_name_and_mib() {
+        let _held = lock_guest_arch(GuestArch::X86_64);
+        for name in ["hw.cputype", "hw.cpusubtype", "hw.optional.arm64"] {
+            let mib = BY_NAME.iter().find(|(key, _)| *key == name).unwrap().1;
+            assert_eq!(ask_name(name), ask(mib), "{name}");
+        }
+    }
+
+    #[test]
     fn by_name_and_by_mib_agree() {
         let _held = lock_guest_arch(GuestArch::X86_64);
         let name = std::ffi::CString::new("hw.machine").unwrap();
@@ -830,14 +938,13 @@ mod tests {
         assert_eq!(&buf[..len - 1], b"x86_64");
     }
 
-    /// Every name in the table must map to a MIB this module actually answers, or
-    /// the two halves have drifted.
+    /// A name and its MIB must report the same value or the same absence.
     #[test]
     #[cfg(not(target_os = "macos"))]
-    fn every_named_key_has_an_answer() {
+    fn every_named_key_agrees_with_its_mib() {
         let _held = lock_guest_arch(GuestArch::X86_64);
         for (name, mib) in BY_NAME {
-            assert!(ask(mib).is_some(), "{name} has a MIB but no answer");
+            assert_eq!(ask_name(name), ask(mib), "{name}");
         }
     }
 }

@@ -22,13 +22,12 @@ unsafe extern "C" fn chkstk() {
     );
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-unsafe extern "C" fn chkstk() {
-    todo!()
-}
-
+#[cfg(target_arch = "x86_64")]
 exports::exports! {
     functions {
         "___chkstk_darwin" => chkstk,
     }
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+exports::exports! {}

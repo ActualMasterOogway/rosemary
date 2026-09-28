@@ -50,7 +50,6 @@ pub mod fortify;
 pub mod fs;
 #[cfg(not(target_os = "macos"))]
 pub mod fts;
-#[cfg(not(target_os = "macos"))]
 pub mod glob;
 pub mod heap;
 #[cfg(not(target_os = "macos"))]
@@ -60,6 +59,7 @@ pub mod ioctl;
 pub mod kqueue;
 #[cfg(not(target_os = "macos"))]
 pub mod langinfo;
+pub mod libc_backend;
 pub mod libproc;
 pub mod locale;
 pub mod mach;
@@ -289,6 +289,7 @@ static MODULES: &[exports::Module] = &[
     sysctl::MODULE,
     sysinfo::MODULE,
     mach::MODULE,
+    #[cfg(not(target_os = "macos"))]
     clock::MODULE,
     commoncrypto::MODULE,
     math::MODULE,
@@ -368,7 +369,7 @@ static MODULES: &[exports::Module] = &[
     kqueue::MODULE,
     #[cfg(not(target_os = "macos"))]
     backtrace::MODULE,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     stackprobe::MODULE,
     #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
     printf_l::MODULE,
@@ -401,7 +402,34 @@ static MODULES: &[exports::Module] = &[
 ];
 
 fn implemented(name: &str) -> Option<u64> {
-    registered(name).or_else(|| exports::Module::resolve(MODULES, name))
+    registered(name)
+        .or_else(|| exports::Module::resolve(MODULES, name))
+        .or_else(|| exports::Module::resolve(extra_modules(), name))
+}
+
+#[cfg(target_os = "macos")]
+static MAC_BUILTIN_MODULES: &[exports::Module] = &[
+    clock::MODULE,
+    glob::MODULE,
+    resolv::MODULE,
+    string::MODULE,
+    #[cfg(target_arch = "x86_64")]
+    stackprobe::MODULE,
+];
+
+fn extra_modules() -> &'static [exports::Module] {
+    #[cfg(target_os = "macos")]
+    {
+        if libc_backend::using_builtin() {
+            MAC_BUILTIN_MODULES
+        } else {
+            &[]
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &[]
+    }
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
@@ -440,6 +468,7 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     }
     let out = &mut exports::NonNull(&mut lib);
     exports::Module::provide_all(MODULES, out);
+    exports::Module::provide_all(extra_modules(), out);
     lib
 }
 
@@ -447,10 +476,62 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn libc_mode_child() {
+        let Ok(want) = std::env::var("ROSETTA3_LIBC_TEST_CHILD") else {
+            return;
+        };
+        assert_eq!(libc_backend::using_builtin(), want == "builtin");
+        assert!(is_implemented("_sysctl"));
+        for name in ["_clock_gettime", "_glob", "_res_9_init", "_strerror"] {
+            assert_eq!(is_implemented(name), want == "builtin", "{name}");
+        }
+        let addr = symbol("_glob").expect("native or builtin glob");
+        assert_eq!(
+            addr,
+            if want == "builtin" {
+                (glob::MODULE.symbol)("glob").unwrap()
+            } else {
+                host_symbol("glob").unwrap()
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn libc_mode_selects_the_same_symbols_for_imports_and_dlsym() {
+        for (setting, want, success) in [
+            (None, "native", true),
+            (Some("native"), "native", true),
+            (Some("builtin"), "builtin", true),
+            (Some("invalid"), "invalid", false),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::libc_mode_child"]);
+            command.env("ROSETTA3_LIBC_TEST_CHILD", want);
+            match setting {
+                Some(value) => {
+                    command.env(libc_backend::VAR, value);
+                }
+                None => {
+                    command.env_remove(libc_backend::VAR);
+                }
+            }
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{setting:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn no_module_defines_a_name_another_one_does() {
         let mut seen: Vec<(&str, &str)> = Vec::new();
-        for module in MODULES {
+        for module in MODULES.iter().chain(extra_modules()) {
             for name in (module.names)() {
                 if let Some((_, first)) = seen.iter().find(|(n, _)| *n == name) {
                     panic!("{name} is defined by both {first} and {}", module.path);
@@ -462,7 +543,7 @@ mod tests {
 
     #[test]
     fn a_published_name_is_the_one_dlsym_answers() {
-        for module in MODULES {
+        for module in MODULES.iter().chain(extra_modules()) {
             for name in (module.names)() {
                 let mach_o = format!("_{name}");
                 assert!(

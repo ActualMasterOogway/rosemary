@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{c_char, c_void};
 
 /// Compare `len` bytes without stopping at the first difference.
@@ -178,10 +176,12 @@ mod tests {
             unsafe { timingsafe_bcmp(std::ptr::null(), std::ptr::null(), 0) },
             0
         );
-        assert_eq!(
-            crate::symbol("_timingsafe_bcmp"),
-            Some(timingsafe_bcmp as *const () as usize as u64)
-        );
+        if crate::libc_backend::using_builtin() {
+            assert_eq!(
+                crate::symbol("_timingsafe_bcmp"),
+                Some(timingsafe_bcmp as *const () as usize as u64)
+            );
+        }
     }
 
     fn filled(n: usize, pattern: &[u8], len: usize) -> Vec<u8> {

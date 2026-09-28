@@ -1,6 +1,5 @@
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
-#[cfg(not(target_os = "macos"))]
 use std::ffi::c_char;
 use std::ffi::c_void;
 
@@ -25,6 +24,17 @@ impl Timeval {
             sec: value.tv_sec,
             usec: value.tv_usec,
             _pad: 0,
+        }
+    }
+
+    unsafe fn read(value: *const Self) -> Self {
+        unsafe { value.read_unaligned() }
+    }
+
+    fn host(self) -> libc::timeval {
+        libc::timeval {
+            tv_sec: self.sec,
+            tv_usec: self.usec,
         }
     }
 }
@@ -113,7 +123,6 @@ unsafe extern "C" {
 
 /// Convert the two guest values into host-owned storage. A null pointer keeps
 /// the documented "use the current time" meaning and reaches libc as null.
-#[cfg(not(target_os = "macos"))]
 unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
     (!times.is_null()).then(|| unsafe {
         [
@@ -121,6 +130,38 @@ unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
             Timeval::read(times.add(1)).host(),
         ]
     })
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    let path = unsafe { std::ffi::CStr::from_ptr(path) };
+    let path = prefix::ns::to_host(path);
+    unsafe {
+        libc::utimes(
+            path.as_ptr(),
+            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    unsafe { libc::futimes(fd, host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr())) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 {
+    let host = unsafe { timevals(times) };
+    let path = unsafe { std::ffi::CStr::from_ptr(path) };
+    let path = prefix::ns::to_host(path);
+    unsafe {
+        libc::lutimes(
+            path.as_ptr(),
+            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+        )
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -164,6 +205,22 @@ unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezon
             host_timezone
                 .as_ref()
                 .map_or(core::ptr::null(), core::ptr::from_ref),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezone) -> i32 {
+    let host_time = (!time.is_null()).then(|| unsafe { Timeval::read(time).host() });
+    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone) });
+    unsafe {
+        libc::settimeofday(
+            host_time
+                .as_ref()
+                .map_or(core::ptr::null(), core::ptr::from_ref),
+            host_timezone
+                .as_ref()
+                .map_or(core::ptr::null(), |v| core::ptr::from_ref(v).cast()),
         )
     }
 }
@@ -292,6 +349,15 @@ unsafe extern "C" fn settime(clock: id::clockid_t, ts: *const c_void) -> i32 {
     unsafe { host_settimeofday(&tv, core::ptr::null()) }
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn settime(clock: id::clockid_t, ts: *const c_void) -> i32 {
+    let Some(host) = translate(clock) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+    unsafe { libc::clock_settime(host, ts.cast()) }
+}
+
 /// `uint64_t clock_gettime_nsec_np(clockid_t)`, which has no host spelling at all.
 ///
 /// Zero is the failure Darwin reports, with `errno` set; there is no other value a
@@ -323,10 +389,6 @@ unsafe extern "C" fn clock() -> u64 {
     unsafe { host::clock() as u64 }
 }
 
-#[cfg(target_os = "macos")]
-exports::exports! {}
-
-#[cfg(not(target_os = "macos"))]
 exports::exports! {
     functions {
         "clock_gettime" => gettime,

@@ -1,12 +1,27 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+
+#[cfg(target_os = "macos")]
+type GuestDirent = libc::dirent;
+#[cfg(not(target_os = "macos"))]
+type GuestDirent = crate::dirent::Dirent;
+#[cfg(target_os = "macos")]
+type GuestStat = libc::stat;
+#[cfg(not(target_os = "macos"))]
+type GuestStat = crate::stat::Stat;
+
+#[cfg(target_os = "macos")]
+const _: () = {
+    assert!(size_of::<GuestDirent>() == 1048);
+    assert!(std::mem::offset_of!(GuestDirent, d_name) == 21);
+    assert!(size_of::<GuestStat>() == 144);
+    assert!(std::mem::offset_of!(GuestStat, st_mode) == 4);
+};
 
 type ErrorFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type OpenDirFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-type ReadDirFn = unsafe extern "C" fn(*mut c_void) -> *mut crate::dirent::Dirent;
+type ReadDirFn = unsafe extern "C" fn(*mut c_void) -> *mut GuestDirent;
 type CloseDirFn = unsafe extern "C" fn(*mut c_void);
-type StatFn = unsafe extern "C" fn(*const c_char, *mut crate::stat::Stat) -> c_int;
+type StatFn = unsafe extern "C" fn(*const c_char, *mut GuestStat) -> c_int;
 
 /// Darwin's public `glob_t`.
 #[repr(C)]
@@ -256,7 +271,7 @@ fn tilde(pattern: &[Raw], flags: c_int) -> Vec<Raw> {
         },
     };
     // An unknown user leaves the tilde alone, which is what a shell does too.
-    let Some(home) = crate::passwd::home(user.as_deref()) else {
+    let Some(home) = home(user.as_deref()) else {
         return pattern.to_vec();
     };
 
@@ -270,6 +285,30 @@ fn tilde(pattern: &[Raw], flags: c_int) -> Vec<Raw> {
         .collect();
     out.extend_from_slice(&pattern[end..]);
     out
+}
+
+#[cfg(not(target_os = "macos"))]
+fn home(user: Option<&CStr>) -> Option<CString> {
+    crate::passwd::home(user)
+}
+
+#[cfg(target_os = "macos")]
+fn home(user: Option<&CStr>) -> Option<CString> {
+    let Some(user) = user else {
+        return CString::new(prefix::ns::home()).ok();
+    };
+    let entry = unsafe { libc::getpwnam(user.as_ptr()) };
+    if entry.is_null() {
+        return None;
+    }
+    let pointer = unsafe { (*entry).pw_dir };
+    if pointer.is_null() {
+        return None;
+    }
+    let directory = unsafe { CStr::from_ptr(pointer) };
+    let directory = std::path::Path::new(directory.to_str().ok()?);
+    let guest = prefix::ns::to_guest(directory)?;
+    CString::new(guest.into_os_string().into_encoded_bytes()).ok()
 }
 
 /// The pattern as tokens, and whether it held a metacharacter.
@@ -455,6 +494,47 @@ enum Handle {
     Guest(*mut c_void),
 }
 
+#[cfg(not(target_os = "macos"))]
+unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
+    unsafe { crate::dirent::opendir(path.as_ptr()) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
+    let host = prefix::ns::to_host(path);
+    let dir = unsafe { libc::opendir(host.as_ptr()) };
+    if !dir.is_null() || crate::errno::get() != libc::ENOENT {
+        return dir;
+    }
+    prefix::ns::fold(&host)
+        .map(|found| unsafe { libc::opendir(found.as_ptr()) })
+        .unwrap_or(dir)
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn guest_entry_name(entry: *mut GuestDirent) -> Vec<u8> {
+    unsafe { CStr::from_ptr((&raw const (*entry).name).cast()) }
+        .to_bytes()
+        .to_vec()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn guest_entry_name(entry: *mut GuestDirent) -> Vec<u8> {
+    unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) }
+        .to_bytes()
+        .to_vec()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn guest_mode(stat: &GuestStat) -> u32 {
+    u32::from(stat.mode)
+}
+
+#[cfg(target_os = "macos")]
+fn guest_mode(stat: &GuestStat) -> u32 {
+    u32::from(stat.st_mode)
+}
+
 /// The caller's `GLOB_ALTDIRFUNC` hooks, all five or none.
 struct Hooks {
     opendir: OpenDirFn,
@@ -542,7 +622,7 @@ impl Walk {
                 // is case-insensitive, and the literal part of a pattern is
                 // spelled by the guest.
                 // SAFETY: a NUL-terminated path.
-                let dir = unsafe { crate::dirent::opendir(path.as_ptr()) };
+                let dir = unsafe { open_host(path) };
                 (!dir.is_null()).then_some(Handle::Host(dir))
             }
         }
@@ -560,9 +640,7 @@ impl Walk {
                 if entry.is_null() {
                     return Ok(None);
                 }
-                unsafe { CStr::from_ptr((&raw const (*entry).name).cast()) }
-                    .to_bytes()
-                    .to_vec()
+                unsafe { guest_entry_name(entry) }
             }
             (Handle::Host(dir), _) => {
                 // The end of a directory and a failure are both a null return,
@@ -604,11 +682,11 @@ impl Walk {
                 true => hooks.stat,
                 false => hooks.lstat,
             };
-            let mut out = crate::stat::Stat::default();
+            let mut out: GuestStat = unsafe { std::mem::zeroed() };
             // SAFETY: the guest's hook, filling a Darwin `struct stat` it is
             // handed a pointer to.
             let status = unsafe { crate::call_as_darwin!(ask(path.as_ptr(), &raw mut out)) };
-            return Ok((status == 0).then_some(u32::from(out.mode)));
+            return Ok((status == 0).then_some(guest_mode(&out)));
         }
 
         let mut out: libc::stat = unsafe { std::mem::zeroed() };
@@ -1492,10 +1570,10 @@ mod tests {
             std::ptr::dangling_mut()
         }
 
-        pub unsafe extern "C" fn readdir(_dir: *mut c_void) -> *mut crate::dirent::Dirent {
+        pub unsafe extern "C" fn readdir(_dir: *mut c_void) -> *mut GuestDirent {
             thread_local! {
-                static ENTRY: std::cell::RefCell<crate::dirent::Dirent> =
-                    std::cell::RefCell::new(crate::dirent::Dirent::default());
+                static ENTRY: std::cell::RefCell<GuestDirent> =
+                    std::cell::RefCell::new(unsafe { std::mem::zeroed() });
             }
             let at = POSITION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(name) = ENTRIES.get(at) else {
@@ -1503,9 +1581,20 @@ mod tests {
             };
             ENTRY.with(|entry| {
                 let mut entry = entry.borrow_mut();
-                entry.namlen = name.len() as u16;
-                entry.name = [0; 1024];
-                for (slot, byte) in entry.name.iter_mut().zip(name.bytes()) {
+                #[cfg(not(target_os = "macos"))]
+                {
+                    entry.namlen = name.len() as u16;
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    entry.d_namlen = name.len() as u16;
+                }
+                #[cfg(not(target_os = "macos"))]
+                let slots = &mut entry.name;
+                #[cfg(target_os = "macos")]
+                let slots = &mut entry.d_name;
+                slots.fill(0);
+                for (slot, byte) in slots.iter_mut().zip(name.bytes()) {
                     *slot = byte as c_char;
                 }
                 &raw mut *entry
@@ -1515,9 +1604,16 @@ mod tests {
         pub unsafe extern "C" fn closedir(_dir: *mut c_void) {}
 
         /// Every path the walk asks about exists and is a regular file.
-        pub unsafe extern "C" fn stat(_path: *const c_char, out: *mut crate::stat::Stat) -> c_int {
+        pub unsafe extern "C" fn stat(_path: *const c_char, out: *mut GuestStat) -> c_int {
             // SAFETY: the walk's own structure.
-            unsafe { (*out).mode = libc::S_IFREG as u16 };
+            #[cfg(not(target_os = "macos"))]
+            unsafe {
+                (*out).mode = libc::S_IFREG as u16
+            };
+            #[cfg(target_os = "macos")]
+            unsafe {
+                (*out).st_mode = libc::S_IFREG as u16
+            };
             0
         }
 
