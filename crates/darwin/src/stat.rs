@@ -745,6 +745,63 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int {
     result
 }
 
+/// `int getmntinfo(struct statfs **, int)`.
+///
+/// The prefix is one host filesystem view for now. Keep the result in static
+/// storage because Darwin returns a pointer owned by the C library.
+///
+/// # Safety
+///
+/// `out` is a writable pointer slot or null.
+pub unsafe extern "C" fn getmntinfo(out: *mut *mut Statfs, _flags: c_int) -> c_int {
+    static ROOT: std::sync::OnceLock<Statfs> = std::sync::OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        let path = c"/";
+        let mut value = Statfs {
+            bsize: 0,
+            iosize: 0,
+            blocks: 0,
+            bfree: 0,
+            bavail: 0,
+            files: 0,
+            ffree: 0,
+            fsid: [0; 2],
+            owner: 0,
+            fstype: 0,
+            flags: 0,
+            fssubtype: 0,
+            fstypename: [0; 16],
+            mntonname: [0; 1024],
+            mntfromname: [0; 1024],
+            flags_ext: 0,
+            reserved: [0; 7],
+        };
+        let mut host: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(path.as_ptr(), &mut host) } == 0 {
+            unsafe { fill_statfs(&host, &mut value) };
+        }
+        value.mntonname[0] = b'/';
+        value.fstypename[..5].copy_from_slice(b"other");
+        value
+    });
+    if out.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller provided a writable result slot and `root` is static.
+    unsafe { out.write(root as *const Statfs as *mut Statfs) };
+    1
+}
+
+/// `char *devname(dev_t, mode_t)`.
+///
+/// There is no host-wide device database to translate Darwin's device number
+/// into. The empty name is the C library's missing-device spelling and keeps
+/// callers from dereferencing an unresolved import.
+pub extern "C" fn devname(_device: i32, _mode: i32) -> *const c_char {
+    c"".as_ptr()
+}
+
 exports::exports! {
     functions {
         "stat" | "stat$INODE64" => stat,
@@ -753,6 +810,8 @@ exports::exports! {
         "fstatat" | "fstatat$INODE64" => fstatat,
         "statfs" | "statfs$INODE64" => statfs,
         "fstatfs" | "fstatfs$INODE64" => fstatfs,
+        "getmntinfo" | "getmntinfo$INODE64" => getmntinfo,
+        "devname" => devname,
         "access" => access,
         "faccessat" => faccessat,
         "realpath" => realpath,

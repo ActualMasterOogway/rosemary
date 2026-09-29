@@ -146,6 +146,8 @@ pub mod oflag {
     pub const O_DIRECTORY: i32 = 0x0010_0000;
     pub const O_DSYNC: i32 = 0x0040_0000;
     pub const O_CLOEXEC: i32 = 0x0100_0000;
+    /// Execute-only open; Linux has no separate execute access mode.
+    pub const O_EXEC: i32 = 0x4000_0000;
 }
 
 pub fn creates(flags: i32) -> bool {
@@ -181,6 +183,8 @@ const PAIRS: &[(i32, libc::c_int)] = &[
     (oflag::O_DIRECTORY, libc::O_DIRECTORY),
     (oflag::O_DSYNC, libc::O_DSYNC),
     (oflag::O_CLOEXEC, libc::O_CLOEXEC),
+    // Linux represents an execute-only open as a normal read-only descriptor.
+    (oflag::O_EXEC, 0),
 ];
 
 #[cfg(not(target_os = "macos"))]
@@ -240,7 +244,7 @@ impl DarwinTranslation<libc::c_int> for FcntlFlags {
         // not answer as both.
         let mut rest = host & !oflag::O_ACCMODE;
         for (darwin, native) in PAIRS {
-            if rest & native == *native {
+            if *native != 0 && rest & native == *native {
                 guest |= darwin;
                 rest &= !native;
             }

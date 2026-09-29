@@ -2,6 +2,13 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
+extern "C" fn errc(_: c_int, _: c_int, _: *const c_char) {
+    todo!()
+}
+extern "C" fn warnc(_: c_int, _: *const c_char) {
+    todo!()
+}
+
 unsafe extern "C" {
     fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
     #[cfg(target_env = "gnu")]
@@ -371,6 +378,8 @@ pub unsafe extern "C" fn csops(
 
 exports::exports! {
     functions {
+        "errc" => errc,
+        "warnc" => warnc,
         #[cfg(target_os = "linux")]
         "sigsetjmp" => sigsetjmp,
         "csops" => csops,

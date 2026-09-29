@@ -25,6 +25,8 @@ const LIBRARIES: &[&str] = &[
     "libtermcap.dylib",
     "libssl.60.dylib",
     "libcrypto.57.dylib",
+    "libxo.0.dylib",
+    "libremovefile.dylib",
 ];
 
 /// Whether `install_name` is one of the libraries this module takes from the base.

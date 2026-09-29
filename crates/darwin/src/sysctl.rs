@@ -126,6 +126,7 @@ enum Value {
     Str(String),
     U32(u32),
     U64(u64),
+    Bytes(Vec<u8>),
 }
 
 impl Value {
@@ -139,6 +140,7 @@ impl Value {
             }
             Value::U32(n) => n.to_ne_bytes().to_vec(),
             Value::U64(n) => n.to_ne_bytes().to_vec(),
+            Value::Bytes(bytes) => bytes.clone(),
         }
     }
 }
@@ -405,6 +407,29 @@ unsafe fn fallback(
         // SAFETY: the caller's own `oldp`/`oldlenp`.
         Some(value) => unsafe { copy_out(&value, oldp, oldlenp) },
         None => {
+            // Darwin's `kern.proc` selectors return a byte array of
+            // `kinfo_proc` records. The Linux host has no compatible record
+            // layout, so synthesize the running utility's basic `ps` record
+            // and report an empty set for the remaining process selectors.
+            if mib.len() >= 3 && mib[0] == CTL_KERN && mib[1] == 14 {
+                let record = if mib.get(2) == Some(&5)
+                    && mib.get(3).copied() == Some(unsafe { libc::getuid() } as i32)
+                {
+                    let mut record = vec![0u8; 648];
+                    record[32..36].copy_from_slice(&4i32.to_ne_bytes()); // `P_LP64`.
+                    record[36] = 2; // `extern_proc.p_stat = SRUN`.
+                    record[40..44].copy_from_slice(&unsafe { libc::getpid() }.to_ne_bytes());
+                    record[243..246].copy_from_slice(b"ps\0");
+                    let uid = unsafe { libc::getuid() };
+                    record[392..396].copy_from_slice(&uid.to_ne_bytes()); // `e_pcred.p_ruid`.
+                    record[396..400].copy_from_slice(&uid.to_ne_bytes()); // `e_pcred.p_svuid`.
+                    record[420..424].copy_from_slice(&unsafe { libc::getuid() }.to_ne_bytes());
+                    record
+                } else {
+                    Vec::new()
+                };
+                return unsafe { copy_out(&Value::Bytes(record), oldp, oldlenp) };
+            }
             say_unanswered(&format_args!("mib {mib:?}"));
             crate::errno::set(libc::ENOENT);
             -1

@@ -3,10 +3,12 @@
 //! `copyfile(3)`, which has no host counterpart. Feral's games copy their
 //! bundled `InputDevices` tree into a cache with it before opening a window.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const ACL: u32 = 1 << 0;
 const STAT: u32 = 1 << 1;
@@ -23,6 +25,7 @@ const UNLINK: u32 = 1 << 21;
 /// The opaque `copyfile_state_t`. Nothing is kept in it: no callback or
 /// progress query is supported, so it only has to be a distinct live block.
 const STATE_SIZE: usize = 64;
+static STATE_VALUES: OnceLock<Mutex<HashMap<(usize, u32), usize>>> = OnceLock::new();
 
 fn host(path: *const c_char) -> Option<PathBuf> {
     if path.is_null() {
@@ -246,9 +249,58 @@ pub unsafe extern "C" fn copyfile_state_alloc() -> *mut c_void {
 /// `state` is null or came from [`copyfile_state_alloc`].
 pub unsafe extern "C" fn copyfile_state_free(state: *mut c_void) -> c_int {
     if !state.is_null() {
+        if let Some(values) = STATE_VALUES.get() {
+            values
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|(owner, _), _| *owner != state as usize);
+        }
         // SAFETY: the caller's obligation.
         unsafe { crate::heap::free(state) };
     }
+    0
+}
+
+/// Store one opaque state value. The copy engine does not consume Apple's
+/// progress callbacks, but preserving values lets utilities configure them.
+pub unsafe extern "C" fn copyfile_state_set(
+    state: *mut c_void,
+    flag: u32,
+    source: *const c_void,
+) -> c_int {
+    if state.is_null() || source.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: state values used by the API are pointer-sized or 64-bit words.
+    let value = unsafe { source.cast::<usize>().read_unaligned() };
+    STATE_VALUES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert((state as usize, flag), value);
+    0
+}
+
+/// Read a state value, returning zero for a value that was never set.
+pub unsafe extern "C" fn copyfile_state_get(
+    state: *mut c_void,
+    flag: u32,
+    destination: *mut c_void,
+) -> c_int {
+    if state.is_null() || destination.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let value = STATE_VALUES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&(state as usize, flag))
+        .copied()
+        .unwrap_or(0);
+    // SAFETY: callers provide storage for the flag's pointer-sized value.
+    unsafe { destination.cast::<usize>().write_unaligned(value) };
     0
 }
 
@@ -258,6 +310,8 @@ exports::exports! {
         "fcopyfile" => fcopyfile,
         "copyfile_state_alloc" => copyfile_state_alloc,
         "copyfile_state_free" => copyfile_state_free,
+        "copyfile_state_set" => copyfile_state_set,
+        "copyfile_state_get" => copyfile_state_get,
     }
 }
 
