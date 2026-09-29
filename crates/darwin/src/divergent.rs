@@ -79,7 +79,9 @@ pub const NAMES: &[(&str, &str)] = &[
     // answers all four: the entry is what stops the host's own being bound
     // instead, and `reason` carves an implemented name back out.
     ("regcomp", REGEX),
+    ("regncomp", REGEX),
     ("regexec", REGEX),
+    ("regnexec", REGEX),
     ("regfree", REGEX),
     ("regerror", REGEX),
     // `FTSENT::fts_statp` is a `struct stat *`, which is the [`STAT`] divergence

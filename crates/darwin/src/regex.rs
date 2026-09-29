@@ -1,186 +1,309 @@
-#![cfg(not(target_os = "macos"))]
+use std::ffi::{CStr, c_char, c_int, c_void};
 
-use std::ffi::{c_char, c_int, c_void};
+use fancy_regex::{
+    BytesMode, Error as FancyError, ParseError, Regex as FancyRegex, RegexBuilder, RegexInput,
+};
+use posix_regex::{PosixRegex, PosixRegexBuilder, compile::Error as PosixError};
 
-// The host's own `regcomp` family, declared here because the `libc` crate does
-// not publish it for this target.
-unsafe extern "C" {
-    fn regcomp(preg: *mut c_void, pattern: *const c_char, cflags: c_int) -> c_int;
-    fn regexec(
-        preg: *const c_void,
-        string: *const c_char,
-        nmatch: usize,
-        pmatch: *mut HostMatch,
-        eflags: c_int,
-    ) -> c_int;
-    fn regfree(preg: *mut c_void);
-}
-
-/// `regmatch_t` as the host lays it out.
+/// Darwin's `regmatch_t`: two 64-bit `regoff_t` values.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct HostMatch {
-    rm_so: libc::regoff_t,
-    rm_eo: libc::regoff_t,
-}
-
-/// `regmatch_t` as Darwin lays it out: two `off_t`.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GuestMatch {
-    rm_so: i64,
-    rm_eo: i64,
+    pub rm_so: i64,
+    pub rm_eo: i64,
 }
 
 const _: () = assert!(size_of::<GuestMatch>() == 16);
 
-/// The host's `regex_t`, mirrored so that `re_nsub` - the one field POSIX makes
-/// public and a guest reads - can be got at.
-///
-/// Checked against the `libc` crate's own declaration for this target, which is
-/// what keeps the mirror from drifting.
-#[cfg(all(target_env = "musl", not(target_os = "freebsd")))]
-#[repr(C)]
-struct HostRegex {
-    re_nsub: usize,
-    opaque: *mut c_void,
-    padding: [usize; 4],
-    nsub2: usize,
-    padding2: u8,
-}
-
-/// The BSDs' `regex_t`, which is the same four fields Darwin publishes.
-#[cfg(target_os = "freebsd")]
-#[repr(C)]
-struct HostRegex {
-    re_magic: i32,
-    re_nsub: usize,
-    re_endp: *const c_char,
-    re_g: *mut c_void,
-}
-
-#[cfg(not(any(target_env = "musl", target_os = "freebsd")))]
-#[repr(C)]
-struct HostRegex {
-    buffer: *mut c_void,
-    allocated: usize,
-    used: usize,
-    syntax: u64,
-    fastmap: *mut c_char,
-    translate: *mut c_char,
-    re_nsub: usize,
-    bits: u8,
-}
-
-const _: () = assert!(size_of::<HostRegex>() == size_of::<libc::regex_t>());
-
-/// Darwin's `regex_t`: `{ int re_magic; size_t re_nsub; const char *re_endp;
-/// struct re_guts *re_g; }`. The guest declared this, so the layout is ABI.
-///
-/// `re_g` is opaque to the guest on Darwin too - it is the compiled program -
-/// so this crate's host `regex_t` goes there and nothing is being smuggled into
-/// a field a caller reads.
+/// Darwin's public `regex_t`. The compiled Rust value is held behind `re_g`.
 #[repr(C)]
 pub struct GuestRegex {
-    re_magic: i32,
-    _pad: u32,
-    re_nsub: usize,
-    re_endp: *const c_char,
-    re_g: *mut HostRegex,
+    pub re_magic: i32,
+    pub _pad: u32,
+    pub re_nsub: usize,
+    pub re_endp: *const c_char,
+    pub re_g: *mut c_void,
 }
 
 const _: () = assert!(size_of::<GuestRegex>() == 32);
 
-/// What this crate leaves in `re_magic`, so that a `regexec` on storage no
-/// `regcomp` of ours filled is refused rather than followed into a wild
-/// pointer. Not Darwin's value: nothing may depend on the number, and a
-/// distinct one says which implementation compiled the pattern.
 const MAGIC: i32 = 0x5233_5245;
 
-/// Darwin's `<regex.h>` compile flags.
-mod darwin {
+pub mod flags {
     pub const EXTENDED: i32 = 0o001;
     pub const ICASE: i32 = 0o002;
     pub const NOSUB: i32 = 0o004;
     pub const NEWLINE: i32 = 0o010;
     pub const NOSPEC: i32 = 0o020;
     pub const PEND: i32 = 0o040;
-    /// Everything above, so that a flag nothing here knows can be told from one
-    /// that is merely unsupported.
-    pub const KNOWN: i32 = EXTENDED | ICASE | NOSUB | NEWLINE | NOSPEC | PEND | 0o200;
+    pub const MINIMAL: i32 = 0o100;
+    pub const DUMP: i32 = 0o200;
+    pub const ENHANCED: i32 = 0o400;
+    pub const NOTBOL: i32 = 0o001;
+    pub const NOTEOL: i32 = 0o002;
+    pub const STARTEND: i32 = 0o004;
+    pub const TRACE: i32 = 0o400;
+    pub const LARGE: i32 = 0o1000;
+    pub const BACKR: i32 = 0o2000;
+    pub const ITOA: i32 = 0o400;
+    pub const ATOI: i32 = 255;
 }
 
-/// The host's, which agree on the first two and swap the next two.
-mod host {
-    pub const EXTENDED: i32 = 1;
-    pub const ICASE: i32 = 2;
-    pub const NEWLINE: i32 = 4;
-    pub const NOSUB: i32 = 8;
-}
+const COMPILE_FLAGS: i32 = flags::EXTENDED
+    | flags::ICASE
+    | flags::NOSUB
+    | flags::NEWLINE
+    | flags::NOSPEC
+    | flags::PEND
+    | flags::MINIMAL
+    | flags::DUMP
+    | flags::ENHANCED;
+const EXEC_FLAGS: i32 =
+    flags::NOTBOL | flags::NOTEOL | flags::STARTEND | flags::TRACE | flags::LARGE | flags::BACKR;
 
-/// Darwin's error codes. The first thirteen are the host's as well; from
-/// fourteen the two numberings part, which is why [`from_host_error`] exists.
 pub const REG_NOMATCH: i32 = 1;
 const REG_BADPAT: i32 = 2;
+const REG_ECTYPE: i32 = 4;
+const REG_EESCAPE: i32 = 5;
+const REG_ESUBREG: i32 = 6;
+const REG_EBRACK: i32 = 7;
+const REG_EPAREN: i32 = 8;
+const REG_EBRACE: i32 = 9;
+const REG_BADBR: i32 = 10;
 const REG_ESPACE: i32 = 12;
+const REG_BADRPT: i32 = 13;
+const REG_EMPTY: i32 = 14;
 const REG_ASSERT: i32 = 15;
 const REG_INVARG: i32 = 16;
+const REG_BADMAX: i32 = 18;
 
-/// `REG_STARTEND`, which both spell `4` and which makes `pmatch[0]` an *input*.
-const REG_STARTEND: i32 = 4;
+enum Engine {
+    Posix(PosixRegex<'static>),
+    Enhanced(FancyRegex),
+    Literal(Vec<u8>),
+}
 
-/// Translate a host error number into Darwin's.
-///
-/// One to thirteen are the same code with the same meaning. Above that glibc
-/// has `REG_EEND`, `REG_ESIZE` and `REG_ERPAREN` where Darwin has `REG_EMPTY`,
-/// `REG_ASSERT` and `REG_INVARG`, so the three are mapped by meaning rather
-/// than passed through as numbers that name something else.
-fn from_host_error(code: c_int) -> i32 {
-    match code {
-        0..=13 => code,
-        // REG_EEND: "premature end", which is the host saying its own matcher
-        // got into a state it does not describe.
-        14 => REG_ASSERT,
-        // REG_ESIZE: the compiled pattern is too large.
-        15 => REG_ESPACE,
-        // REG_ERPAREN.
-        16 => 8,
+struct Compiled {
+    engine: Engine,
+    cflags: i32,
+}
+
+fn posix_error(error: PosixError) -> i32 {
+    match error {
+        PosixError::EOF => REG_EESCAPE,
+        PosixError::EmptyAlternative => REG_EMPTY,
+        PosixError::EmptyRepetition | PosixError::UnclosedRepetition => REG_EBRACE,
+        PosixError::Expected(b']', _) => REG_EBRACK,
+        PosixError::Expected(b')', _) => REG_EPAREN,
+        PosixError::Expected(_, _) => REG_BADPAT,
+        PosixError::IllegalRange => REG_BADBR,
+        PosixError::InvalidCharacterRange => 11,
+        PosixError::IntegerOverflow => REG_BADMAX,
+        PosixError::InvalidBackRef(_) => REG_ESUBREG,
+        PosixError::LeadingRepetition => REG_BADRPT,
+        PosixError::UnexpectedToken(b')') => REG_EPAREN,
+        PosixError::UnexpectedToken(_) => REG_BADPAT,
+        PosixError::UnknownClass(_) => REG_ECTYPE,
+        PosixError::UnknownCollation => REG_BADPAT,
+    }
+}
+
+fn fancy_error(error: FancyError) -> i32 {
+    match error {
+        FancyError::ParseError(_, ParseError::UnclosedOpenParen) => REG_EPAREN,
+        FancyError::ParseError(_, ParseError::TrailingBackslash) => REG_EESCAPE,
+        FancyError::ParseError(_, ParseError::InvalidClass) => REG_EBRACK,
+        FancyError::ParseError(_, ParseError::InvalidRepeat | ParseError::TargetNotRepeatable) => {
+            REG_BADRPT
+        }
+        FancyError::ParseError(_, ParseError::InvalidBackref)
+        | FancyError::ParseError(_, ParseError::InvalidGroupNameBackref(_)) => REG_ESUBREG,
+        FancyError::CompileError(error) => match *error {
+            fancy_regex::CompileError::InvalidBackref(_)
+            | fancy_regex::CompileError::InvalidGroupNameBackref(_) => REG_ESUBREG,
+            _ => REG_BADPAT,
+        },
         _ => REG_BADPAT,
     }
 }
 
-/// Translate compile flags, or say which one cannot be honoured.
-fn compile_flags(cflags: i32) -> Result<c_int, &'static str> {
-    if cflags & darwin::NOSPEC != 0 {
-        return Err("REG_NOSPEC: a literal-text match, which the host's regcomp has no flag for");
+fn fancy_pattern(input: &[u8], basic: bool, enhanced: bool) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut bracket = false;
+    let mut quoted = false;
+    let mut index = 0;
+    while index < input.len() {
+        let byte = input[index];
+        if enhanced && !bracket && byte == b'\\' && index + 1 < input.len() {
+            if input[index + 1] == b'Q' && !quoted {
+                quoted = true;
+                index += 2;
+                continue;
+            }
+            if input[index + 1] == b'E' && quoted {
+                quoted = false;
+                index += 2;
+                continue;
+            }
+        }
+        if quoted {
+            use std::fmt::Write;
+            write!(output, "\\x{byte:02X}").expect("write to String");
+            index += 1;
+            continue;
+        }
+        if byte == b'[' {
+            bracket = true;
+        } else if byte == b']' {
+            bracket = false;
+        }
+        if basic && !bracket && byte == b'\\' && index + 1 < input.len() {
+            let next = input[index + 1];
+            if matches!(next, b'(' | b')' | b'|' | b'+' | b'?' | b'{' | b'}') {
+                output.push(next as char);
+                index += 2;
+                continue;
+            }
+        }
+        if basic && !bracket && matches!(byte, b'(' | b')' | b'|' | b'+' | b'?' | b'{' | b'}') {
+            output.push('\\');
+        }
+        if byte.is_ascii() {
+            output.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            write!(output, "\\x{byte:02X}").expect("write to String");
+        }
+        index += 1;
     }
-    if cflags & darwin::PEND != 0 {
-        return Err("REG_PEND: a pattern bounded by re_endp rather than by a NUL");
-    }
-    if cflags & !darwin::KNOWN != 0 {
-        return Err("a compile flag this crate does not know");
-    }
-    let mut out = 0;
-    if cflags & darwin::EXTENDED != 0 {
-        out |= host::EXTENDED;
-    }
-    if cflags & darwin::ICASE != 0 {
-        out |= host::ICASE;
-    }
-    if cflags & darwin::NEWLINE != 0 {
-        out |= host::NEWLINE;
-    }
-    if cflags & darwin::NOSUB != 0 {
-        out |= host::NOSUB;
-    }
-    Ok(out)
+    output
 }
 
-/// `int regcomp(regex_t *preg, const char *pattern, int cflags)`
-///
+fn minimal_repetitions(pattern: &str) -> String {
+    let mut output = String::with_capacity(pattern.len());
+    let bytes = pattern.as_bytes();
+    let mut index = 0;
+    let mut bracket = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && index + 1 < bytes.len() {
+            output.push('\\');
+            output.push(bytes[index + 1] as char);
+            index += 2;
+            continue;
+        }
+        if byte == b'[' {
+            bracket = true;
+        }
+        if byte == b']' {
+            bracket = false;
+        }
+        output.push(byte as char);
+        let bound = byte == b'}'
+            && pattern[..index].rfind('{').is_some_and(|open| {
+                pattern.as_bytes()[open + 1..index]
+                    .iter()
+                    .all(|part| part.is_ascii_digit() || *part == b',')
+            });
+        let optional = byte == b'?' && index > 0 && bytes[index - 1] != b'(';
+        if !bracket && (matches!(byte, b'*' | b'+') || optional || bound) {
+            if bytes.get(index + 1) == Some(&b'?') {
+                index += 1;
+            } else {
+                output.push('?');
+            }
+        }
+        index += 1;
+    }
+    output
+}
+
+fn compile(input: &[u8], cflags: i32) -> Result<(Engine, usize), i32> {
+    if cflags & !COMPILE_FLAGS != 0 || cflags & flags::NOSPEC != 0 && cflags & flags::EXTENDED != 0
+    {
+        return Err(REG_INVARG);
+    }
+    if input.is_empty() {
+        return Err(REG_EMPTY);
+    }
+    if cflags & flags::NOSPEC != 0 {
+        return Ok((Engine::Literal(input.to_vec()), 0));
+    }
+    let empty_group = if cflags & flags::EXTENDED != 0 {
+        input.windows(2).any(|bytes| bytes == b"()")
+    } else {
+        input.windows(4).any(|bytes| bytes == br"\(\)")
+    };
+    if cflags & flags::ENHANCED != 0 || empty_group {
+        let pattern = fancy_pattern(
+            input,
+            cflags & flags::EXTENDED == 0,
+            cflags & flags::ENHANCED != 0,
+        );
+        let pattern = if cflags & flags::MINIMAL != 0 && cflags & flags::EXTENDED != 0 {
+            minimal_repetitions(&pattern)
+        } else {
+            pattern
+        };
+        let mut builder = RegexBuilder::new(&pattern);
+        builder
+            .bytes_mode(BytesMode::Ascii)
+            .unicode_mode(false)
+            .case_insensitive(cflags & flags::ICASE != 0)
+            .dot_matches_new_line(cflags & flags::NEWLINE == 0)
+            .multi_line(cflags & flags::NEWLINE != 0)
+            .allow_input_assertion_overrides(true)
+            .leftmost_longest(
+                cflags & flags::MINIMAL == 0 && !pattern.contains("*?") && !pattern.contains("+?"),
+            );
+        let regex = builder.build().map_err(fancy_error)?;
+        let groups = regex.captures_len() - 1;
+        return Ok((Engine::Enhanced(regex), groups));
+    }
+    let regex = PosixRegexBuilder::new(input)
+        .with_default_classes()
+        .extended(cflags & flags::EXTENDED != 0)
+        .compile()
+        .map_err(|error| {
+            if error == PosixError::EOF && !input.ends_with(b"\\") {
+                REG_EBRACK
+            } else {
+                posix_error(error)
+            }
+        })?;
+    let groups = regex.count_groups() - 1;
+    Ok((Engine::Posix(regex), groups))
+}
+
+unsafe fn compile_into(preg: *mut GuestRegex, pattern: &[u8], cflags: i32) -> c_int {
+    if preg.is_null() {
+        return REG_INVARG;
+    }
+    let (engine, groups) = match std::panic::catch_unwind(|| compile(pattern, cflags)) {
+        Ok(Ok(compiled)) => compiled,
+        Ok(Err(error)) => {
+            unsafe {
+                (*preg).re_magic = 0;
+                (*preg).re_g = std::ptr::null_mut();
+            }
+            return error;
+        }
+        Err(_) => return REG_ASSERT,
+    };
+    let pointer = Box::into_raw(Box::new(Compiled { engine, cflags }));
+    unsafe {
+        (*preg).re_magic = MAGIC;
+        (*preg)._pad = 0;
+        (*preg).re_nsub = groups;
+        (*preg).re_endp = std::ptr::null();
+        (*preg).re_g = pointer.cast();
+    }
+    0
+}
+
 /// # Safety
 ///
-/// `preg` is storage for a Darwin `regex_t` and `pattern` a C string.
+/// `preg` is writable Darwin regex storage and `pattern` is a C string.
 pub unsafe extern "C" fn darwin_regcomp(
     preg: *mut GuestRegex,
     pattern: *const c_char,
@@ -189,46 +312,101 @@ pub unsafe extern "C" fn darwin_regcomp(
     if preg.is_null() || pattern.is_null() {
         return REG_INVARG;
     }
-    let cflags = match compile_flags(cflags) {
-        Ok(flags) => flags,
-        Err(why) => {
-            eprintln!("rosetta3: darwin: regcomp: {why}");
+    let bytes = if cflags & flags::PEND != 0 {
+        let end = unsafe { (*preg).re_endp };
+        let start = pattern.addr();
+        let finish = end.addr();
+        if end.is_null() || finish < start {
             return REG_INVARG;
         }
+        unsafe { std::slice::from_raw_parts(pattern.cast::<u8>(), finish - start) }
+    } else {
+        unsafe { CStr::from_ptr(pattern).to_bytes() }
     };
-    // Zeroed, because the host's `regcomp` reads the fields it is about to fill
-    // when the pattern is recompiled into the same structure.
-    let host = Box::into_raw(Box::new(unsafe { std::mem::zeroed::<HostRegex>() }));
-    // SAFETY: a box just made, and the caller's C string.
-    let status = unsafe { regcomp(host.cast(), pattern, cflags) };
-    if status != 0 {
-        // SAFETY: nothing was compiled into it, so only the box is freed.
-        drop(unsafe { Box::from_raw(host) });
-        // SAFETY: the caller states `preg` is writable.
-        unsafe { (*preg).re_g = std::ptr::null_mut() };
-        return from_host_error(status);
-    }
-    // SAFETY: the caller states `preg` is a whole `regex_t`, and `host` is live.
-    unsafe {
-        (*preg).re_magic = MAGIC;
-        (*preg)._pad = 0;
-        (*preg).re_nsub = (*host).re_nsub;
-        (*preg).re_endp = std::ptr::null();
-        (*preg).re_g = host;
-    }
-    0
+    unsafe { compile_into(preg, bytes, cflags) }
 }
 
-/// `int regexec(const regex_t *preg, const char *string, size_t nmatch,
-/// regmatch_t pmatch[], int eflags)`
-///
 /// # Safety
 ///
-/// `preg` is a compiled Darwin `regex_t`, `string` a C string, and `pmatch` is
-/// null or writable for `nmatch` Darwin `regmatch_t`.
-pub unsafe extern "C" fn darwin_regexec(
+/// `pattern` is readable for `len` bytes and `preg` is writable regex storage.
+pub unsafe extern "C" fn darwin_regncomp(
+    preg: *mut GuestRegex,
+    pattern: *const c_char,
+    len: usize,
+    cflags: c_int,
+) -> c_int {
+    if preg.is_null() || pattern.is_null() || cflags & flags::PEND != 0 {
+        return REG_INVARG;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(pattern.cast::<u8>(), len) };
+    unsafe { compile_into(preg, bytes, cflags) }
+}
+
+fn literal_match(pattern: &[u8], haystack: &[u8], icase: bool) -> Option<(usize, usize)> {
+    haystack
+        .windows(pattern.len())
+        .position(|window| {
+            window.iter().zip(pattern).all(|(&a, &b)| {
+                if icase {
+                    a.eq_ignore_ascii_case(&b)
+                } else {
+                    a == b
+                }
+            })
+        })
+        .map(|start| (start, start + pattern.len()))
+}
+
+fn execute(
+    compiled: &Compiled,
+    input: &[u8],
+    eflags: i32,
+) -> Result<Option<Vec<Option<(usize, usize)>>>, i32> {
+    if eflags & !EXEC_FLAGS != 0 {
+        return Err(REG_INVARG);
+    }
+    match &compiled.engine {
+        Engine::Posix(base) => {
+            let regex = base
+                .clone()
+                .case_insensitive(compiled.cflags & flags::ICASE != 0)
+                .newline(compiled.cflags & flags::NEWLINE != 0)
+                .no_start(eflags & flags::NOTBOL != 0)
+                .no_end(eflags & flags::NOTEOL != 0);
+            Ok(regex
+                .matches(input, Some(1))
+                .into_iter()
+                .next()
+                .map(|groups| groups.into_vec()))
+        }
+        Engine::Enhanced(regex) => {
+            let search = RegexInput::new(input)
+                .start_text(eflags & flags::NOTBOL == 0)
+                .end_text(eflags & flags::NOTEOL == 0);
+            let captures = regex.captures_input(search).map_err(|_| REG_ESPACE)?;
+            Ok(captures.map(|captures| {
+                (0..regex.captures_len())
+                    .map(|index| {
+                        captures
+                            .get(index)
+                            .map(|value| (value.start(), value.end()))
+                    })
+                    .collect()
+            }))
+        }
+        Engine::Literal(pattern) => {
+            Ok(
+                literal_match(pattern, input, compiled.cflags & flags::ICASE != 0)
+                    .map(|span| vec![Some(span)]),
+            )
+        }
+    }
+}
+
+unsafe fn execute_from(
     preg: *const GuestRegex,
     string: *const c_char,
+    len: Option<usize>,
     nmatch: usize,
     pmatch: *mut GuestMatch,
     eflags: c_int,
@@ -236,132 +414,170 @@ pub unsafe extern "C" fn darwin_regexec(
     if preg.is_null() || string.is_null() {
         return REG_INVARG;
     }
-    // SAFETY: the caller states `preg` is a `regex_t`.
-    let (magic, host) = unsafe { ((*preg).re_magic, (*preg).re_g) };
-    if magic != MAGIC || host.is_null() {
-        // Storage no `regcomp` of this crate's filled in. Following `re_g`
-        // would be a jump into whatever the guest left there.
+    let regex = unsafe { &*preg };
+    if regex.re_magic != MAGIC || regex.re_g.is_null() {
         return REG_INVARG;
     }
-    let wanted = match pmatch.is_null() {
-        true => 0,
-        false => nmatch,
-    };
-    let mut matches = vec![HostMatch::default(); wanted];
-    if eflags & REG_STARTEND != 0 && wanted > 0 {
-        // The one direction that is an input: `pmatch[0]` bounds the search.
-        // SAFETY: the caller states `pmatch` holds `nmatch` entries.
-        let first = unsafe { *pmatch };
-        matches[0] = HostMatch {
-            rm_so: first.rm_so as libc::regoff_t,
-            rm_eo: first.rm_eo as libc::regoff_t,
+    let compiled = unsafe { &*regex.re_g.cast::<Compiled>() };
+    let (start, end) = if eflags & flags::STARTEND != 0 {
+        if pmatch.is_null() {
+            return REG_INVARG;
+        }
+        let bounds = unsafe { *pmatch };
+        let (Ok(start), Ok(end)) = (usize::try_from(bounds.rm_so), usize::try_from(bounds.rm_eo))
+        else {
+            return REG_INVARG;
         };
-    }
-    // SAFETY: a compiled host pattern, the caller's string, and a vector of
-    // exactly the length passed with it.
-    let status = unsafe {
-        regexec(
-            host.cast::<c_void>().cast_const(),
-            string,
-            wanted,
-            matches.as_mut_ptr(),
-            eflags,
+        if start > end || len.is_some_and(|len| end > len) {
+            return REG_INVARG;
+        }
+        (start, end)
+    } else {
+        (
+            0,
+            len.unwrap_or_else(|| unsafe { CStr::from_ptr(string).to_bytes().len() }),
         )
     };
-    if status != 0 {
-        return from_host_error(status);
-    }
-    // `regoff_t` is 32 bits on Linux and 64 - Darwin's own width - on the BSDs,
-    // so the widening is a conversion on one host and nothing on the other.
-    #[allow(clippy::useless_conversion)]
-    for (at, found) in matches.iter().enumerate() {
-        // SAFETY: `wanted` is the caller's own `nmatch`, and `pmatch` is
-        // non-null whenever it is not zero.
-        unsafe {
-            *pmatch.add(at) = GuestMatch {
-                rm_so: i64::from(found.rm_so),
-                rm_eo: i64::from(found.rm_eo),
+    let input = unsafe { std::slice::from_raw_parts(string.cast::<u8>().add(start), end - start) };
+    let groups = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        execute(compiled, input, eflags)
+    })) {
+        Ok(Ok(Some(groups))) => groups,
+        Ok(Ok(None)) => return REG_NOMATCH,
+        Ok(Err(error)) => return error,
+        Err(_) => return REG_ASSERT,
+    };
+    if compiled.cflags & flags::NOSUB == 0 && !pmatch.is_null() {
+        for index in 0..nmatch {
+            let span = groups.get(index).copied().flatten();
+            let output = match span {
+                Some((so, eo)) => GuestMatch {
+                    rm_so: i64::try_from(start + so).unwrap_or(-1),
+                    rm_eo: i64::try_from(start + eo).unwrap_or(-1),
+                },
+                None => GuestMatch {
+                    rm_so: -1,
+                    rm_eo: -1,
+                },
             };
+            unsafe { *pmatch.add(index) = output };
         }
     }
     0
 }
 
-/// `void regfree(regex_t *preg)`
-///
 /// # Safety
 ///
-/// `preg` is null or a `regex_t` [`darwin_regcomp`] filled in.
+/// The pointers follow Darwin's `regexec` contract.
+pub unsafe extern "C" fn darwin_regexec(
+    preg: *const GuestRegex,
+    string: *const c_char,
+    nmatch: usize,
+    pmatch: *mut GuestMatch,
+    eflags: c_int,
+) -> c_int {
+    unsafe { execute_from(preg, string, None, nmatch, pmatch, eflags) }
+}
+
+/// # Safety
+///
+/// `string` is readable for `len` bytes; the other pointers follow Darwin's `regnexec` contract.
+pub unsafe extern "C" fn darwin_regnexec(
+    preg: *const GuestRegex,
+    string: *const c_char,
+    len: usize,
+    nmatch: usize,
+    pmatch: *mut GuestMatch,
+    eflags: c_int,
+) -> c_int {
+    unsafe { execute_from(preg, string, Some(len), nmatch, pmatch, eflags) }
+}
+
+/// # Safety
+///
+/// `preg` is null or contains storage compiled by this module.
 pub unsafe extern "C" fn darwin_regfree(preg: *mut GuestRegex) {
     if preg.is_null() {
         return;
     }
-    // SAFETY: the caller states `preg` is a `regex_t`.
-    let (magic, host) = unsafe { ((*preg).re_magic, (*preg).re_g) };
-    if magic != MAGIC || host.is_null() {
-        return;
-    }
-    // SAFETY: a pattern this crate compiled and has not freed - the magic is
-    // cleared below, so a second `regfree` of the same structure does nothing.
-    unsafe {
-        regfree(host.cast());
-        drop(Box::from_raw(host));
-        (*preg).re_magic = 0;
-        (*preg).re_g = std::ptr::null_mut();
-        (*preg).re_nsub = 0;
+    let regex = unsafe { &mut *preg };
+    if regex.re_magic == MAGIC && !regex.re_g.is_null() {
+        unsafe { drop(Box::from_raw(regex.re_g.cast::<Compiled>())) };
+        regex.re_magic = 0;
+        regex.re_nsub = 0;
+        regex.re_g = std::ptr::null_mut();
     }
 }
 
-/// The message Darwin gives for each of its own error codes.
-fn describe(code: i32) -> &'static str {
-    match code {
-        0 => "no errors detected",
-        REG_NOMATCH => "regexec() failed to match",
-        REG_BADPAT => "invalid regular expression",
-        3 => "invalid collating element",
-        4 => "invalid character class",
-        5 => "trailing backslash (\\)",
-        6 => "invalid backreference number",
-        7 => "brackets ([ ]) not balanced",
-        8 => "parentheses ( ) not balanced",
-        9 => "braces { } not balanced",
-        10 => "invalid repetition count(s)",
-        11 => "invalid character range",
-        REG_ESPACE => "out of memory",
-        13 => "repetition-operator operand invalid",
-        14 => "empty (sub)expression",
-        REG_ASSERT => "\"can't happen\" -- you found a bug",
-        REG_INVARG => "invalid argument to regex routine",
-        _ => "*** unknown regexp error code ***",
-    }
-}
+const ERRORS: &[(i32, &str, &str)] = &[
+    (1, "REG_NOMATCH", "regexec() failed to match"),
+    (2, "REG_BADPAT", "invalid regular expression"),
+    (3, "REG_ECOLLATE", "invalid collating element"),
+    (4, "REG_ECTYPE", "invalid character class"),
+    (5, "REG_EESCAPE", "trailing backslash (\\)"),
+    (6, "REG_ESUBREG", "invalid backreference number"),
+    (7, "REG_EBRACK", "brackets ([ ]) not balanced"),
+    (8, "REG_EPAREN", "parentheses not balanced"),
+    (9, "REG_EBRACE", "braces not balanced"),
+    (10, "REG_BADBR", "invalid repetition count(s)"),
+    (11, "REG_ERANGE", "invalid character range"),
+    (12, "REG_ESPACE", "out of memory"),
+    (13, "REG_BADRPT", "repetition-operator operand invalid"),
+    (14, "REG_EMPTY", "empty (sub)expression"),
+    (15, "REG_ASSERT", "\"can't happen\" -- you found a bug"),
+    (16, "REG_INVARG", "invalid argument to regex routine"),
+    (17, "REG_ILLSEQ", "illegal byte sequence"),
+    (18, "REG_BADMAX", "maximum repetition exceeds 255"),
+];
 
-/// `size_t regerror(int errcode, const regex_t *preg, char *errbuf,
-/// size_t errbuf_size)`
-///
-/// Answers the size the whole message needs, terminator included, and copies as
-/// much of it as fits - which is what a caller sizing a second buffer reads.
-///
 /// # Safety
 ///
-/// `errbuf` is null or writable for `size` bytes.
+/// `errbuf` is null or writable for `size` bytes. `preg` is required for `REG_ATOI`.
 pub unsafe extern "C" fn darwin_regerror(
     code: c_int,
-    _preg: *const GuestRegex,
+    preg: *const GuestRegex,
     errbuf: *mut c_char,
     size: usize,
 ) -> usize {
-    let message = describe(code);
+    let message = if code == flags::ATOI {
+        let name = if preg.is_null() || unsafe { (*preg).re_endp.is_null() } {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr((*preg).re_endp) }.to_bytes())
+        };
+        ERRORS
+            .iter()
+            .find(|(_, symbol, _)| name == Some(symbol.as_bytes()))
+            .map_or_else(|| "0".to_owned(), |(number, _, _)| number.to_string())
+    } else if code & flags::ITOA != 0 {
+        if code == flags::ITOA {
+            "REG_0x0".to_owned()
+        } else {
+            ERRORS
+                .iter()
+                .find(|(number, _, _)| *number == code & !flags::ITOA)
+                .map_or("*** unknown regexp error code ***", |(_, symbol, _)| {
+                    *symbol
+                })
+                .to_owned()
+        }
+    } else {
+        ERRORS
+            .iter()
+            .find(|(number, _, _)| *number == code)
+            .map_or(
+                "*** unknown regexp error code ***",
+                |(_, _, description)| *description,
+            )
+            .to_owned()
+    };
     let needed = message.len() + 1;
-    if errbuf.is_null() || size == 0 {
-        return needed;
-    }
-    let fits = message.len().min(size - 1);
-    // SAFETY: the caller states `errbuf` holds `size` bytes, and `fits` leaves
-    // room for the terminator.
-    unsafe {
-        std::ptr::copy_nonoverlapping(message.as_ptr().cast::<c_char>(), errbuf, fits);
-        *errbuf.add(fits) = 0;
+    if !errbuf.is_null() && size != 0 {
+        let copied = message.len().min(size - 1);
+        unsafe {
+            std::ptr::copy_nonoverlapping(message.as_ptr().cast::<c_char>(), errbuf, copied);
+            *errbuf.add(copied) = 0;
+        }
     }
     needed
 }
@@ -369,133 +585,10 @@ pub unsafe extern "C" fn darwin_regerror(
 exports::exports! {
     functions {
         "regcomp" => darwin_regcomp,
+        "regncomp" => darwin_regncomp,
         "regexec" => darwin_regexec,
+        "regnexec" => darwin_regnexec,
         "regfree" => darwin_regfree,
         "regerror" => darwin_regerror,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::CStr;
-
-    use super::*;
-
-    fn compile(pattern: &CStr, cflags: c_int) -> GuestRegex {
-        let mut preg = GuestRegex {
-            re_magic: 0,
-            _pad: 0,
-            re_nsub: 0,
-            re_endp: std::ptr::null(),
-            re_g: std::ptr::null_mut(),
-        };
-        // SAFETY: storage for a whole `regex_t`, and a C string.
-        let status = unsafe { darwin_regcomp(&mut preg, pattern.as_ptr(), cflags) };
-        assert_eq!(status, 0, "compiling {pattern:?}");
-        preg
-    }
-
-    /// The bug this module exists for: the sub-match offsets land in the
-    /// guest's own sixteen-byte entries, not in glibc's eight-byte ones.
-    #[test]
-    fn submatches_are_written_at_darwins_width() {
-        let mut preg = compile(c"([a-z]+)=([0-9]+)", darwin::EXTENDED);
-        assert_eq!(preg.re_nsub, 2);
-        let mut found = [GuestMatch::default(); 3];
-        // SAFETY: a compiled pattern, a C string, and three whole entries.
-        let status = unsafe {
-            darwin_regexec(
-                &preg,
-                c"  width=1280;".as_ptr(),
-                found.len(),
-                found.as_mut_ptr(),
-                0,
-            )
-        };
-        assert_eq!(status, 0);
-        assert_eq!((found[0].rm_so, found[0].rm_eo), (2, 12));
-        assert_eq!((found[1].rm_so, found[1].rm_eo), (2, 7));
-        assert_eq!((found[2].rm_so, found[2].rm_eo), (8, 12));
-        // SAFETY: a pattern this test compiled.
-        unsafe { darwin_regfree(&mut preg) };
-    }
-
-    /// `REG_NEWLINE` and `REG_NOSUB` have each other's values on the two hosts,
-    /// so the flag that reaches the host has to be the translated one.
-    #[test]
-    fn newline_is_newline_and_not_nosub() {
-        let mut preg = compile(c"^b", darwin::EXTENDED | darwin::NEWLINE);
-        let mut found = [GuestMatch::default(); 1];
-        // SAFETY: a compiled pattern and one whole entry.
-        let status = unsafe { darwin_regexec(&preg, c"a\nb".as_ptr(), 1, found.as_mut_ptr(), 0) };
-        assert_eq!(status, 0, "REG_NEWLINE was not honoured");
-        assert_eq!((found[0].rm_so, found[0].rm_eo), (2, 3));
-        // SAFETY: a pattern this test compiled.
-        unsafe { darwin_regfree(&mut preg) };
-    }
-
-    /// A pattern that does not match says so in Darwin's numbering, which is
-    /// the same as the host's for this one.
-    #[test]
-    fn a_failure_to_match_is_reported() {
-        let mut preg = compile(c"[0-9]+", darwin::EXTENDED);
-        // SAFETY: a compiled pattern; a null `pmatch` with `nmatch` zero.
-        let status =
-            unsafe { darwin_regexec(&preg, c"none here".as_ptr(), 0, std::ptr::null_mut(), 0) };
-        assert_eq!(status, REG_NOMATCH);
-        // SAFETY: a pattern this test compiled.
-        unsafe { darwin_regfree(&mut preg) };
-    }
-
-    /// Storage nothing compiled into is refused rather than followed - a guest
-    /// that declares a `regex_t` statically starts with one full of zeroes.
-    #[test]
-    fn uncompiled_storage_is_refused() {
-        let preg = GuestRegex {
-            re_magic: 0,
-            _pad: 0,
-            re_nsub: 0,
-            re_endp: std::ptr::null(),
-            re_g: std::ptr::null_mut(),
-        };
-        // SAFETY: a readable `regex_t` and a C string.
-        let status = unsafe { darwin_regexec(&preg, c"x".as_ptr(), 0, std::ptr::null_mut(), 0) };
-        assert_eq!(status, REG_INVARG);
-    }
-
-    /// A flag with no host counterpart is refused by name rather than dropped,
-    /// because a literal-text match done as a pattern matches something else.
-    #[test]
-    fn a_flag_with_no_counterpart_is_refused() {
-        let mut preg = GuestRegex {
-            re_magic: 0,
-            _pad: 0,
-            re_nsub: 0,
-            re_endp: std::ptr::null(),
-            re_g: std::ptr::null_mut(),
-        };
-        // SAFETY: storage for a whole `regex_t`, and a C string.
-        let status = unsafe { darwin_regcomp(&mut preg, c"a.b".as_ptr(), darwin::NOSPEC) };
-        assert_eq!(status, REG_INVARG);
-    }
-
-    /// The message is the whole length even when the buffer is not, which is
-    /// what a caller that allocates from the answer depends on.
-    #[test]
-    fn the_error_message_reports_its_whole_length() {
-        let mut small = [0_i8; 8];
-        // SAFETY: a buffer with its own length.
-        let needed = unsafe {
-            darwin_regerror(
-                REG_NOMATCH,
-                std::ptr::null(),
-                small.as_mut_ptr(),
-                small.len(),
-            )
-        };
-        assert_eq!(needed, describe(REG_NOMATCH).len() + 1);
-        // SAFETY: the call above NUL-terminated it.
-        let text = unsafe { CStr::from_ptr(small.as_ptr()) };
-        assert_eq!(text.to_bytes(), b"regexec");
     }
 }

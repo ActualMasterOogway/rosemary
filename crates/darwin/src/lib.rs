@@ -411,6 +411,7 @@ fn implemented(name: &str) -> Option<u64> {
 static MAC_BUILTIN_MODULES: &[exports::Module] = &[
     clock::MODULE,
     glob::MODULE,
+    regex::MODULE,
     resolv::MODULE,
     string::MODULE,
     #[cfg(target_arch = "x86_64")]
