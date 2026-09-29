@@ -3671,6 +3671,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectInset", AGGREGATE),
     ("NSMouseInRect", AGGREGATE),
+    ("NSRectFill", AGGREGATE),
     ("CTFontGetBoundingBox", AGGREGATE),
     ("CTFontGetBoundingRectsForGlyphs", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of

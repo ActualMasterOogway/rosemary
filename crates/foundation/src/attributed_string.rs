@@ -2,7 +2,7 @@ use objc::object::Id;
 use objc::sel::Sel;
 
 use crate::define::{class_methods, methods};
-use crate::geometry::{NSRect, NSSize};
+use crate::geometry::{NSRange, NSRect, NSSize};
 
 fn class() -> &'static objc::class::Class {
     objc::class::lookup(c"NSAttributedString").expect("NSAttributedString is registered")
@@ -68,6 +68,35 @@ unsafe extern "C" fn size(receiver: Id, _sel: Sel) -> NSSize {
 /// not itself rasterize AppKit glyphs.
 unsafe extern "C" fn draw_in_rect(_receiver: Id, _sel: Sel, _rect: NSRect) {}
 
+unsafe extern "C" fn add_attribute(
+    _receiver: Id,
+    _sel: Sel,
+    _name: Id,
+    _value: Id,
+    _range: NSRange,
+) {
+}
+
+unsafe extern "C" fn set_attributed_string(receiver: Id, _sel: Sel, value: Id) {
+    // SAFETY: both objects use this module's boxed String storage.
+    let text = unsafe { crate::boxed::contents::<String>(value, class()) }
+        .cloned()
+        .unwrap_or_default();
+    if let Some(contents) = unsafe { crate::boxed::contents::<String>(receiver, class()) } {
+        *contents = text;
+    }
+}
+
+unsafe extern "C" fn append_attributed_string(receiver: Id, _sel: Sel, value: Id) {
+    // SAFETY: both objects use this module's boxed String storage.
+    let text = unsafe { crate::boxed::contents::<String>(value, class()) }
+        .cloned()
+        .unwrap_or_default();
+    if let Some(contents) = unsafe { crate::boxed::contents::<String>(receiver, class()) } {
+        contents.push_str(&text);
+    }
+}
+
 pub(crate) fn make(text: &str) -> Id {
     let object = crate::boxed::make(class(), text.to_owned());
     // SAFETY: a fresh object owned by this function.
@@ -85,5 +114,11 @@ pub(crate) fn install() {
     });
     class_methods!(class, {
         "attributedStringWithString:" => attributed_string_with_string, c"@24@0:8@16";
+    });
+    let mutable = crate::boxed::register::<String>(c"NSMutableAttributedString", Some(class));
+    methods!(mutable, {
+        "addAttribute:value:range:" => add_attribute, c"v48@0:8@16@24{_NSRange=QQ}32";
+        "setAttributedString:" => set_attributed_string, c"v24@0:8@16";
+        "appendAttributedString:" => append_attributed_string, c"v24@0:8@16";
     });
 }

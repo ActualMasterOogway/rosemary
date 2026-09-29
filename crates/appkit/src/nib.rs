@@ -4,6 +4,63 @@ use std::path::Path;
 use foundation::unarchiver::{Archive, Uid};
 use objc::object::Id;
 
+use crate::define::methods;
+
+/// `-[NSBundle loadNibNamed:owner:topLevelObjects:]` is an AppKit category on
+/// Foundation's bundle class.
+unsafe extern "C" fn load_named(
+    bundle: Id,
+    _sel: objc::sel::Sel,
+    name: Id,
+    owner: Id,
+    top_level: *mut Id,
+) -> u8 {
+    if !top_level.is_null() {
+        // SAFETY: the caller passed a writable `NSArray **`.
+        unsafe { *top_level = std::ptr::null_mut() };
+    }
+    // SAFETY: the name is an NSString or nil.
+    let Ok(name) = String::from_utf8(unsafe { foundation::string::bytes(name) }) else {
+        return 0;
+    };
+    let path = unsafe { foundation::bundle::resource_for_object(bundle, &name, "nib") }
+        .or_else(|| unsafe { foundation::bundle::resource_for_object(bundle, &name, "") });
+    let Some(path) = path else {
+        return 0;
+    };
+    let loaded = match load(&path, owner) {
+        Ok(loaded) => loaded,
+        Err(why) => {
+            eprintln!("rosetta3: appkit: {}: {why}", path.display());
+            return 0;
+        }
+    };
+    loaded.report(&path);
+    if !top_level.is_null() {
+        let objects: Vec<_> = loaded
+            .objects
+            .values()
+            .filter(|object| !object.is_null() && **object != owner)
+            .map(|object| *object as corefoundation::base::CFTypeRef)
+            .collect();
+        let array = corefoundation::collections::new_array(
+            &objects,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        // SAFETY: a fresh array and a writable output slot.
+        unsafe { *top_level = corefoundation::api::CFAutorelease(array) as Id };
+    }
+    1
+}
+
+pub(crate) fn install() {
+    let bundle = objc::class::lookup(c"NSBundle").expect("Foundation registered NSBundle");
+    methods!(bundle, {
+        "loadNibNamed:owner:topLevelObjects:" => load_named, c"B40@0:8@16@24^@32";
+    });
+}
+
 /// What a load produced.
 #[derive(Debug)]
 pub struct Loaded {

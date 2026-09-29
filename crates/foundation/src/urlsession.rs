@@ -24,6 +24,7 @@ struct Request {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     timeout: f64,
+    cache_policy: usize,
 }
 
 impl Request {
@@ -34,6 +35,7 @@ impl Request {
             headers: Vec::new(),
             body: Vec::new(),
             timeout,
+            cache_policy: 0,
         }
     }
 }
@@ -239,6 +241,14 @@ unsafe extern "C" fn value_for_header(receiver: Id, _sel: Sel, field: Id) -> Id 
     }
 }
 
+unsafe extern "C" fn request_headers(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a request this module made.
+    let Some(request) = (unsafe { request_of(receiver) }) else {
+        return std::ptr::null_mut();
+    };
+    headers_dictionary(&request.headers)
+}
+
 unsafe extern "C" fn set_http_body(receiver: Id, _sel: Sel, data: Id) {
     // SAFETY: an `NSData`, or nil.
     let bytes = unsafe { corefoundation::collections::data(data as CFTypeRef) }
@@ -270,6 +280,18 @@ unsafe extern "C" fn set_timeout_interval(receiver: Id, _sel: Sel, timeout: f64)
     {
         request.timeout = timeout;
     }
+}
+
+unsafe extern "C" fn set_cache_policy(receiver: Id, _sel: Sel, policy: usize) {
+    // SAFETY: the receiver is a request this module made.
+    if let Some(request) = unsafe { request_of(receiver) } {
+        request.cache_policy = policy;
+    }
+}
+
+unsafe extern "C" fn cache_policy(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: the receiver is a request this module made.
+    unsafe { request_of(receiver) }.map_or(0, |request| request.cache_policy)
 }
 
 unsafe extern "C" fn timeout_interval(receiver: Id, _sel: Sel) -> f64 {
@@ -314,8 +336,11 @@ unsafe extern "C" fn all_header_fields(receiver: Id, _sel: Sel) -> Id {
     let Some(response) = (unsafe { response_of(receiver) }) else {
         return std::ptr::null_mut();
     };
-    let pairs: Vec<(CFTypeRef, CFTypeRef)> = response
-        .headers
+    headers_dictionary(&response.headers)
+}
+
+fn headers_dictionary(headers: &[(String, String)]) -> Id {
+    let pairs: Vec<(CFTypeRef, CFTypeRef)> = headers
         .iter()
         .map(|(name, value)| {
             (
@@ -366,6 +391,26 @@ unsafe extern "C" fn mime_type(receiver: Id, _sel: Sel) -> Id {
     }
 }
 
+unsafe extern "C" fn text_encoding_name(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a response this module made.
+    let Some(response) = (unsafe { response_of(receiver) }) else {
+        return std::ptr::null_mut();
+    };
+    response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .and_then(|(_, value)| {
+            value.split(';').skip(1).find_map(|part| {
+                let (name, value) = part.trim().split_once('=')?;
+                name.trim()
+                    .eq_ignore_ascii_case("charset")
+                    .then(|| autoreleased_string(value.trim().trim_matches('"')))
+            })
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
 /// `-expectedContentLength`, or `NSURLResponseUnknownLength` when the response
 /// did not say - which is every chunked one.
 unsafe extern "C" fn expected_content_length(receiver: Id, _sel: Sel) -> i64 {
@@ -393,6 +438,7 @@ fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .user_agent(concat!("rosetta3/", env!("CARGO_PKG_VERSION")))
+            .http_status_as_error(false)
             .build()
             .into()
     })
@@ -508,9 +554,27 @@ struct Task {
     /// A heap copy, because `-resume` may be sent long after the block's own
     /// scope ended. Released once the handler has run.
     completion: usize,
+    delegate: usize,
+    session: usize,
+    download: bool,
+    description: usize,
+    response: std::sync::atomic::AtomicUsize,
     /// Whether `-resume` has already been sent, so a second one does nothing -
     /// which is what Apple's does for a task that is no longer suspended.
     started: bool,
+    canceled: bool,
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        objc::arc::release(self.description as Id);
+        objc::arc::release(self.response.load(std::sync::atomic::Ordering::Relaxed) as Id);
+        if !self.started {
+            objc::block::release(self.completion as Id);
+            objc::arc::release(self.delegate as Id);
+            objc::arc::release(self.session as Id);
+        }
+    }
 }
 
 // SAFETY: the block is a heap copy the task owns until its handler has run, and
@@ -528,6 +592,15 @@ fn task_class() -> &'static Class {
     unsafe { objc::class::from_ptr(ptr as *const Class).expect("a class") }
 }
 
+fn download_task_class() -> &'static Class {
+    corefoundation::base::register(
+        c"NSURLSessionDownloadTask",
+        Some(task_class()),
+        size_of::<Body<Task>>(),
+        false,
+    )
+}
+
 /// `-resume`: run the request on a thread of its own and call the handler there.
 ///
 /// A thread rather than the caller's, because that is what a caller of an
@@ -537,28 +610,91 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
     let Some(task) = (unsafe { contents::<Task>(receiver, task_class()) }) else {
         return;
     };
-    if task.started {
+    if task.started || task.canceled {
         return;
     }
     task.started = true;
     let request = task.request.clone();
     let completion = task.completion;
+    let delegate = task.delegate;
+    let session = task.session;
+    let download = task.download;
+    let task_id = objc::arc::retain(receiver) as usize;
     std::thread::spawn(move || {
         // A thread of this runtime's making needs a pool of its own: everything
         // handed to the completion handler is autoreleased into it.
         let pool = objc::arc::pool_push();
-        let (data, response, error) = objects(perform(&request));
-        // SAFETY: the block was retained when the task was made, so it is live
-        // until the release below.
-        unsafe { call_completion(completion as Id, data, response, error) };
+        if download {
+            let result = perform(&request).and_then(|(response, bytes)| {
+                // SAFETY: the task is retained for the duration of this worker.
+                if let Some(task) = unsafe { contents::<Task>(task_id as Id, task_class()) } {
+                    let object = make(response_class(), response);
+                    task.response
+                        .store(object as usize, std::sync::atomic::Ordering::Release);
+                }
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let path = format!(
+                    "/tmp/rosetta3-download-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                let host = prefix::ns::host_path(&path);
+                std::fs::write(host, bytes).map_err(|e| e.to_string())?;
+                Ok(path)
+            });
+            let error = match result {
+                Ok(path) => {
+                    let url = corefoundation::url::new_file_url(&path, false) as Id;
+                    // SAFETY: the delegate implements this optional method, and
+                    // the task retains it until the callback returns.
+                    unsafe {
+                        let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
+                            std::mem::transmute(objc::msg::entry());
+                        f(
+                            delegate as Id,
+                            objc::sel::get("URLSession:downloadTask:didFinishDownloadingToURL:"),
+                            session as Id,
+                            task_id as Id,
+                            url,
+                        );
+                        corefoundation::api::CFRelease(url as CFTypeRef);
+                    }
+                    std::ptr::null_mut()
+                }
+                Err(message) => crate::error::make(
+                    crate::error::NSURL_ERROR_DOMAIN,
+                    crate::error::NSURL_ERROR_UNKNOWN,
+                    &message,
+                ),
+            };
+            // SAFETY: the delegate and session are retained by this task.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    delegate as Id,
+                    objc::sel::get("URLSession:task:didCompleteWithError:"),
+                    session as Id,
+                    task_id as Id,
+                    error,
+                );
+            }
+        } else {
+            let (data, response, error) = objects(perform(&request));
+            // SAFETY: the block was retained when the task was made.
+            unsafe { call_completion(completion as Id, data, response, error) };
+        }
         objc::arc::pool_pop(pool);
         objc::block::release(completion as Id);
+        objc::arc::release(delegate as Id);
+        objc::arc::release(session as Id);
+        objc::arc::release(task_id as Id);
     });
 }
 
 /// `-cancel`, which cannot stop a request already in flight.
 ///
-/// The task is marked started so a later `-resume` does nothing, and a request
+/// The task is marked canceled so a later `-resume` does nothing, and a request
 /// already running is left to finish - its handler still runs, which is what a
 /// caller waiting on one needs. Apple's calls the handler with
 /// `NSURLErrorCancelled` instead; matching that would need the transport to be
@@ -567,14 +703,57 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
 unsafe extern "C" fn cancel(receiver: Id, _sel: Sel) {
     // SAFETY: the receiver is a task this module made.
     if let Some(task) = unsafe { contents::<Task>(receiver, task_class()) } {
-        task.started = true;
+        task.canceled = true;
     }
+}
+
+unsafe extern "C" fn set_task_description(receiver: Id, _sel: Sel, description: Id) {
+    // SAFETY: the receiver is a task this module made.
+    let Some(task) = (unsafe { contents::<Task>(receiver, task_class()) }) else {
+        return;
+    };
+    let old = std::mem::replace(
+        &mut task.description,
+        objc::arc::retain(description) as usize,
+    );
+    objc::arc::release(old as Id);
+}
+
+unsafe extern "C" fn task_description(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a task this module made.
+    unsafe { contents::<Task>(receiver, task_class()) }
+        .map_or(std::ptr::null_mut(), |task| task.description as Id)
+}
+
+unsafe extern "C" fn task_current_request(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a task this module made.
+    let Some(task) = (unsafe { contents::<Task>(receiver, task_class()) }) else {
+        return std::ptr::null_mut();
+    };
+    objc::arc::autorelease(make(immutable_request_class(), task.request.clone()))
+}
+
+unsafe extern "C" fn task_response(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a task this module made.
+    unsafe { contents::<Task>(receiver, task_class()) }.map_or(std::ptr::null_mut(), |task| {
+        task.response.load(std::sync::atomic::Ordering::Acquire) as Id
+    })
 }
 
 //
 
 fn session_class() -> &'static Class {
-    corefoundation::base::register(c"NSURLSession", None, size_of::<usize>(), false)
+    register::<Session>(c"NSURLSession", None)
+}
+
+struct Session {
+    delegate: usize,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        objc::arc::release(self.delegate as Id);
+    }
 }
 
 /// `+sharedSession`, and `+sessionWithConfiguration:` - which is the same
@@ -583,7 +762,7 @@ fn session_class() -> &'static Class {
 unsafe extern "C" fn shared_session(_class: Id, _sel: Sel) -> Id {
     static SESSION: OnceLock<usize> = OnceLock::new();
     *SESSION.get_or_init(|| {
-        let session = objc::object::create_instance(session_class(), 0);
+        let session = make(session_class(), Session { delegate: 0 });
         // Retained forever: a singleton a guest can release is one it can make
         // dangle by releasing what it never owned.
         objc::arc::retain(session);
@@ -595,6 +774,24 @@ unsafe extern "C" fn session_with_configuration(class: Id, sel: Sel, _configurat
     // SAFETY: `+sharedSession` reads neither argument.
     unsafe { shared_session(class, sel) }
 }
+
+unsafe extern "C" fn session_with_configuration_delegate_queue(
+    class: Id,
+    sel: Sel,
+    configuration: Id,
+    delegate: Id,
+    _queue: Id,
+) -> Id {
+    let _ = (class, sel, configuration);
+    objc::arc::autorelease(make(
+        session_class(),
+        Session {
+            delegate: objc::arc::retain(delegate) as usize,
+        },
+    ))
+}
+
+unsafe extern "C" fn invalidate_session(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn data_task_with_request(
     _receiver: Id,
@@ -624,9 +821,39 @@ fn autoreleased_task(request: Request, completion: Id) -> Id {
         // a guest passes inline is stack-allocated and its scope ends the moment
         // this method returns.
         completion: objc::block::copy(completion) as usize,
+        delegate: 0,
+        session: 0,
+        download: false,
+        description: 0,
+        response: std::sync::atomic::AtomicUsize::new(0),
         started: false,
+        canceled: false,
     };
     objc::arc::autorelease(make(task_class(), task))
+}
+
+unsafe extern "C" fn download_task_with_request(receiver: Id, _sel: Sel, request: Id) -> Id {
+    // SAFETY: a request and a session this module made.
+    let Some(request) = (unsafe { request_of(request) }) else {
+        return std::ptr::null_mut();
+    };
+    let Some(session) = (unsafe { contents::<Session>(receiver, session_class()) }) else {
+        return std::ptr::null_mut();
+    };
+    objc::arc::autorelease(make(
+        download_task_class(),
+        Task {
+            request: request.clone(),
+            completion: 0,
+            delegate: objc::arc::retain(session.delegate as Id) as usize,
+            session: objc::arc::retain(receiver) as usize,
+            download: true,
+            description: 0,
+            response: std::sync::atomic::AtomicUsize::new(0),
+            started: false,
+            canceled: false,
+        },
+    ))
 }
 
 //
@@ -687,6 +914,7 @@ pub const CLASSES: &[&str] = &[
     "NSURLSession",
     "NSURLSessionTask",
     "NSURLSessionDataTask",
+    "NSURLSessionDownloadTask",
     "NSURLConnection",
     "NSError",
 ];
@@ -710,13 +938,16 @@ pub(crate) fn install() {
         "HTTPMethod" => http_method, c"@16@0:8";
         "HTTPBody" => http_body, c"@16@0:8";
         "valueForHTTPHeaderField:" => value_for_header, c"@24@0:8@16";
+        "allHTTPHeaderFields" => request_headers, c"@16@0:8";
         "timeoutInterval" => timeout_interval, c"d16@0:8";
+        "cachePolicy" => cache_policy, c"Q16@0:8";
         "setURL:" => set_url, c"v24@0:8@16";
         "setHTTPMethod:" => set_http_method, c"v24@0:8@16";
         "setHTTPBody:" => set_http_body, c"v24@0:8@16";
         "setValue:forHTTPHeaderField:" => set_value_for_header, c"v32@0:8@16@24";
         "addValue:forHTTPHeaderField:" => add_value_for_header, c"v32@0:8@16@24";
         "setTimeoutInterval:" => set_timeout_interval, c"v24@0:8d16";
+        "setCachePolicy:" => set_cache_policy, c"v24@0:8Q16";
     });
 
     let response = response_class();
@@ -724,6 +955,7 @@ pub(crate) fn install() {
     methods!(base, {
         "URL" => response_url, c"@16@0:8";
         "MIMEType" => mime_type, c"@16@0:8";
+        "textEncodingName" => text_encoding_name, c"@16@0:8";
         "expectedContentLength" => expected_content_length, c"q16@0:8";
     });
     methods!(response, {
@@ -732,21 +964,32 @@ pub(crate) fn install() {
     });
 
     let task = task_class();
+    download_task_class();
     methods!(task, {
         "resume" => resume, c"v16@0:8";
         "cancel" => cancel, c"v16@0:8";
+        "setTaskDescription:" => set_task_description, c"v24@0:8@16";
+        "taskDescription" => task_description, c"@16@0:8";
+        "currentRequest" => task_current_request, c"@16@0:8";
+        "originalRequest" => task_current_request, c"@16@0:8";
+        "response" => task_response, c"@16@0:8";
     });
 
     let session = session_class();
     class_methods!(session, {
         "sharedSession" => shared_session, c"@16@0:8";
         "sessionWithConfiguration:" => session_with_configuration, c"@24@0:8@16";
+        "sessionWithConfiguration:delegate:delegateQueue:"
+            => session_with_configuration_delegate_queue, c"@40@0:8@16@24@32";
     });
     // `@?` for the handler, which is what tells the emulated backend's argument
     // conversion that the parameter is a block whose `invoke` needs a thunk.
     methods!(session, {
         "dataTaskWithRequest:completionHandler:" => data_task_with_request, c"@32@0:8@16@?24";
         "dataTaskWithURL:completionHandler:" => data_task_with_url, c"@32@0:8@16@?24";
+        "downloadTaskWithRequest:" => download_task_with_request, c"@24@0:8@16";
+        "invalidateAndCancel" => invalidate_session, c"v16@0:8";
+        "finishTasksAndInvalidate" => invalidate_session, c"v16@0:8";
     });
 
     let connection = corefoundation::base::abstract_class(c"NSURLConnection", None);

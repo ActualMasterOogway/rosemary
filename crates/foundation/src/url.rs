@@ -490,6 +490,8 @@ pub(crate) fn install() {
             c"@32@0:8@16@24";
     });
     methods!(class, {
+        "copy" => url_copy, c"@16@0:8";
+        "copyWithZone:" => url_copy_with_zone, c"@24@0:8^v16";
         "absoluteString" => absolute_string, c"@16@0:8";
         "description" => absolute_string, c"@16@0:8";
         "path" => path, c"@16@0:8";
@@ -508,6 +510,14 @@ pub(crate) fn install() {
         "getResourceValue:forKey:error:" => get_resource_value, c"B40@0:8^@16@24^@32";
         "setResourceValue:forKey:error:" => set_resource_value, c"B40@0:8@16@24^@32";
     });
+}
+
+unsafe extern "C" fn url_copy(receiver: Id, _sel: Sel) -> Id {
+    objc::arc::retain(receiver)
+}
+
+unsafe extern "C" fn url_copy_with_zone(receiver: Id, sel: Sel, _zone: *const ()) -> Id {
+    unsafe { url_copy(receiver, sel) }
 }
 
 #[cfg(test)]

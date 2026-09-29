@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use foundation::geometry::NSRange;
+use foundation::geometry::{NSPoint, NSRange, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -18,6 +18,7 @@ struct Flags {
     selectable: bool,
     /// Unretained, as every AppKit delegate is: the delegate owns the view.
     delegate: usize,
+    text_storage: usize,
 }
 
 /// State owned by an `NSTextField`, separate from the `NSTextView` AppKit uses
@@ -418,6 +419,37 @@ const NOT_FOUND: usize = isize::MAX as usize;
 
 unsafe extern "C" fn string(receiver: Id, _sel: Sel) -> Id {
     objc::arc::autorelease(foundation::string::from_str(&read(receiver).text))
+}
+
+unsafe extern "C" fn text_storage(receiver: Id, _sel: Sel) -> Id {
+    if let Some(storage) = flags()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(receiver as usize))
+        .map(|flags| flags.text_storage)
+        .filter(|storage| *storage != 0)
+    {
+        return storage as Id;
+    }
+    let class =
+        objc::class::lookup(c"NSMutableAttributedString").expect("Foundation registered it");
+    let object = objc::object::create_instance(class, 0);
+    let value = foundation::string::from_str(&read(receiver).text);
+    // SAFETY: the new mutable attributed string accepts an NSString.
+    let object = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc::msg::entry());
+        f(object, objc::sel::get("initWithString:"), value)
+    };
+    objc::arc::release(value);
+    let mut flags = flags().lock().unwrap_or_else(|e| e.into_inner());
+    let entry = flags.entry(receiver as usize).or_default();
+    if entry.text_storage != 0 {
+        objc::arc::release(object);
+        entry.text_storage as Id
+    } else {
+        entry.text_storage = object as usize;
+        object
+    }
 }
 
 unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, value: Id) {
@@ -1049,7 +1081,40 @@ unsafe extern "C" fn field_text_did_change(receiver: Id, _sel: Sel, _notificatio
     }
 }
 
+unsafe extern "C" fn string_bounding_rect(
+    receiver: Id,
+    _sel: Sel,
+    limit: NSSize,
+    _options: usize,
+    _attributes: Id,
+) -> NSRect {
+    // SAFETY: the receiver is an NSString.
+    let text =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(receiver) }).into_owned();
+    let character_width = 13.0 * 0.55;
+    let columns = (limit.width / character_width).floor().max(1.0) as usize;
+    let mut lines = 0usize;
+    let mut widest = 0usize;
+    for line in text.split('\n') {
+        let count = line.chars().count();
+        lines += count.max(1).div_ceil(columns);
+        widest = widest.max(count.min(columns));
+    }
+    NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size: NSSize {
+            width: (widest as f64 * character_width).min(limit.width),
+            height: (lines as f64 * 16.0).min(limit.height),
+        },
+    }
+}
+
 pub(crate) fn install() {
+    let string_class = objc::class::lookup(c"NSString").expect("Foundation registered NSString");
+    methods!(string_class, {
+        "boundingRectWithSize:options:attributes:" => string_bounding_rect,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGSize=dd}16Q32@40";
+    });
     let text = objc::class::lookup(c"NSText").expect("declared before its methods");
     methods!(text, {
         "setFieldEditor:" => set_field_editor, c"v20@0:8c16";
@@ -1098,6 +1163,10 @@ pub(crate) fn install() {
         "validAttributesForMarkedText" => valid_attributes, c"@16@0:8";
         "doCommandBySelector:" => do_command_by_selector, c"v24@0:8:16";
         "acceptsFirstResponder" => accepts_first_responder, c"c16@0:8";
+    });
+    let view = objc::class::lookup(c"NSTextView").expect("declared before its methods");
+    methods!(view, {
+        "textStorage" => text_storage, c"@16@0:8";
     });
     let field = objc::class::lookup(c"NSTextField").expect("declared before its methods");
     methods!(field, {

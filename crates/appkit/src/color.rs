@@ -1,6 +1,7 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 
-use foundation::geometry::CGFloat;
+use foundation::geometry::{CGFloat, NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -383,6 +384,48 @@ unsafe extern "C" fn get_components(
     }
 }
 
+// FIXME (ACCURACY): WRONG?
+thread_local! {
+    static FILL: Cell<[f64; 4]> = const { Cell::new([0.0, 0.0, 0.0, 1.0]) };
+}
+
+unsafe extern "C" fn set_fill(receiver: Id, _sel: Sel) {
+    let (red, green, blue, alpha) = unsafe { components(receiver) };
+    FILL.with(|fill| fill.set([red, green, blue, alpha]));
+}
+
+#[allow(non_snake_case)]
+pub extern "C" fn NSRectFill(rect: NSRect) {
+    let [red, green, blue, alpha] = FILL.with(Cell::get);
+    let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    let pixel = [
+        channel(blue),
+        channel(green),
+        channel(red),
+        (alpha.clamp(0.0, 1.0) * 255.0) as u8,
+    ];
+    crate::backing::draw_image(
+        &pixel,
+        1,
+        1,
+        NSSize {
+            width: 1.0,
+            height: 1.0,
+        },
+        rect,
+        NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: 1.0,
+                height: 1.0,
+            },
+        },
+        1,
+        1.0,
+        true,
+    );
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSColor").expect("declared before its methods");
     let meta = class.metaclass();
@@ -400,6 +443,7 @@ pub(crate) fn install() {
         "colorWithWhite:alpha:" => color_with_white, c"@32@0:8d16d24";
     });
     methods!(class, {
+        "setFill" => set_fill, c"v16@0:8";
         "redComponent" => component, c"d16@0:8";
         "greenComponent" => component, c"d16@0:8";
         "blueComponent" => component, c"d16@0:8";

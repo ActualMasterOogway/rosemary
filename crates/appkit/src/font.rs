@@ -78,6 +78,10 @@ unsafe extern "C" fn system_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id
     unsafe { autorelease(font) }
 }
 
+unsafe extern "C" fn system_font_size(_class: Id, _sel: Sel) -> f64 {
+    13.0
+}
+
 unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
     if font.is_null() {
         return std::ptr::null_mut();
@@ -91,6 +95,7 @@ pub(crate) fn install() {
         "fontWithName:size:" => font_with_name, c"@32@0:8@16d24";
         "systemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
         "boldSystemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "systemFontSize" => system_font_size, c"d16@0:8";
     });
 
     let class = objc::class::lookup(c"NSFontManager").expect("declared before its methods");

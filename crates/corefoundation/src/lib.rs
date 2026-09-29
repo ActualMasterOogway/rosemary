@@ -256,7 +256,28 @@ exports::exports! {
 /// answer.
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
+    static EMPTY_ARRAY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static EMPTY_DICTIONARY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let empty_array = *EMPTY_ARRAY.get_or_init(|| {
+        collections::new_array(&[], callbacks::Policy::from_type_callbacks(), false) as usize
+    });
+    let empty_dictionary = *EMPTY_DICTIONARY.get_or_init(|| {
+        collections::new_dictionary(
+            &[],
+            callbacks::Policy::from_key_callbacks(),
+            callbacks::Policy::from_type_callbacks(),
+            false,
+        ) as usize
+    });
     let mut out = vec![
+        (
+            "___NSArray0__".to_string(),
+            base::global_cell("___NSArray0__", empty_array as u64),
+        ),
+        (
+            "___NSDictionary0__".to_string(),
+            base::global_cell("___NSDictionary0__", empty_dictionary as u64),
+        ),
         (
             "___CFConstantStringClassReference".to_string(),
             objc::class::ptr(string::constant_class()) as usize as u64,

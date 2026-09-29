@@ -498,6 +498,43 @@ unsafe extern "C" fn data_using_encoding_lossy(
     unsafe { data_using_encoding(receiver, sel, ns) }
 }
 
+/// `-[NSString writeToFile:atomically:encoding:error:]`.
+unsafe extern "C" fn write_to_file_with_encoding(
+    receiver: Id,
+    sel: Sel,
+    path: Id,
+    atomically: u8,
+    ns: usize,
+    error: *mut Id,
+) -> u8 {
+    if !error.is_null() {
+        // SAFETY: the caller passed a writable `NSError **`.
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    let guest_path = String::from_utf8(unsafe { bytes(path) });
+    let data = unsafe { data_using_encoding(receiver, sel, ns) };
+    let result = match (guest_path, unsafe {
+        corefoundation::collections::data(data as CFTypeRef)
+    }) {
+        (Ok(path), Some(data)) => {
+            crate::collections::write_bytes_to_file(&path, data, atomically != 0)
+                .map_err(|why| (512, format!("could not write {path}: {why}")))
+        }
+        (Err(_), _) => Err((512, "the file path is not valid UTF-8".to_owned())),
+        (_, None) => Err((517, format!("could not encode string with encoding {ns}"))),
+    };
+    match result {
+        Ok(()) => 1,
+        Err((code, description)) => {
+            if !error.is_null() {
+                // SAFETY: the caller passed a writable `NSError **`.
+                unsafe { *error = crate::error::make("NSCocoaErrorDomain", code, &description) };
+            }
+            0
+        }
+    }
+}
+
 /// `-initWithData:encoding:`, the other direction.
 unsafe extern "C" fn init_with_data(receiver: Id, _sel: Sel, data: Id, ns: usize) -> Id {
     objc::arc::release(receiver);
@@ -597,18 +634,50 @@ unsafe extern "C" fn mutable_copy(receiver: Id, _sel: Sel) -> Id {
 const NOT_FOUND: usize = usize::MAX >> 1;
 
 unsafe extern "C" fn range_of_string(receiver: Id, _sel: Sel, needle: Id) -> NSRange {
+    unsafe { range_of_string_options(receiver, _sel, needle, 0) }
+}
+
+unsafe extern "C" fn range_of_string_options(
+    receiver: Id,
+    _sel: Sel,
+    needle: Id,
+    options: usize,
+) -> NSRange {
     // SAFETY: two `NSString`s, or nil.
-    let (haystack, needle) = unsafe { (units(receiver), units(needle)) };
+    let (mut haystack, mut needle) = unsafe { (units(receiver), units(needle)) };
     if needle.is_empty() {
         return NSRange {
             location: NOT_FOUND,
             length: 0,
         };
     }
-    match haystack
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())
-    {
+    if options & 1 != 0 {
+        for unit in &mut haystack {
+            if *unit <= 0x7f {
+                *unit = (*unit as u8).to_ascii_lowercase() as u16;
+            }
+        }
+        for unit in &mut needle {
+            if *unit <= 0x7f {
+                *unit = (*unit as u8).to_ascii_lowercase() as u16;
+            }
+        }
+    }
+    let mut windows = haystack.windows(needle.len());
+    let found = if options & 4 != 0 {
+        windows.rposition(|w| w == needle.as_slice())
+    } else {
+        windows.position(|w| w == needle.as_slice())
+    };
+    let found = found.filter(|at| {
+        options & 8 == 0
+            || if options & 4 != 0 {
+                *at + needle.len() == haystack.len()
+            } else {
+                *at == 0
+            }
+    });
+    match found {
         Some(at) => NSRange {
             location: at,
             length: needle.len(),
@@ -1053,6 +1122,25 @@ unsafe extern "C" fn string_with_string(_class: Id, _sel: Sel, other: Id) -> Id 
     unsafe { api::CFAutorelease(s) as Id }
 }
 
+unsafe extern "C" fn mutable_string_with_string(_class: Id, _sel: Sel, other: Id) -> Id {
+    // SAFETY: the argument is an NSString or nil.
+    let Some(source) = (unsafe { corefoundation::string::as_string(other as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: the new object belongs to the autorelease pool.
+    unsafe { api::CFAutorelease(corefoundation::string::new_mutable_copy(source)) as Id }
+}
+
+unsafe extern "C" fn init_mutable_with_string(receiver: Id, _sel: Sel, other: Id) -> Id {
+    // SAFETY: the argument is an NSString or nil.
+    let source = unsafe { corefoundation::string::as_string(other as CFTypeRef) };
+    let replacement = source
+        .map(corefoundation::string::new_mutable_copy)
+        .unwrap_or(std::ptr::null()) as Id;
+    objc::arc::release(receiver);
+    replacement
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSString").expect("CoreFoundation registered NSString");
     methods!(class, {
@@ -1063,6 +1151,8 @@ pub(crate) fn install() {
         "lengthOfBytesUsingEncoding:" => length_of_bytes, c"Q24@0:8Q16";
         "dataUsingEncoding:" => data_using_encoding, c"@24@0:8Q16";
         "dataUsingEncoding:allowLossyConversion:" => data_using_encoding_lossy, c"@32@0:8Q16B24";
+        "writeToFile:atomically:encoding:error:" => write_to_file_with_encoding,
+            c"B48@0:8@16B24Q32^@40";
         "maximumLengthOfBytesUsingEncoding:" => length_of_bytes, c"Q24@0:8Q16";
         "isEqualToString:" => is_equal_to_string, c"B24@0:8@16";
         "characterAtIndex:" => character_at_index, c"S24@0:8Q16";
@@ -1073,6 +1163,7 @@ pub(crate) fn install() {
         "copyWithZone:" => copy, c"@24@0:8^v16";
         "mutableCopy" => mutable_copy, c"@16@0:8";
         "rangeOfString:" => range_of_string, c"{_NSRange=QQ}24@0:8@16";
+        "rangeOfString:options:" => range_of_string_options, c"{_NSRange=QQ}32@0:8@16Q24";
         "containsString:" => contains_string, c"B24@0:8@16";
         "hasPrefix:" => has_prefix, c"B24@0:8@16";
         "hasSuffix:" => has_suffix, c"B24@0:8@16";
@@ -1118,12 +1209,14 @@ pub(crate) fn install() {
         "appendString:" => append_string_in_place, c"v24@0:8@16";
         "appendFormat:" => append_format, c"v24@0:8@16";
         "setString:" => set_string, c"v24@0:8@16";
-        "init" => init_mutable, c"@16@0:8"
+        "init" => init_mutable, c"@16@0:8";
+        "initWithString:" => init_mutable_with_string, c"@24@0:8@16";
     });
     class_methods!(mutable, {
         "string" => mutable_string, c"@16@0:8";
         "stringWithCapacity:" => mutable_string_with_capacity, c"@24@0:8Q16";
-        "new" => mutable_string, c"@16@0:8"
+        "new" => mutable_string, c"@16@0:8";
+        "stringWithString:" => mutable_string_with_string, c"@24@0:8@16";
     });
 
     class_methods!(class, {

@@ -428,23 +428,29 @@ unsafe extern "C" fn write_to_file(receiver: Id, _sel: Sel, path: Id, atomically
     let Some(bytes) = (unsafe { collections::data(receiver as CFTypeRef) }) else {
         return 0;
     };
-    let path = prefix::ns::host_path(&path);
-    if atomically == 0 {
-        return std::fs::write(&path, &**bytes).is_ok() as u8;
+    write_bytes_to_file(&path, bytes, atomically != 0).is_ok() as u8
+}
+
+pub(crate) fn write_bytes_to_file(
+    guest_path: &str,
+    bytes: &[u8],
+    atomically: bool,
+) -> std::io::Result<()> {
+    let path = prefix::ns::host_path(guest_path);
+    if !atomically {
+        return std::fs::write(&path, bytes);
     }
     // Appended, not `with_extension`, which would *replace* `.dat` and could
     // collide with a real neighbour.
     let mut temporary = path.clone().into_os_string();
     temporary.push(format!(".rosetta3-{}", std::process::id()));
     let temporary = std::path::PathBuf::from(temporary);
-    if std::fs::write(&temporary, &**bytes).is_err() {
-        return 0;
-    }
+    std::fs::write(&temporary, bytes)?;
     match std::fs::rename(&temporary, &path) {
-        Ok(()) => 1,
-        Err(_) => {
+        Ok(()) => Ok(()),
+        Err(why) => {
             let _ = std::fs::remove_file(&temporary);
-            0
+            Err(why)
         }
     }
 }
@@ -783,6 +789,39 @@ unsafe extern "C" fn all_values(receiver: Id, _sel: Sel) -> Id {
             false,
         )) as Id
     }
+}
+
+unsafe extern "C" fn dictionary_copy(receiver: Id, _sel: Sel) -> Id {
+    copy_dictionary(receiver, false)
+}
+
+unsafe extern "C" fn dictionary_mutable_copy(receiver: Id, _sel: Sel) -> Id {
+    copy_dictionary(receiver, true)
+}
+
+fn copy_dictionary(receiver: Id, mutable: bool) -> Id {
+    // SAFETY: the receiver is a dictionary.
+    let Some(dictionary) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    collections::new_dictionary(
+        &dictionary.entries,
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        mutable,
+    ) as Id
+}
+
+unsafe extern "C" fn dictionary_copy_with_zone(receiver: Id, sel: Sel, _zone: *const ()) -> Id {
+    unsafe { dictionary_copy(receiver, sel) }
+}
+
+unsafe extern "C" fn dictionary_mutable_copy_with_zone(
+    receiver: Id,
+    sel: Sel,
+    _zone: *const (),
+) -> Id {
+    unsafe { dictionary_mutable_copy(receiver, sel) }
 }
 
 /// `-init` on `NSMutableArray` and `NSMutableDictionary`, which are class
@@ -1394,6 +1433,15 @@ unsafe extern "C" fn set_with_capacity(_class: Id, _sel: Sel, _capacity: usize) 
     unsafe { api::CFAutorelease(collections::new_set(&[], Policy::from_type_callbacks())) as Id }
 }
 
+unsafe extern "C" fn set_with_array(_class: Id, _sel: Sel, array: Id) -> Id {
+    // SAFETY: the argument is an NSArray or nil.
+    let values = unsafe { collections::array(array as CFTypeRef) }
+        .map(|array| array.values.as_slice())
+        .unwrap_or(&[]);
+    // SAFETY: the new set retains its elements.
+    unsafe { api::CFAutorelease(collections::new_set(values, Policy::from_type_callbacks())) as Id }
+}
+
 unsafe extern "C" fn set_count(receiver: Id, _sel: Sel) -> usize {
     // SAFETY: a set.
     unsafe { collections::set(receiver as CFTypeRef) }.map_or(0, |set| set.values.len())
@@ -1439,6 +1487,7 @@ pub(crate) fn install() {
     class_methods!(set, {
         "setWithObject:" => set_with_object, c"@24@0:8@16";
         "setWithCapacity:" => set_with_capacity, c"@24@0:8Q16";
+        "setWithArray:" => set_with_array, c"@24@0:8@16";
     });
     methods!(set, {
         "count" => set_count, c"Q16@0:8";
@@ -1497,6 +1546,10 @@ pub(crate) fn install() {
         "allKeys" => all_keys, c"@16@0:8";
         "allValues" => all_values, c"@16@0:8";
         "description" => dictionary_description, c"@16@0:8";
+        "copy" => dictionary_copy, c"@16@0:8";
+        "copyWithZone:" => dictionary_copy_with_zone, c"@24@0:8^v16";
+        "mutableCopy" => dictionary_mutable_copy, c"@16@0:8";
+        "mutableCopyWithZone:" => dictionary_mutable_copy_with_zone, c"@24@0:8^v16";
         "valueForKey:" => dictionary_value_for_key, c"@24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => dictionary_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });

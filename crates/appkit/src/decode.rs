@@ -118,6 +118,7 @@ pub(crate) fn build(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Op
     match class_name {
         "NSWindowTemplate" => window_template(builder, uid),
         "NSCustomView" => custom_view(builder, uid),
+        "NSClassSwapper" => custom_view(builder, uid),
         "NSView" => view(builder, uid, "NSView"),
         "NSMenu" => menu(builder, uid),
         "NSMenuItem" => menu_item(builder, uid),
@@ -129,6 +130,7 @@ pub(crate) fn build(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Op
 pub(crate) const DECODED: &[&str] = &[
     "NSWindowTemplate",
     "NSCustomView",
+    "NSClassSwapper",
     "NSView",
     "NSMenu",
     "NSMenuItem",
@@ -268,8 +270,12 @@ fn menu_item(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
 }
 
 fn text<'a>(builder: &'a dyn Builder, uid: Uid, key: &str) -> Option<&'a str> {
-    let value = builder.archive().field_object(uid, key)?;
-    builder.archive().string(value)
+    builder.archive().field(uid, key).and_then(|value| {
+        value.as_str().or_else(|| {
+            let reference = builder.archive().field_object(uid, key)?;
+            builder.archive().string(reference)
+        })
+    })
 }
 
 fn window_template(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {

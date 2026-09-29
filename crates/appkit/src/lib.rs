@@ -73,6 +73,7 @@ pub fn bootstrap() {
         panel::install();
         appearance::install();
         application::install();
+        nib::install();
         dock::install();
         workspace::install();
         color::install();
@@ -185,6 +186,7 @@ exports::exports! {
         "NSPointInRect" => geometry::NSPointInRect,
         "NSMouseInRect" => geometry::NSMouseInRect,
         "NSInsetRect" => geometry::NSInsetRect,
+        "NSRectFill" => color::NSRectFill,
         "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
         "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
         "CGRectEqualToRect" | "NSEqualRects" => geometry::CGRectEqualToRect,
@@ -354,6 +356,7 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSDeviceResolution", "NSDeviceResolution"),
     ("_NSForegroundColorAttributeName", "NSColor"),
     ("_NSFontAttributeName", "NSFont"),
+    ("_NSLinkAttributeName", "NSLink"),
     ("_NSParagraphStyleAttributeName", "NSParagraphStyle"),
     ("_NSObliquenessAttributeName", "NSObliqueness"),
     ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),

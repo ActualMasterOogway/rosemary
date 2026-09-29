@@ -651,6 +651,19 @@ pub fn main() -> Option<&'static Layout> {
     *MAIN.read().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Resolve a resource in the bundle object the guest supplied.
+///
+/// # Safety
+///
+/// `bundle` must be an `NSBundle` this module made.
+pub unsafe fn resource_for_object(
+    bundle: objc::object::Id,
+    name: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    unsafe { class::layout_of(bundle) }?.resource(name, extension)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,7 +844,7 @@ pub(crate) mod class {
     /// # Safety
     ///
     /// `receiver` must be an `NSBundle` this module made.
-    unsafe fn layout_of(receiver: Id) -> Option<&'static super::Layout> {
+    pub(super) unsafe fn layout_of(receiver: Id) -> Option<&'static super::Layout> {
         if receiver.is_null() {
             return None;
         }

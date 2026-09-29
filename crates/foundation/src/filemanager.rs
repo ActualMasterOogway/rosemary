@@ -72,6 +72,29 @@ unsafe extern "C" fn file_exists_is_directory(
     1
 }
 
+unsafe extern "C" fn create_file(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    contents: Id,
+    _attributes: Id,
+) -> u8 {
+    // SAFETY: the arguments are an NSString and an NSData, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return 0;
+    };
+    let bytes = if contents.is_null() {
+        Vec::new()
+    } else {
+        let Some(data) = (unsafe { corefoundation::collections::data(contents as CFTypeRef) })
+        else {
+            return 0;
+        };
+        data.to_vec()
+    };
+    std::fs::write(path, bytes).is_ok() as u8
+}
+
 unsafe extern "C" fn create_directory(
     _receiver: Id,
     _sel: Sel,
@@ -461,6 +484,68 @@ unsafe extern "C" fn attributes_of_item(_receiver: Id, _sel: Sel, path: Id, erro
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
+unsafe extern "C" fn attributes_of_file_system(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: an NSString, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(path) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: statvfs initializes the output on success.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return std::ptr::null_mut();
+    }
+    let entries = [
+        (
+            "NSFileSystemSize",
+            stat.f_blocks.saturating_mul(stat.f_frsize),
+        ),
+        (
+            "NSFileSystemFreeSize",
+            stat.f_bavail.saturating_mul(stat.f_frsize),
+        ),
+        ("NSFileSystemNodes", stat.f_files),
+        ("NSFileSystemFreeNodes", stat.f_favail),
+    ];
+    let pairs: Vec<(CFTypeRef, CFTypeRef)> = entries
+        .iter()
+        .map(|(key, value)| {
+            (
+                corefoundation::string::from_bytes(key.as_bytes(), false),
+                corefoundation::collections::new_number(
+                    corefoundation::collections::Number::Integer(
+                        (*value).min(i64::MAX as u64) as i64
+                    ),
+                ),
+            )
+        })
+        .collect();
+    let dictionary = corefoundation::collections::new_dictionary(
+        &pairs,
+        corefoundation::callbacks::Policy::from_key_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for (key, value) in pairs {
+        // SAFETY: the dictionary retained both objects.
+        unsafe {
+            corefoundation::api::CFRelease(key);
+            corefoundation::api::CFRelease(value);
+        }
+    }
+    // SAFETY: a fresh dictionary.
+    unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
+}
+
 /// Seconds since the Unix epoch, negative for a file dated before it.
 fn since_1970(time: std::time::SystemTime) -> f64 {
     match time.duration_since(std::time::UNIX_EPOCH) {
@@ -583,6 +668,7 @@ pub(crate) fn install() {
     methods!(class, {
         "fileExistsAtPath:" => file_exists, c"B24@0:8@16";
         "fileExistsAtPath:isDirectory:" => file_exists_is_directory, c"B32@0:8@16^c24";
+        "createFileAtPath:contents:attributes:" => create_file, c"B40@0:8@16@24@32";
         "createDirectoryAtPath:withIntermediateDirectories:attributes:error:"
             => create_directory, c"B44@0:8@16c24@32^@40";
         "removeItemAtPath:error:" => remove_item, c"B32@0:8@16^@24";
@@ -590,6 +676,7 @@ pub(crate) fn install() {
         "moveItemAtPath:toPath:error:" => move_item, c"B40@0:8@16@24^@32";
         "contentsOfDirectoryAtPath:error:" => contents_of_directory, c"@32@0:8@16^@24";
         "attributesOfItemAtPath:error:" => attributes_of_item, c"@32@0:8@16^@24";
+        "attributesOfFileSystemForPath:error:" => attributes_of_file_system, c"@32@0:8@16^@24";
         "isWritableFileAtPath:" => is_writable, c"B24@0:8@16";
         "isReadableFileAtPath:" => file_exists, c"B24@0:8@16";
         "isExecutableFileAtPath:" => is_executable, c"B24@0:8@16";
@@ -625,6 +712,56 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_system_attributes_report_available_space() {
+        let manager = manager();
+        let root = std::env::temp_dir().join(format!("r3-fs-{}", std::process::id()));
+        let path = crate::string::from_str(&root.to_string_lossy());
+        // SAFETY: the manager and path are Foundation objects; no error slot is needed.
+        assert_eq!(
+            unsafe {
+                create_directory(
+                    manager,
+                    objc::sel::get(
+                        "createDirectoryAtPath:withIntermediateDirectories:attributes:error:",
+                    ),
+                    path,
+                    1,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            1
+        );
+        let attributes = unsafe {
+            attributes_of_file_system(
+                manager,
+                objc::sel::get("attributesOfFileSystemForPath:error:"),
+                path,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!attributes.is_null());
+        // SAFETY: the returned dictionary holds an NSNumber at this key.
+        let free = unsafe { attribute(attributes, "NSFileSystemFreeSize") };
+        let free = unsafe { corefoundation::collections::number(free as CFTypeRef) }
+            .expect("free space number")
+            .as_i64();
+        assert!(free > 0);
+        assert_eq!(
+            unsafe {
+                remove_item(
+                    manager,
+                    objc::sel::get("removeItemAtPath:error:"),
+                    path,
+                    std::ptr::null_mut(),
+                )
+            },
+            1
+        );
+        objc::arc::release(path);
+    }
 
     fn manager() -> Id {
         crate::bootstrap();

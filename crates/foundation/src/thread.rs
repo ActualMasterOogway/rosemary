@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::define::class_methods;
+use crate::define::{class_methods, methods};
 
 /// Set once a thread has been detached, which is the whole of what
 /// `+isMultiThreaded` reports: a guest that made its own threads with
@@ -68,11 +68,20 @@ unsafe extern "C" fn is_multi_threaded(_class: Id, _sel: Sel) -> bool {
     MULTITHREADED.load(Ordering::Relaxed)
 }
 
+unsafe extern "C" fn is_main_thread(_receiver: Id, _sel: Sel) -> bool {
+    // SAFETY: this asks about the calling thread, not an object pointer.
+    unsafe { darwin::pthread::main_np() != 0 }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSThread").expect("declared abstract by this crate");
     class_methods!(class, {
         "detachNewThreadSelector:toTarget:withObject:" => detach, c"v40@0:8:16@24@32";
         "sleepForTimeInterval:" => sleep_for_interval, c"v24@0:8d16";
         "isMultiThreaded" => is_multi_threaded, c"B16@0:8";
+        "isMainThread" => is_main_thread, c"B16@0:8";
+    });
+    methods!(class, {
+        "isMainThread" => is_main_thread, c"B16@0:8";
     });
 }

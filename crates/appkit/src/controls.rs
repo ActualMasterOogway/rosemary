@@ -394,7 +394,8 @@ mod slot {
     pub const IMAGE: usize = 0;
     pub const TARGET: usize = 1;
     pub const ACTION: usize = 2;
-    pub const BUTTON_OBJECTS: [usize; 1] = [IMAGE];
+    pub const TITLE: usize = 3;
+    pub const BUTTON_OBJECTS: [usize; 2] = [IMAGE, TITLE];
 }
 
 const ROW: usize = 4;
@@ -497,6 +498,14 @@ unsafe extern "C" fn button_set_image(receiver: Id, _sel: Sel, value: Id) {
 
 unsafe extern "C" fn button_image(receiver: Id, _sel: Sel) -> Id {
     read(buttons(), receiver, slot::IMAGE) as Id
+}
+
+unsafe extern "C" fn button_set_title(receiver: Id, _sel: Sel, value: Id) {
+    write_object(buttons(), receiver, slot::TITLE, value);
+}
+
+unsafe extern "C" fn button_title(receiver: Id, _sel: Sel) -> Id {
+    read(buttons(), receiver, slot::TITLE) as Id
 }
 
 /// `-setTarget:`, unretained as a control's target is.
@@ -690,6 +699,8 @@ pub(crate) fn install() {
     methods!(class, {
         "setImage:" => button_set_image, c"v24@0:8@16";
         "image" => button_image, c"@16@0:8";
+        "setTitle:" => button_set_title, c"v24@0:8@16";
+        "title" => button_title, c"@16@0:8";
         "setTarget:" => button_set_target, c"v24@0:8@16";
         "target" => button_target, c"@16@0:8";
         "setAction:" => button_set_action, c"v24@0:8:16";
@@ -715,6 +726,21 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_title_is_retained_and_read_back() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSButton").expect("NSButton");
+        let button = objc::object::create_instance(class, 0);
+        let title = foundation::string::from_str("Install");
+        // SAFETY: the receiver is a button and the argument is an NSString.
+        unsafe { button_set_title(button, objc::sel::get("setTitle:"), title) };
+        objc::arc::release(title);
+        // SAFETY: the receiver is the same live button.
+        let stored = unsafe { button_title(button, objc::sel::get("title")) };
+        assert_eq!(unsafe { foundation::string::bytes(stored) }, b"Install");
+        objc::arc::release(button);
+    }
 
     fn scroller(frame: NSRect) -> Id {
         crate::bootstrap();

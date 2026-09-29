@@ -133,12 +133,11 @@ pub fn ensure_standard_directories() {
 unsafe extern "C" fn temporary_directory() -> Id {
     // Apple's ends in a separator, and a caller that concatenates rather than
     // using `-stringByAppendingPathComponent:` depends on it.
-    let path = std::env::temp_dir();
-    let path = path.to_string_lossy();
-    crate::string::from_str(&match path.ends_with('/') {
-        true => path.into_owned(),
-        false => format!("{path}/"),
-    })
+    // The host's TMPDIR may sit below a private shell directory that the
+    // guest prefix does not contain.
+    // TODO: make this read the guest's environ block incase they set TMPDIR
+    // themselves
+    return crate::string::from_str("/tmp/");
 }
 
 exports::exports! {
