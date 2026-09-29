@@ -1590,7 +1590,7 @@ mod tests {
         pub unsafe extern "C" fn stat(_path: *const c_char, out: *mut GuestStat) -> c_int {
             // SAFETY: the walk's own structure.
             unsafe {
-                (*out).mode = libc::S_IFREG.into()
+                (*out).mode = libc::S_IFREG as _
             };
             0
         }

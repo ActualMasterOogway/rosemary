@@ -34,30 +34,33 @@ pub struct Stat {
 
 impl DarwinTranslation<libc::stat> for Stat {
     fn to_host(&self) -> libc::stat {
-        libc::stat {
-            st_dev: self.dev,
-            st_mode: self.mode,
-            st_nlink: self.nlink,
-            st_ino: self.ino,
-            st_uid: self.uid,
-            st_gid: self.gid,
-            st_rdev: self.rdev,
-            st_atime: self.atime.sec,
-            st_atime_nsec: self.atime.nsec,
-            st_mtime: self.mtime.sec,
-            st_mtime_nsec: self.mtime.nsec,
-            st_ctime: self.ctime.sec,
-            st_ctime_nsec: self.ctime.nsec,
-            st_birthtime: self.birthtime.sec,
-            st_birthtime_nsec: self.birthtime.nsec,
-            st_size: self.size,
-            st_blocks: self.blocks,
-            st_blksize: self.blksize,
-            st_flags: self.flags,
-            st_gen: self.generation,
-            st_lspare: self.lspare,
-            st_qspare: self.qspare,
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_dev = self.dev as u64;
+        stat.st_mode = self.mode.into();
+        stat.st_nlink = self.nlink.into();
+        stat.st_ino = self.ino;
+        stat.st_uid = self.uid;
+        stat.st_gid = self.gid;
+        stat.st_rdev = self.rdev as u64;
+        stat.st_atime = self.atime.sec;
+        stat.st_atime_nsec = self.atime.nsec;
+        stat.st_mtime = self.mtime.sec;
+        stat.st_mtime_nsec = self.mtime.nsec;
+        stat.st_ctime = self.ctime.sec;
+        stat.st_ctime_nsec = self.ctime.nsec;
+        stat.st_size = self.size;
+        stat.st_blocks = self.blocks;
+        stat.st_blksize = self.blksize.into();
+        #[cfg(target_os = "macos")]
+        {
+            stat.st_birthtime = self.birthtime.sec;
+            stat.st_birthtime_nsec = self.birthtime.nsec;
+            stat.st_flags = self.flags;
+            stat.st_gen = self.generation;
+            stat.st_lspare = self.lspare;
+            stat.st_qspare = self.qspare;
         }
+        stat
     }
 
     fn from_host(host: &libc::stat) -> Self {
