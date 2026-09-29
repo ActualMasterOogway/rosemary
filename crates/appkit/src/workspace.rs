@@ -11,6 +11,32 @@ pub const DID_WAKE: &str = "NSWorkspaceDidWakeNotification";
 pub const SCREENS_DID_SLEEP: &str = "NSWorkspaceScreensDidSleepNotification";
 pub const SCREENS_DID_WAKE: &str = "NSWorkspaceScreensDidWakeNotification";
 
+/// The `NSWorkspaceLaunchConfiguration...` keys, published as data in
+/// `crate::STRING_GLOBALS`.
+pub const LAUNCH_ARGUMENTS: &str = "NSWorkspaceLaunchConfigurationArguments";
+pub const LAUNCH_ENVIRONMENT: &str = "NSWorkspaceLaunchConfigurationEnvironment";
+pub const LAUNCH_APPLE_EVENT: &str = "NSWorkspaceLaunchConfigurationAppleEvent";
+pub const LAUNCH_ARCHITECTURE: &str = "NSWorkspaceLaunchConfigurationArchitecture";
+
+/// What an `NSRunningApplication` for a process this one launched knows about
+/// it, by object address. Anything not listed here is this process.
+struct Launched {
+    pid: i32,
+    identifier: Option<String>,
+    name: Option<String>,
+}
+
+static LAUNCHED: std::sync::Mutex<Vec<(usize, Launched)>> = std::sync::Mutex::new(Vec::new());
+
+fn launched<T>(receiver: Id, read: impl FnOnce(&Launched) -> T) -> Option<T> {
+    LAUNCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(object, _)| *object == receiver as usize)
+        .map(|(_, launched)| read(launched))
+}
+
 /// `+[NSWorkspace sharedWorkspace]`.
 ///
 /// The workspace is a process-lifetime singleton. Its individual services are
@@ -108,13 +134,16 @@ fn autoreleased(text: &str) -> Id {
     unsafe { corefoundation::api::CFAutorelease(string as _) as Id }
 }
 
-/// `-processIdentifier`. Only this process is ever represented.
-unsafe extern "C" fn process_identifier(_receiver: Id, _sel: Sel) -> i32 {
-    std::process::id() as i32
+/// `-processIdentifier`: this process, or one it launched.
+unsafe extern "C" fn process_identifier(receiver: Id, _sel: Sel) -> i32 {
+    launched(receiver, |app| app.pid).unwrap_or(std::process::id() as i32)
 }
 
 /// `-bundleIdentifier`: nil for an executable outside a bundle, as on macOS.
-unsafe extern "C" fn bundle_identifier(_receiver: Id, _sel: Sel) -> Id {
+unsafe extern "C" fn bundle_identifier(receiver: Id, _sel: Sel) -> Id {
+    if let Some(identifier) = launched(receiver, |app| app.identifier.clone()) {
+        return identifier.map_or(std::ptr::null_mut(), |id| autoreleased(&id));
+    }
     match foundation::bundle::main().and_then(|b| b.identifier()) {
         Some(identifier) => autoreleased(identifier),
         None => std::ptr::null_mut(),
@@ -122,7 +151,10 @@ unsafe extern "C" fn bundle_identifier(_receiver: Id, _sel: Sel) -> Id {
 }
 
 /// `-localizedName`: the bundle's display name, else the executable's name.
-unsafe extern "C" fn localized_name(_receiver: Id, _sel: Sel) -> Id {
+unsafe extern "C" fn localized_name(receiver: Id, _sel: Sel) -> Id {
+    if let Some(name) = launched(receiver, |app| app.name.clone()) {
+        return name.map_or(std::ptr::null_mut(), |name| autoreleased(&name));
+    }
     if let Some(name) = foundation::bundle::main().and_then(|b| b.display_name()) {
         return autoreleased(name);
     }
@@ -137,14 +169,134 @@ unsafe extern "C" fn localized_name(_receiver: Id, _sel: Sel) -> Id {
     }
 }
 
-/// `-isActive`: always, for the reason given at [`frontmost_application`].
-unsafe extern "C" fn running_is_active(_receiver: Id, _sel: Sel) -> u8 {
-    1
+/// `-isActive`: always for this process, for the reason given at
+/// [`frontmost_application`]; never for one it launched, which has its own
+/// windows this process knows nothing of.
+unsafe extern "C" fn running_is_active(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(launched(receiver, |_| ()).is_none())
 }
 
 /// `-activateWithOptions:`: already active, which Apple reports as success.
 unsafe extern "C" fn activate_with_options(_receiver: Id, _sel: Sel, _options: usize) -> u8 {
     1
+}
+
+/// The strings of an `NSArray`, or nothing for nil.
+///
+/// # Safety
+///
+/// `list` is null or an array of strings.
+unsafe fn strings_of(list: Id) -> Vec<String> {
+    // SAFETY: the caller's array, or nil.
+    unsafe { corefoundation::collections::array(list as *const std::ffi::c_void) }.map_or_else(
+        Vec::new,
+        |array| {
+            array
+                .values
+                .iter()
+                .map(|value| unsafe { text(*value as Id) })
+                .collect()
+        },
+    )
+}
+
+/// # Safety
+///
+/// `string` is null or an `NSString`.
+unsafe fn text(string: Id) -> String {
+    match string.is_null() {
+        true => String::new(),
+        false => {
+            String::from_utf8_lossy(&unsafe { foundation::string::bytes(string) }).into_owned()
+        }
+    }
+}
+
+fn launch_error(error: *mut Id, message: &str) -> Id {
+    if !error.is_null() {
+        // SAFETY: the caller's writable `NSError **`.
+        unsafe { *error = foundation::error::make("NSCocoaErrorDomain", 4, message) };
+    }
+    std::ptr::null_mut()
+}
+
+/// `-launchApplicationAtURL:options:configuration:error:`: start the bundle's
+/// executable as the guest's own `posix_spawn` would, so a Mach-O runs through
+/// this runtime, and answer an `NSRunningApplication` for it.
+///
+/// The launch options are about activation and Dock behaviour, which have no
+/// meaning here. Of the configuration only the arguments are applied; another
+/// key is named, not silently dropped.
+unsafe extern "C" fn launch_application(
+    _receiver: Id,
+    _sel: Sel,
+    url: Id,
+    _options: usize,
+    configuration: Id,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: an `NSURL`, or nil.
+    let Some(path) = (unsafe { corefoundation::url::as_url(url as *const std::ffi::c_void) })
+        .and_then(|url| url.file_path())
+    else {
+        return launch_error(error, "the application URL is not a file URL");
+    };
+    let Some(bundle) = foundation::bundle::Layout::at(&prefix::ns::host_path(&path)) else {
+        return launch_error(error, &format!("{path} is not an application bundle"));
+    };
+    let Some(executable) = prefix::ns::to_guest(&bundle.executable) else {
+        return launch_error(error, &format!("{path} has no executable"));
+    };
+
+    let mut arguments = Vec::new();
+    // SAFETY: an `NSDictionary`, or nil.
+    if let Some(dictionary) =
+        unsafe { corefoundation::collections::dictionary(configuration as *const std::ffi::c_void) }
+    {
+        for (key, value) in &dictionary.entries {
+            // SAFETY: the keys are strings.
+            match unsafe { text(*key as Id) }.as_str() {
+                LAUNCH_ARGUMENTS => arguments = unsafe { strings_of(*value as Id) },
+                other => eprintln!(
+                    "rosetta3: appkit: -launchApplicationAtURL: does not apply {other}; \
+                     launching without it"
+                ),
+            }
+        }
+    }
+    let cstring = |text: &str| std::ffi::CString::new(text).unwrap_or_default();
+    let program = cstring(&executable.to_string_lossy());
+    let argv: Vec<std::ffi::CString> = std::iter::once(program.clone())
+        .chain(arguments.iter().map(|argument| cstring(argument)))
+        .collect();
+    let pid = match darwin::spawn::spawn_child(&program, &argv, None, None, [None; 3]) {
+        Ok(pid) => pid,
+        Err(errno) => {
+            let why = std::io::Error::from_raw_os_error(errno);
+            return launch_error(error, &format!("could not launch {path}: {why}"));
+        }
+    };
+    // An application is not the launcher's to wait for, but its exit status
+    // still has to be collected by somebody.
+    std::thread::spawn(move || darwin::spawn::wait_child(pid, true));
+
+    let class = objc::class::lookup(c"NSRunningApplication").expect("declared before its methods");
+    let object = objc::object::create_instance(class, 0);
+    LAUNCHED.lock().unwrap_or_else(|e| e.into_inner()).push((
+        object as usize,
+        Launched {
+            pid,
+            identifier: bundle.identifier().map(str::to_owned),
+            name: bundle
+                .display_name()
+                .map(str::to_owned)
+                .or_else(|| Some(bundle.root.file_stem()?.to_string_lossy().into_owned())),
+        },
+    ));
+    // The table outlives the object's address only as long as the object is
+    // kept, which is for the process: applications launched here are few.
+    objc::arc::retain(object);
+    objc::arc::autorelease(object)
 }
 
 /// `+[NSRunningApplication runningApplicationsWithBundleIdentifier:]`.
@@ -170,6 +322,8 @@ pub(crate) fn install() {
         "notificationCenter" => notification_center, c"@16@0:8";
         "frontmostApplication" => frontmost_application, c"@16@0:8";
         "runningApplications" => workspace_running_applications, c"@16@0:8";
+        "launchApplicationAtURL:options:configuration:error:" => launch_application,
+            c"@48@0:8@16Q24@32^@40";
         "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
         "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
     });

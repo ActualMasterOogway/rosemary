@@ -124,6 +124,8 @@ pub(crate) fn build(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Op
         "NSMenuItem" => menu_item(builder, uid),
         "NSImageView" => image_view(builder, uid),
         "NSCustomResource" => custom_resource(builder, uid),
+        "NSBox" => box_view(builder, uid),
+        "NSColor" => color(builder, uid),
         _ => None,
     }
 }
@@ -138,6 +140,8 @@ pub(crate) const DECODED: &[&str] = &[
     "NSMenuItem",
     "NSImageView",
     "NSCustomResource",
+    "NSBox",
+    "NSColor",
 ];
 
 /// A boolean field, which an archive writes as a boolean or as an integer.
@@ -330,6 +334,14 @@ fn window_template(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
         // SAFETY: `-setContentView:` takes one object.
         unsafe { send_object(window, "setContentView:", view) };
     }
+    if let Some(transparent) = flag(builder, uid, "NSTitlebarAppearsTransparent") {
+        // SAFETY: `-setTitlebarAppearsTransparent:` takes one `BOOL`.
+        unsafe { send_flag(window, "setTitlebarAppearsTransparent:", transparent) };
+    }
+    if let Some(visibility) = integer(builder, uid, "NSWindowTitleVisibility") {
+        // SAFETY: `-setTitleVisibility:` takes one `NSInteger`.
+        unsafe { send_integer(window, "setTitleVisibility:", visibility as usize) };
+    }
     Some(window)
 }
 
@@ -386,6 +398,113 @@ fn custom_resource(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
     };
     objc::arc::release(name);
     (!image.is_null()).then_some(image)
+}
+
+/// An archived number field: a plain value, or an `NSNumber` entry holding one.
+fn real(builder: &dyn Builder, uid: Uid, key: &str) -> Option<f64> {
+    use foundation::plist::Value;
+    let archive = builder.archive();
+    let value = match archive.field_object(uid, key) {
+        Some(number) => archive
+            .field(number, "NS.dblval")
+            .or_else(|| archive.field(number, "NS.intval"))?,
+        None => archive.field(uid, key)?,
+    };
+    match value {
+        Value::Real(v) => Some(*v),
+        Value::Integer(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+/// `NSBox`: a view, and how it is drawn.
+fn box_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let view = view(builder, uid, "NSBox")?;
+    if let Some(kind) = integer(builder, uid, "NSBoxType") {
+        // SAFETY: `-setBoxType:` takes one `NSUInteger`.
+        unsafe { send_integer(view, "setBoxType:", kind as usize) };
+    }
+    if let Some(transparent) = flag(builder, uid, "NSTransparent") {
+        // SAFETY: `-setTransparent:` takes one `BOOL`.
+        unsafe { send_flag(view, "setTransparent:", transparent) };
+    }
+    for (key, selector) in [
+        ("NSFillColor2", "setFillColor:"),
+        ("NSBorderColor2", "setBorderColor:"),
+    ] {
+        if let Some(entry) = builder.archive().field_object(uid, key)
+            && let Some(color) = builder.object_at(entry)
+        {
+            // SAFETY: both setters take one object.
+            unsafe { send_object(view, selector, color) };
+        }
+    }
+    if let Some(width) = real(builder, uid, "NSBorderWidth2") {
+        // SAFETY: `-setBorderWidth:` takes one `CGFloat`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, f64) = std::mem::transmute(objc::msg::entry());
+            f(view, objc::sel::get("setBorderWidth:"), width);
+        }
+    }
+    Some(view)
+}
+
+/// The numbers in an archived colour's component string, such as
+/// `"0.098 0.102 0.122 1"`.
+fn components(builder: &dyn Builder, uid: Uid, key: &str) -> Option<Vec<f64>> {
+    let text = match builder.archive().field(uid, key)? {
+        foundation::plist::Value::Data(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        foundation::plist::Value::String(text) => text.clone(),
+        _ => return None,
+    };
+    let numbers: Vec<f64> = text
+        .trim_end_matches('\0')
+        .split_whitespace()
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    (!numbers.is_empty()).then_some(numbers)
+}
+
+/// `NSColor`, as Interface Builder archives one: RGB, grey, or a named
+/// catalogue colour with an RGB or grey fallback. The components written for
+/// a custom (sRGB) colour space are preferred over the calibrated `NSRGB`
+/// ones, since sRGB is what this runtime draws in.
+fn color(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let space = integer(builder, uid, "NSColorSpace")?;
+    let rgba = |parts: &[f64]| {
+        let get = |at: usize, default: f64| parts.get(at).copied().unwrap_or(default);
+        crate::color::rgba(get(0, 0.0), get(1, 0.0), get(2, 0.0), get(3, 1.0))
+    };
+    match space {
+        1 | 2 => {
+            let parts = components(builder, uid, "NSComponents")
+                .filter(|_| builder.archive().field(uid, "NSCustomColorSpace").is_some())
+                .or_else(|| components(builder, uid, "NSRGB"))?;
+            Some(rgba(&parts))
+        }
+        3 | 4 => {
+            let parts = components(builder, uid, "NSWhite")?;
+            let white = parts[0];
+            Some(rgba(&[
+                white,
+                white,
+                white,
+                parts.get(1).copied().unwrap_or(1.0),
+            ]))
+        }
+        6 => {
+            let name = text(builder, uid, "NSColorName").map(str::to_owned);
+            if let Some(named) = name.as_deref().and_then(crate::color::named_color) {
+                return Some(named);
+            }
+            let fallback = builder.archive().field_object(uid, "NSColor")?;
+            builder.object_at(fallback)
+        }
+        other => {
+            builder.note_missing(&format!("NSColor in colour space {other}"));
+            None
+        }
+    }
 }
 
 /// The bits of `NSvFlags`, which is where a view built in Interface Builder

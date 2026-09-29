@@ -153,6 +153,11 @@ pub(crate) struct Facts {
     pub shown: bool,
     pub key: bool,
     pub title: String,
+    /// `-titleVisibility` is `NSWindowTitleHidden`.
+    pub title_hidden: bool,
+    /// Straight RGBA the titlebar is filled with, for a window whose titlebar
+    /// appears transparent; `None` draws the usual bar.
+    pub titlebar_color: Option<[u8; 4]>,
 }
 
 /// The height of chrome above a window's content, in points.
@@ -499,21 +504,27 @@ fn models(config: Config, facts: &Facts, window: Id) -> (Option<Bar>, Option<Bar
     // A window whose menu is open is still the one being worked in, even
     // when the host gave the menu the keyboard.
     let active = facts.key || open.is_some();
+    // A titled window that can be neither closed, minimized nor zoomed shows
+    // no window buttons at all on a Mac, rather than three disabled ones.
+    let lights = (facts.closable || facts.miniaturizable || facts.resizable).then_some(Lights {
+        closable: facts.closable,
+        minimizable: facts.miniaturizable,
+        zoomable: facts.resizable,
+    });
     let titlebar = (titlebar_height > 0.0).then(|| Bar {
         title: facts.title.clone(),
-        show_title: true,
-        lights: Some(Lights {
-            closable: facts.closable,
-            minimizable: facts.miniaturizable,
-            zoomable: facts.resizable,
-        }),
+        show_title: !facts.title_hidden,
+        lights,
+        background: facts
+            .titlebar_color
+            .map(|[r, g, b, a]| chrome::Color::rgba(r, g, b, f32::from(a) / 255.0)),
         menus: match strip_height > 0.0 {
             true => Vec::new(),
             false => menus.clone(),
         },
         active,
         open: open.and_then(|(row, title)| (row == Row::Titlebar).then_some(title)),
-        separator: strip_height <= 0.0,
+        separator: strip_height <= 0.0 && facts.titlebar_color.is_none(),
         ..Bar::default()
     });
     let strip = (strip_height > 0.0).then(|| Bar {

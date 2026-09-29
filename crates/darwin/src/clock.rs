@@ -189,6 +189,16 @@ unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 
     })
 }
 
+/// `int utime(const char *, const struct utimbuf *)`. Both `time_t` fields have
+/// the same layout on Darwin and this host; only the path needs translating.
+unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> i32 {
+    crate::stat::with_fallback(path, |path| {
+        // SAFETY: a translated path, and the caller's `utimbuf` or null.
+        let rc = unsafe { libc::utime(path, times) };
+        (rc, rc == 0)
+    })
+}
+
 /// `int settimeofday(const struct timeval *, const struct timezone *)`.
 ///
 /// This is bridged rather than denied: changing host time is the host analogue
@@ -397,6 +407,7 @@ exports::exports! {
         "clock_gettime_nsec_np" => gettime_nsec_np,
         "clock" => clock,
         "gettimeofday" => gettimeofday,
+        "utime" => utime,
         "utimes" => utimes,
         "futimes" => futimes,
         "lutimes" => lutimes,
@@ -407,6 +418,28 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utime_sets_both_times() {
+        let path = std::env::temp_dir().join(format!("r3-utime-{}", std::process::id()));
+        std::fs::write(&path, b"x").expect("a file");
+        let name = std::ffi::CString::new(path.to_str().expect("utf-8")).expect("no NUL");
+        let times = libc::utimbuf {
+            actime: 315_550_800,
+            modtime: 315_550_800,
+        };
+        // SAFETY: a NUL-terminated path and a live `utimbuf`.
+        assert_eq!(unsafe { utime(name.as_ptr(), &times) }, 0);
+        let modified = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        let seconds = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970");
+        assert_eq!(seconds.as_secs(), 315_550_800);
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// macOS SDK `<sys/_types/_timeval.h>` declares `long` then `int32_t`.
     #[test]

@@ -390,6 +390,9 @@ mod slot {
     pub const BOX_TYPE: usize = 0;
     pub const FILL_COLOR: usize = 1;
     pub const BORDER_COLOR: usize = 2;
+    pub const TRANSPARENT: usize = 3;
+    /// An `f64`'s bits.
+    pub const BORDER_WIDTH: usize = 4;
     pub const BOX_OBJECTS: [usize; 2] = [FILL_COLOR, BORDER_COLOR];
 
     pub const INDETERMINATE: usize = 0;
@@ -446,6 +449,7 @@ unsafe extern "C" fn box_box_type(receiver: Id, _sel: Sel) -> usize {
 
 unsafe extern "C" fn box_set_fill_color(receiver: Id, _sel: Sel, value: Id) {
     write_object(boxes(), receiver, slot::FILL_COLOR, value);
+    crate::backing::needs_display(receiver);
 }
 
 unsafe extern "C" fn box_fill_color(receiver: Id, _sel: Sel) -> Id {
@@ -454,10 +458,88 @@ unsafe extern "C" fn box_fill_color(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn box_set_border_color(receiver: Id, _sel: Sel, value: Id) {
     write_object(boxes(), receiver, slot::BORDER_COLOR, value);
+    crate::backing::needs_display(receiver);
 }
 
 unsafe extern "C" fn box_border_color(receiver: Id, _sel: Sel) -> Id {
     read(boxes(), receiver, slot::BORDER_COLOR) as Id
+}
+
+unsafe extern "C" fn box_set_transparent(receiver: Id, _sel: Sel, value: u8) {
+    write(
+        boxes(),
+        receiver,
+        slot::TRANSPARENT,
+        usize::from(value != 0),
+    );
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn box_is_transparent(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(read(boxes(), receiver, slot::TRANSPARENT) != 0)
+}
+
+unsafe extern "C" fn box_set_border_width(receiver: Id, _sel: Sel, value: f64) {
+    write(
+        boxes(),
+        receiver,
+        slot::BORDER_WIDTH,
+        value.to_bits() as usize,
+    );
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn box_border_width(receiver: Id, _sel: Sel) -> f64 {
+    f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64)
+}
+
+/// `NSBoxCustom`, the type whose look is entirely its fill and border colours.
+const BOX_CUSTOM: usize = 4;
+
+/// `-drawRect:` for a custom box: the fill over its bounds, then a border of
+/// its width inside them. Other box types keep their earlier look, which here
+/// is nothing drawn.
+unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
+    if read(boxes(), receiver, slot::BOX_TYPE) != BOX_CUSTOM
+        || read(boxes(), receiver, slot::TRANSPARENT) != 0
+    {
+        return;
+    }
+    let bounds = view::bounds_of(receiver);
+    let fill = |color: Id, rect: NSRect| {
+        if color.is_null() || rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+            return;
+        }
+        // SAFETY: `-setFill` takes no arguments.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+            f(color, objc::sel::get("setFill"));
+        }
+        crate::color::NSRectFill(rect);
+    };
+    fill(read(boxes(), receiver, slot::FILL_COLOR) as Id, bounds);
+    let width = f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64);
+    let border = read(boxes(), receiver, slot::BORDER_COLOR) as Id;
+    if width > 0.0 {
+        let NSRect { origin, size } = bounds;
+        let edge = |x: f64, y: f64, w: f64, h: f64| NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize {
+                width: w,
+                height: h,
+            },
+        };
+        fill(border, edge(origin.x, origin.y, size.width, width));
+        fill(
+            border,
+            edge(origin.x, origin.y + size.height - width, size.width, width),
+        );
+        fill(border, edge(origin.x, origin.y, width, size.height));
+        fill(
+            border,
+            edge(origin.x + size.width - width, origin.y, width, size.height),
+        );
+    }
 }
 
 unsafe extern "C" fn indicator_set_indeterminate(receiver: Id, _sel: Sel, value: u8) {
@@ -841,6 +923,11 @@ pub(crate) fn install() {
         "fillColor" => box_fill_color, c"@16@0:8";
         "setBorderColor:" => box_set_border_color, c"v24@0:8@16";
         "borderColor" => box_border_color, c"@16@0:8";
+        "setTransparent:" => box_set_transparent, c"v20@0:8c16";
+        "isTransparent" => box_is_transparent, c"c16@0:8";
+        "setBorderWidth:" => box_set_border_width, c"v24@0:8d16";
+        "borderWidth" => box_border_width, c"d16@0:8";
+        "drawRect:" => box_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });
 
     let class = objc::class::lookup(c"NSProgressIndicator").expect("declared before its methods");

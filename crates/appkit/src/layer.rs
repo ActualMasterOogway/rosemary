@@ -119,6 +119,33 @@ pub unsafe fn view_of(layer: Id) -> Id {
     }
 }
 
+/// A layer's `-bounds`, for the layer tree in `crate::coreanimation`.
+pub(crate) fn bounds_of(layer: Id) -> NSRect {
+    match is_layer(layer) {
+        true => layer_of(layer).bounds,
+        false => NSRect::default(),
+    }
+}
+
+pub(crate) fn set_bounds_of(layer: Id, bounds: NSRect) {
+    if is_layer(layer) {
+        layer_of(layer).bounds = bounds;
+    }
+}
+
+/// Whether `layer` is a `CAMetalLayer`, whose pixels are presented by Metal
+/// rather than drawn by the window's views.
+pub(crate) fn is_metal(layer: Id) -> bool {
+    objc::class::lookup(c"CAMetalLayer").is_some_and(|metal| {
+        // SAFETY: null or an object the runtime allocated.
+        unsafe { objc::object::class_of(layer) }.is_some_and(|class| {
+            class
+                .chain()
+                .any(|candidate| std::ptr::eq(candidate, metal))
+        })
+    })
+}
+
 fn is_layer(object: Id) -> bool {
     objc::class::lookup(c"CALayer").is_some_and(|base| {
         // SAFETY: null or an object the runtime allocated.
@@ -156,6 +183,7 @@ unsafe extern "C" fn bounds(receiver: Id, _sel: Sel) -> NSRect {
 
 unsafe extern "C" fn set_bounds(receiver: Id, _sel: Sel, bounds: NSRect) {
     layer_of(receiver).bounds = bounds;
+    crate::coreanimation::changed(receiver);
 }
 
 unsafe extern "C" fn set_delegate(receiver: Id, _sel: Sel, delegate: Id) {
@@ -323,6 +351,7 @@ unsafe extern "C" fn action_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
 /// `-dealloc`, which must unregister the weak delegate slot before the memory
 /// holding it is freed.
 unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
+    crate::coreanimation::forget(receiver);
     objc::arc::destroy_weak(&mut layer_of(receiver).delegate);
     let mask = std::mem::replace(&mut layer_of(receiver).mask, std::ptr::null_mut());
     objc::arc::release(mask);

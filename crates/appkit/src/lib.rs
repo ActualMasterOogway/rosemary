@@ -23,6 +23,7 @@ pub mod cgl;
 pub mod classes;
 pub mod color;
 mod controls;
+mod coreanimation;
 pub mod coretext;
 pub mod cursor;
 pub(crate) mod decode;
@@ -94,6 +95,7 @@ pub fn bootstrap() {
         paragraph::install();
         backing::install();
         layer::install();
+        coreanimation::install();
         text::install();
         input_context::install();
         opengl::install();
@@ -334,6 +336,34 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
 /// space and an attribute key are compared against by string, so publishing the
 /// documented value is exact.
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
+    ("_kCAMediaTimingFunctionLinear", coreanimation::LINEAR),
+    ("_kCAMediaTimingFunctionEaseIn", coreanimation::EASE_IN),
+    ("_kCAMediaTimingFunctionEaseOut", coreanimation::EASE_OUT),
+    (
+        "_kCAMediaTimingFunctionEaseInEaseOut",
+        coreanimation::EASE_IN_EASE_OUT,
+    ),
+    ("_kCAMediaTimingFunctionDefault", coreanimation::DEFAULT),
+    ("_kCAFillModeForwards", coreanimation::FILL_FORWARDS),
+    ("_kCAFillModeBackwards", coreanimation::FILL_BACKWARDS),
+    ("_kCAFillModeBoth", coreanimation::FILL_BOTH),
+    ("_kCAFillModeRemoved", coreanimation::FILL_REMOVED),
+    (
+        "_NSWorkspaceLaunchConfigurationArguments",
+        workspace::LAUNCH_ARGUMENTS,
+    ),
+    (
+        "_NSWorkspaceLaunchConfigurationEnvironment",
+        workspace::LAUNCH_ENVIRONMENT,
+    ),
+    (
+        "_NSWorkspaceLaunchConfigurationAppleEvent",
+        workspace::LAUNCH_APPLE_EVENT,
+    ),
+    (
+        "_NSWorkspaceLaunchConfigurationArchitecture",
+        workspace::LAUNCH_ARCHITECTURE,
+    ),
     ("_NSCalibratedRGBColorSpace", "NSCalibratedRGBColorSpace"),
     ("_NSDeviceRGBColorSpace", "NSDeviceRGBColorSpace"),
     // The other colour-space names, published so the *comparison* against them

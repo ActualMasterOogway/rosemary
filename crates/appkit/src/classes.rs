@@ -28,6 +28,11 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
         Some("CALayer"),
         crate::layer::METAL_INSTANCE_SIZE,
     ),
+    // Basic animations; their state is `crate::coreanimation`'s side tables.
+    ("CAAnimation", None, 0),
+    ("CAPropertyAnimation", Some("CAAnimation"), 0),
+    ("CABasicAnimation", Some("CAPropertyAnimation"), 0),
+    ("CAMediaTimingFunction", None, 0),
     ("NSControl", Some("NSView"), 0),
     ("NSButton", Some("NSControl"), 0),
     ("NSTextField", Some("NSControl"), 0),

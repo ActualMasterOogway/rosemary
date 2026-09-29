@@ -311,6 +311,27 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
     objc::arc::release(previous);
 }
 
+/// `-setWantsLayer:`. Asking for a layer makes the view layer-backed: it gets a
+/// plain `CALayer` whose sublayers are drawn over it, which is how a program
+/// adds animated pieces to a view it otherwise draws itself. A view that already
+/// has a layer - a `CAMetalLayer` a program set - keeps it.
+unsafe extern "C" fn set_wants_layer(receiver: Id, _sel: Sel, wants: u8) {
+    if wants == 0 || !view_of(receiver).layer.is_null() {
+        return;
+    }
+    let Some(class) = objc::class::lookup(c"CALayer") else {
+        return;
+    };
+    // SAFETY: `+layer` is `id (Class, SEL)`, and `-setBounds:` and
+    // `-setLayer:` are this crate's own.
+    unsafe {
+        let make: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        let layer = make(objc::class::ptr(class) as Id, objc::sel::get("layer"));
+        crate::layer::set_bounds_of(layer, bounds_of(receiver));
+        set_layer(receiver, objc::sel::get("setLayer:"), layer);
+    }
+}
+
 unsafe extern "C" fn layer(receiver: Id, _sel: Sel) -> Id {
     view_of(receiver).layer
 }
@@ -1442,8 +1463,6 @@ pub fn is_hidden_or_has_hidden_ancestor(view: Id) -> bool {
 
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
-unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
-
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
@@ -1548,7 +1567,7 @@ pub(crate) fn install() {
         "postsBoundsChangedNotifications" => posts_bounds_changed, c"c16@0:8";
         "setLayer:" => set_layer, c"v24@0:8@16";
         "layer" => layer, c"@16@0:8";
-        "setWantsLayer:" => ignored_flag, c"v20@0:8c16";
+        "setWantsLayer:" => set_wants_layer, c"v20@0:8c16";
         // A hint about when the backing store may be reused across a resize.
         // Nothing here keeps one, so every policy draws the same.
         "setLayerContentsRedrawPolicy:" => ignored_integer, c"v24@0:8q16";

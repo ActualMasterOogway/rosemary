@@ -197,6 +197,20 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
     }
 }
 
+/// An autoreleased colour of these components, for a decoder.
+pub(crate) fn rgba(red: f64, green: f64, blue: f64, alpha: f64) -> Id {
+    make(red, green, blue, alpha)
+}
+
+/// The named system colour `name`, such as `labelColor`, or `None` for one this
+/// runtime does not define.
+pub(crate) fn named_color(name: &str) -> Option<Id> {
+    NAMED
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, r, g, b, a)| singleton(name, *r, *g, *b, *a))
+}
+
 /// `+controlAlternatingRowBackgroundColors`, an `NSArray` of **two** colours.
 ///
 /// Not in [`NAMED`] because it is not a colour: a table view alternates its row
@@ -384,6 +398,18 @@ unsafe extern "C" fn get_components(
     }
 }
 
+/// `-CGColor`: the same components as a `CGColorRef`, autoreleased, which is
+/// as long as a caller that does not retain it may keep it.
+unsafe extern "C" fn cg_color(receiver: Id, _sel: Sel) -> *const c_void {
+    // SAFETY: a colour of this crate's.
+    let (red, green, blue, alpha) = unsafe { components(receiver) };
+    // SAFETY: a fresh colour this call owns.
+    unsafe {
+        let color = crate::cgcontext::CGColorCreateGenericRGB(red, green, blue, alpha);
+        corefoundation::api::CFAutorelease(color)
+    }
+}
+
 // FIXME (ACCURACY): WRONG?
 thread_local! {
     static FILL: Cell<[f64; 4]> = const { Cell::new([0.0, 0.0, 0.0, 1.0]) };
@@ -444,6 +470,7 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "setFill" => set_fill, c"v16@0:8";
+        "CGColor" => cg_color, c"^{CGColor=}16@0:8";
         "redComponent" => component, c"d16@0:8";
         "greenComponent" => component, c"d16@0:8";
         "blueComponent" => component, c"d16@0:8";

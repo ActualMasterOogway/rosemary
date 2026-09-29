@@ -42,13 +42,48 @@ fn argument_values() -> BTreeMap<String, String> {
 /// # Safety
 ///
 /// `receiver` is one of our defaults objects; `key` is null or an NSString.
+/// The suites `-addSuiteNamed:` put in each defaults object's search list,
+/// searched after its own domain, in the order they were added.
+static ADDED_SUITES: Mutex<BTreeMap<usize, Vec<String>>> = Mutex::new(BTreeMap::new());
+
 unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
     let key = unsafe { key_text(key) }?;
     argument_values().remove(&key).or_else(|| {
-        values()
+        let values = values();
+        values
             .get(&format!("{}{key}", unsafe { prefix(receiver) }))
+            .or_else(|| {
+                let suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
+                suites
+                    .get(&(receiver as usize))?
+                    .iter()
+                    .find_map(|suite| values.get(&format!("{suite}\u{1}{key}")))
+            })
             .cloned()
     })
+}
+
+unsafe extern "C" fn add_suite_named(receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: null or an `NSString`.
+    let Some(name) = (unsafe { key_text(name) }) else {
+        return;
+    };
+    let mut suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
+    let list = suites.entry(receiver as usize).or_default();
+    if !list.contains(&name) {
+        list.push(name);
+    }
+}
+
+unsafe extern "C" fn remove_suite_named(receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: null or an `NSString`.
+    let Some(name) = (unsafe { key_text(name) }) else {
+        return;
+    };
+    let mut suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(list) = suites.get_mut(&(receiver as usize)) {
+        list.retain(|suite| *suite != name);
+    }
 }
 
 /// Under the directory macOS keeps preferences in, so a second launch finds
@@ -429,6 +464,8 @@ pub(crate) fn install() {
         "synchronize" => synchronize, c"c16@0:8";
         "registerDefaults:" => register_defaults, c"v24@0:8@16";
         "initWithSuiteName:" => init_with_suite_name, c"@24@0:8@16";
+        "addSuiteNamed:" => add_suite_named, c"v24@0:8@16";
+        "removeSuiteNamed:" => remove_suite_named, c"v24@0:8@16";
         "volatileDomainForName:" => volatile_domain_for_name, c"@24@0:8@16";
         "persistentDomainForName:" => domain_for_name, c"@24@0:8@16";
         "dictionaryRepresentation" => dictionary_representation, c"@16@0:8";

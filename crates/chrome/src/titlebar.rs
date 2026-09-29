@@ -57,6 +57,9 @@ pub struct Bar {
     pub open: Option<usize>,
     /// A hairline along the bottom edge, between the bar and the content.
     pub separator: bool,
+    /// A solid fill in place of the bar's own, for a titlebar that shows the
+    /// window behind it.
+    pub background: Option<Color>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -269,11 +272,12 @@ impl View for Bar {
 
     fn paint(&self, canvas: &mut Canvas, layout: &BarLayout, theme: &Theme) {
         let bounds = layout.bounds;
-        match self.active {
-            true => {
+        match (self.background, self.active) {
+            (Some(color), _) => canvas.fill_rect(bounds, color),
+            (None, true) => {
                 canvas.fill_vertical_gradient(bounds, theme.titlebar_top, theme.titlebar_bottom)
             }
-            false => canvas.fill_rect(bounds, theme.titlebar_inactive),
+            (None, false) => canvas.fill_rect(bounds, theme.titlebar_inactive),
         }
         if self.separator {
             let hairline = 1.0 / canvas.scale();

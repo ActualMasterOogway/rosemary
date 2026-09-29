@@ -338,12 +338,16 @@ fn spawn(task: &Task) -> Result<libc::pid_t, c_int> {
             parent_copies.extend(end);
         }
     }
-    let pid = darwin::spawn::spawn_child(&path, &argv, envp.as_deref(), directory.as_deref(), fds)?;
+    let spawned =
+        darwin::spawn::spawn_child(&path, &argv, envp.as_deref(), directory.as_deref(), fds);
+    // Closed whether or not the child started: a task that could not launch
+    // reports itself exited, and a reader of its output pipe has to see end of
+    // file rather than wait on a writer that never existed.
     for end in parent_copies {
         // SAFETY: a pipe end this task handed to the child.
         unsafe { crate::filehandle::close(end) };
     }
-    Ok(pid)
+    spawned
 }
 
 unsafe extern "C" fn launch_task(receiver: Id, _sel: Sel) {
@@ -588,6 +592,8 @@ mod tests {
         let task = new_task();
         let path = crate::string::from_str("/r3-no-such-directory/tool");
         send(task, "setLaunchPath:", path);
+        let pipe = crate::filehandle::tests_pipe();
+        send(task, "setStandardOutput:", pipe);
         let mut error: Id = std::ptr::null_mut();
         // SAFETY: the declared prototypes, on a task this test made.
         unsafe {
@@ -600,6 +606,9 @@ mod tests {
                 127
             );
         }
+        // The output pipe ends rather than waiting on a child that never ran.
+        let (_, reader) = crate::filehandle::tests_ends(pipe);
+        assert!(crate::filehandle::tests_read_all(reader).is_empty());
         objc::arc::release(path);
         objc::arc::release(task);
         objc::arc::pool_pop(pool);

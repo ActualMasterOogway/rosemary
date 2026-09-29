@@ -431,6 +431,10 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
 ///
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c_int {
+    if flags & beneath::O_SUPPORTED != 0 {
+        // SAFETY: the caller's obligations, unchanged.
+        return unsafe { openat(DARWIN_AT_FDCWD, path, flags, mode) };
+    }
     let Some(host_flags) = open_flags(flags) else {
         return -1;
     };
@@ -459,7 +463,8 @@ pub unsafe extern "C" fn openat(
     flags: c_int,
     mode: u32,
 ) -> c_int {
-    let Some(host_flags) = open_flags(flags) else {
+    let resolve_beneath = flags & beneath::O_SUPPORTED != 0;
+    let Some(host_flags) = open_flags(flags & !beneath::O_SUPPORTED) else {
         return -1;
     };
     let dirfd = match dirfd {
@@ -471,7 +476,11 @@ pub unsafe extern "C" fn openat(
         if writes(host_flags) && !may_write_at(dirfd, path) {
             return (-1, false);
         }
-        let fd = unsafe { libc::openat(dirfd, path, host_flags, mode) };
+        let fd = match resolve_beneath {
+            // SAFETY: the caller's descriptor, and a translated path.
+            true => unsafe { beneath::open(dirfd, path, host_flags, mode) },
+            false => unsafe { libc::openat(dirfd, path, host_flags, mode) },
+        };
         (fd, fd >= 0)
     })
 }
@@ -564,11 +573,13 @@ pub unsafe extern "C" fn fstatat(
     out: *mut Stat,
     flag: c_int,
 ) -> c_int {
-    if flag & !DARWIN_AT_SYMLINK_NOFOLLOW != 0 {
+    let known = DARWIN_AT_SYMLINK_NOFOLLOW | beneath::SUPPORTED;
+    if flag & !known != 0 {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let host_flag = match flag & DARWIN_AT_SYMLINK_NOFOLLOW != 0 {
+    let nofollow = flag & DARWIN_AT_SYMLINK_NOFOLLOW != 0;
+    let host_flag = match nofollow {
         true => libc::AT_SYMLINK_NOFOLLOW,
         false => 0,
     };
@@ -576,6 +587,13 @@ pub unsafe extern "C" fn fstatat(
         DARWIN_AT_FDCWD => libc::AT_FDCWD,
         fd => fd,
     };
+    if flag & beneath::SUPPORTED != 0 {
+        return with_fallback_at(dirfd, path, |path| {
+            // SAFETY: the caller's path and descriptor; `out` as for this function.
+            let rc = unsafe { beneath::fstatat(dirfd, path, out, nofollow) };
+            (rc, rc == 0)
+        });
+    }
     with_fallback_at(dirfd, path, |path| {
         let mut host = MaybeUninit::<libc::stat>::uninit();
         let rc = unsafe { libc::fstatat(dirfd, path, host.as_mut_ptr(), host_flag) };
@@ -584,6 +602,103 @@ pub unsafe extern "C" fn fstatat(
         }
         (rc, rc == 0)
     })
+}
+
+/// Darwin's `AT_RESOLVE_BENEATH`, which fails a lookup that would leave the
+/// directory it starts from, by `..`, an absolute path or a symlink. Safe
+/// archive extraction (`unzip`) relies on it, so it is kept rather than dropped.
+mod beneath {
+    use super::{Stat, from_host};
+    use std::ffi::{c_char, c_int};
+
+    /// The `AT_` flag where the host can honour it, and no bits elsewhere, so
+    /// the caller's check refuses it by `EINVAL` there.
+    #[cfg(target_os = "linux")]
+    pub const SUPPORTED: c_int = 0x2000;
+    #[cfg(not(target_os = "linux"))]
+    pub const SUPPORTED: c_int = 0;
+
+    /// `O_RESOLVE_BENEATH`, likewise: elsewhere it stays an unknown bit that
+    /// `open` refuses by name.
+    #[cfg(target_os = "linux")]
+    pub const O_SUPPORTED: c_int = 0x1000;
+    #[cfg(not(target_os = "linux"))]
+    pub const O_SUPPORTED: c_int = 0;
+
+    /// `openat2` beneath `dirfd` with host `flags`.
+    ///
+    /// # Safety
+    ///
+    /// `path` is a NUL-terminated host path.
+    #[cfg(target_os = "linux")]
+    pub unsafe fn open(dirfd: c_int, path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = flags as u64;
+        if flags & (libc::O_CREAT | libc::O_TMPFILE) != 0 {
+            how.mode = mode as u64;
+        }
+        how.resolve = libc::RESOLVE_BENEATH;
+        // SAFETY: a live `open_how` of the size passed, and the caller's path.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                dirfd,
+                path,
+                &how,
+                size_of::<libc::open_how>(),
+            )
+        };
+        fd as c_int
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub unsafe fn open(_: c_int, _: *const c_char, _: c_int, _: c_int) -> c_int {
+        unreachable!("O_SUPPORTED is zero here, so nothing asks for it")
+    }
+
+    /// `fstatat` beneath `dirfd`: `openat2` with `RESOLVE_BENEATH` to an
+    /// `O_PATH` descriptor, then that descriptor's own `stat`.
+    ///
+    /// FIXME (ACCURACY): an escape fails with this host's `EXDEV`, which the
+    /// guest sees as `EXDEV`; Darwin answers `ENOTCAPABLE`, which has no host
+    /// counterpart in `crate::errno`.
+    ///
+    /// # Safety
+    ///
+    /// `path` is a NUL-terminated host path and `out` is null or a writable
+    /// Darwin `struct stat`.
+    #[cfg(target_os = "linux")]
+    pub unsafe fn fstatat(
+        dirfd: c_int,
+        path: *const c_char,
+        out: *mut Stat,
+        nofollow: bool,
+    ) -> c_int {
+        let flags = libc::O_PATH | libc::O_CLOEXEC | if nofollow { libc::O_NOFOLLOW } else { 0 };
+        // SAFETY: the caller's path.
+        let fd = unsafe { open(dirfd, path, flags, 0) };
+        if fd < 0 {
+            return -1;
+        }
+        let mut host: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: an `O_PATH` descriptor this call owns; an empty path asks
+        // about the descriptor itself, which is the symlink under `O_NOFOLLOW`.
+        let rc = unsafe { libc::fstatat(fd, c"".as_ptr(), &mut host, libc::AT_EMPTY_PATH) };
+        let saved = crate::errno::get();
+        // SAFETY: closed exactly once.
+        unsafe { libc::close(fd) };
+        crate::errno::set(saved);
+        if rc == 0 && !out.is_null() {
+            // SAFETY: the caller states `out` is writable.
+            unsafe { *out = from_host(&host) };
+        }
+        rc
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub unsafe fn fstatat(_: c_int, _: *const c_char, _: *mut Stat, _: bool) -> c_int {
+        unreachable!("SUPPORTED is zero here, so nothing asks for it")
+    }
 }
 
 /// Translate a Darwin `O_` word, refusing bits whose semantics cannot be kept.
@@ -1058,6 +1173,45 @@ mod tests {
 
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(dirfd) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `unzip` looks up and opens every path it extracts beneath its target
+    /// directory this way, and refuses to extract when the lookup fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_beneath_finds_what_is_inside_and_refuses_what_is_not() {
+        const AT_RESOLVE_BENEATH: c_int = 0x2000;
+        const O_RESOLVE_BENEATH: c_int = 0x1000;
+        let dir = std::env::temp_dir().join(format!("r3-beneath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("inside")).expect("a directory");
+        std::fs::write(dir.join("inside").join("file"), b"ab").expect("a file");
+        let directory = CString::new(dir.join("inside").to_str().expect("utf-8")).expect("no NUL");
+        // SAFETY: a NUL-terminated directory path and Darwin scalar arguments.
+        let dirfd = unsafe { open(directory.as_ptr(), crate::fcntl::oflag::O_RDONLY, 0) };
+        assert!(dirfd >= 0);
+
+        let mut out = Stat::default();
+        let flags = AT_RESOLVE_BENEATH | DARWIN_AT_SYMLINK_NOFOLLOW;
+        // SAFETY: a live directory descriptor, NUL-terminated relative paths
+        // and a writable `stat`.
+        unsafe {
+            assert_eq!(fstatat(dirfd, c"file".as_ptr(), &mut out, flags), 0);
+            assert_eq!(out.size, 2);
+            assert_eq!(
+                fstatat(dirfd, c"../inside/file".as_ptr(), &mut out, flags),
+                -1
+            );
+            let fd = openat(dirfd, c"file".as_ptr(), O_RESOLVE_BENEATH, 0);
+            assert!(fd >= 0, "a file beneath the descriptor opens");
+            libc::close(fd);
+            assert_eq!(
+                openat(dirfd, c"../inside/file".as_ptr(), O_RESOLVE_BENEATH, 0),
+                -1
+            );
+            libc::close(dirfd);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -936,6 +936,14 @@ unsafe extern "C" fn dictionary(_class: Id, _sel: Sel) -> Id {
     unsafe { api::CFAutorelease(new_dictionary(_class, _sel) as CFTypeRef) as Id }
 }
 
+/// `+[NSDictionary dictionary]`: an empty dictionary that stays empty.
+unsafe extern "C" fn empty_dictionary(_class: Id, _sel: Sel) -> Id {
+    let policy = corefoundation::callbacks::Policy::from_type_callbacks();
+    let dictionary = collections::new_dictionary(&[], policy, policy, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(dictionary) as Id }
+}
+
 unsafe extern "C" fn dictionary_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
     // SAFETY: a fresh object.
     unsafe { api::CFAutorelease(new_dictionary(_class, _sel) as CFTypeRef) as Id }
@@ -1580,6 +1588,7 @@ pub(crate) fn install() {
         "countByEnumeratingWithState:objects:count:" => dictionary_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(dictionary_class, {
+        "dictionary" => empty_dictionary, c"@16@0:8";
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
         "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
         "dictionaryWithContentsOfFile:" => dictionary_with_contents_of_file, c"@24@0:8@16";

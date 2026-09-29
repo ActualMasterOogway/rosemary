@@ -1036,6 +1036,41 @@ unsafe extern "C" fn components_separated_by_string(receiver: Id, _sel: Sel, sep
     unsafe { api::CFAutorelease(array) as Id }
 }
 
+/// The components `-pathComponents` answers, as Apple splits them: a leading
+/// `/` is a component of its own, as is a trailing one, and repeated slashes
+/// count once.
+fn path_components_of(path: &str) -> Vec<&str> {
+    let mut components = Vec::new();
+    if path.starts_with('/') {
+        components.push("/");
+    }
+    components.extend(path.split('/').filter(|part| !part.is_empty()));
+    if path.len() > 1 && path.ends_with('/') {
+        components.push("/");
+    }
+    components
+}
+
+unsafe extern "C" fn path_components(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`.
+    let text = String::from_utf8_lossy(&unsafe { bytes(receiver) }).into_owned();
+    let pieces: Vec<corefoundation::base::CFTypeRef> = path_components_of(&text)
+        .into_iter()
+        .map(|piece| corefoundation::string::from_bytes(piece.as_bytes(), false))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &pieces,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for piece in pieces {
+        // SAFETY: a string this function made, which the array retained.
+        unsafe { api::CFRelease(piece) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { api::CFAutorelease(array) as Id }
+}
+
 /// `-componentsSeparatedByCharactersInSet:`: split at every member, so two
 /// members in a row give an empty piece between them, as on macOS.
 unsafe extern "C" fn components_separated_by_characters(receiver: Id, _sel: Sel, set: Id) -> Id {
@@ -1233,6 +1268,7 @@ pub(crate) fn install() {
         "doubleValue" => double_value, c"d16@0:8";
         "floatValue" => double_value, c"d16@0:8";
         "lastPathComponent" => last_path_component, c"@16@0:8";
+        "pathComponents" => path_components, c"@16@0:8";
         "stringByDeletingLastPathComponent" => delete_last_path_component, c"@16@0:8";
         "pathExtension" => path_extension, c"@16@0:8";
         "stringByAppendingPathComponent:" => append_path_component, c"@24@0:8@16";
@@ -1297,6 +1333,14 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_components_keep_the_root_and_a_trailing_slash() {
+        assert_eq!(path_components_of("/tmp/scratch"), ["/", "tmp", "scratch"]);
+        assert_eq!(path_components_of("tmp//scratch/"), ["tmp", "scratch", "/"]);
+        assert_eq!(path_components_of("/"), ["/"]);
+        assert!(path_components_of("").is_empty());
+    }
 
     #[test]
     fn percent_decoding_handles_utf8_and_rejects_invalid_sequences() {

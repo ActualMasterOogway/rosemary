@@ -60,6 +60,10 @@ pub struct Window {
     /// request, so what a guest asked for is not readable back from the window
     /// system - and it is what a window remade as a popup has to be placed at.
     requested: NSRect,
+    /// `-setTitlebarAppearsTransparent:`.
+    titlebar_transparent: usize,
+    /// `-setTitleVisibility:`, `NSWindowTitleHidden` being 1.
+    title_visibility: isize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
@@ -450,6 +454,14 @@ pub(crate) fn facts(object: Id) -> Option<crate::decor::Facts> {
         title: sdl3::video::window_title(sdl)
             .to_string_lossy()
             .into_owned(),
+        title_hidden: window.title_visibility == 1,
+        // A transparent titlebar shows the window behind it, which is its
+        // background colour, or AppKit's window background when none was set.
+        titlebar_color: (window.titlebar_transparent != 0).then(|| {
+            let (r, g, b, a) = background_rgba(object).unwrap_or((0.93, 0.93, 0.93, 1.0));
+            let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            [byte(r), byte(g), byte(b), byte(a)]
+        }),
     })
 }
 
@@ -1516,15 +1528,18 @@ unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     crate::backing::window_background_changed(receiver);
 }
 
+/// The window's `backgroundColor` as straight RGBA, or `None` when the
+/// program never set one.
+fn background_rgba(window: Id) -> Option<(f64, f64, f64, f64)> {
+    let color = window_of(window).background;
+    // SAFETY: an object the window retained.
+    (!color.is_null()).then(|| unsafe { crate::color::components(color) })
+}
+
 /// The window's `backgroundColor` as one premultiplied BGRA pixel, or `None`
 /// when the program never set one.
 pub(crate) fn background_pixel(window: Id) -> Option<[u8; 4]> {
-    let color = window_of(window).background;
-    if color.is_null() {
-        return None;
-    }
-    // SAFETY: an object the window retained.
-    let (red, green, blue, alpha) = unsafe { crate::color::components(color) };
+    let (red, green, blue, alpha) = background_rgba(window)?;
     let alpha = alpha.clamp(0.0, 1.0);
     let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha * 255.0).round() as u8;
     Some([
@@ -1976,6 +1991,22 @@ unsafe extern "C" fn window_number(receiver: Id, _sel: Sel) -> isize {
 /// on a line that changes nothing about whether it can draw.
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
+unsafe extern "C" fn set_titlebar_transparent(receiver: Id, _sel: Sel, flag: u8) {
+    window_of(receiver).titlebar_transparent = usize::from(flag != 0);
+}
+
+unsafe extern "C" fn titlebar_transparent(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(window_of(receiver).titlebar_transparent != 0)
+}
+
+unsafe extern "C" fn set_title_visibility(receiver: Id, _sel: Sel, visibility: isize) {
+    window_of(receiver).title_visibility = visibility;
+}
+
+unsafe extern "C" fn title_visibility(receiver: Id, _sel: Sel) -> isize {
+    window_of(receiver).title_visibility
+}
+
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_size(_receiver: Id, _sel: Sel, _size: NSSize) {}
@@ -2118,8 +2149,10 @@ pub(crate) fn install() {
         "setShowsResizeIndicator:" => ignored_flag, c"v20@0:8c16";
         "standardWindowButton:" => standard_window_button, c"@24@0:8Q16";
         "windowNumber" => window_number, c"q16@0:8";
-        "setTitlebarAppearsTransparent:" => ignored_flag, c"v20@0:8c16";
-        "setTitleVisibility:" => ignored_integer, c"v24@0:8q16";
+        "setTitlebarAppearsTransparent:" => set_titlebar_transparent, c"v20@0:8c16";
+        "titlebarAppearsTransparent" => titlebar_transparent, c"c16@0:8";
+        "setTitleVisibility:" => set_title_visibility, c"v24@0:8q16";
+        "titleVisibility" => title_visibility, c"q16@0:8";
         "setTabbingMode:" => ignored_integer, c"v24@0:8q16";
         "setAnimationBehavior:" => ignored_integer, c"v24@0:8q16";
         "setHasShadow:" => ignored_flag, c"v20@0:8c16";

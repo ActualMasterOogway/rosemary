@@ -18,6 +18,11 @@ pub struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn for_tests(width: u32, height: u32) -> Self {
+        Store::new(width, height)
+    }
+
     fn new(width: u32, height: u32) -> Self {
         Store {
             width,
@@ -59,11 +64,11 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.width <= 0 || self.height <= 0
     }
 
-    fn intersection(&self, other: &Rect) -> Rect {
+    pub(crate) fn intersection(&self, other: &Rect) -> Rect {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
         let right = (self.x + self.width).min(other.x + other.width);
@@ -406,6 +411,10 @@ pub(crate) fn forget(view: Id) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|v| *v != key);
+    ANIMATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, v)| *v != key);
     for batch in DRAWING.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
         for entry in batch.iter_mut().filter(|entry| **entry == key) {
             *entry = 0;
@@ -487,12 +496,58 @@ pub fn pump() {
         }
     }
     DRAWING.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    damage_animating();
     for window in crate::window::all() {
         if crate::window::is_shown(window) {
             compose_window(window);
         }
     }
     present_dirty();
+}
+
+/// Views whose layer trees were still animating when last composed, by window.
+static ANIMATING: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// Recompose each animating view, at most once a display frame: the pump runs
+/// far more often than that, and every recompose is a software fill.
+fn damage_animating() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(16)) {
+        return;
+    }
+    let views: Vec<usize> = ANIMATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(_, view)| *view)
+        .collect();
+    if views.is_empty() {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+    for view in views {
+        damage_view(view as Id);
+    }
+}
+
+/// Have the part of the window `view` covers recomposed at the next pump,
+/// without asking the view to draw again: its layer tree changed, not it.
+pub(crate) fn damage_view(view: Id) {
+    // SAFETY: a view this crate made.
+    let Some(frame) = (unsafe { crate::view::presentation_frame(view) }) else {
+        return;
+    };
+    damage(
+        frame.window,
+        Rect {
+            x: i64::from(frame.x),
+            y: i64::from(frame.y),
+            width: i64::from(frame.width),
+            height: i64::from(frame.height),
+        },
+    );
 }
 
 /// One view's place in the composite.
@@ -607,7 +662,7 @@ fn compose_window(window: Id) {
         .iter()
         .filter_map(|p| {
             let layer = crate::view::layer_of(p.view);
-            (!layer.is_null() && !p.clip.is_empty()).then_some(Hole {
+            (crate::layer::is_metal(layer) && !p.clip.is_empty()).then_some(Hole {
                 layer: layer as usize,
                 rect: p.clip,
             })
@@ -634,7 +689,9 @@ fn compose_window(window: Id) {
             placed
                 .iter()
                 .any(|p| views.contains_key(&(p.view as usize)))
-        });
+        }) || placed
+            .iter()
+            .any(|p| crate::coreanimation::has_tree(crate::view::layer_of(p.view)));
         if !drawn {
             return;
         }
@@ -710,20 +767,30 @@ fn compose_window(window: Id) {
         }
     }
     let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(views) = views.as_ref() {
-        for p in &placed {
-            let Some(source) = views.get(&(p.view as usize)) else {
-                continue;
-            };
-            blend_at(
-                store,
-                source,
-                p.rect.x,
-                p.rect.y,
-                p.clip.intersection(&region),
-            );
+    let mut animating = Vec::new();
+    for p in &placed {
+        let clip = p.clip.intersection(&region);
+        use crate::coreanimation::{Pass, render};
+        render(p.view, store, p.rect, clip, Pass::Background);
+        if let Some(source) = views
+            .as_ref()
+            .and_then(|views| views.get(&(p.view as usize)))
+        {
+            blend_at(store, source, p.rect.x, p.rect.y, clip);
+        }
+        if render(p.view, store, p.rect, clip, Pass::Sublayers) {
+            animating.push(p.view as usize);
         }
     }
+    drop(views);
+    ANIMATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(window, _)| *window != sdl as usize);
+    ANIMATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(animating.into_iter().map(|view| (sdl as usize, view)));
     if let Some(chrome) = &chrome {
         copy_chrome(store, chrome);
     }
