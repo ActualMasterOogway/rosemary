@@ -14,8 +14,7 @@ pub struct Alert {
     /// Owned by the alert, and null until the first one is added.
     buttons: *mut Vec<String>,
     /// The view a program adds to the dialog to put its own controls in,
-    /// retained. Kept so that `-accessoryView` answers what was set; nothing
-    /// draws it - see [`set_accessory_view`].
+    /// retained. Its supported controls are presented by `-runModal`.
     accessory: Id,
     style: usize,
 }
@@ -108,29 +107,15 @@ unsafe extern "C" fn informative_text(receiver: Id, _sel: Sel) -> Id {
 /// `-setAccessoryView:`, which is how a program puts its own controls - a
 /// checkbox, a pop-up of resolutions - into an alert.
 ///
-/// Kept and not drawn, for the reason the module note gives: there is no
-/// dialog. What that costs is worth writing down, because it is more than the
-/// text: a program that reads a *choice* back out of its accessory view after
-/// `-runModal` reads whatever the view was left holding, which is its own
-/// default. So the program gets its defaults rather than the person's answer.
 unsafe extern "C" fn set_accessory_view(receiver: Id, _sel: Sel, view: Id) {
     set(&mut alert_of(receiver).accessory, view);
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| {
-        eprintln!(
-            "rosetta3: appkit: an alert has controls of the guest's own in it, and nothing \
-             here displays a dialog - so the program will read its own defaults back out of \
-             them rather than an answer"
-        );
-    });
 }
 
 unsafe extern "C" fn accessory_view(receiver: Id, _sel: Sel) -> Id {
     alert_of(receiver).accessory
 }
 
-/// `-layout`, which asks AppKit to size the dialog around its accessory view.
-/// There is no dialog to size.
+/// `-layout`; the chrome dialog sizes itself when `-runModal` opens it.
 unsafe extern "C" fn layout(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn set_alert_style(receiver: Id, _sel: Sel, style: usize) {
@@ -180,6 +165,8 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
         true => &[],
         false => unsafe { &*alert.buttons },
     };
+    let mut accessory_buttons = Vec::new();
+    collect_accessory_buttons(alert.accessory, &mut accessory_buttons);
 
     eprintln!("rosetta3: guest alert: {message}");
     if !informative.is_empty() {
@@ -199,18 +186,46 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
         },
         cancel: None,
         application_icon: true,
+        accessories: accessory_buttons
+            .iter()
+            .map(|(_, title, checked)| chrome::alert::Accessory {
+                title: title.clone(),
+                checked: *checked,
+            })
+            .collect(),
         ..Default::default()
     };
     // With no dialog to show, the second button is the one that declines;
     // with fewer than two there is nothing to decline with.
-    let index = crate::dialog::run(&request).unwrap_or(match buttons.len() >= 2 {
-        true => 1,
-        false => 0,
+    let (index, _, states) = crate::dialog::run_with_accessories(&request).unwrap_or_else(|| {
+        (
+            if buttons.len() >= 2 { 1 } else { 0 },
+            false,
+            accessory_buttons
+                .iter()
+                .map(|(_, _, checked)| *checked)
+                .collect(),
+        )
     });
+    for ((button, _, _), checked) in accessory_buttons.iter().zip(states) {
+        crate::controls::set_accessory_checkbox(*button, checked);
+    }
     let answer = FIRST_BUTTON_RETURN + index as i64;
     let chosen = buttons.get(index).map_or("<none>", |t| t.as_str());
     eprintln!("rosetta3: guest alert: answered {answer} ({chosen})");
     answer
+}
+
+fn collect_accessory_buttons(view: Id, result: &mut Vec<(Id, String, bool)>) {
+    if !crate::view::is_view(view) || crate::view::is_hidden_or_has_hidden_ancestor(view) {
+        return;
+    }
+    if let Some((title, checked)) = crate::controls::accessory_checkbox(view) {
+        result.push((view, title, checked));
+    }
+    for child in crate::view::subviews_of(view) {
+        collect_accessory_buttons(child, result);
+    }
 }
 
 /// # Safety
@@ -242,4 +257,32 @@ pub(crate) fn install() {
         "runModal" => run_modal, c"q16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessory_view_collects_nested_checkboxes() {
+        crate::bootstrap();
+        let root = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let button = objc::object::create_instance(objc::class::lookup(c"NSButton").unwrap(), 0);
+        let title = foundation::string::from_str("Remember choice");
+        // SAFETY: the selectors have object and integer arguments respectively.
+        unsafe {
+            let object: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            let integer: unsafe extern "C" fn(Id, Sel, usize) =
+                std::mem::transmute(objc::msg::entry());
+            object(button, objc::sel::get("setTitle:"), title);
+            integer(button, objc::sel::get("setButtonType:"), 3);
+            object(root, objc::sel::get("addSubview:"), button);
+        }
+        let mut found = Vec::new();
+        collect_accessory_buttons(root, &mut found);
+        assert_eq!(found, vec![(button, "Remember choice".into(), false)]);
+        objc::arc::release(root);
+        objc::arc::release(button);
+        objc::arc::release(title);
+    }
 }

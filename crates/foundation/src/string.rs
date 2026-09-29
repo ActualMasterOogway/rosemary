@@ -280,8 +280,36 @@ unsafe extern "C" fn string_with_contents_of_url(
         }
         return std::ptr::null_mut();
     };
-    // The guest named it by URL, so it is read at this host's spelling.
-    let bytes = match std::fs::read(prefix::ns::host_path(&path)) {
+    // SAFETY: the caller's `NSError **`.
+    unsafe { read_file(&path, ns, error) }
+}
+
+/// `+stringWithContentsOfFile:encoding:error:`.
+unsafe extern "C" fn string_with_contents_of_file(
+    _class: Id,
+    _sel: Sel,
+    path: Id,
+    ns: usize,
+    error: *mut Id,
+) -> Id {
+    if !error.is_null() {
+        // SAFETY: the caller passed a writable `NSError **`.
+        unsafe { *error = std::ptr::null_mut() };
+    }
+    if path.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: an `NSString`, and the caller's `NSError **`.
+    unsafe { read_file(&String::from_utf8_lossy(&bytes(path)), ns, error) }
+}
+
+/// A guest path's contents decoded in `ns`, an `NSStringEncoding`.
+///
+/// # Safety
+///
+/// `error` is null or a writable `NSError **`.
+unsafe fn read_file(path: &str, ns: usize, error: *mut Id) -> Id {
+    let bytes = match std::fs::read(prefix::ns::host_path(path)) {
         Ok(bytes) => bytes,
         Err(why) => {
             if !error.is_null() {
@@ -1008,6 +1036,29 @@ unsafe extern "C" fn components_separated_by_string(receiver: Id, _sel: Sel, sep
     unsafe { api::CFAutorelease(array) as Id }
 }
 
+/// `-componentsSeparatedByCharactersInSet:`: split at every member, so two
+/// members in a row give an empty piece between them, as on macOS.
+unsafe extern "C" fn components_separated_by_characters(receiver: Id, _sel: Sel, set: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let whole = unsafe { bytes(receiver) };
+    let pieces: Vec<corefoundation::base::CFTypeRef> = whole
+        // SAFETY: `set` is the caller's live character set, or nil.
+        .split(|byte| unsafe { crate::characterset::contains(set, *byte) })
+        .map(|piece| corefoundation::string::from_bytes(piece, false))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &pieces,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for piece in pieces {
+        // SAFETY: a string this function made, which the array retained.
+        unsafe { api::CFRelease(piece) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { api::CFAutorelease(array) as Id }
+}
+
 /// `-stringByDeletingPathExtension`: everything up to the last dot in the last
 /// component.
 ///
@@ -1171,6 +1222,7 @@ pub(crate) fn install() {
         "substringToIndex:" => substring_to_index, c"@24@0:8Q16";
         "substringWithRange:" => substring_with_range, c"@32@0:8{_NSRange=QQ}16";
         "componentsSeparatedByString:" => components_separated_by_string, c"@24@0:8@16";
+        "componentsSeparatedByCharactersInSet:" => components_separated_by_characters, c"@24@0:8@16";
         "lowercaseString" => lowercase, c"@16@0:8";
         "uppercaseString" => uppercase, c"@16@0:8";
         "compare:" => compare, c"q24@0:8@16";
@@ -1222,6 +1274,8 @@ pub(crate) fn install() {
     class_methods!(class, {
         "stringWithUTF8String:" => string_with_utf8, c"@24@0:8*16";
         "stringWithCString:encoding:" => string_with_cstring_encoding, c"@32@0:8*16Q24";
+        "stringWithContentsOfFile:encoding:error:" => string_with_contents_of_file,
+            c"@40@0:8@16Q24^@32";
         "stringWithContentsOfURL:encoding:error:" => string_with_contents_of_url,
         c"@40@0:8@16Q24^@32";
         "string" => empty_string, c"@16@0:8";

@@ -18,6 +18,7 @@ pub mod defaults;
 mod define;
 pub mod error;
 pub mod exception;
+pub mod filehandle;
 pub mod filemanager;
 pub mod formatter;
 pub mod geometry;
@@ -36,6 +37,7 @@ pub mod runtime;
 mod signature;
 pub mod string;
 pub mod strings;
+pub mod task;
 pub mod thread;
 pub mod timer;
 mod timezone;
@@ -84,6 +86,8 @@ pub fn bootstrap() {
         cookies::install();
         defaults::install();
         processinfo::install();
+        filehandle::install();
+        task::install();
         appleevent::install();
     });
 }
@@ -267,6 +271,10 @@ pub const CLASSES: &[&str] = &[
     "NSURL",
     "NSJSONSerialization",
     "NSProcessInfo",
+    "NSDateFormatter",
+    "NSFileHandle",
+    "NSPipe",
+    "NSTask",
     "NSAppleEventManager",
     "NSAppleEventDescriptor",
     "NSMethodSignature",

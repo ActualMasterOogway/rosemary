@@ -1201,6 +1201,119 @@ pub unsafe extern "C" fn attr_setbinpref_np(
     0
 }
 
+/// Spawn a child for a framework's process API, such as `NSTask`.
+///
+/// Launched as the guest's own `posix_spawn` would launch it, so `path` and
+/// `cwd` are guest paths and a Mach-O runs through this runtime. `stdio` holds
+/// the descriptors the child gets as 0, 1 and 2, with `None` inheriting the
+/// parent's. With no `envp`, the child gets the guest's environment.
+pub fn spawn_child(
+    path: &CStr,
+    argv: &[CString],
+    envp: Option<&[CString]>,
+    cwd: Option<&CStr>,
+    stdio: [Option<c_int>; 3],
+) -> Result<libc::pid_t, c_int> {
+    let argv = as_argv(argv);
+    let envp = envp.map(as_argv);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut actions = FileActions::default();
+        for (to, from) in stdio.iter().enumerate() {
+            if let Some(from) = *from {
+                actions.actions.push(Action::Dup2 {
+                    from,
+                    to: to as c_int,
+                });
+            }
+        }
+        if let Some(cwd) = cwd {
+            actions.actions.push(Action::Chdir(cwd.to_owned()));
+        }
+        // `posix_spawn` reads its file actions through a guest's `void *`.
+        let mut slot = &mut actions as *mut FileActions as u64;
+        let envp = envp.as_ref().map_or(environ(), |e| e.as_ptr());
+        let mut pid = 0;
+        // SAFETY: every string, array and the actions outlive the call.
+        let rc = unsafe {
+            posix_spawn(
+                &mut pid,
+                path.as_ptr(),
+                &mut slot as *mut u64 as *mut c_void,
+                std::ptr::null_mut(),
+                argv.as_ptr(),
+                envp,
+            )
+        };
+        match rc {
+            0 => Ok(pid),
+            error => Err(error),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            static environ: *const *const c_char;
+            fn posix_spawn_file_actions_addchdir_np(
+                actions: *mut libc::posix_spawn_file_actions_t,
+                path: *const c_char,
+            ) -> c_int;
+        }
+        let mut actions = HostActions::new().ok_or(libc::ENOMEM)?;
+        // SAFETY: `actions.0` is initialised, and every path outlives the call.
+        unsafe {
+            for (to, from) in stdio.iter().enumerate() {
+                if let Some(from) = *from {
+                    libc::posix_spawn_file_actions_adddup2(&mut actions.0, from, to as c_int);
+                }
+            }
+            if let Some(cwd) = cwd {
+                posix_spawn_file_actions_addchdir_np(&mut actions.0, cwd.as_ptr());
+            }
+        }
+        // SAFETY: the host's own block, read once.
+        let envp = envp.as_ref().map_or(unsafe { environ }, |e| e.as_ptr());
+        let mut pid = 0;
+        // SAFETY: every string, array and the actions outlive the call.
+        let rc = unsafe {
+            libc::posix_spawn(
+                &mut pid,
+                path.as_ptr(),
+                &actions.0,
+                std::ptr::null(),
+                argv.as_ptr() as *const *mut c_char,
+                envp as *const *mut c_char,
+            )
+        };
+        match rc {
+            0 => Ok(pid),
+            error => Err(error),
+        }
+    }
+}
+
+/// Reap a child [`spawn_child`] made, answering its Darwin wait status.
+///
+/// `Ok(None)` when `block` is false and the child is still running.
+pub fn wait_child(pid: libc::pid_t, block: bool) -> Result<Option<c_int>, c_int> {
+    let mut status = 0;
+    loop {
+        #[cfg(not(target_os = "macos"))]
+        // SAFETY: a writable local; Darwin's `WNOHANG` is 1.
+        let reaped = unsafe { crate::wait::waitpid(pid, &mut status, if block { 0 } else { 1 }) };
+        #[cfg(target_os = "macos")]
+        // SAFETY: a writable local.
+        let reaped =
+            unsafe { libc::waitpid(pid, &mut status, if block { 0 } else { libc::WNOHANG }) };
+        match reaped {
+            0 => return Ok(None),
+            -1 if crate::errno::get() == libc::EINTR => continue,
+            -1 => return Err(crate::errno::get()),
+            _ => return Ok(Some(status)),
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 exports::exports! {}
 

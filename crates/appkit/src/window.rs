@@ -1513,6 +1513,26 @@ unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     let window = window_of(receiver);
     objc::arc::release(window.background);
     window.background = objc::arc::retain(color);
+    crate::backing::window_background_changed(receiver);
+}
+
+/// The window's `backgroundColor` as one premultiplied BGRA pixel, or `None`
+/// when the program never set one.
+pub(crate) fn background_pixel(window: Id) -> Option<[u8; 4]> {
+    let color = window_of(window).background;
+    if color.is_null() {
+        return None;
+    }
+    // SAFETY: an object the window retained.
+    let (red, green, blue, alpha) = unsafe { crate::color::components(color) };
+    let alpha = alpha.clamp(0.0, 1.0);
+    let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha * 255.0).round() as u8;
+    Some([
+        channel(blue),
+        channel(green),
+        channel(red),
+        (alpha * 255.0).round() as u8,
+    ])
 }
 
 unsafe extern "C" fn background_color(receiver: Id, _sel: Sel) -> Id {

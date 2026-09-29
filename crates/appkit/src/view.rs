@@ -912,6 +912,17 @@ pub fn bounds_of(view: Id) -> NSRect {
     }
 }
 
+pub(crate) fn subviews_of(view: Id) -> Vec<Id> {
+    if !is_view(view) {
+        return Vec::new();
+    }
+    // SAFETY: a view holds an array of retained subviews.
+    let list =
+        unsafe { corefoundation::collections::array(view_of(view).subviews as *const c_void) };
+    list.map(|array| array.values.iter().map(|child| *child as Id).collect())
+        .unwrap_or_default()
+}
+
 /// The view above this one, for walking the responder chain.
 ///
 /// # Safety

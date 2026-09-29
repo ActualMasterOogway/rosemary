@@ -23,12 +23,20 @@ pub struct Alert {
     pub checkbox: Option<String>,
     pub checkbox_checked: bool,
     pub checkbox_tip: String,
+    pub accessories: Vec<Accessory>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Accessory {
+    pub title: String,
+    pub checked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Button(usize),
     Checkbox,
+    Accessory(usize),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,6 +55,7 @@ pub struct AlertLayout {
     /// One per button, in the order they were given.
     pub buttons: Vec<Rect>,
     pub checkbox: Option<CheckboxLayout>,
+    pub accessories: Vec<CheckboxLayout>,
     pub tip: Vec<Line>,
 }
 
@@ -104,6 +113,18 @@ impl View for Alert {
                 .max(CHECKBOX_ALERT_MIN_WIDTH)
                 .max(natural + 2.0 * SIDE + 16.0)
         });
+        let width = self.accessories.iter().fold(width, |width, item| {
+            let natural = Checkbox {
+                title: item.title.clone(),
+                ..Checkbox::default()
+            }
+            .layout(Rect::default(), theme)
+            .bounds
+            .width;
+            width
+                .max(CHECKBOX_ALERT_MIN_WIDTH)
+                .max(natural + 2.0 * SIDE + 16.0)
+        });
         let text_width = width - 2.0 * SIDE;
         let (x, mut y) = (bounds.x, bounds.y + TOP);
 
@@ -154,6 +175,20 @@ impl View for Alert {
             y = layout.bounds.bottom();
             layout
         });
+        let accessories: Vec<_> = self
+            .accessories
+            .iter()
+            .map(|item| {
+                y += BEFORE_CHECKBOX;
+                let layout = Checkbox {
+                    title: item.title.clone(),
+                    ..Checkbox::default()
+                }
+                .layout(Rect::new(x + SIDE, y, text_width, 0.0), theme);
+                y = layout.bounds.bottom();
+                layout
+            })
+            .collect();
         let mut tip = Vec::new();
         if checkbox.is_some() && !self.checkbox_tip.is_empty() {
             y += BEFORE_INFORMATIVE;
@@ -206,6 +241,7 @@ impl View for Alert {
             lines,
             buttons,
             checkbox,
+            accessories,
             tip,
         }
     }
@@ -240,6 +276,14 @@ impl View for Alert {
                 } else {
                     State::Off
                 },
+                ..Checkbox::default()
+            }
+            .paint(canvas, placement, theme);
+        }
+        for (item, placement) in self.accessories.iter().zip(&layout.accessories) {
+            Checkbox {
+                title: item.title.clone(),
+                state: if item.checked { State::On } else { State::Off },
                 ..Checkbox::default()
             }
             .paint(canvas, placement, theme);
@@ -289,6 +333,13 @@ impl View for Alert {
         {
             return Some(Part::Checkbox);
         }
+        if let Some(index) = layout
+            .accessories
+            .iter()
+            .position(|checkbox| checkbox.bounds.contains(point))
+        {
+            return Some(Part::Accessory(index));
+        }
         layout
             .buttons
             .iter()
@@ -300,6 +351,35 @@ impl View for Alert {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accessory_checkboxes_have_distinct_hit_areas_above_buttons() {
+        let alert = Alert {
+            buttons: vec!["OK".into()],
+            accessories: vec![
+                Accessory {
+                    title: "First".into(),
+                    checked: false,
+                },
+                Accessory {
+                    title: "Second".into(),
+                    checked: true,
+                },
+            ],
+            ..Alert::default()
+        };
+        let layout = alert.layout(Rect::default(), &Theme::light());
+        assert!(layout.accessories[0].bounds.bottom() < layout.accessories[1].bounds.y);
+        assert!(layout.accessories[1].bounds.bottom() < layout.buttons[0].y);
+        assert_eq!(
+            alert.hit(&layout, layout.accessories[0].bounds.center()),
+            Some(Part::Accessory(0))
+        );
+        assert_eq!(
+            alert.hit(&layout, layout.accessories[1].bounds.center()),
+            Some(Part::Accessory(1))
+        );
+    }
 
     fn alert(buttons: &[&str]) -> Alert {
         Alert {

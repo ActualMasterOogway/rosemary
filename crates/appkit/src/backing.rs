@@ -696,9 +696,18 @@ fn compose_window(window: Id) {
         return;
     }
 
+    // What no view covers shows the window's `backgroundColor`, which a
+    // program that draws only a logo and a bar relies on for everything else.
+    // With none set it stays transparent, as it always has here.
+    let background = crate::window::background_pixel(window).unwrap_or([0; 4]);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
-        store.pixels[base..base + region.width as usize * 4].fill(0);
+        for pixel in store.pixels[base..base + region.width as usize * 4]
+            .as_chunks_mut::<4>()
+            .0
+        {
+            *pixel = background;
+        }
     }
     let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(views) = views.as_ref() {
@@ -741,6 +750,26 @@ pub fn present_again(sdl: sdl3::Window) {
         .and_then(|stores| stores.get_mut(&(sdl as usize)))
     {
         store.dirty = true;
+    }
+}
+
+/// Recompose the whole of a window, whose background changed.
+pub(crate) fn window_background_changed(window: Id) {
+    // SAFETY: a window this crate made.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if sdl.is_null() {
+        return;
+    }
+    if let Some((width, height)) = sdl3::video::window_size_in_pixels(sdl) {
+        damage(
+            sdl,
+            Rect {
+                x: 0,
+                y: 0,
+                width: i64::from(width.max(0)),
+                height: i64::from(height.max(0)),
+            },
+        );
     }
 }
 

@@ -122,6 +122,8 @@ pub(crate) fn build(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Op
         "NSView" => view(builder, uid, "NSView"),
         "NSMenu" => menu(builder, uid),
         "NSMenuItem" => menu_item(builder, uid),
+        "NSImageView" => image_view(builder, uid),
+        "NSCustomResource" => custom_resource(builder, uid),
         _ => None,
     }
 }
@@ -134,6 +136,8 @@ pub(crate) const DECODED: &[&str] = &[
     "NSView",
     "NSMenu",
     "NSMenuItem",
+    "NSImageView",
+    "NSCustomResource",
 ];
 
 /// A boolean field, which an archive writes as a boolean or as an integer.
@@ -334,6 +338,54 @@ fn custom_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
         .unwrap_or("NSView")
         .to_string();
     view(builder, uid, &wanted)
+}
+
+/// An image view, and the image, scaling and alignment its cell holds.
+fn image_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let view = view(builder, uid, "NSImageView")?;
+    let Some(cell) = builder.archive().field_object(uid, "NSCell") else {
+        return Some(view);
+    };
+    if let Some(contents) = builder.archive().field_object(cell, "NSContents")
+        && let Some(image) = builder.object_at(contents)
+    {
+        // SAFETY: `-setImage:` takes one object.
+        unsafe { send_object(view, "setImage:", image) };
+    }
+    for (key, selector) in [
+        ("NSScale", "setImageScaling:"),
+        ("NSAlign", "setImageAlignment:"),
+    ] {
+        if let Some(value) = integer(builder, cell, key) {
+            // SAFETY: both setters take one `NSUInteger`.
+            unsafe { send_integer(view, selector, value as usize) };
+        }
+    }
+    Some(view)
+}
+
+/// A named resource from the nib's bundle, which is how an image placed in
+/// Interface Builder is archived. Only images are resources a nib here names.
+fn custom_resource(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let class = text(builder, uid, "NSClassName").unwrap_or("").to_string();
+    let name = text(builder, uid, "NSResourceName")?.to_string();
+    if class != "NSImage" {
+        builder.note_missing(&format!("NSCustomResource of class {class}"));
+        return None;
+    }
+    let image_class = objc::class::lookup(c"NSImage")?;
+    let name = foundation::string::from_str(&name);
+    // SAFETY: `+imageNamed:` is `id (Class, SEL, id)`.
+    let image = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc::msg::entry());
+        f(
+            objc::class::ptr(image_class) as Id,
+            objc::sel::get("imageNamed:"),
+            name,
+        )
+    };
+    objc::arc::release(name);
+    (!image.is_null()).then_some(image)
 }
 
 /// The bits of `NSvFlags`, which is where a view built in Interface Builder

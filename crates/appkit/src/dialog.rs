@@ -25,6 +25,8 @@ pub struct Request {
     /// Optional checkbox and text shown when it is selected.
     pub checkbox: Option<String>,
     pub checkbox_tip: String,
+    /// Checkboxes supplied by an NSAlert accessory view.
+    pub accessories: Vec<chrome::alert::Accessory>,
 }
 
 /// The button areas of each open dialog's window, for [`hit_test`], which
@@ -77,6 +79,7 @@ struct Dialog {
     /// The button a press began on, which a release has to end on too.
     armed: Option<usize>,
     armed_checkbox: bool,
+    armed_accessory: Option<usize>,
     /// A modal dialog holds the pointer shown for as long as it is up; a
     /// modeless one only while the pointer is over it, so a game that hid the
     /// pointer keeps it hidden over its own window.
@@ -128,7 +131,7 @@ impl Dialog {
             .hit(&self.layout, Point::new(x, y))
             .and_then(|part| match part {
                 Part::Button(at) => Some(at),
-                Part::Checkbox => None,
+                Part::Checkbox | Part::Accessory(_) => None,
             })
     }
 
@@ -168,6 +171,7 @@ impl Dialog {
             checkbox: request.checkbox.clone(),
             checkbox_checked: false,
             checkbox_tip: request.checkbox_tip.clone(),
+            accessories: request.accessories.clone(),
         };
         let theme = theme();
         let layout = alert.layout(Rect::default(), &theme);
@@ -209,6 +213,7 @@ impl Dialog {
                 .iter()
                 .copied()
                 .chain(layout.checkbox.map(|c| c.bounds))
+                .chain(layout.accessories.iter().map(|c| c.bounds))
                 .collect(),
         ));
         sdl3::video::set_window_hit_test(window, Some(hit_test));
@@ -224,6 +229,7 @@ impl Dialog {
             cancel,
             armed: None,
             armed_checkbox: false,
+            armed_accessory: None,
             modal,
             showed_cursor: false,
             started_video,
@@ -268,10 +274,23 @@ impl Dialog {
             } if ours(window) => {
                 let checkbox =
                     self.alert.hit(&self.layout, Point::new(*x, *y)) == Some(Part::Checkbox);
+                let accessory = match self.alert.hit(&self.layout, Point::new(*x, *y)) {
+                    Some(Part::Accessory(index)) => Some(index),
+                    _ => None,
+                };
                 if *down {
                     self.armed_checkbox = checkbox;
+                    self.armed_accessory = accessory;
                 } else if std::mem::take(&mut self.armed_checkbox) && checkbox {
                     self.alert.checkbox_checked = !self.alert.checkbox_checked;
+                    self.paint();
+                    return Outcome::Handled;
+                } else if let Some(index) = self
+                    .armed_accessory
+                    .take()
+                    .filter(|i| Some(*i) == accessory)
+                {
+                    self.alert.accessories[index].checked = !self.alert.accessories[index].checked;
                     self.paint();
                     return Outcome::Handled;
                 }
@@ -380,15 +399,20 @@ fn dump(id: u32, surface: &sdl3::video::Presentation, pixels: &[u8]) {
 
 /// The window a dialog is modal for: the key window, or any of the program's.
 fn parent() -> sdl3::Window {
+    // SDL leaves a child of a hidden window unmapped, so a program that
+    // ordered its only window out before alerting would get no dialog at all.
+    let shown = |window: sdl3::Window| {
+        !window.is_null() && sdl3::video::window_flags(window) & sdl3::video::flags::HIDDEN == 0
+    };
     let key = crate::window::key_window();
     // SAFETY: nil or a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(key) };
-    match sdl.is_null() {
-        true => crate::window::sdl_windows()
+    match shown(sdl) {
+        true => sdl,
+        false => crate::window::sdl_windows()
             .into_iter()
-            .next()
+            .find(|window| shown(*window))
             .unwrap_or(std::ptr::null_mut()),
-        false => sdl,
     }
 }
 
@@ -427,18 +451,29 @@ pub fn run(request: &Request) -> Option<usize> {
 
 /// Show a modal dialog and return the button and optional checkbox state.
 pub fn run_with_checkbox(request: &Request) -> Option<(usize, bool)> {
+    run_with_accessories(request).map(|(answer, checked, _)| (answer, checked))
+}
+
+/// Show a modal dialog and return its button and checkbox states.
+pub fn run_with_accessories(request: &Request) -> Option<(usize, bool, Vec<bool>)> {
     let mut dialog = Dialog::open(request, true)?;
     let outer = MODAL.replace(Some((dialog.window, Default::default())));
     let (answer, quit) = modal_loop(&mut dialog);
     MODAL.set(outer);
     let started_video = dialog.started_video;
     let checked = dialog.alert.checkbox_checked;
+    let accessories = dialog
+        .alert
+        .accessories
+        .iter()
+        .map(|item| item.checked)
+        .collect();
     dialog.close();
     if quit && !started_video {
         // The quit was the program's, and only postponed.
         crate::event::deliver(sdl3::video::Event::Quit);
     }
-    Some((answer, checked))
+    Some((answer, checked, accessories))
 }
 
 /// A dialog up without a caller waiting on it, and what to do with its answer.

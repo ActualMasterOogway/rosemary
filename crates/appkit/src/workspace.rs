@@ -60,6 +60,18 @@ unsafe extern "C" fn frontmost_application(_receiver: Id, _sel: Sel) -> Id {
     current()
 }
 
+/// `-[NSWorkspace runningApplications]`: this process alone, for the reason
+/// given at [`running_applications`].
+unsafe extern "C" fn workspace_running_applications(_receiver: Id, _sel: Sel) -> Id {
+    let array = corefoundation::collections::new_array(
+        &[current() as *const std::ffi::c_void],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: a fresh CFArray, toll-free bridged to NSArray.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
 /// `-[NSWorkspace iconForFileType:]` and `-iconForFile:`: a blank 32x32 image.
 ///
 /// Apple never answers nil - a type it knows nothing about gets the generic
@@ -157,6 +169,7 @@ pub(crate) fn install() {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
         "notificationCenter" => notification_center, c"@16@0:8";
         "frontmostApplication" => frontmost_application, c"@16@0:8";
+        "runningApplications" => workspace_running_applications, c"@16@0:8";
         "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
         "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
     });
@@ -227,5 +240,26 @@ mod tests {
         // SAFETY: `-processIdentifier` takes no explicit arguments.
         let pid = unsafe { process_identifier(frontmost, objc::sel::get("processIdentifier")) };
         assert_eq!(pid, std::process::id() as i32);
+    }
+
+    #[test]
+    fn running_applications_lists_this_process() {
+        crate::bootstrap();
+        // SAFETY: both take no explicit arguments.
+        let list = unsafe {
+            workspace_running_applications(
+                std::ptr::null_mut(),
+                objc::sel::get("runningApplications"),
+            )
+        };
+        let current = unsafe {
+            current_application(std::ptr::null_mut(), objc::sel::get("currentApplication"))
+        };
+        // SAFETY: the answer is a CFArray.
+        let array = unsafe { corefoundation::collections::array(list as *const _) }.unwrap();
+        assert_eq!(
+            array.values,
+            vec![current as corefoundation::base::CFTypeRef]
+        );
     }
 }

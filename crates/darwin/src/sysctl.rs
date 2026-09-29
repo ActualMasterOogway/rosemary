@@ -498,6 +498,9 @@ fn named(name: &str) -> Option<Value> {
         "kern.osproductversioncompat" => Some(Value::Str(env_or("ROSETTA3_MACOS_VERSION", "15.0"))),
         "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
         "hw.cpufamily" | "hw.cpusubfamily" => Some(Value::U32(0)),
+        // Both guest architectures are 64-bit. A caller that reads a missing
+        // key as 0 decides it is on 32-bit i386.
+        "hw.cpu64bit_capable" => Some(Value::U32(1)),
         _ => optional_feature(name),
     }
 }
@@ -941,6 +944,14 @@ mod tests {
             let mib = BY_NAME.iter().find(|(key, _)| *key == name).unwrap().1;
             assert_eq!(ask_name(name), ask(mib), "{name}");
         }
+    }
+
+    #[test]
+    fn reports_a_64_bit_capable_cpu() {
+        assert_eq!(
+            ask_name("hw.cpu64bit_capable"),
+            Some(1u32.to_ne_bytes().to_vec())
+        );
     }
 
     #[test]

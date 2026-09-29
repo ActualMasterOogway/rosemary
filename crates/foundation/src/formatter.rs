@@ -222,6 +222,16 @@ mod date_style {
 struct DateFormat {
     date: i32,
     time: i32,
+    /// `-setDateFormat:`, which wins over the two styles once set.
+    pattern: Option<String>,
+    /// Retained, or null for this machine's zone.
+    timezone: CFTypeRef,
+}
+
+impl Drop for DateFormat {
+    fn drop(&mut self) {
+        objc::arc::release(self.timezone as Id);
+    }
 }
 
 /// The English month names, long then abbreviated.
@@ -255,6 +265,15 @@ const WEEKDAYS: [(&str, &str); 7] = [
 ];
 
 impl DateFormat {
+    fn styled(date: i32, time: i32) -> DateFormat {
+        DateFormat {
+            date,
+            time,
+            pattern: None,
+            timezone: std::ptr::null(),
+        }
+    }
+
     /// The Unicode `LDML` pattern this pair of styles means, which is what
     /// `CFDateFormatterGetFormat` answers with.
     fn pattern(&self) -> String {
@@ -340,6 +359,271 @@ fn civil(when: f64) -> libc::tm {
     tm
 }
 
+/// `when`, a Unix timestamp, written out in an LDML pattern such as
+/// `yyyy-MM-dd_HH:mm:ss.SSS`, with `offset` seconds east of UTC.
+///
+/// The fields are the English ones, as for the styles. A pattern letter this
+/// does not know is named and written as itself rather than guessed at.
+fn render_pattern(pattern: &str, when: f64, offset: i64) -> String {
+    let whole = when.floor();
+    let seconds = whole as i64 + offset;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let time = seconds as libc::time_t;
+    // SAFETY: a live `time_t` and a live `tm` for the call to fill in.
+    unsafe { libc::gmtime_r(&time, &mut tm) };
+    let fraction = when - whole;
+    let year = tm.tm_year + 1900;
+    let hour12 = match tm.tm_hour % 12 {
+        0 => 12,
+        other => other,
+    };
+
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let c = chars[at];
+        if c == '\'' {
+            // `''` is a quote; otherwise everything up to the next quote is literal.
+            if chars.get(at + 1) == Some(&'\'') {
+                out.push('\'');
+                at += 2;
+                continue;
+            }
+            at += 1;
+            while at < chars.len() {
+                if chars[at] == '\'' {
+                    if chars.get(at + 1) == Some(&'\'') {
+                        out.push('\'');
+                        at += 2;
+                        continue;
+                    }
+                    break;
+                }
+                out.push(chars[at]);
+                at += 1;
+            }
+            at += 1;
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            out.push(c);
+            at += 1;
+            continue;
+        }
+        let run = chars[at..].iter().take_while(|next| **next == c).count();
+        at += run;
+        let number = |value: i64| format!("{value:0run$}");
+        let text = match c {
+            'G' => "AD".to_string(),
+            'y' | 'u' => match run {
+                2 => format!("{:02}", year.rem_euclid(100)),
+                _ => number(year.into()),
+            },
+            'M' | 'L' => {
+                let (long, short) = MONTHS[(tm.tm_mon as usize).min(11)];
+                match run {
+                    1 | 2 => number((tm.tm_mon + 1).into()),
+                    3 => short.to_string(),
+                    _ => long.to_string(),
+                }
+            }
+            'd' => number(tm.tm_mday.into()),
+            'D' => number((tm.tm_yday + 1).into()),
+            'E' => {
+                let (long, short) = WEEKDAYS[(tm.tm_wday as usize).min(6)];
+                match run {
+                    4 => long.to_string(),
+                    _ => short.to_string(),
+                }
+            }
+            'a' => match tm.tm_hour < 12 {
+                true => "AM".to_string(),
+                false => "PM".to_string(),
+            },
+            'H' => number(tm.tm_hour.into()),
+            'k' => number(match tm.tm_hour {
+                0 => 24,
+                other => other.into(),
+            }),
+            'h' => number(hour12.into()),
+            'K' => number((tm.tm_hour % 12).into()),
+            'm' => number(tm.tm_min.into()),
+            's' => number(tm.tm_sec.into()),
+            // Fractional seconds: truncated to the digits asked for, as ICU does.
+            'S' => {
+                let digits = run.min(9) as u32;
+                let scaled = (fraction * 10f64.powi(digits as i32)).floor() as i64;
+                let mut text = format!("{scaled:0width$}", width = digits as usize);
+                text.extend(std::iter::repeat_n('0', run - digits as usize));
+                text
+            }
+            'Z' | 'x' | 'X' => {
+                let sign = if offset < 0 { '-' } else { '+' };
+                let (hours, minutes) = (offset.abs() / 3600, offset.abs() % 3600 / 60);
+                match (c, run) {
+                    ('X', _) if offset == 0 => "Z".to_string(),
+                    ('Z', 4) => format!("GMT{sign}{hours:02}:{minutes:02}"),
+                    ('Z', 5) | (_, 3) | (_, 5) => format!("{sign}{hours:02}:{minutes:02}"),
+                    _ => format!("{sign}{hours:02}{minutes:02}"),
+                }
+            }
+            _ => {
+                eprintln!(
+                    "rosetta3: foundation: NSDateFormatter does not know the pattern letter \
+                     {c:?} in {pattern:?}; writing it as itself"
+                );
+                std::iter::repeat_n(c, run).collect()
+            }
+        };
+        out.push_str(&text);
+    }
+    out
+}
+
+/// Seconds east of UTC at `when` in `timezone`, null being this machine's zone.
+///
+/// # Safety
+///
+/// `timezone` is null or a time zone.
+unsafe fn offset_at(timezone: CFTypeRef, when: f64) -> i64 {
+    if timezone.is_null() {
+        return civil(when).tm_gmtoff as i64;
+    }
+    // SAFETY: a time zone; the conversion is to CoreFoundation's epoch.
+    unsafe { corefoundation::calendar::offset_seconds(timezone, when - 978_307_200.0) }.unwrap_or(0)
+}
+
+mod objc_api {
+    use objc::object::Id;
+    use objc::sel::Sel;
+
+    use super::{CFTypeRef, DateFormat, contents, date_class, make};
+
+    /// # Safety
+    ///
+    /// `object` is null or an object this runtime allocated.
+    unsafe fn format<'a>(object: Id) -> Option<&'a mut DateFormat> {
+        unsafe { contents::<DateFormat>(object as CFTypeRef, date_class()) }
+    }
+
+    fn autoreleased(text: &str) -> Id {
+        let string = crate::string::from_str(text);
+        // SAFETY: a fresh string.
+        unsafe { corefoundation::api::CFAutorelease(string as CFTypeRef) as Id }
+    }
+
+    /// `-init` on the placeholder `+alloc` made from the abstract class, which
+    /// has no room for settings: the concrete formatter replaces it, as the
+    /// collection clusters do.
+    unsafe extern "C" fn init(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: an object this runtime allocated.
+        if unsafe { format(receiver) }.is_some() {
+            return receiver;
+        }
+        objc::arc::release(receiver);
+        make(date_class(), DateFormat::styled(0, 0)) as Id
+    }
+
+    unsafe extern "C" fn set_date_format(receiver: Id, _sel: Sel, pattern: Id) {
+        // SAFETY: a formatter, and a string or nil.
+        if let Some(format) = unsafe { format(receiver) } {
+            format.pattern = (!pattern.is_null()).then(|| {
+                String::from_utf8_lossy(&unsafe { crate::string::bytes(pattern) }).into_owned()
+            });
+        }
+    }
+
+    unsafe extern "C" fn date_format(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: a formatter.
+        match unsafe { format(receiver) } {
+            Some(format) => {
+                autoreleased(&format.pattern.clone().unwrap_or_else(|| format.pattern()))
+            }
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    unsafe extern "C" fn set_time_zone(receiver: Id, _sel: Sel, timezone: Id) {
+        // SAFETY: a formatter.
+        if let Some(format) = unsafe { format(receiver) } {
+            let old = std::mem::replace(
+                &mut format.timezone,
+                objc::arc::retain(timezone) as CFTypeRef,
+            );
+            objc::arc::release(old as Id);
+        }
+    }
+
+    unsafe extern "C" fn time_zone(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: a formatter.
+        unsafe { format(receiver) }.map_or(std::ptr::null_mut(), |format| format.timezone as Id)
+    }
+
+    unsafe extern "C" fn set_date_style(receiver: Id, _sel: Sel, style: usize) {
+        // SAFETY: a formatter.
+        if let Some(format) = unsafe { format(receiver) } {
+            format.date = style as i32;
+        }
+    }
+
+    unsafe extern "C" fn date_style(receiver: Id, _sel: Sel) -> usize {
+        // SAFETY: a formatter.
+        unsafe { format(receiver) }.map_or(0, |format| format.date as usize)
+    }
+
+    unsafe extern "C" fn set_time_style(receiver: Id, _sel: Sel, style: usize) {
+        // SAFETY: a formatter.
+        if let Some(format) = unsafe { format(receiver) } {
+            format.time = style as i32;
+        }
+    }
+
+    unsafe extern "C" fn time_style(receiver: Id, _sel: Sel) -> usize {
+        // SAFETY: a formatter.
+        unsafe { format(receiver) }.map_or(0, |format| format.time as usize)
+    }
+
+    /// `-setLocale:`. Every field here is written the English way already; see
+    /// the module note.
+    unsafe extern "C" fn set_locale(_receiver: Id, _sel: Sel, _locale: Id) {}
+
+    unsafe extern "C" fn string_from_date(receiver: Id, _sel: Sel, date: Id) -> Id {
+        // SAFETY: a formatter.
+        let Some(format) = (unsafe { format(receiver) }) else {
+            return std::ptr::null_mut();
+        };
+        let Some(when) = crate::timer::interval_since_1970(date) else {
+            return std::ptr::null_mut();
+        };
+        let text = match &format.pattern {
+            // SAFETY: the zone this formatter retained, or null.
+            Some(pattern) => super::render_pattern(pattern, when, unsafe {
+                super::offset_at(format.timezone, when)
+            }),
+            None => format.format(when),
+        };
+        autoreleased(&text)
+    }
+
+    pub(super) fn install() {
+        let base = objc::class::lookup(c"NSDateFormatter").expect("registered by date_class");
+        crate::define::methods!(base, {
+            "init" => init, c"@16@0:8";
+            "setDateFormat:" => set_date_format, c"v24@0:8@16";
+            "dateFormat" => date_format, c"@16@0:8";
+            "setTimeZone:" => set_time_zone, c"v24@0:8@16";
+            "timeZone" => time_zone, c"@16@0:8";
+            "setDateStyle:" => set_date_style, c"v24@0:8Q16";
+            "dateStyle" => date_style, c"Q16@0:8";
+            "setTimeStyle:" => set_time_style, c"v24@0:8Q16";
+            "timeStyle" => time_style, c"Q16@0:8";
+            "setLocale:" => set_locale, c"v24@0:8@16";
+            "stringFromDate:" => string_from_date, c"@24@0:8@16";
+        });
+    }
+}
+
 //
 // Calendars
 //
@@ -414,6 +698,7 @@ pub fn install() {
     number_class();
     date_class();
     calendar_class();
+    objc_api::install();
 }
 
 /// The C entry points, and the property keys that go with them.
@@ -551,7 +836,7 @@ pub mod cf {
         date: i32,
         time: i32,
     ) -> CFTypeRef {
-        super::make(super::date_class(), DateFormat { date, time })
+        super::make(super::date_class(), DateFormat::styled(date, time))
     }
 
     /// `CFStringRef CFDateFormatterGetFormat(CFDateFormatterRef)`
@@ -1105,7 +1390,7 @@ mod tests {
     /// The patterns are what a caller parses, so their shape is the interface.
     #[test]
     fn the_patterns_name_each_style() {
-        let pattern = |date, time| DateFormat { date, time }.pattern();
+        let pattern = |date, time| DateFormat::styled(date, time).pattern();
         assert_eq!(pattern(date_style::SHORT, date_style::NONE), "M/d/yy");
         assert_eq!(
             pattern(date_style::FULL, date_style::NONE),
@@ -1119,15 +1404,30 @@ mod tests {
         assert_eq!(pattern(date_style::NONE, date_style::NONE), "");
     }
 
+    #[test]
+    fn a_pattern_writes_each_field_in_place() {
+        // 2001-02-03 04:05:06.789 UTC.
+        let when = 981_173_106.789;
+        assert_eq!(
+            render_pattern("yyyy-MM-dd_HH:mm:ss.SSS", when, 0),
+            "2001-02-03_04:05:06.789"
+        );
+        assert_eq!(
+            render_pattern("EEE, d MMM yy h a", when, 0),
+            "Sat, 3 Feb 01 4 AM"
+        );
+        assert_eq!(
+            render_pattern("'at' HH 'o''clock' Z", when, 3600),
+            "at 05 o'clock +0100"
+        );
+    }
+
     /// Midnight and noon are the two a twelve-hour clock gets wrong.
     #[test]
     fn twelve_hour_time_names_midnight_and_noon() {
         // 1970-01-01 in UTC, so the test is about the arithmetic rather than
         // about this host's time zone.
-        let format = DateFormat {
-            date: date_style::NONE,
-            time: date_style::SHORT,
-        };
+        let format = DateFormat::styled(date_style::NONE, date_style::SHORT);
         let midnight = civil(0.0);
         let hour = match midnight.tm_hour % 12 {
             0 => 12,

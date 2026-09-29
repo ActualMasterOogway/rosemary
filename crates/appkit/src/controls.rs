@@ -101,6 +101,7 @@ pub(crate) fn forget(object: Id) {
         (boxes(), &slot::BOX_OBJECTS[..]),
         (indicators(), &[][..]),
         (buttons(), &slot::BUTTON_OBJECTS[..]),
+        (image_views(), &slot::IMAGE_VIEW_OBJECTS[..]),
     ] {
         let gone = table.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         if let Some(row) = gone {
@@ -377,6 +378,11 @@ fn buttons() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
     TABLE.get_or_init(Default::default)
 }
 
+fn image_views() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
+    static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
 /// Slots in each control's row. Object slots are retained; the rest are plain
 /// values stored as words. The views are the rows' keys, so [`forget`] is what
 /// frees them.
@@ -395,10 +401,17 @@ mod slot {
     pub const TARGET: usize = 1;
     pub const ACTION: usize = 2;
     pub const TITLE: usize = 3;
+    pub const BUTTON_TYPE: usize = 4;
+    pub const BUTTON_STATE: usize = 5;
     pub const BUTTON_OBJECTS: [usize; 2] = [IMAGE, TITLE];
+
+    pub const VIEW_IMAGE: usize = 0;
+    pub const SCALING: usize = 1;
+    pub const ALIGNMENT: usize = 2;
+    pub const IMAGE_VIEW_OBJECTS: [usize; 1] = [VIEW_IMAGE];
 }
 
-const ROW: usize = 4;
+const ROW: usize = 6;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -506,6 +519,156 @@ unsafe extern "C" fn button_set_title(receiver: Id, _sel: Sel, value: Id) {
 
 unsafe extern "C" fn button_title(receiver: Id, _sel: Sel) -> Id {
     read(buttons(), receiver, slot::TITLE) as Id
+}
+
+unsafe extern "C" fn button_set_type(receiver: Id, _sel: Sel, value: usize) {
+    write(buttons(), receiver, slot::BUTTON_TYPE, value);
+}
+
+unsafe extern "C" fn button_type(receiver: Id, _sel: Sel) -> usize {
+    read(buttons(), receiver, slot::BUTTON_TYPE)
+}
+
+unsafe extern "C" fn button_set_state(receiver: Id, _sel: Sel, value: isize) {
+    write(buttons(), receiver, slot::BUTTON_STATE, value as usize);
+}
+
+unsafe extern "C" fn button_state(receiver: Id, _sel: Sel) -> isize {
+    read(buttons(), receiver, slot::BUTTON_STATE) as isize
+}
+
+pub(crate) fn accessory_checkbox(receiver: Id) -> Option<(String, bool)> {
+    let class = unsafe { objc::object::class_of(receiver) }?;
+    let button = objc::class::lookup(c"NSButton")?;
+    if !class.chain().any(|ancestor| std::ptr::eq(ancestor, button))
+        || read(buttons(), receiver, slot::BUTTON_TYPE) != 3
+    {
+        return None;
+    }
+    let title = read(buttons(), receiver, slot::TITLE) as Id;
+    let title = if title.is_null() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(title) }).into_owned()
+    };
+    Some((title, read(buttons(), receiver, slot::BUTTON_STATE) != 0))
+}
+
+pub(crate) fn set_accessory_checkbox(receiver: Id, checked: bool) {
+    write(
+        buttons(),
+        receiver,
+        slot::BUTTON_STATE,
+        usize::from(checked),
+    );
+}
+
+unsafe extern "C" fn image_view_set_image(receiver: Id, _sel: Sel, image: Id) {
+    write_object(image_views(), receiver, slot::VIEW_IMAGE, image);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn image_view_image(receiver: Id, _sel: Sel) -> Id {
+    read(image_views(), receiver, slot::VIEW_IMAGE) as Id
+}
+
+unsafe extern "C" fn image_view_set_scaling(receiver: Id, _sel: Sel, value: usize) {
+    write(image_views(), receiver, slot::SCALING, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn image_view_scaling(receiver: Id, _sel: Sel) -> usize {
+    read(image_views(), receiver, slot::SCALING)
+}
+
+unsafe extern "C" fn image_view_set_alignment(receiver: Id, _sel: Sel, value: usize) {
+    write(image_views(), receiver, slot::ALIGNMENT, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn image_view_alignment(receiver: Id, _sel: Sel) -> usize {
+    read(image_views(), receiver, slot::ALIGNMENT)
+}
+
+/// `NSImageScaling`. Proportionally down, 0, is the default arm below.
+mod scaling {
+    pub const AXES_INDEPENDENTLY: usize = 1;
+    pub const NONE: usize = 2;
+    pub const PROPORTIONALLY_UP_OR_DOWN: usize = 3;
+}
+
+/// Where an image of `image` size goes in `bounds`, for an image view's
+/// `NSImageScaling` and `NSImageAlignment`.
+fn image_placement(bounds: NSRect, image: NSSize, scaling: usize, alignment: usize) -> NSRect {
+    let fit = (bounds.size.width / image.width).min(bounds.size.height / image.height);
+    let size = match scaling {
+        scaling::AXES_INDEPENDENTLY => bounds.size,
+        scaling::NONE => image,
+        scaling::PROPORTIONALLY_UP_OR_DOWN => NSSize {
+            width: image.width * fit,
+            height: image.height * fit,
+        },
+        // Proportionally down, and the default for a value this does not know.
+        _ => NSSize {
+            width: image.width * fit.min(1.0),
+            height: image.height * fit.min(1.0),
+        },
+    };
+    // `NSImageAlignment`: center, top, top left, top right, left, bottom,
+    // bottom left, bottom right, right - as fractions of the room left over,
+    // with y measured up from the bottom.
+    let (x, y) = match alignment {
+        1 => (0.5, 1.0),
+        2 => (0.0, 1.0),
+        3 => (1.0, 1.0),
+        4 => (0.0, 0.5),
+        5 => (0.5, 0.0),
+        6 => (0.0, 0.0),
+        7 => (1.0, 0.0),
+        8 => (1.0, 0.5),
+        _ => (0.5, 0.5),
+    };
+    NSRect {
+        origin: NSPoint {
+            x: bounds.origin.x + (bounds.size.width - size.width) * x,
+            y: bounds.origin.y + (bounds.size.height - size.height) * y,
+        },
+        size,
+    }
+}
+
+unsafe extern "C" fn image_view_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
+    let image = read(image_views(), receiver, slot::VIEW_IMAGE) as Id;
+    if image.is_null() {
+        return;
+    }
+    // SAFETY: `-size` answers an `NSSize`, and the draw call is the prototype
+    // `NSImage` declares for it.
+    unsafe {
+        let size: unsafe extern "C" fn(Id, Sel) -> NSSize = std::mem::transmute(objc::msg::entry());
+        let natural = size(image, objc::sel::get("size"));
+        if natural.width <= 0.0 || natural.height <= 0.0 {
+            return;
+        }
+        let bounds = view::bounds_of(receiver);
+        let destination = image_placement(
+            bounds,
+            natural,
+            read(image_views(), receiver, slot::SCALING),
+            read(image_views(), receiver, slot::ALIGNMENT),
+        );
+        let draw: unsafe extern "C" fn(Id, Sel, NSRect, NSRect, usize, f64) =
+            std::mem::transmute(objc::msg::entry());
+        // A zero source rectangle is the whole image; 2 is source-over.
+        draw(
+            image,
+            objc::sel::get("drawInRect:fromRect:operation:fraction:"),
+            destination,
+            NSRect::default(),
+            2,
+            1.0,
+        );
+    }
 }
 
 /// `-setTarget:`, unretained as a control's target is.
@@ -701,10 +864,25 @@ pub(crate) fn install() {
         "image" => button_image, c"@16@0:8";
         "setTitle:" => button_set_title, c"v24@0:8@16";
         "title" => button_title, c"@16@0:8";
+        "setButtonType:" => button_set_type, c"v24@0:8Q16";
+        "buttonType" => button_type, c"Q16@0:8";
+        "setState:" => button_set_state, c"v24@0:8q16";
+        "state" => button_state, c"q16@0:8";
         "setTarget:" => button_set_target, c"v24@0:8@16";
         "target" => button_target, c"@16@0:8";
         "setAction:" => button_set_action, c"v24@0:8:16";
         "action" => button_action, c":16@0:8";
+    });
+
+    let class = objc::class::lookup(c"NSImageView").expect("declared before its methods");
+    methods!(class, {
+        "setImage:" => image_view_set_image, c"v24@0:8@16";
+        "image" => image_view_image, c"@16@0:8";
+        "setImageScaling:" => image_view_set_scaling, c"v24@0:8Q16";
+        "imageScaling" => image_view_scaling, c"Q16@0:8";
+        "setImageAlignment:" => image_view_set_alignment, c"v24@0:8Q16";
+        "imageAlignment" => image_view_alignment, c"Q16@0:8";
+        "drawRect:" => image_view_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });
 
     let class = objc::class::lookup(c"NSTextField").expect("declared before its methods");
@@ -740,6 +918,52 @@ mod tests {
         let stored = unsafe { button_title(button, objc::sel::get("title")) };
         assert_eq!(unsafe { foundation::string::bytes(stored) }, b"Install");
         objc::arc::release(button);
+    }
+
+    #[test]
+    fn accessory_checkbox_state_is_read_back_from_button() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSButton").expect("NSButton");
+        let button = objc::object::create_instance(class, 0);
+        let title = foundation::string::from_str("Show details");
+        unsafe {
+            button_set_title(button, objc::sel::get("setTitle:"), title);
+            button_set_type(button, objc::sel::get("setButtonType:"), 3);
+        }
+        objc::arc::release(title);
+        assert_eq!(
+            accessory_checkbox(button),
+            Some(("Show details".into(), false))
+        );
+        set_accessory_checkbox(button, true);
+        assert_eq!(unsafe { button_state(button, objc::sel::get("state")) }, 1);
+        objc::arc::release(button);
+    }
+
+    #[test]
+    fn an_image_view_centres_its_image_and_only_shrinks_it() {
+        const PROPORTIONALLY_DOWN: usize = 0;
+        let bounds = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: 300.0,
+                height: 200.0,
+            },
+        };
+        let small = NSSize {
+            width: 100.0,
+            height: 50.0,
+        };
+        let placed = image_placement(bounds, small, PROPORTIONALLY_DOWN, 0);
+        assert_eq!((placed.origin.x, placed.origin.y), (100.0, 75.0));
+        assert_eq!(placed.size.width, 100.0);
+        let large = NSSize {
+            width: 600.0,
+            height: 200.0,
+        };
+        let placed = image_placement(bounds, large, PROPORTIONALLY_DOWN, 0);
+        assert_eq!((placed.size.width, placed.size.height), (300.0, 100.0));
+        assert_eq!(placed.origin.y, 50.0);
     }
 
     fn scroller(frame: NSRect) -> Id {

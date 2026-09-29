@@ -42,6 +42,31 @@ unsafe extern "C" fn object_at_index(receiver: Id, _sel: Sel, index: usize) -> I
     unsafe { api::CFArrayGetValueAtIndex(receiver as CFTypeRef, index as isize) as Id }
 }
 
+/// `-subarrayWithRange:`, or `NSRangeException` by name for a range past the end.
+unsafe extern "C" fn subarray_with_range(
+    receiver: Id,
+    _sel: Sel,
+    location: usize,
+    length: usize,
+) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let Some(end) = location
+        .checked_add(length)
+        .filter(|end| *end <= array.values.len())
+    else {
+        objc::fail!(
+            "-subarrayWithRange:: range {{{location}, {length}}} exceeds array count {}",
+            array.values.len()
+        );
+    };
+    let sub = collections::new_array(&array.values[location..end], array.policy, false);
+    // SAFETY: a fresh array.
+    unsafe { api::CFAutorelease(sub) as Id }
+}
+
 /// `-firstObject` and `-lastObject`, which answer nil for an empty array where
 /// `-objectAtIndex:` on one is out of range. That difference is the reason a
 /// caller uses them.
@@ -1504,6 +1529,7 @@ pub(crate) fn install() {
     methods!(array, {
         "count" => count, c"Q16@0:8";
         "objectAtIndex:" => object_at_index, c"@24@0:8Q16";
+        "subarrayWithRange:" => subarray_with_range, c"@32@0:8{_NSRange=QQ}16";
         "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
         "containsObject:" => contains_object, c"B24@0:8@16";
         "firstObject" => first_object, c"@16@0:8";

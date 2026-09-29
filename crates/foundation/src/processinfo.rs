@@ -139,9 +139,12 @@ unsafe extern "C" fn process_identifier(_receiver: Id, _sel: Sel) -> i32 {
     std::process::id() as i32
 }
 
+/// `-processName`: the guest executable's name. The host's own `argv[0]` is
+/// this runtime, which a program would put in its log and lock file names.
 unsafe extern "C" fn process_name(_receiver: Id, _sel: Sel) -> Id {
-    let name = std::env::args_os()
-        .next()
+    let guest = guest_arguments().into_iter().next();
+    let name = guest
+        .or_else(|| std::env::args_os().next())
         .and_then(|arg| {
             std::path::Path::new(&arg)
                 .file_name()
@@ -335,6 +338,8 @@ mod tests {
                 .map(|value| value.as_encoded_bytes().to_vec())
                 .collect();
             assert_eq!(actual, expected);
+            let name = process_name(std::ptr::null_mut(), objc::sel::get("processName"));
+            assert_eq!(crate::string::bytes(name), b"Guest App");
         }
         *GUEST_ARGUMENTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
