@@ -414,7 +414,7 @@ static MAC_BUILTIN_MODULES: &[exports::Module] = &[
     regex::MODULE,
     resolv::MODULE,
     string::MODULE,
-    #[cfg(target_arch = "x86_64")]
+    stat::MODULE,
     stackprobe::MODULE,
 ];
 

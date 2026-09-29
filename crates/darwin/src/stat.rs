@@ -1,9 +1,9 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::{
     ffi::{CStr, c_char, c_int},
     mem::MaybeUninit,
 };
+
+use crate::translation::DarwinTranslation;
 
 /// Darwin's `struct stat` as an x86-64 guest sees it - the `_DARWIN_FEATURE_64_BIT_INODE`
 /// layout, which is the only one arm64 and modern x86-64 code has.
@@ -32,11 +32,60 @@ pub struct Stat {
     pub qspare: [i64; 2],
 }
 
+impl DarwinTranslation<libc::stat> for Stat {
+    fn to_host(&self) -> libc::stat {
+        libc::stat {
+            st_dev: self.dev,
+            st_mode: self.mode,
+            st_nlink: self.nlink,
+            st_ino: self.ino,
+            st_uid: self.uid,
+            st_gid: self.gid,
+            st_rdev: self.rdev,
+            st_atime: self.atime.sec,
+            st_atime_nsec: self.atime.nsec,
+            st_mtime: self.mtime.sec,
+            st_mtime_nsec: self.mtime.nsec,
+            st_ctime: self.ctime.sec,
+            st_ctime_nsec: self.ctime.nsec,
+            st_birthtime: self.birthtime.sec,
+            st_birthtime_nsec: self.birthtime.nsec,
+            st_size: self.size,
+            st_blocks: self.blocks,
+            st_blksize: self.blksize,
+            st_flags: self.flags,
+            st_gen: self.generation,
+            st_lspare: self.lspare,
+            st_qspare: self.qspare,
+        }
+    }
+
+    fn from_host(host: &libc::stat) -> Self {
+        from_host(host)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Timespec {
     pub sec: i64,
     pub nsec: i64,
+}
+
+impl DarwinTranslation<libc::timespec> for Timespec {
+    fn to_host(&self) -> libc::timespec {
+        libc::timespec {
+            tv_sec: self.sec,
+            tv_nsec: self.nsec,
+        }
+    }
+
+    fn from_host(host: &libc::timespec) -> Self {
+        Self {
+            sec: host.tv_sec,
+            nsec: host.tv_nsec,
+        }
+    }
 }
 
 const _: () = {
@@ -936,11 +985,11 @@ mod tests {
         };
         let (rc, followed) = stat_at(c"link", 0);
         assert_eq!(rc, 0);
-        assert_eq!(followed.mode as u32 & 0o170000, libc::S_IFREG);
+        assert_eq!(followed.mode as u32 & 0o170000, libc::S_IFREG.into());
         assert_eq!(followed.size, 3);
         let (rc, link) = stat_at(c"link", DARWIN_AT_SYMLINK_NOFOLLOW);
         assert_eq!(rc, 0);
-        assert_eq!(link.mode as u32 & 0o170000, libc::S_IFLNK);
+        assert_eq!(link.mode as u32 & 0o170000, libc::S_IFLNK.into());
         let (rc, folded) = stat_at(c"contents/game.ios", 0);
         assert_eq!(rc, 0, "the case fold stays relative to the descriptor");
         assert_eq!(folded.size, 3);

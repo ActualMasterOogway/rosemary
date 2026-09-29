@@ -4,18 +4,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 type GuestDirent = libc::dirent;
 #[cfg(not(target_os = "macos"))]
 type GuestDirent = crate::dirent::Dirent;
-#[cfg(target_os = "macos")]
-type GuestStat = libc::stat;
-#[cfg(not(target_os = "macos"))]
 type GuestStat = crate::stat::Stat;
-
-#[cfg(target_os = "macos")]
-const _: () = {
-    assert!(size_of::<GuestDirent>() == 1048);
-    assert!(std::mem::offset_of!(GuestDirent, d_name) == 21);
-    assert!(size_of::<GuestStat>() == 144);
-    assert!(std::mem::offset_of!(GuestStat, st_mode) == 4);
-};
 
 type ErrorFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 type OpenDirFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
@@ -525,14 +514,8 @@ unsafe fn guest_entry_name(entry: *mut GuestDirent) -> Vec<u8> {
         .to_vec()
 }
 
-#[cfg(not(target_os = "macos"))]
 fn guest_mode(stat: &GuestStat) -> u32 {
     u32::from(stat.mode)
-}
-
-#[cfg(target_os = "macos")]
-fn guest_mode(stat: &GuestStat) -> u32 {
-    u32::from(stat.st_mode)
 }
 
 /// The caller's `GLOB_ALTDIRFUNC` hooks, all five or none.
@@ -1606,13 +1589,8 @@ mod tests {
         /// Every path the walk asks about exists and is a regular file.
         pub unsafe extern "C" fn stat(_path: *const c_char, out: *mut GuestStat) -> c_int {
             // SAFETY: the walk's own structure.
-            #[cfg(not(target_os = "macos"))]
             unsafe {
-                (*out).mode = libc::S_IFREG as u16
-            };
-            #[cfg(target_os = "macos")]
-            unsafe {
-                (*out).st_mode = libc::S_IFREG as u16
+                (*out).mode = libc::S_IFREG.into()
             };
             0
         }
