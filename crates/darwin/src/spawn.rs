@@ -1,4 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+#[cfg(not(target_os = "macos"))]
+use std::sync::{Mutex, MutexGuard};
 
 use crate::signal::signal_to_host;
 
@@ -267,6 +269,104 @@ fn rewrite(path: &CStr, on_disk: &CStr, argv: &[CString]) -> Option<(CString, Ve
 
 /// Darwin's `_PATH_BSHELL`, which `execvp` hands a script with no `#!` line.
 const BSHELL: &CStr = c"/bin/sh";
+
+#[cfg(not(target_os = "macos"))]
+static SYSTEM_SIGNALS: Mutex<()> = Mutex::new(());
+
+/// Save the caller's signal state while `system` waits for its shell.
+#[cfg(not(target_os = "macos"))]
+struct SystemSignals {
+    _lock: MutexGuard<'static, ()>,
+    mask: libc::sigset_t,
+    int: libc::sigaction,
+    quit: libc::sigaction,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl SystemSignals {
+    fn new() -> Result<Self, c_int> {
+        let lock = SYSTEM_SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: these are plain C signal structures, initialised by the calls below.
+        let (mut blocked, mut mask, mut ignore, mut int, mut quit) = unsafe {
+            (
+                std::mem::zeroed::<libc::sigset_t>(),
+                std::mem::zeroed::<libc::sigset_t>(),
+                std::mem::zeroed::<libc::sigaction>(),
+                std::mem::zeroed::<libc::sigaction>(),
+                std::mem::zeroed::<libc::sigaction>(),
+            )
+        };
+        // SAFETY: every pointer is to a live host signal structure.
+        unsafe {
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, libc::SIGCHLD);
+            let rc = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut mask);
+            if rc != 0 {
+                return Err(rc);
+            }
+            ignore.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&mut ignore.sa_mask);
+            if libc::sigaction(libc::SIGINT, &ignore, &mut int) != 0 {
+                let error = crate::errno::get();
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                return Err(error);
+            }
+            if libc::sigaction(libc::SIGQUIT, &ignore, &mut quit) != 0 {
+                let error = crate::errno::get();
+                libc::sigaction(libc::SIGINT, &int, std::ptr::null_mut());
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                return Err(error);
+            }
+        }
+        Ok(Self {
+            _lock: lock,
+            mask,
+            int,
+            quit,
+        })
+    }
+
+    fn child_attr(&self) -> Result<HostAttr, c_int> {
+        let mut attr = HostAttr::new().ok_or(libc::ENOMEM)?;
+        // The child gets the original mask and the original ignored dispositions.
+        // Signals temporarily ignored only by this call return to their defaults.
+        let mut defaults = host_sigset(0);
+        // SAFETY: both signal sets and the spawn attribute are initialised locals.
+        unsafe {
+            if self.int.sa_sigaction != libc::SIG_IGN {
+                libc::sigaddset(&mut defaults, libc::SIGINT);
+            }
+            if self.quit.sa_sigaction != libc::SIG_IGN {
+                libc::sigaddset(&mut defaults, libc::SIGQUIT);
+            }
+            for rc in [
+                libc::posix_spawnattr_setflags(
+                    &mut attr.0,
+                    (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+                ),
+                libc::posix_spawnattr_setsigmask(&mut attr.0, &self.mask),
+                libc::posix_spawnattr_setsigdefault(&mut attr.0, &defaults),
+            ] {
+                if rc != 0 {
+                    return Err(rc);
+                }
+            }
+        }
+        Ok(attr)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl Drop for SystemSignals {
+    fn drop(&mut self) {
+        // SAFETY: these are the dispositions and thread mask saved by `new`.
+        unsafe {
+            libc::sigaction(libc::SIGQUIT, &self.quit, std::ptr::null_mut());
+            libc::sigaction(libc::SIGINT, &self.int, std::ptr::null_mut());
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.mask, std::ptr::null_mut());
+        }
+    }
+}
 
 /// What an exec of the guest's `path` really runs.
 struct Launch {
@@ -808,6 +908,97 @@ pub unsafe extern "C" fn posix_spawnp(
     }
 }
 
+/// `int system(const char *command)`, using the guest's `/bin/sh`.
+///
+/// A null command tests whether that shell is available. Otherwise the shell
+/// receives the command unchanged with `-c`, and the caller receives its Darwin
+/// wait status. A shell that cannot be executed exits with status 127.
+///
+/// # Safety
+///
+/// `command` is null or a NUL-terminated string.
+#[cfg(not(target_os = "macos"))]
+pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
+    use std::os::unix::ffi::OsStrExt;
+
+    let shell = exec_path(BSHELL);
+    // SAFETY: the translated path is a NUL-terminated string.
+    let available = std::fs::metadata(std::ffi::OsStr::from_bytes(shell.to_bytes()))
+        .is_ok_and(|meta| meta.is_file())
+        && unsafe { libc::access(shell.as_ptr(), libc::X_OK) } == 0;
+    if command.is_null() {
+        return c_int::from(available);
+    }
+
+    let signals = match SystemSignals::new() {
+        Ok(signals) => signals,
+        Err(error) => {
+            crate::errno::set(error);
+            return -1;
+        }
+    };
+    let attr = match signals.child_attr() {
+        Ok(attr) => attr,
+        Err(error) => {
+            drop(signals);
+            crate::errno::set(error);
+            return -1;
+        }
+    };
+    let args = [
+        c"sh".to_owned(),
+        c"-c".to_owned(),
+        unsafe { CStr::from_ptr(command) }.to_owned(),
+    ];
+    let plan = launch(BSHELL, &args);
+    let raw = plan.argv.as_deref().map(as_argv);
+    let guest_argv = as_argv(&args);
+    let argv = raw.as_ref().unwrap_or(&guest_argv);
+    let environment = match plan.runtime {
+        true => Some(unsafe { runtime_environ(environ()) }),
+        false => None,
+    };
+    let environment = environment.as_deref().map(as_argv);
+    let guest_env = environ();
+    let envp = environment.as_ref().map_or(guest_env, |e| e.as_ptr());
+    let mut pid = 0;
+    // SAFETY: all strings, arrays, and the host attribute outlive this call.
+    let rc = unsafe {
+        libc::posix_spawn(
+            &mut pid,
+            plan.program.as_ptr(),
+            std::ptr::null(),
+            &attr.0,
+            argv.as_ptr() as *const *mut c_char,
+            envp as *const *mut c_char,
+        )
+    };
+    if rc != 0 {
+        drop(signals);
+        if rc == libc::EAGAIN || rc == libc::ENOMEM {
+            crate::errno::set(rc);
+            return -1;
+        }
+        return 127 << 8;
+    }
+    let mut status = 0;
+    let result = loop {
+        // SAFETY: `pid` belongs to this call and `status` is writable.
+        let waited = unsafe { crate::wait::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            break status;
+        }
+        if waited == -1 && crate::errno::get() == libc::EINTR {
+            continue;
+        }
+        break -1;
+    };
+    let error = crate::errno::get();
+    drop(signals);
+    crate::errno::set(error);
+    result
+}
+
 /// # Safety
 ///
 /// Each takes the guest's `posix_spawn*_t`, which Darwin declares as a `void *`.
@@ -1022,6 +1213,7 @@ exports::exports! {
         "execvp" => execvp,
         "posix_spawn" => posix_spawn,
         "posix_spawnp" => posix_spawnp,
+        "system" => system,
         "posix_spawn_file_actions_init" => file_actions_init,
         "posix_spawn_file_actions_destroy" => file_actions_destroy,
         "posix_spawn_file_actions_addopen" => file_actions_addopen,

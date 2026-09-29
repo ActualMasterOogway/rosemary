@@ -244,12 +244,6 @@ pub const NAMES: &[(&str, &str)] = &[
     // diverge above 34. `crate::string` answers both.
     ("strerror", ERRNO),
     ("perror", ERRNO),
-    // Running a command would invoke the host shell against the host filesystem.
-    // Neither is part of the Darwin process the guest was linked for.
-    (
-        "system",
-        "would run the host shell against the host filesystem",
-    ),
     (
         "ioctl",
         "BSD ioctl requests need translation before reaching the host",
