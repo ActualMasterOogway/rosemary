@@ -6,6 +6,7 @@ fn builtin_libc_agrees_with_native_for_small_guest_calls() {
     const SOURCE: &str = r#"
 #include <glob.h>
 #include <resolv.h>
+#include <regex.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/sysctl.h>
@@ -36,6 +37,21 @@ int main(int argc, char **argv) {
     if (res_init() != 0) return 15;
     res_close();
     printf("resolver=ok\n");
+
+    regex_t re = {0};
+    regmatch_t found[3];
+    if (regcomp(&re, "(ab|a)(b)", REG_EXTENDED) != 0) return 16;
+    if (regexec(&re, "abb", 3, found, 0) != 0) return 17;
+    printf("regex=%zu:%lld-%lld:%lld-%lld\n", re.re_nsub,
+           (long long)found[0].rm_so, (long long)found[0].rm_eo,
+           (long long)found[1].rm_so, (long long)found[1].rm_eo);
+    regfree(&re);
+
+    char bounded[] = {'a', '\0', 'b'};
+    if (regncomp(&re, bounded, sizeof bounded, REG_EXTENDED) != 0) return 18;
+    if (regnexec(&re, bounded, sizeof bounded, 3, found, 0) != 0) return 19;
+    printf("regex-bounded=%lld-%lld\n", (long long)found[0].rm_so, (long long)found[0].rm_eo);
+    regfree(&re);
     return 0;
 }
 "#;
@@ -56,4 +72,6 @@ int main(int argc, char **argv) {
     assert_eq!(builtin.1, native.1);
     assert!(builtin.1.contains("glob=1:"), "{}", builtin.1);
     assert!(builtin.1.contains("machine=x86_64"), "{}", builtin.1);
+    assert!(builtin.1.contains("regex=2:0-3:0-2"), "{}", builtin.1);
+    assert!(builtin.1.contains("regex-bounded=0-3"), "{}", builtin.1);
 }

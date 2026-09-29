@@ -2849,8 +2849,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Darwin's `regex_t` and `regmatch_t` have the same pointer/size_t/off_t
     // layout on x86_64 and arm64, so libc can use the guest's buffers directly.
     sig!("regcomp", I32, P, P, I32),
+    sig!("regncomp", I32, P, P, U64, I32),
     sig!("regerror", U64, I32, P, P, U64),
     sig!("regexec", I32, P, P, U64, P, I32),
+    sig!("regnexec", I32, P, P, U64, U64, P, I32),
     sig!("regfree", V, P),
     sig!("recv", I64, I32, P, U64, I32),
     sig!("recvfrom", I64, I32, P, U64, I32, P, P),
