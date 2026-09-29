@@ -4,6 +4,7 @@ use corefoundation::base::CFTypeRef;
 use foundation::geometry::{CGFloat, NSRect};
 use objc::object::Id;
 use objc::sel::Sel;
+use static_init::dynamic;
 
 /// `CGSessionCopyCurrentDictionary`.
 ///
@@ -1067,8 +1068,9 @@ pub const CONFINE_ENV: &str = "ROSETTA3_CONFINE_POINTER";
 
 /// Confine the pointer to `window` if [`CONFINE_ENV`] asks for it.
 pub fn confine_pointer(window: sdl3::Window) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| std::env::var_os(CONFINE_ENV).is_some_and(|v| v != "0"));
+    #[dynamic]
+    static ON: bool = std::env::var_os(CONFINE_ENV).is_some_and(|v| v != "0");
+    let on = *ON;
     if on {
         sdl3::video::set_mouse_grab(window, true);
     }

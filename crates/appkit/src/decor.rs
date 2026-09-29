@@ -16,6 +16,7 @@ use chrome::titlebar::{Bar, BarLayout, Lights, MenuTitle, Part};
 use chrome::{Canvas, Point, Rect, Theme, View};
 use objc::object::Id;
 use objc::sel::Sel;
+use static_init::dynamic;
 
 /// `ROSETTA3_DECORATIONS`: `client` (the default) draws the titlebar here;
 /// `server` leaves it to the host's window manager.
@@ -96,15 +97,16 @@ impl Config {
 }
 
 pub fn config() -> Config {
-    static CONFIG: OnceLock<Config> = OnceLock::new();
-    *CONFIG.get_or_init(|| {
+    #[dynamic]
+    static CONFIG: Config = {
         let read = |name| std::env::var(name).ok();
         Config::parse(
             read(DECORATIONS_ENV).as_deref(),
             read(MENU_ENV).as_deref(),
             read(MENU_CTRL_ENV).as_deref(),
         )
-    })
+    };
+    *CONFIG
 }
 
 /// Whether the chrome is drawn dark. The chrome is the host's, not the

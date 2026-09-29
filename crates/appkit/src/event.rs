@@ -622,7 +622,7 @@ fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
         return true;
     }
     let control_only = modifiers & flags::CONTROL != 0 && modifiers & flags::COMMAND == 0;
-    if !(control_only && crate::decor::config().control_shortcuts) {
+    if !(control_only && !crate::decor::config().control_shortcuts) {
         return false;
     }
     let aliased = nsevent::make(Fields {
