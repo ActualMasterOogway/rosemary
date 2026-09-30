@@ -353,13 +353,20 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
     if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
         return false;
     }
+    // Where a web view sits over this layer, the window's store carries its
+    // page, and the layer's frame must not paint over it.
+    let covered: Vec<(usize, crate::swapchain::Region)> =
+        appkit::backing::covered(frame.window, described.layer)
+            .into_iter()
+            .map(|rect| (frame.window as usize, crate::swapchain::Region::from(rect)))
+            .collect();
     let owner = objc::arc::retain(drawable) as usize;
     match crate::swapchain::present_owned(
         described.gpu,
         described.layer as usize,
         &frame,
         &texture.image,
-        &[],
+        &covered,
         owner,
     ) {
         Ok(true) => {
@@ -870,17 +877,7 @@ pub(crate) fn present_store(
     };
     let holes: Vec<(usize, crate::swapchain::Region)> = holes
         .iter()
-        .map(|hole| {
-            (
-                hole.layer,
-                crate::swapchain::Region {
-                    x: hole.rect.x.clamp(0, i64::from(i32::MAX)) as i32,
-                    y: hole.rect.y.clamp(0, i64::from(i32::MAX)) as i32,
-                    width: hole.rect.width.clamp(0, i64::from(i32::MAX)) as i32,
-                    height: hole.rect.height.clamp(0, i64::from(i32::MAX)) as i32,
-                },
-            )
-        })
+        .map(|hole| (hole.layer, crate::swapchain::Region::from(hole.rect)))
         .collect();
     let presented =
         match crate::swapchain::present(gpu, window as usize, &frame, &entry.image, &holes) {

@@ -274,6 +274,17 @@ pub(crate) struct Region {
     pub height: i32,
 }
 
+impl From<appkit::backing::Rect> for Region {
+    fn from(rect: appkit::backing::Rect) -> Region {
+        Region {
+            x: rect.x.clamp(0, i64::from(i32::MAX)) as i32,
+            y: rect.y.clamp(0, i64::from(i32::MAX)) as i32,
+            width: rect.width.clamp(0, i64::from(i32::MAX)) as i32,
+            height: rect.height.clamp(0, i64::from(i32::MAX)) as i32,
+        }
+    }
+}
+
 /// `whole` less every rectangle in `holes`, as rectangles that do not overlap.
 pub(crate) fn subtract(whole: Region, holes: &[Region]) -> Vec<Region> {
     let mut pieces = vec![whole];
@@ -687,7 +698,7 @@ impl Swapchain {
     }
 
     /// `regions`, where given, are the parts of `frame` to blit, each from
-    /// the same rectangle of `source`: the source is the window's size.
+    /// the part of `source` that lands there.
     fn present(
         &mut self,
         frame: &appkit::view::Frame,
@@ -808,7 +819,7 @@ impl Swapchain {
                                         device,
                                         command_buffer,
                                         source.image,
-                                        into,
+                                        source_of(into, frame, (source.width, source.height)),
                                         composite,
                                         vk::ImageLayout::GENERAL,
                                         into,

@@ -635,3 +635,36 @@ fn the_store_is_presented_around_a_layers_rectangle() {
         vec![whole]
     );
 }
+
+#[test]
+fn a_region_of_a_layer_is_blitted_from_the_matching_part_of_its_drawable() {
+    let frame = appkit::view::Frame {
+        window: std::ptr::null_mut(),
+        x: 10,
+        y: 20,
+        width: 100,
+        height: 50,
+        window_width: 400,
+        window_height: 300,
+    };
+    let at = |x, y| vk::Offset3D { x, y, z: 0 };
+    let to = |x, y| vk::Offset3D { x, y, z: 1 };
+    // A drawable at twice the view's size: the lower half of the view comes
+    // from the lower half of the drawable, not from the window's coordinates.
+    assert_eq!(
+        source_of([at(10, 45), to(110, 70)], &frame, (200, 100)),
+        [at(0, 50), to(200, 100)]
+    );
+    // The window's own store is its size, so a region maps to itself.
+    let store = appkit::view::Frame {
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 300,
+        ..frame
+    };
+    assert_eq!(
+        source_of([at(10, 45), to(110, 70)], &store, (400, 300)),
+        [at(10, 45), to(110, 70)]
+    );
+}

@@ -81,6 +81,52 @@ impl Rect {
         }
     }
 
+    /// `self` less every rectangle in `cuts`, as rectangles that do not
+    /// overlap.
+    fn subtract(&self, cuts: &[Rect]) -> Vec<Rect> {
+        let mut pieces = vec![*self];
+        for cut in cuts {
+            let mut next = Vec::with_capacity(pieces.len() + 4);
+            for piece in pieces {
+                let inside = piece.intersection(cut);
+                if inside.is_empty() {
+                    next.push(piece);
+                    continue;
+                }
+                let (right, bottom) = (inside.x + inside.width, inside.y + inside.height);
+                let bands = [
+                    (piece.x, piece.y, piece.width, inside.y - piece.y),
+                    (
+                        piece.x,
+                        bottom,
+                        piece.width,
+                        piece.y + piece.height - bottom,
+                    ),
+                    (piece.x, inside.y, inside.x - piece.x, inside.height),
+                    (
+                        right,
+                        inside.y,
+                        piece.x + piece.width - right,
+                        inside.height,
+                    ),
+                ];
+                next.extend(
+                    bands
+                        .into_iter()
+                        .map(|(x, y, width, height)| Rect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        })
+                        .filter(|band| !band.is_empty()),
+                );
+            }
+            pieces = next;
+        }
+        pieces
+    }
+
     fn union(&self, other: &Rect) -> Rect {
         if self.is_empty() {
             return *other;
@@ -121,6 +167,9 @@ struct WindowState {
     damage: Rect,
     placed: Vec<(usize, Rect)>,
     holes: Vec<Hole>,
+    /// For each layer with an overlay stacked above it, the overlays'
+    /// rectangles, which its own presents must leave to the store.
+    covered: Vec<(usize, Vec<Rect>)>,
     /// The generation of `crate::decor`'s chrome last copied in, zero for
     /// none.
     chrome: u64,
@@ -704,16 +753,36 @@ fn compose_window(window: Id) {
     let (width, height) = (width.max(1) as u32, height.max(1) as u32);
     let placed = place_tree(window, sdl);
     let now: Vec<(usize, Rect)> = placed.iter().map(|p| (p.view as usize, p.clip)).collect();
-    let holes: Vec<Hole> = placed
+    let overlaid: Vec<usize> = OVERLAYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .filter_map(|p| {
-            let layer = crate::view::layer_of(p.view);
-            (crate::layer::is_metal(layer) && !p.clip.is_empty()).then_some(Hole {
-                layer: layer as usize,
-                rect: p.clip,
-            })
-        })
+        .map(|(view, _)| *view)
         .collect();
+    let mut holes = Vec::new();
+    let mut covered = Vec::new();
+    for (index, p) in placed.iter().enumerate() {
+        let layer = crate::view::layer_of(p.view);
+        if !crate::layer::is_metal(layer) || p.clip.is_empty() {
+            continue;
+        }
+        // An overlay is stacked above the layers of the views placed before
+        // it - a web view inside a Metal-drawn panel - so there the store,
+        // which carries the overlay, shows instead of the layer.
+        let above: Vec<Rect> = placed[index + 1..]
+            .iter()
+            .filter(|q| overlaid.contains(&(q.view as usize)))
+            .map(|q| q.clip.intersection(&p.clip))
+            .filter(|rect| !rect.is_empty())
+            .collect();
+        holes.extend(p.clip.subtract(&above).into_iter().map(|rect| Hole {
+            layer: layer as usize,
+            rect,
+        }));
+        if !above.is_empty() {
+            covered.push((layer as usize, above));
+        }
+    }
 
     let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
     // A window no view has drawn into has nothing to compose. Composing it
@@ -783,6 +852,7 @@ fn compose_window(window: Id) {
             .zip(&holes)
             .any(|(a, b)| a.layer != b.layer || a.rect != b.rect);
     state.holes = holes;
+    state.covered = covered;
     let chrome_generation = chrome.as_ref().map_or(0, |chrome| chrome.generation);
     let chrome_changed =
         std::mem::replace(&mut state.chrome, chrome_generation) != chrome_generation;
@@ -1061,6 +1131,18 @@ pub fn remove_overlay(view: Id) {
     if removed {
         mark_window_of(view);
     }
+}
+
+/// The rectangles, in window pixels, of the overlays stacked above `layer`
+/// in `sdl`'s window, which that layer's presents must not draw over.
+pub fn covered(sdl: sdl3::Window, layer: Id) -> Vec<Rect> {
+    let windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    windows
+        .as_ref()
+        .and_then(|windows| windows.get(&(sdl as usize)))
+        .and_then(|state| state.covered.iter().find(|(key, _)| *key == layer as usize))
+        .map(|(_, rects)| rects.clone())
+        .unwrap_or_default()
 }
 
 /// Have `view`'s window presented again, composing it if nothing has been:
@@ -1601,6 +1683,31 @@ mod tests {
             &store.pixels[16..],
             &[1, 2, 3, 255, 1, 2, 3, 255, 9, 9, 9, 9, 9, 9, 9, 9]
         );
+    }
+
+    #[test]
+    fn a_layer_hole_leaves_out_the_overlay_above_it() {
+        let rect = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // A web view filling the lower part of a Metal-drawn panel.
+        let hole = rect(1, 510, 278, 338);
+        let pieces = hole.subtract(&[rect(1, 546, 278, 302)]);
+        assert_eq!(pieces, [rect(1, 510, 278, 36)]);
+        // One in the middle leaves a band on every side.
+        let pieces = rect(0, 0, 10, 10).subtract(&[rect(2, 3, 4, 5)]);
+        let area: i64 = pieces.iter().map(|p| p.width * p.height).sum();
+        assert_eq!(area, 100 - 20);
+        assert!(
+            pieces
+                .iter()
+                .all(|p| p.intersection(&rect(2, 3, 4, 5)).is_empty())
+        );
+        // One elsewhere leaves the hole as it was.
+        assert_eq!(hole.subtract(&[rect(400, 0, 5, 5)]), [hole]);
     }
 
     #[test]

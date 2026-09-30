@@ -99,6 +99,24 @@ pub(super) fn extent_of(image: &GpuImage) -> [vk::Offset3D; 2] {
     ]
 }
 
+/// The part of a `width` by `height` source, which is scaled over the whole
+/// of `frame`, that lands on `into`, a rectangle of window pixels inside
+/// `frame`.
+pub(super) fn source_of(
+    into: [vk::Offset3D; 2],
+    frame: &appkit::view::Frame,
+    (width, height): (u32, u32),
+) -> [vk::Offset3D; 2] {
+    let scale_x = f64::from(width.max(1)) / f64::from(frame.width.max(1));
+    let scale_y = f64::from(height.max(1)) / f64::from(frame.height.max(1));
+    let map = |at: vk::Offset3D| vk::Offset3D {
+        x: (f64::from(at.x - frame.x) * scale_x).round() as i32,
+        y: (f64::from(at.y - frame.y) * scale_y).round() as i32,
+        z: at.z,
+    };
+    [map(into[0]), map(into[1])]
+}
+
 /// One colour mip level, which is all any image here has.
 pub(super) fn whole_color() -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {
