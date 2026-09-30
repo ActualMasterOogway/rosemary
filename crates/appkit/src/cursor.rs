@@ -128,6 +128,9 @@ fn show(cursor: Id) {
         true => unsafe { (*(cursor as *const Cursor)).sdl },
         false => std::ptr::null_mut(),
     };
+    // Recorded apart from `SHOWN`: every named cursor shares the null SDL
+    // cursor, and `+currentSystemCursor` has to tell them apart.
+    SHOWN_OBJECT.store(cursor as usize, std::sync::atomic::Ordering::Release);
     // Only on a change: this runs on every mouse move, and SDL redraws the
     // pointer for each call whether or not it is the cursor already shown.
     if SHOWN.swap(sdl as usize, std::sync::atomic::Ordering::AcqRel) == sdl as usize {
@@ -140,6 +143,10 @@ fn show(cursor: Id) {
 /// nothing. Reset when a cursor is destroyed: SDL is free to hand the same
 /// address out again, and a stale match would leave the new cursor unshown.
 static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// The cursor object on screen, which `+currentSystemCursor` answers; null for
+/// the desktop's own arrow.
+static SHOWN_OBJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Whether `object` is one of this crate's cursors, checked rather than
 /// assumed: `-addCursorRect:cursor:` takes an `id` from the guest.
@@ -222,6 +229,14 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     {
         sdl3::video::set_cursor(std::ptr::null_mut());
     }
+    // A cursor rectangle's cursor can go while still on screen; the arrow is
+    // what the pointer falls back to.
+    let _ = SHOWN_OBJECT.compare_exchange(
+        receiver as usize,
+        0,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    );
     if !cursor.sdl.is_null() {
         SHOWN.store(usize::MAX, std::sync::atomic::Ordering::Release);
         // SAFETY: made by `create_color_cursor`, and destroyed once - the last
@@ -829,6 +844,19 @@ unsafe extern "C" fn current_cursor(_class: Id, _sel: Sel) -> Id {
     }
 }
 
+/// `+currentSystemCursor`: what the pointer shows, which differs from
+/// `+currentCursor` whenever a cursor rectangle or the chrome has put up a
+/// cursor the program did not `-set`.
+///
+/// Apple answers a fresh copy of the system's cursor; the object itself serves
+/// the same purpose, and lets a program compare it against its own.
+unsafe extern "C" fn current_system_cursor(_class: Id, _sel: Sel) -> Id {
+    match SHOWN_OBJECT.load(std::sync::atomic::Ordering::Acquire) {
+        0 => cursor_for(0),
+        object => object as Id,
+    }
+}
+
 /// `+hide` and `+unhide`, which SDL does have.
 ///
 /// AppKit's are *counted* - two hides need two unhides - and SDL's are not, so
@@ -982,6 +1010,7 @@ pub(crate) fn install() {
     }
     class_methods!(cursor, {
         "currentCursor" => current_cursor, c"@16@0:8";
+        "currentSystemCursor" => current_system_cursor, c"@16@0:8";
         "pop" => class_pop, c"v16@0:8";
         "hide" => hide, c"v16@0:8";
         "unhide" => unhide, c"v16@0:8";
