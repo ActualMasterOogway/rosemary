@@ -48,6 +48,67 @@ fn new(name: &str) -> CFTypeRef {
     body as CFTypeRef
 }
 
+/// The directories a zoneinfo database is found in, in the order `tzset` itself
+/// looks: `TZDIR` overrides, and the rest are where the distributions put it -
+/// NixOS uses `/etc/zoneinfo`, most others `/usr/share/zoneinfo`.
+pub fn database() -> Option<std::path::PathBuf> {
+    std::env::var("TZDIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .into_iter()
+        .chain(
+            ["/usr/share/zoneinfo", "/etc/zoneinfo", "/usr/lib/zoneinfo"]
+                .into_iter()
+                .map(std::path::PathBuf::from),
+        )
+        .find(|dir| dir.is_dir())
+}
+
+/// The zone called `name`, read from the host's database once and kept, or
+/// `None` for a name the host does not have.
+///
+/// The system zone falls back to `/etc/localtime`, which is where the host's
+/// zone lives even when its name is not in a database this can find; UTC and
+/// GMT are answered without one.
+pub fn zone(name: &str) -> Option<std::sync::Arc<crate::tzif::Zone>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    static ZONES: Mutex<Option<HashMap<String, Option<Arc<crate::tzif::Zone>>>>> = Mutex::new(None);
+
+    let mut zones = ZONES.lock().unwrap_or_else(|e| e.into_inner());
+    let zones = zones.get_or_insert_default();
+    if let Some(found) = zones.get(name) {
+        return found.clone();
+    }
+    // A name is a relative path inside the database and nothing else.
+    let valid = !name.is_empty()
+        && !name.starts_with('/')
+        && !name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    let read = |path: std::path::PathBuf| {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| crate::tzif::Zone::parse(&bytes))
+    };
+    let found = valid
+        .then(|| database().and_then(|root| read(root.join(name))))
+        .flatten()
+        .or_else(|| {
+            (name == system_name())
+                .then(|| read("/etc/localtime".into()))
+                .flatten()
+        })
+        .or_else(|| match name {
+            "UTC" | "GMT" | "Etc/UTC" | "Etc/GMT" => Some(crate::tzif::Zone::fixed(0, name)),
+            _ => None,
+        })
+        .map(Arc::new);
+    zones.insert(name.to_owned(), found.clone());
+    found
+}
+
 /// The zone this host is set to, as an IANA name.
 pub fn system_name() -> String {
     std::fs::read_link("/etc/localtime")
@@ -77,7 +138,13 @@ pub unsafe extern "C" fn create_with_name(
     let Some(name) = (unsafe { crate::string::as_string(name) }) else {
         return std::ptr::null();
     };
-    new(&String::from_utf8_lossy(&name.utf8()))
+    let name = String::from_utf8_lossy(&name.utf8()).into_owned();
+    // A name the host has no zone for is NULL, as it is on a Mac, rather than
+    // an object every later question about would have to refuse.
+    match zone(&name) {
+        Some(_) => new(&name),
+        None => std::ptr::null(),
+    }
 }
 
 /// The zone's name as Rust text, or `None` for anything that is not one of

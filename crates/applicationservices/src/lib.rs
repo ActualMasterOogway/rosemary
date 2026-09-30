@@ -13,7 +13,6 @@ extern "C" fn CGWindowLevelForKey(_key: CGWindowLevelKey) -> CGWindowLevel {
 
 exports::exports! {
     functions {
-        "CGCursorIsVisible" => appkit::cursor::CGCursorIsVisible,
         "CGWindowLevelForKey" => CGWindowLevelForKey,
     }
 }

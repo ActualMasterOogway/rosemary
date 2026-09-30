@@ -248,6 +248,7 @@ pub const CLASSES: &[&str] = &[
     "NSMutableData",
     "NSNumber",
     "NSPredicate",
+    "NSEnumerator",
     "NSValue",
     "NSNull",
     "NSNotification",
@@ -453,6 +454,39 @@ mod tests {
             send1(array, objc::sel::get("addObject:"), element);
             assert_eq!(count(array, objc::sel::get("count")), 1);
             assert_eq!(at(array, objc::sel::get("objectAtIndex:"), 0), element);
+        }
+    }
+
+    /// An enumerator hands out each element once, in order - or back to front
+    /// for the reverse one - and then nil; `-allObjects` takes what is left.
+    #[test]
+    fn an_array_enumerator_walks_the_array_once() {
+        bootstrap();
+        // SAFETY: each prototype is the one its selector declares.
+        unsafe {
+            let send0: unsafe extern "C" fn(Id, Sel) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send1: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc::msg::entry());
+
+            let array = send0(class(c"NSMutableArray"), objc::sel::get("array"));
+            let elements = [class(c"NSNumber"), class(c"NSArray"), class(c"NSSet")];
+            for element in elements {
+                send1(array, objc::sel::get("addObject:"), element);
+            }
+            let next = objc::sel::get("nextObject");
+            let forward = send0(array, objc::sel::get("objectEnumerator"));
+            for element in elements {
+                assert_eq!(send0(forward, next), element);
+            }
+            assert!(send0(forward, next).is_null());
+
+            let reverse = send0(array, objc::sel::get("reverseObjectEnumerator"));
+            assert_eq!(send0(reverse, next), elements[2]);
+            let rest = send0(reverse, objc::sel::get("allObjects"));
+            assert_eq!(count(rest, objc::sel::get("count")), 2);
+            assert!(send0(reverse, next).is_null());
         }
     }
 

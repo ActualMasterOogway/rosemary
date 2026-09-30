@@ -102,6 +102,7 @@ pub(crate) fn forget(object: Id) {
         (indicators(), &[][..]),
         (buttons(), &slot::BUTTON_OBJECTS[..]),
         (image_views(), &slot::IMAGE_VIEW_OBJECTS[..]),
+        (scrollers(), &[][..]),
     ] {
         let gone = table.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         if let Some(row) = gone {
@@ -378,6 +379,11 @@ fn buttons() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
     TABLE.get_or_init(Default::default)
 }
 
+fn scrollers() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
+    static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
 fn image_views() -> &'static Mutex<HashMap<usize, Vec<usize>>> {
     static TABLE: OnceLock<Mutex<HashMap<usize, Vec<usize>>>> = OnceLock::new();
     TABLE.get_or_init(Default::default)
@@ -412,6 +418,10 @@ mod slot {
     pub const SCALING: usize = 1;
     pub const ALIGNMENT: usize = 2;
     pub const IMAGE_VIEW_OBJECTS: [usize; 1] = [VIEW_IMAGE];
+
+    /// Both `f64` bits.
+    pub const SCROLLER_VALUE: usize = 0;
+    pub const KNOB_PROPORTION: usize = 1;
 }
 
 const ROW: usize = 6;
@@ -894,6 +904,116 @@ unsafe extern "C" fn scroller_init_with_frame(receiver: Id, sel: Sel, frame: NSR
     }
 }
 
+/// The shortest knob a scroller draws, so that a huge document still leaves
+/// something to grab.
+const MIN_KNOB_LENGTH: f64 = 18.0;
+
+/// `NSScrollerPart`.
+mod part {
+    pub const DECREMENT_PAGE: usize = 1;
+    pub const KNOB: usize = 2;
+    pub const INCREMENT_PAGE: usize = 3;
+    pub const KNOB_SLOT: usize = 6;
+}
+
+fn scroller_f64(receiver: Id, at: usize) -> f64 {
+    f64::from_bits(read(scrollers(), receiver, at) as u64)
+}
+
+/// AppKit clamps both the position and the proportion into `0..=1`, and a
+/// program reads the clamped value back.
+fn set_scroller_f64(receiver: Id, at: usize, value: f64) {
+    let value = match value.is_nan() {
+        true => 0.0,
+        false => value.clamp(0.0, 1.0),
+    };
+    write(scrollers(), receiver, at, value.to_bits() as usize);
+}
+
+unsafe extern "C" fn scroller_set_double_value(receiver: Id, _sel: Sel, value: f64) {
+    set_scroller_f64(receiver, slot::SCROLLER_VALUE, value);
+}
+
+unsafe extern "C" fn scroller_double_value(receiver: Id, _sel: Sel) -> f64 {
+    scroller_f64(receiver, slot::SCROLLER_VALUE)
+}
+
+unsafe extern "C" fn scroller_set_float_value(receiver: Id, _sel: Sel, value: f32) {
+    set_scroller_f64(receiver, slot::SCROLLER_VALUE, f64::from(value));
+}
+
+unsafe extern "C" fn scroller_float_value(receiver: Id, _sel: Sel) -> f32 {
+    scroller_f64(receiver, slot::SCROLLER_VALUE) as f32
+}
+
+unsafe extern "C" fn scroller_set_knob_proportion(receiver: Id, _sel: Sel, value: f64) {
+    set_scroller_f64(receiver, slot::KNOB_PROPORTION, value);
+}
+
+unsafe extern "C" fn scroller_knob_proportion(receiver: Id, _sel: Sel) -> f64 {
+    scroller_f64(receiver, slot::KNOB_PROPORTION)
+}
+
+/// `-[NSScroller rectForPart:]`, in the scroller's own flipped coordinates.
+///
+/// A scroller since 10.7 has no arrows, so the slot is the whole bounds and
+/// the line parts are empty. The knob is the proportion's share of the slot,
+/// placed by the value along what is left; with nothing to scroll (a
+/// proportion of 0 or 1) there is no knob, and so no page parts either.
+/// Qt's style lays out and hit-tests its scroll bars from these rectangles.
+unsafe extern "C" fn scroller_rect_for_part(receiver: Id, _sel: Sel, which: usize) -> NSRect {
+    let size = view::frame_of(receiver).size;
+    scroller_part(
+        size,
+        scroller_f64(receiver, slot::SCROLLER_VALUE),
+        scroller_f64(receiver, slot::KNOB_PROPORTION),
+        which,
+    )
+}
+
+fn scroller_part(size: NSSize, value: f64, proportion: f64, which: usize) -> NSRect {
+    let bounds = NSRect {
+        origin: NSPoint::default(),
+        size,
+    };
+    // The same test `-initWithFrame:` makes: wider than tall is horizontal.
+    let horizontal = size.width > size.height;
+    let length = match horizontal {
+        true => size.width,
+        false => size.height,
+    };
+    // A span `(start, extent)` along the scrolling axis, full breadth across.
+    let span = |start: f64, extent: f64| match horizontal {
+        true => NSRect {
+            origin: NSPoint { x: start, y: 0.0 },
+            size: NSSize {
+                width: extent,
+                height: size.height,
+            },
+        },
+        false => NSRect {
+            origin: NSPoint { x: 0.0, y: start },
+            size: NSSize {
+                width: size.width,
+                height: extent,
+            },
+        },
+    };
+    let knob = (proportion > 0.0 && proportion < 1.0 && length >= MIN_KNOB_LENGTH).then(|| {
+        let extent = (length * proportion).max(MIN_KNOB_LENGTH);
+        ((length - extent) * value, extent)
+    });
+    match (which, knob) {
+        (part::KNOB_SLOT, _) => bounds,
+        (part::KNOB, Some((start, extent))) => span(start, extent),
+        (part::DECREMENT_PAGE, Some((start, _))) => span(0.0, start),
+        (part::INCREMENT_PAGE, Some((start, extent))) => {
+            span(start + extent, length - start - extent)
+        }
+        _ => NSRect::default(),
+    }
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSStackView").expect("declared before its methods");
     methods!(class, {
@@ -985,6 +1105,14 @@ pub(crate) fn install() {
     methods!(class, {
         "initWithFrame:" => scroller_init_with_frame,
             c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "setDoubleValue:" => scroller_set_double_value, c"v24@0:8d16";
+        "doubleValue" => scroller_double_value, c"d16@0:8";
+        "setFloatValue:" => scroller_set_float_value, c"v20@0:8f16";
+        "floatValue" => scroller_float_value, c"f16@0:8";
+        "setKnobProportion:" => scroller_set_knob_proportion, c"v24@0:8d16";
+        "knobProportion" => scroller_knob_proportion, c"d16@0:8";
+        "rectForPart:" => scroller_rect_for_part,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}24@0:8Q16";
     });
 }
 
@@ -1125,5 +1253,54 @@ mod tests {
                 SMALL_SCROLLER_WIDTH
             );
         }
+    }
+
+    /// The knob takes its proportion of the slot and slides along the rest;
+    /// the page parts are what lies either side of it.
+    #[test]
+    fn a_scroller_places_its_knob_by_value_and_proportion() {
+        let size = NSSize {
+            width: SCROLLER_WIDTH,
+            height: 200.0,
+        };
+        let knob = scroller_part(size, 0.5, 0.25, part::KNOB);
+        assert_eq!((knob.origin.y, knob.size.height), (75.0, 50.0));
+        assert_eq!(knob.size.width, SCROLLER_WIDTH);
+        let before = scroller_part(size, 0.5, 0.25, part::DECREMENT_PAGE);
+        assert_eq!((before.origin.y, before.size.height), (0.0, 75.0));
+        let after = scroller_part(size, 0.5, 0.25, part::INCREMENT_PAGE);
+        assert_eq!((after.origin.y, after.size.height), (125.0, 75.0));
+        let slot = scroller_part(size, 0.5, 0.25, part::KNOB_SLOT);
+        assert_eq!(slot.size, size);
+        // A tiny proportion still leaves a knob to grab.
+        let small = scroller_part(size, 1.0, 0.001, part::KNOB);
+        assert_eq!(
+            (small.origin.y, small.size.height),
+            (182.0, MIN_KNOB_LENGTH)
+        );
+        // Nothing to scroll: no knob.
+        assert_eq!(scroller_part(size, 0.0, 1.0, part::KNOB), NSRect::default());
+    }
+
+    #[test]
+    fn a_scroller_clamps_what_it_is_given() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSScroller").expect("NSScroller");
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: the receiver is a live scroller.
+        unsafe {
+            scroller_set_float_value(object, objc::sel::get("setFloatValue:"), 1.5);
+            assert_eq!(
+                scroller_double_value(object, objc::sel::get("doubleValue")),
+                1.0
+            );
+            scroller_set_knob_proportion(object, objc::sel::get("setKnobProportion:"), 0.3);
+            assert_eq!(
+                scroller_knob_proportion(object, objc::sel::get("knobProportion")),
+                0.3
+            );
+        }
+        forget(object);
+        objc::arc::release(object);
     }
 }

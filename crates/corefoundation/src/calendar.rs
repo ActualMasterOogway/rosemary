@@ -47,11 +47,8 @@ const _: () = {
 
 /// The zone's offset from UTC at `at`, in seconds.
 ///
-/// Only two zones can be answered: UTC, and whichever one this host is set to -
-/// which is what `CFTimeZoneCopySystem` hands back and what a program asking
-/// for "now, locally" means. Any other named zone would need the zone database
-/// read by hand, and reporting this machine's offset for it would be a wrong
-/// time rather than a refusal.
+/// Read from the zone's own database entry, so any zone a time zone object
+/// can be made for is answered - not only this machine's.
 ///
 /// # Safety
 ///
@@ -64,30 +61,18 @@ pub unsafe fn offset_seconds(timezone: CFTypeRef, at: CFAbsoluteTime) -> Option<
         None => return Some(0),
         Some(name) => name,
     };
-    if name == "UTC" || name == "GMT" || name == "Etc/UTC" || name == "Etc/GMT" {
-        return Some(0);
+    let unix = (at.floor() as i64).checked_add(UNIX_TO_ABSOLUTE)?;
+    match crate::timezone::zone(&name) {
+        Some(zone) => Some(zone.at(unix).offset),
+        None => objc::fail!("CFCalendar: the time zone {name} is not in this host's zone database"),
     }
-    if name != crate::timezone::system_name() {
-        objc::fail!(
-            "CFCalendar: this runtime can place a date in UTC and in this machine's own zone, \
-             and {name} is neither"
-        );
-    }
-    let unix = (at as i64).checked_add(UNIX_TO_ABSOLUTE)?;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let time = unix as libc::time_t;
-    // SAFETY: `localtime_r` fills the `tm` it is given and reads only `time`.
-    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
-        return None;
-    }
-    Some(tm.tm_gmtoff)
 }
 
 /// Days from 1970-01-01 to `y-m-d`, by Howard Hinnant's closed form.
 ///
 /// Written out rather than taken from a library because it is eight lines and
 /// because the two directions have to be exact inverses of each other.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = y - i64::from(m <= 2);
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -97,7 +82,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// The inverse of [`days_from_civil`].
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;

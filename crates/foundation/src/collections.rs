@@ -206,6 +206,143 @@ unsafe extern "C" fn predicate_dealloc(receiver: Id, _sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
+/// An array enumerator: a snapshot of the array's elements and a cursor.
+///
+/// A snapshot rather than the live array, so that a program that mutates the
+/// array mid-walk - its error, which Apple raises for - still reads elements
+/// that are alive rather than a freed slot.
+#[repr(C)]
+struct ArrayEnumerator {
+    isa: *const objc::class::Class,
+    /// An owned immutable array.
+    values: CFTypeRef,
+    next: usize,
+}
+
+fn array_enumerator_class() -> &'static objc::class::Class {
+    objc::class::lookup(c"__NSArrayEnumerator").expect("installed with the collections")
+}
+
+/// A fresh, autoreleased enumerator over `receiver`'s elements, back to front
+/// when `reverse` is set.
+unsafe fn new_array_enumerator(receiver: Id, reverse: bool) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut values = array.values.clone();
+    if reverse {
+        values.reverse();
+    }
+    // SAFETY: `ArrayEnumerator` is the registered layout for this class.
+    let enumerator =
+        unsafe { corefoundation::base::allocate::<ArrayEnumerator>(array_enumerator_class()) };
+    if enumerator.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a fresh instance.
+    unsafe {
+        (*enumerator).values =
+            collections::new_array(&values, Policy::from_type_callbacks(), false);
+        (*enumerator).next = 0;
+        api::CFAutorelease(enumerator as CFTypeRef) as Id
+    }
+}
+
+unsafe extern "C" fn object_enumerator(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an array.
+    unsafe { new_array_enumerator(receiver, false) }
+}
+
+unsafe extern "C" fn reverse_object_enumerator(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an array.
+    unsafe { new_array_enumerator(receiver, true) }
+}
+
+/// The snapshot and cursor of one of this module's enumerators.
+///
+/// # Safety
+///
+/// `receiver` is an `__NSArrayEnumerator`.
+unsafe fn enumerator_parts<'a>(receiver: Id) -> Option<(&'a [CFTypeRef], &'a mut usize)> {
+    let body = receiver as *mut ArrayEnumerator;
+    // SAFETY: the registered layout, and a snapshot this module made.
+    let array = unsafe { collections::array((*body).values) }?;
+    Some((&array.values, unsafe { &mut (*body).next }))
+}
+
+/// `-nextObject`: the next element, owned by the enumerator, or nil at the end.
+unsafe extern "C" fn enumerator_next_object(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an array enumerator.
+    let Some((values, next)) = (unsafe { enumerator_parts(receiver) }) else {
+        return std::ptr::null_mut();
+    };
+    let Some(value) = values.get(*next) else {
+        return std::ptr::null_mut();
+    };
+    *next += 1;
+    *value as Id
+}
+
+/// `-allObjects`: whatever the enumerator has not yet handed out, which it
+/// then has not got any more.
+unsafe extern "C" fn enumerator_all_objects(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an array enumerator.
+    let rest = match unsafe { enumerator_parts(receiver) } {
+        Some((values, next)) => {
+            let rest = values.get(*next..).unwrap_or_default().to_vec();
+            *next = values.len();
+            rest
+        }
+        None => Vec::new(),
+    };
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &rest,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+/// `for (id x in enumerator)`, which consumes the enumerator as `-nextObject`
+/// would: a batch into the caller's buffer at a time.
+unsafe extern "C" fn enumerator_enumerate(
+    receiver: Id,
+    _sel: Sel,
+    state: *mut FastEnumerationState,
+    buffer: *mut Id,
+    len: usize,
+) -> usize {
+    if state.is_null() || buffer.is_null() || len == 0 {
+        return 0;
+    }
+    // SAFETY: an array enumerator.
+    let Some((values, next)) = (unsafe { enumerator_parts(receiver) }) else {
+        return 0;
+    };
+    let batch = values.len().saturating_sub(*next).min(len);
+    for i in 0..batch {
+        // SAFETY: the caller said `buffer` holds `len` items, and `batch` is at
+        // most that.
+        unsafe { *buffer.add(i) = values[*next + i] as Id };
+    }
+    *next += batch;
+    // SAFETY: the guest's own state structure.
+    let state = unsafe { &mut *state };
+    state.state = 1;
+    state.items = buffer;
+    state.mutations = &NEVER_MUTATED as *const usize as *mut usize;
+    batch
+}
+
+unsafe extern "C" fn enumerator_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: an enumerator at the end of its lifetime, and the snapshot it owns.
+    unsafe { api::CFRelease((*(receiver as *mut ArrayEnumerator)).values) };
+    objc::arc::finalize(receiver);
+}
+
 unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -1532,6 +1669,20 @@ pub(crate) fn install() {
         "addObject:" => set_add_object, c"v24@0:8@16";
     });
 
+    let enumerator = corefoundation::base::abstract_class(c"NSEnumerator", None);
+    let array_enumerator = corefoundation::base::register(
+        c"__NSArrayEnumerator",
+        Some(enumerator),
+        std::mem::size_of::<ArrayEnumerator>(),
+        false,
+    );
+    methods!(array_enumerator, {
+        "dealloc" => enumerator_dealloc, c"v16@0:8";
+        "nextObject" => enumerator_next_object, c"@16@0:8";
+        "allObjects" => enumerator_all_objects, c"@16@0:8";
+        "countByEnumeratingWithState:objects:count:" => enumerator_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
+    });
+
     let array = objc::class::lookup(c"NSArray").expect("CoreFoundation registered NSArray");
     let mutable_array = objc::class::lookup(c"NSMutableArray").expect("NSMutableArray");
     methods!(array, {
@@ -1548,6 +1699,8 @@ pub(crate) fn install() {
         "indexOfObjectWithOptions:passingTest:" => index_of_object_with_options_passing_test, c"Q32@0:8Q16@?24";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
         "description" => array_description, c"@16@0:8";
+        "objectEnumerator" => object_enumerator, c"@16@0:8";
+        "reverseObjectEnumerator" => reverse_object_enumerator, c"@16@0:8";
     });
     class_methods!(array, {
         "array" => array_fn, c"@16@0:8";
