@@ -37,6 +37,8 @@
               pkgs.openal
               # webkit: loaded with dlopen, so it has to be on the library path.
               pkgs.webkitgtk_6_0
+              # webkit: the compositor WebKitGTK's windows are shown in.
+              pkgs.libxkbcommon
             ];
         in {
           default = pkgs.mkShell {
