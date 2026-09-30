@@ -118,6 +118,21 @@ fn domain_root(volume: i16) -> Option<String> {
     })
 }
 
+/// The domain the two legacy "system disk" volumes mean for `kind`.
+///
+/// Carbon answers `kOnSystemDisk` and `kOnAppropriateDisk` from whichever
+/// domain holds that kind of folder. For frameworks that is the system domain:
+/// Apple's CallMachOFramework sample finds `System.framework` through
+/// `FSFindFolder(kOnAppropriateDisk, kFrameworksFolderType)`, and programs that
+/// copied it look up `free` that way. Every other kind keeps the local domain.
+fn system_disk(volume: i16, kind: u32) -> i16 {
+    const SYSTEM_DOMAIN: i16 = -32766;
+    match (volume, &kind.to_be_bytes()) {
+        (-32768 | -32767, b"fram") => SYSTEM_DOMAIN,
+        _ => volume,
+    }
+}
+
 /// The folder an `OSType` names, relative to a domain root.
 ///
 /// Four-character codes, written as the integers a guest passes rather than as
@@ -168,7 +183,8 @@ pub unsafe extern "C" fn FSFindFolder(
     if result.is_null() {
         return PARAM_ERR as i16;
     }
-    let (Some(root), Some(relative)) = (domain_root(volume), folder(kind)) else {
+    let (Some(root), Some(relative)) = (domain_root(system_disk(volume, kind)), folder(kind))
+    else {
         return FNF_ERR as i16;
     };
     // The temporary folder is the one answer that does not hang off a domain:
@@ -179,13 +195,18 @@ pub unsafe extern "C" fn FSFindFolder(
         _ => format!("{root}/{relative}"),
     };
     let path = prefix::ns::host_path(&guest);
-    if create != 0 && !path.is_dir() {
+    // A provided framework's folder exists without being on disk, and is not
+    // made there either: that would put an empty directory where the guest
+    // expects to find every system framework.
+    let mut found = path.is_dir() || darwin::images::virtual_directory(&guest);
+    if create != 0 && !found {
         // A failure here is reported rather than ignored: `/Library/Frameworks`
         // cannot be made by an unprivileged process, and a reference to a
         // directory that is not there is worse than saying so.
         let _ = std::fs::create_dir_all(&path);
+        found = path.is_dir();
     }
-    if !path.is_dir() {
+    if !found {
         return DIR_NF_ERR as i16;
     }
     // SAFETY: checked non-null above.
@@ -213,12 +234,14 @@ pub unsafe extern "C" fn FSPathMakeRef(
         return PARAM_ERR;
     };
     let path = prefix::ns::host_path(text);
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return FNF_ERR;
+    let directory = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(_) if darwin::images::virtual_directory(text) => true,
+        Err(_) => return FNF_ERR,
     };
     if !is_directory.is_null() {
         // SAFETY: the caller states it is writable.
-        unsafe { *is_directory = u8::from(metadata.is_dir()) };
+        unsafe { *is_directory = u8::from(directory) };
     }
     // SAFETY: checked non-null above.
     unsafe { store(reference, path) };
@@ -275,6 +298,15 @@ pub unsafe extern "C" fn FSCompareFSRefs(a: *const c_void, b: *const c_void) -> 
     }
 }
 
+/// Whether the host path a reference holds is a folder, counting the ones a
+/// provided framework makes exist - see [`darwin::images::virtual_directory`].
+fn is_folder(host: &std::path::Path) -> bool {
+    host.is_dir()
+        || prefix::ns::to_guest(host)
+            .and_then(|guest| guest.to_str().map(darwin::images::virtual_directory))
+            .unwrap_or(false)
+}
+
 /// `OSErr FSIsAliasFile(const FSRef *ref, Boolean *aliasFileFlag,
 /// Boolean *folderFlag)`
 ///
@@ -299,7 +331,7 @@ pub unsafe extern "C" fn FSIsAliasFile(
         unsafe { *alias = 0 };
     }
     if !folder.is_null() {
-        unsafe { *folder = u8::from(path.is_dir()) };
+        unsafe { *folder = u8::from(is_folder(&path)) };
     }
     NO_ERR
 }
@@ -325,7 +357,7 @@ pub unsafe extern "C" fn FSResolveAliasFile(
     };
     if !target_is_folder.is_null() {
         // SAFETY: the caller states it is writable.
-        unsafe { *target_is_folder = u8::from(path.is_dir()) };
+        unsafe { *target_is_folder = u8::from(is_folder(&path)) };
     }
     if !was_aliased.is_null() {
         unsafe { *was_aliased = 0 };
@@ -401,6 +433,27 @@ mod tests {
         assert_eq!(
             unsafe { FSCompareFSRefs(zero.as_ptr().cast(), zero.as_ptr().cast()) },
             PARAM_ERR
+        );
+    }
+
+    /// `kOnAppropriateDisk` frameworks are the system's, which is where
+    /// `System.framework` is; every other kind stays on the local domain.
+    #[test]
+    fn system_disk_frameworks_are_the_system_domains() {
+        const K_ON_SYSTEM_DISK: i16 = -32768;
+        const K_ON_APPROPRIATE_DISK: i16 = -32767;
+        const K_SYSTEM_DOMAIN: i16 = -32766;
+        let fram = u32::from_be_bytes(*b"fram");
+        let pref = u32::from_be_bytes(*b"pref");
+        assert_eq!(system_disk(K_ON_APPROPRIATE_DISK, fram), K_SYSTEM_DOMAIN);
+        assert_eq!(system_disk(K_ON_SYSTEM_DISK, fram), K_SYSTEM_DOMAIN);
+        assert_eq!(
+            system_disk(K_ON_APPROPRIATE_DISK, pref),
+            K_ON_APPROPRIATE_DISK
+        );
+        assert_eq!(
+            domain_root(system_disk(K_ON_APPROPRIATE_DISK, fram)).as_deref(),
+            Some("/System")
         );
     }
 

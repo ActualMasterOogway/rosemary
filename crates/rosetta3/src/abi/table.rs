@@ -394,6 +394,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFBundleGetIdentifier", P, P),
     sig!("CFBundleGetInfoDictionary", P, P),
     sig!("CFBundleGetMainBundle", P),
+    sig!("CFBundleLoadExecutable", U8, P),
+    sig!("CFBundleGetFunctionPointerForName", P, P, P),
     sig!("CFBundleGetVersionNumber", U32, P),
     sig!("CFBundleGetValueForInfoDictionaryKey", P, P, P),
     sig!("CFStringGetCharactersPtr", P, P),

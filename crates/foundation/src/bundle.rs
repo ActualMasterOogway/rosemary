@@ -149,6 +149,49 @@ impl Layout {
         })
     }
 
+    /// The bundle of a framework this runtime provides, at its guest path
+    /// `/System/Library/Frameworks/X.framework`.
+    ///
+    /// Nothing of it is on disk, so there is no `Info.plist` to read: the
+    /// dictionary holds only what the shape of a framework already says - its
+    /// executable is `X`, beside the bundle's top level, and it is a framework.
+    /// An identifier or a version would be invented, and a caller comparing
+    /// one would be told something no Mac says.
+    pub fn provided_framework(guest: &str) -> Option<Layout> {
+        let guest = guest.trim_end_matches('/');
+        if !darwin::images::virtual_directory(guest) {
+            return None;
+        }
+        let leaf = Path::new(guest)
+            .file_name()?
+            .to_str()?
+            .strip_suffix(".framework")?
+            .to_string();
+        let root = opened(Path::new(guest));
+        let info = Value::Dictionary(
+            [
+                (
+                    "CFBundleExecutable".to_string(),
+                    Value::String(leaf.clone()),
+                ),
+                (
+                    "CFBundlePackageType".to_string(),
+                    Value::String("FMWK".into()),
+                ),
+            ]
+            .into(),
+        );
+        Some(Layout {
+            resources: root.join("Resources"),
+            frameworks: root.join("Frameworks"),
+            plugins: root.join("PlugIns"),
+            executable: root.join(&leaf),
+            contents: root.clone(),
+            root,
+            info,
+        })
+    }
+
     /// An `Info.plist` string, which is how every question below is asked.
     pub fn info_string(&self, key: &str) -> Option<&str> {
         self.info.get(key)?.as_str()
@@ -352,7 +395,7 @@ pub mod cf {
     /// CFStringRef type, CFStringRef subDirName)`
     ///
     unsafe extern "C" fn CFBundleCopyResourceURL(
-        _bundle: Id,
+        bundle: Id,
         name: Id,
         kind: Id,
         subdirectory: Id,
@@ -372,23 +415,24 @@ pub mod cf {
         ) else {
             return std::ptr::null_mut();
         };
-        let Some(path) = super::main().and_then(|b| b.resource_in(name, kind, subdirectory)) else {
+        let Some(path) = layout(bundle).and_then(|b| b.resource_in(name, kind, subdirectory))
+        else {
             return std::ptr::null_mut();
         };
         file_url(&path, false)
     }
 
     /// `CFURLRef CFBundleCopyExecutableURL(CFBundleRef)`
-    unsafe extern "C" fn CFBundleCopyExecutableURL(_bundle: Id) -> Id {
-        match super::main() {
+    unsafe extern "C" fn CFBundleCopyExecutableURL(bundle: Id) -> Id {
+        match layout(bundle) {
             Some(bundle) => file_url(&bundle.executable, false),
             None => std::ptr::null_mut(),
         }
     }
 
     /// `CFURLRef CFBundleCopyBundleURL(CFBundleRef)`
-    unsafe extern "C" fn CFBundleCopyBundleURL(_bundle: Id) -> Id {
-        match super::main() {
+    unsafe extern "C" fn CFBundleCopyBundleURL(bundle: Id) -> Id {
+        match layout(bundle) {
             Some(bundle) => file_url(&bundle.root, true),
             None => std::ptr::null_mut(),
         }
@@ -398,8 +442,8 @@ pub mod cf {
     ///
     /// The directory rather than a file in it, so the trailing slash a caller
     /// appends a name onto is there.
-    unsafe extern "C" fn CFBundleCopyResourcesDirectoryURL(_bundle: Id) -> Id {
-        match super::main() {
+    unsafe extern "C" fn CFBundleCopyResourcesDirectoryURL(bundle: Id) -> Id {
+        match layout(bundle) {
             Some(bundle) => file_url(&bundle.resources, true),
             None => std::ptr::null_mut(),
         }
@@ -410,8 +454,8 @@ pub mod cf {
     /// Answered whether or not the directory exists, which is Apple's behaviour:
     /// the URL is where a private framework *would* be, and a caller that finds
     /// nothing there is entitled to that answer rather than to a null.
-    unsafe extern "C" fn CFBundleCopyPrivateFrameworksURL(_bundle: Id) -> Id {
-        match super::main() {
+    unsafe extern "C" fn CFBundleCopyPrivateFrameworksURL(bundle: Id) -> Id {
+        match layout(bundle) {
             Some(bundle) => file_url(&bundle.frameworks, true),
             None => std::ptr::null_mut(),
         }
@@ -428,16 +472,16 @@ pub mod cf {
     ///
     /// Answered whether or not the directory exists, for the reason
     /// [`CFBundleCopyPrivateFrameworksURL`] gives.
-    unsafe extern "C" fn CFBundleCopyBuiltInPlugInsURL(_bundle: Id) -> Id {
-        match super::main() {
+    unsafe extern "C" fn CFBundleCopyBuiltInPlugInsURL(bundle: Id) -> Id {
+        match layout(bundle) {
             Some(bundle) => file_url(&bundle.plugins, true),
             None => std::ptr::null_mut(),
         }
     }
 
     /// `CFArrayRef CFBundleCopyBundleLocalizations(CFBundleRef)`.
-    unsafe extern "C" fn CFBundleCopyBundleLocalizations(_bundle: Id) -> Id {
-        let Some(bundle) = super::main() else {
+    unsafe extern "C" fn CFBundleCopyBundleLocalizations(bundle: Id) -> Id {
+        let Some(bundle) = layout(bundle) else {
             return std::ptr::null_mut();
         };
         let strings = bundle
@@ -493,33 +537,38 @@ pub mod cf {
     ///
     /// A `Get`, so the string is not the caller's to release - which is why it is
     /// interned rather than made fresh each time.
-    unsafe extern "C" fn CFBundleGetIdentifier(_bundle: Id) -> Id {
-        let Some(identifier) = super::main().and_then(|b| b.identifier()) else {
+    unsafe extern "C" fn CFBundleGetIdentifier(bundle: Id) -> Id {
+        let Some(identifier) = layout(bundle).and_then(|b| b.identifier()) else {
             return std::ptr::null_mut();
         };
         crate::notification::name_object(identifier) as Id
     }
 
-    fn info_dictionary() -> Id {
-        static INFO: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        *INFO.get_or_init(|| {
-            let Some(bundle) = super::main() else {
-                return 0;
-            };
-            let object = crate::objectify::object(&bundle.info, "CFBundleGetInfoDictionary");
-            // A Get result lives with the bundle rather than with an autorelease
-            // pool, so keep the objectified plist for the process.
-            objc::arc::retain(object);
-            object as usize
-        }) as Id
+    /// A bundle's `Info.plist` as a dictionary object, made once per bundle.
+    fn info_dictionary(bundle: Id) -> Id {
+        static MADE: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+        let Some(layout) = layout(bundle) else {
+            return std::ptr::null_mut();
+        };
+        let key = layout as *const super::Layout as usize;
+        let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&(_, object)) = made.iter().find(|(k, _)| *k == key) {
+            return object as Id;
+        }
+        let object = crate::objectify::object(&layout.info, "CFBundleGetInfoDictionary");
+        // A Get result lives with the bundle rather than with an autorelease
+        // pool, so keep the objectified plist for the process.
+        objc::arc::retain(object);
+        made.push((key, object as usize));
+        object
     }
 
-    unsafe extern "C" fn CFBundleGetInfoDictionary(_bundle: Id) -> Id {
-        info_dictionary()
+    unsafe extern "C" fn CFBundleGetInfoDictionary(bundle: Id) -> Id {
+        info_dictionary(bundle)
     }
 
-    unsafe extern "C" fn CFBundleGetValueForInfoDictionaryKey(_bundle: Id, key: Id) -> Id {
-        let dictionary = info_dictionary();
+    unsafe extern "C" fn CFBundleGetValueForInfoDictionaryKey(bundle: Id, key: Id) -> Id {
+        let dictionary = info_dictionary(bundle);
         if dictionary.is_null() || key.is_null() {
             return std::ptr::null_mut();
         }
@@ -537,8 +586,8 @@ pub mod cf {
     /// filled in: a caller compares the whole word against a constant of its
     /// own, and a fabricated revision would make that comparison say something
     /// the `Info.plist` never did.
-    unsafe extern "C" fn CFBundleGetVersionNumber(_bundle: Id) -> u32 {
-        let Some(version) = super::main().and_then(|b| b.version()) else {
+    unsafe extern "C" fn CFBundleGetVersionNumber(bundle: Id) -> u32 {
+        let Some(version) = layout(bundle).and_then(|b| b.version()) else {
             return 0;
         };
         let Some(major) = version
@@ -558,17 +607,14 @@ pub mod cf {
 
     /// `CFBundleRef CFBundleCreate(CFAllocatorRef, CFURLRef bundleURL)`
     ///
-    /// Only the main bundle, and only when the URL names it. A guest asking about
-    /// its own `.app` by URL - which is what a program that already called
-    /// `CFBundleCopyExecutableURL` does - gets the bundle it means; anything else
-    /// is a bundle this runtime has not loaded, and a null says so where an
-    /// invented one would answer questions about the wrong directory.
+    /// The main bundle when the URL names it, and the bundle of a framework this
+    /// runtime provides - which is how a program finds `free` or `malloc` by
+    /// loading `System.framework`. Anything else is a bundle this runtime has
+    /// not loaded, and a null says so where an invented one would answer
+    /// questions about the wrong directory.
     unsafe extern "C" fn CFBundleCreate(_allocator: *const std::ffi::c_void, url: Id) -> Id {
         // SAFETY: a `CFURL` or null.
         let Some(url) = (unsafe { corefoundation::url::as_url(url as CFTypeRef) }) else {
-            return std::ptr::null_mut();
-        };
-        let Some(bundle) = super::main() else {
             return std::ptr::null_mut();
         };
         // A bundle is named by a file URL and by nothing else: a `https:` URL
@@ -578,13 +624,66 @@ pub mod cf {
         };
         // The guest named it, so it is compared at the spelling this crate
         // keeps rather than the one the guest used.
-        if super::opened(std::path::Path::new(&path)) != bundle.root {
+        let object = match super::main() {
+            Some(bundle) if super::opened(std::path::Path::new(&path)) == bundle.root => {
+                super::class::main_object()
+            }
+            _ => super::class::provided(&path),
+        };
+        // A `Create`, so the caller owns a reference to the interned object.
+        if !object.is_null() {
+            objc::arc::retain(object);
+        }
+        object
+    }
+
+    /// The loader's handle for a bundle's executable, loading it if it is not
+    /// yet. The main bundle's is the program itself.
+    fn executable_handle(bundle: Id) -> Option<u64> {
+        let layout = layout(bundle)?;
+        if super::main().is_some_and(|main| std::ptr::eq(main, layout)) {
+            return darwin::images::open(None);
+        }
+        let executable = super::spelled(&layout.executable)?;
+        darwin::images::open(Some(executable.to_str()?))
+    }
+
+    /// `Boolean CFBundleLoadExecutable(CFBundleRef)`
+    unsafe extern "C" fn CFBundleLoadExecutable(bundle: Id) -> u8 {
+        u8::from(executable_handle(bundle).is_some())
+    }
+
+    /// `void *CFBundleGetFunctionPointerForName(CFBundleRef, CFStringRef)`
+    ///
+    /// Loads the executable first, as Apple's does, and looks the name up in
+    /// it alone.
+    unsafe extern "C" fn CFBundleGetFunctionPointerForName(
+        bundle: Id,
+        name: Id,
+    ) -> *mut std::ffi::c_void {
+        if name.is_null() {
             return std::ptr::null_mut();
         }
-        // A `Create`, so the caller owns a reference to the singleton.
-        let object = super::class::main_object();
-        objc::arc::retain(object);
-        object
+        // SAFETY: a CFString, as the caller passed it.
+        let name = unsafe { crate::string::bytes(name) };
+        let (Ok(name), Some(handle)) = (std::str::from_utf8(&name), executable_handle(bundle))
+        else {
+            return std::ptr::null_mut();
+        };
+        darwin::images::symbol(handle, name).map_or(std::ptr::null_mut(), |address| {
+            address as usize as *mut std::ffi::c_void
+        })
+    }
+
+    /// The layout a `CFBundleRef` answers for. A null bundle has always been
+    /// answered as the main one here, and still is.
+    fn layout(bundle: Id) -> Option<&'static super::Layout> {
+        match bundle.is_null() {
+            true => super::main(),
+            // SAFETY: every `CFBundleRef` this runtime hands out is an
+            // `NSBundle` its class module made.
+            false => unsafe { super::class::layout_of(bundle) },
+        }
     }
 
     /// A path as a `CFURL` the caller owns, spelled the guest's way.
@@ -627,6 +726,8 @@ pub mod cf {
             "CFBundleGetValueForInfoDictionaryKey" => CFBundleGetValueForInfoDictionaryKey,
             "CFBundleGetVersionNumber" => CFBundleGetVersionNumber,
             "CFBundleCreate" => CFBundleCreate,
+            "CFBundleLoadExecutable" => CFBundleLoadExecutable,
+            "CFBundleGetFunctionPointerForName" => CFBundleGetFunctionPointerForName,
         }
     }
 }
@@ -672,6 +773,34 @@ pub unsafe fn resource_for_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A framework the loader says exists is a bundle whose executable is
+    /// named after it, at the top level as a framework's is; one it does not
+    /// know is no bundle at all.
+    #[test]
+    fn a_provided_framework_is_a_bundle_with_its_executable_at_the_top() {
+        darwin::images::install(darwin::images::Loader {
+            virtual_directory: |path| {
+                path.trim_end_matches('/') == "/System/Library/Frameworks/R3Probe.framework"
+            },
+            open: |_| None,
+            symbol: |_, _| None,
+        });
+        let layout = Layout::provided_framework("/System/Library/Frameworks/R3Probe.framework/")
+            .expect("a provided framework");
+        assert_eq!(
+            spelled(&layout.executable).as_deref(),
+            Some(Path::new(
+                "/System/Library/Frameworks/R3Probe.framework/R3Probe"
+            ))
+        );
+        assert_eq!(layout.info_string("CFBundleExecutable"), Some("R3Probe"));
+        assert_eq!(layout.info_string("CFBundlePackageType"), Some("FMWK"));
+        assert_eq!(layout.identifier(), None);
+        assert!(
+            Layout::provided_framework("/System/Library/Frameworks/R3Absent.framework").is_none()
+        );
+    }
 
     /// Build a bundle-shaped directory, since the claim is about shape.
     fn scratch(name: &str, info: &str) -> PathBuf {
@@ -832,16 +961,17 @@ pub(crate) mod class {
     unsafe extern "C" fn bundle_with_path(class: Id, _sel: Sel, path: Id) -> Id {
         // SAFETY: an `NSString`, or nil.
         let path = unsafe { crate::string::bytes(path) };
-        let Ok(path) = std::str::from_utf8(&path) else {
+        let Ok(guest) = std::str::from_utf8(&path) else {
             return std::ptr::null_mut();
         };
         // The guest named it, so it is opened at this crate's spelling.
-        let path = super::opened(std::path::Path::new(path));
+        let path = super::opened(std::path::Path::new(guest));
         if super::main().is_some_and(|main| main.root == path) {
             return main_object();
         }
         let Some(layout) = super::Layout::at(&path) else {
-            return std::ptr::null_mut();
+            // A `+` getter, so the interned object is handed out unretained.
+            return provided(guest);
         };
         // SAFETY: `class` is `NSBundle`, which this crate registered.
         let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) })
@@ -855,6 +985,32 @@ pub(crate) mod class {
         // SAFETY: a live instance whose second word is ours to fill in.
         unsafe { (*(object as *mut Body)).layout = Box::leak(Box::new(layout)) };
         objc::arc::autorelease(object)
+    }
+
+    /// The bundle of a framework this runtime provides, named by its guest
+    /// path, or nil for any other path - see [`super::Layout::provided_framework`].
+    ///
+    /// One object per framework for the life of the process, as Apple's
+    /// `CFBundleCreate` also answers a URL it has seen with the same bundle, so
+    /// the result is not the caller's to release.
+    pub(crate) fn provided(guest: &str) -> Id {
+        static MADE: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+        let guest = guest.trim_end_matches('/');
+        let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&(_, object)) = made.iter().find(|(path, _)| path == guest) {
+            return object as Id;
+        }
+        let Some(layout) = super::Layout::provided_framework(guest) else {
+            return std::ptr::null_mut();
+        };
+        let Some(class) = objc::class::lookup(c"NSBundle") else {
+            return std::ptr::null_mut();
+        };
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: a live instance whose second word is ours to fill in.
+        unsafe { (*(object as *mut Body)).layout = Box::leak(Box::new(layout)) };
+        made.push((guest.to_string(), object as usize));
+        object
     }
 
     /// The layout a bundle object answers for: its own, or the main one.

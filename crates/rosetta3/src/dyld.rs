@@ -675,6 +675,44 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     }
 }
 
+/// Give `darwin::images` this loader's answers, which is how `CFBundle` and the
+/// File Manager reach it from beneath this crate.
+pub fn install_image_hooks() {
+    darwin::images::install(darwin::images::Loader {
+        virtual_directory,
+        open: |path| match path {
+            None => Some(global_handle()),
+            // `dlopen`'s order: this loader, then the host's.
+            Some(path) => open(path).ok().or_else(|| open_native(path)),
+        },
+        symbol: lookup,
+    });
+}
+
+/// The directory a guest reaches a provided framework through:
+/// `/System/Library/Frameworks` itself, and `X.framework` in it for every `X`
+/// registered by its framework path. Neither is on disk, since the framework is
+/// this runtime rather than a file.
+fn virtual_directory(path: &str) -> bool {
+    const FRAMEWORKS: &str = "/System/Library/Frameworks";
+    let path = path.trim_end_matches('/');
+    if path == FRAMEWORKS {
+        return true;
+    }
+    let Some(bundle) = path
+        .strip_prefix(FRAMEWORKS)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some(leaf) = bundle.strip_suffix(".framework") else {
+        return false;
+    };
+    !leaf.is_empty()
+        && !leaf.contains('/')
+        && synthetic::find(&format!("{FRAMEWORKS}/{bundle}/{leaf}")).is_some()
+}
+
 /// Load one image using the architecture and executable-memory policy of the
 /// backend that will call it.
 fn open_with<S: MachSpec + 'static>(
@@ -1838,6 +1876,31 @@ pub fn provider() -> SyntheticDylib {
 mod tests {
     use super::*;
     use crate::abi::{Classification, Lookup};
+
+    /// A provided framework's bundle and the folder it is in exist for the
+    /// File Manager, and a framework nobody registered does not.
+    #[test]
+    fn a_registered_framework_makes_its_bundle_directory_exist() {
+        synthetic::register(
+            &["/System/Library/Frameworks/R3Probe.framework/R3Probe"],
+            |_| None,
+        );
+        assert!(virtual_directory("/System/Library/Frameworks"));
+        assert!(virtual_directory("/System/Library/Frameworks/"));
+        assert!(virtual_directory(
+            "/System/Library/Frameworks/R3Probe.framework"
+        ));
+        assert!(virtual_directory(
+            "/System/Library/Frameworks/R3Probe.framework/"
+        ));
+        assert!(!virtual_directory(
+            "/System/Library/Frameworks/R3Absent.framework"
+        ));
+        assert!(!virtual_directory(
+            "/System/Library/Frameworks/R3Probe.framework/R3Probe"
+        ));
+        assert!(!virtual_directory("/Library/Frameworks/R3Probe.framework"));
+    }
 
     #[test]
     fn every_entry_has_a_signature_the_emulated_backend_can_call() {

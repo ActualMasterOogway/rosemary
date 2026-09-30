@@ -17,6 +17,7 @@ fn install() {
     ONCE.call_once(|| {
         darwin::register_provider(symbol);
         register_dlopen_names();
+        crate::dyld::install_image_hooks();
         install_block_runtime();
         push_main_pool();
     });

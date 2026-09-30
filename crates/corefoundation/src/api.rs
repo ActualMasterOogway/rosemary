@@ -1816,9 +1816,11 @@ pub unsafe extern "C" fn CFURLCreateFromFSRef(
         return std::ptr::null();
     };
     let path = String::from_utf8_lossy(&bytes[..end]);
-    // The path is the guest's spelling; the host's answers whether it is a folder.
-    let directory =
-        std::fs::metadata(prefix::ns::host_path(&path)).is_ok_and(|metadata| metadata.is_dir());
+    // The path is the guest's spelling; the host's answers whether it is a
+    // folder, unless only a provided framework makes it exist.
+    let directory = std::fs::metadata(prefix::ns::host_path(&path))
+        .is_ok_and(|metadata| metadata.is_dir())
+        || darwin::images::virtual_directory(&path);
     crate::url::new_file_url(&path, directory)
 }
 

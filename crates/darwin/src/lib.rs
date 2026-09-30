@@ -55,6 +55,7 @@ pub mod heap;
 #[cfg(not(target_os = "macos"))]
 pub mod humanize;
 pub mod idle;
+pub mod images;
 pub mod ioctl;
 pub mod kqueue;
 #[cfg(not(target_os = "macos"))]
@@ -459,6 +460,10 @@ pub const LIBRARY_NAMES: &[&str] = &[
     "/usr/lib/system/libsystem_malloc.dylib",
     "/usr/lib/system/libsystem_platform.dylib",
     "/usr/lib/system/libsystem_pthread.dylib",
+    // An umbrella over libSystem, which is what a program that loads it as a
+    // bundle to look up `free` or `malloc` by name expects to find there.
+    "/System/Library/Frameworks/System.framework/Versions/B/System",
+    "/System/Library/Frameworks/System.framework/System",
 ];
 
 pub fn provider() -> machish::resolve::SyntheticDylib {
