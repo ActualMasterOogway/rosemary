@@ -101,7 +101,7 @@ pub fn bootstrap() {
         label::install();
         input_context::install();
         opengl::install();
-        darwin::idle::on_idle(opengl::release_for_other_threads);
+        darwin::idle::on_idle(opengl::going_idle);
         responder::install();
         pasteboard::install();
         nsevent::install();

@@ -38,6 +38,12 @@ impl Semaphore {
 
     fn wait(&self, deadline: Option<Instant>) -> i32 {
         let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        if *count <= 0 {
+            // Outside the lock, so a signaller is not held up by the hook.
+            drop(count);
+            crate::idle::reached(crate::idle::Idle::Wait);
+            count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        }
         loop {
             if *count > 0 {
                 *count -= 1;

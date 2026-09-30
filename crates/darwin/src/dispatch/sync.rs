@@ -354,6 +354,11 @@ pub unsafe extern "C" fn semaphore_wait(handle: u64, timeout: u64) -> i64 {
     if state.value >= 0 {
         return 0;
     }
+    // Outside the lock, so a signaller is not held up by the hook. This waiter
+    // is already counted, and a signal meanwhile leaves a wakeup for it.
+    drop(state);
+    crate::idle::reached(crate::idle::Idle::Wait);
+    let mut state = s.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if state.wakeups > 0 {
             state.wakeups -= 1;

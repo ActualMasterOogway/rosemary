@@ -680,6 +680,30 @@ thread_local! {
     /// thread asking which context is current must not be told about the one
     /// the thread that set the renderer up is drawing through.
     static CURRENT: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+
+    /// The context this thread's guest let go of, which SDL still has bound
+    /// here - see [`clear_current_context`]. Null when nothing is left bound.
+    static LINGERING: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// `ROSETTA3_GL_DEBUG`, read once: it is asked on every make-current.
+fn gl_debug() -> bool {
+    static DEBUG: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("ROSETTA3_GL_DEBUG").is_some());
+    *DEBUG
+}
+
+/// Unbind whatever SDL has current on this thread, and give `receiver`'s SDL
+/// context back if this thread held it, waking a thread waiting for it.
+fn let_go(receiver: Id) {
+    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    let cell = shared_of(context_of(receiver));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.owner == Some(std::thread::current().id()) {
+        state.owner = None;
+        state.wanted = false;
+        cell.released.notify_all();
+    }
 }
 
 /// The context `thread` draws through while another thread holds the SDL one.
@@ -738,7 +762,8 @@ fn sibling(
 /// hung.
 const HANDOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Give up the SDL context if this thread holds it and another is waiting.
+/// Give up the SDL context if this thread holds it, or still has it bound, and
+/// another is waiting.
 ///
 /// Called from the event pump, which is the one place a thread is known *not*
 /// to be part-way through drawing: it has returned to its event loop, so a
@@ -747,6 +772,15 @@ const HANDOFF: std::time::Duration = std::time::Duration::from_secs(2);
 /// threads itself, which is a thing the GL underneath has no call for - so the
 /// handover has to happen somewhere, and this is the somewhere that is safe.
 pub fn release_for_other_threads() {
+    let lingering = LINGERING.get();
+    if !lingering.is_null() {
+        let cell = shared_of(context_of(lingering));
+        if cell.state.lock().unwrap_or_else(|e| e.into_inner()).wanted {
+            LINGERING.set(std::ptr::null_mut());
+            let_go(lingering);
+        }
+        return;
+    }
     let receiver = CURRENT.get();
     if receiver.is_null() {
         return;
@@ -763,7 +797,31 @@ pub fn release_for_other_threads() {
     cell.released.notify_all();
 }
 
+/// The idle hook: a guest thread is about to sleep, block or yield.
+///
+/// A context left bound after the guest let go of it is let go of for real
+/// before the thread blocks. Otherwise a thread that later asks for it would
+/// wait on one that may not run again until the asker does something - when
+/// the guest's own lock around its GL work is what this thread is blocking on,
+/// that is never.
+pub fn going_idle(idle: darwin::idle::Idle) {
+    if idle == darwin::idle::Idle::Wait {
+        let lingering = LINGERING.replace(std::ptr::null_mut());
+        if !lingering.is_null() {
+            let_go(lingering);
+            return;
+        }
+    }
+    release_for_other_threads();
+}
+
 unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
+    // A different context still bound here underneath is let go properly, so
+    // its owner is cleared and any thread waiting for it is woken.
+    let lingering = LINGERING.replace(std::ptr::null_mut());
+    if !lingering.is_null() && lingering != receiver {
+        let_go(lingering);
+    }
     let window = ensure(receiver, "makeCurrentContext");
     let context = context_of(receiver);
     let primary = context.sdl;
@@ -800,14 +858,18 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
         false => sibling(&mut state, primary, thread),
     };
 
-    if std::env::var_os("ROSETTA3_GL_DEBUG").is_some() {
+    if gl_debug() {
         eprintln!(
             "rosetta3: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, owner={:?}",
             state.owner
         );
     }
 
-    if !sdl3::video::gl_make_current(window, sdl) {
+    // Still bound from before this thread's last clear - see
+    // `clear_current_context` - so there is nothing to ask the driver for.
+    let bound =
+        sdl3::video::gl_current_context() == sdl && sdl3::video::gl_current_window() == window;
+    if !bound && !sdl3::video::gl_make_current(window, sdl) {
         objc::fail!(
             "-[NSOpenGLContext makeCurrentContext]: SDL could not make the context current: {}",
             sdl3::error()
@@ -915,7 +977,12 @@ fn install_debug_output() {
 /// OpenGL framework, which is what SDL opened to make the context, and asking
 /// SDL for it keeps this file building where that framework does not exist.
 fn current_cgl_context() -> *mut c_void {
-    let Some(f) = sdl3::video::gl_proc_address(c"CGLGetCurrentContext") else {
+    // Looked up once: where there is no CGL the answer is null, and the caller
+    // asks again on every make-current of a context that has none.
+    static ENTRY: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let entry = ENTRY
+        .get_or_init(|| sdl3::video::gl_proc_address(c"CGLGetCurrentContext").map(|f| f as usize));
+    let Some(f) = *entry else {
         return std::ptr::null_mut();
     };
     // SAFETY: `CGLContextObj CGLGetCurrentContext(void)`.
@@ -1223,6 +1290,10 @@ static LOCKS: std::sync::Mutex<Option<std::collections::HashMap<usize, ContextLo
 
 static UNLOCKED: std::sync::Condvar = std::sync::Condvar::new();
 
+/// Threads asleep on [`UNLOCKED`], counted under [`LOCKS`]. An unlock is a
+/// few times a draw call, and waking nobody is still a syscall.
+static LOCK_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// `CGLError CGLLockContext(CGLContextObj ctx)`
 ///
 /// # Safety
@@ -1248,7 +1319,12 @@ pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
             entry.depth += 1;
             return 0;
         }
+        // The holder may be waiting for the GL context this thread still has
+        // bound, and would wait for as long as this thread sleeps.
+        going_idle(darwin::idle::Idle::Wait);
+        LOCK_WAITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         held = UNLOCKED.wait(held).unwrap_or_else(|e| e.into_inner());
+        LOCK_WAITERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1276,7 +1352,9 @@ pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
     entry.depth -= 1;
     if entry.depth == 0 {
         entry.owner = None;
-        UNLOCKED.notify_all();
+        if LOCK_WAITERS.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+            UNLOCKED.notify_all();
+        }
     }
     0
 }
@@ -1314,21 +1392,31 @@ unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
     CURRENT.get()
 }
 
+/// `+clearCurrentContext`, and `CGLSetCurrentContext(NULL)`.
+///
+/// The SDL context stays bound underneath. Programs that guard their GL work
+/// with a lock of their own take and drop the context around every piece of it
+/// - thousands of times a frame - which CGL makes a pointer swap and EGL a
+/// flush and a driver round trip each way. So the binding lingers until this
+/// thread takes the context back, another thread asks for it, or this thread
+/// blocks (see [`release_for_other_threads`]); letting go then hands it to
+/// whichever thread asks next, rather than leaving every later thread on a
+/// sibling of a context nobody holds.
 unsafe extern "C" fn clear_current_context(_class: Id, _sel: Sel) {
-    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
     let receiver = CURRENT.replace(std::ptr::null_mut());
     if receiver.is_null() {
+        if LINGERING.get().is_null() && !sdl3::video::gl_current_context().is_null() {
+            // Whatever is bound is not a context of this crate's, and clearing
+            // it is what the guest asked.
+            sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+        }
         return;
     }
-    // Letting go of the SDL context hands it to whichever thread asks next,
-    // rather than leaving every later thread on a sibling of a context nobody
-    // holds.
     let cell = shared_of(context_of(receiver));
-    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
-    if state.owner == Some(std::thread::current().id()) {
-        state.owner = None;
-        state.wanted = false;
-        cell.released.notify_all();
+    let wanted = cell.state.lock().unwrap_or_else(|e| e.into_inner()).wanted;
+    match wanted {
+        true => let_go(receiver),
+        false => LINGERING.set(receiver),
     }
 }
 

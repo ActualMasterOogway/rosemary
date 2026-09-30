@@ -1873,11 +1873,7 @@ pub mod video {
     /// objects exist.
     fn keep_gl_context<T>(f: impl FnOnce() -> T) -> T {
         let context = gl_current_context();
-        let window = match api().and_then(|a| a.SDL_GL_GetCurrentWindow) {
-            // SAFETY: takes nothing.
-            Some(f) => unsafe { f() },
-            None => std::ptr::null_mut(),
-        };
+        let window = gl_current_window();
         let result = f();
         if gl_current_context() != context {
             gl_make_current(window, context);
@@ -2339,6 +2335,15 @@ pub mod video {
     /// The context current on this thread, or null.
     pub fn gl_current_context() -> GlContext {
         match api().and_then(|a| a.SDL_GL_GetCurrentContext) {
+            // SAFETY: takes nothing.
+            Some(f) => unsafe { f() },
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// The window the current context was made current against, or null.
+    pub fn gl_current_window() -> Window {
+        match api().and_then(|a| a.SDL_GL_GetCurrentWindow) {
             // SAFETY: takes nothing.
             Some(f) => unsafe { f() },
             None => std::ptr::null_mut(),

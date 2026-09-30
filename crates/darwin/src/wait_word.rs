@@ -42,11 +42,28 @@ fn classify(error: i32) -> WaitError {
 
 /// Sleep while `word` still equals `expected`.
 ///
+/// Every guest lock parks through here, so this is where the idle hook learns a
+/// thread is about to block - see [`crate::idle::on_idle`].
+///
 /// # Safety
 ///
 /// `word` must remain at a stable, naturally aligned address for the call.
-#[cfg(target_os = "linux")]
 pub(crate) unsafe fn wait_u32(
+    word: &AtomicU32,
+    expected: u32,
+    timeout_ns: Option<u64>,
+    scope: Scope,
+) -> Result<(), WaitError> {
+    crate::idle::reached(crate::idle::Idle::Wait);
+    // SAFETY: the caller's guarantee, passed on.
+    unsafe { park_u32(word, expected, timeout_ns, scope) }
+}
+
+/// # Safety
+///
+/// As [`wait_u32`].
+#[cfg(target_os = "linux")]
+unsafe fn park_u32(
     word: &AtomicU32,
     expected: u32,
     timeout_ns: Option<u64>,
@@ -116,7 +133,7 @@ mod ulock {
 ///
 /// As the Linux form above.
 #[cfg(target_os = "macos")]
-pub(crate) unsafe fn wait_u32(
+unsafe fn park_u32(
     word: &AtomicU32,
     expected: u32,
     timeout_ns: Option<u64>,
@@ -184,7 +201,7 @@ fn ulock_operation(scope: Scope) -> u32 {
 ///
 /// As the Linux form above.
 #[cfg(target_os = "freebsd")]
-pub(crate) unsafe fn wait_u32(
+unsafe fn park_u32(
     word: &AtomicU32,
     expected: u32,
     timeout_ns: Option<u64>,
@@ -284,7 +301,7 @@ pub(crate) unsafe fn wake_u32(
 ///
 /// As the Linux form above.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
-pub(crate) unsafe fn wait_u32(
+unsafe fn park_u32(
     word: &AtomicU32,
     expected: u32,
     timeout_ns: Option<u64>,
@@ -353,6 +370,23 @@ mod tests {
             unsafe { wait_u32(&word, 1, None, Scope::Shared) },
             Err(WaitError::Changed)
         );
+    }
+
+    /// The GL layer lets go of a context before a thread parks, so a thread
+    /// that wants it is never left waiting on one that is asleep.
+    #[test]
+    fn a_parking_thread_tells_the_idle_hook_it_is_waiting() {
+        thread_local! {
+            static SEEN: std::cell::Cell<Option<crate::idle::Idle>> =
+                const { std::cell::Cell::new(None) };
+        }
+        fn hook(idle: crate::idle::Idle) {
+            SEEN.set(Some(idle));
+        }
+        crate::idle::on_idle(hook);
+        let word = AtomicU32::new(1);
+        let _ = unsafe { wait_u32(&word, 1, Some(1_000_000), Scope::Private) };
+        assert_eq!(SEEN.get(), Some(crate::idle::Idle::Wait));
     }
 
     #[test]
