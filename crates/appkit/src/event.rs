@@ -290,6 +290,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             let content = window::content_view_of(object);
             if !object.is_null() {
                 window::fit_content_view(object);
+                crate::screen::confine_pointer(object);
             }
             // A resized view's tracking rectangle is the wrong shape, and
             // AppKit asks for a new one here rather than resizing the old.
@@ -338,11 +339,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 // SDL drops relative mouse mode when focus goes, and a window
                 // made while the guest was disassociated never entered it.
                 crate::screen::apply_mouse_association();
-                // SAFETY: a window this crate made.
-                let sdl = unsafe { window::sdl_window(object) };
-                if !sdl.is_null() {
-                    crate::screen::confine_pointer(sdl);
-                }
+                crate::screen::confine_pointer(object);
             }
             post(
                 window,
@@ -437,6 +434,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             if take_warp_echo(x, y) {
                 return;
             }
+            crate::screen::hold_at_edge(id, x, y, dx, dy);
             let on_chrome = crate::decor::pointer_moved(id, x, y);
             crate::cursor::set_over_chrome(on_chrome);
             if on_chrome {

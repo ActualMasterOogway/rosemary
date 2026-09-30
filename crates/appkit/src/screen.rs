@@ -916,6 +916,27 @@ mod tests {
     }
 
     #[test]
+    fn a_push_stopped_short_of_the_edge_is_pressed_against_it() {
+        // 20 from the end, moving 12 a step: the next one would have crossed.
+        assert_eq!(press(0, 80.0, 12.0, 0, 101), 1);
+        assert_eq!(press(0, 20.0, -12.0, 0, 100), -1);
+        assert_eq!(press(0, 50.0, 2.0, 0, 100), 0);
+        assert_eq!(press(0, 99.5, -1.0, 0, 100), 0, "heading away");
+    }
+
+    #[test]
+    fn a_held_edge_survives_a_wobble_but_not_a_move_back() {
+        assert_eq!(press(1, 97.5, -0.5, 0, 100), 1);
+        assert_eq!(press(1, 95.0, -1.0, 0, 100), 0);
+        assert_eq!(press(-1, 0.0, 0.0, 0, 100), -1, "sliding along it");
+    }
+
+    #[test]
+    fn a_pointer_over_the_chrome_is_not_pressed() {
+        assert_eq!(press(0, 10.0, -3.0, 28, 50), 0);
+    }
+
+    #[test]
     fn a_global_warp_is_translated_to_window_coordinates() {
         assert_eq!(local_warp_point((420.0, 310.0), (100, 50)), (320.0, 260.0));
     }
@@ -933,6 +954,8 @@ mod tests {
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
     let point = (point.x as f32, point.y as f32);
+    // An edge hold is not the guest's relative mode: the warp is a plain one.
+    end_edge_hold();
     let windows = crate::window::sdl_windows();
     let target = crate::event::pointer_window();
     let origin = target
@@ -1074,13 +1097,151 @@ pub fn mouse_is_associated() -> bool {
 /// Strange's drag interactions stop short without this, on macOS too.
 pub const CONFINE_ENV: &str = "ROSETTA3_CONFINE_POINTER";
 
-/// Confine the pointer to `window` if [`CONFINE_ENV`] asks for it.
-pub fn confine_pointer(window: sdl3::Window) {
+fn confining() -> bool {
     #[dynamic]
     static ON: bool = std::env::var_os(CONFINE_ENV).is_some_and(|v| v != "0");
-    let on = *ON;
-    if on {
-        sdl3::video::set_mouse_grab(window, true);
+    *ON
+}
+
+/// Confine the pointer to `window`'s content if [`CONFINE_ENV`] asks for it.
+///
+/// The content and not the frame: over the chrome the pointer is the chrome's,
+/// and the guest stops hearing from it exactly as if it had left the window.
+/// Called again on a resize, since the rectangle does not follow the window.
+pub fn confine_pointer(window: Id) {
+    if !confining() {
+        return;
+    }
+    // SAFETY: null or an object this runtime allocated.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if sdl.is_null() {
+        return;
+    }
+    if let Some(rect) = content_rect(window, sdl) {
+        sdl3::video::set_mouse_rect(sdl, Some(rect));
+    }
+    sdl3::video::set_mouse_grab(sdl, true);
+}
+
+/// The content area of `window` in SDL window coordinates.
+fn content_rect(window: Id, sdl: sdl3::Window) -> Option<sdl3::Rect> {
+    let (w, h) = sdl3::video::window_size(sdl)?;
+    let inset = crate::window::content_inset(window).ceil() as i32;
+    (w > 0 && h > inset).then_some(sdl3::Rect {
+        x: 0,
+        y: inset,
+        w,
+        h: h - inset,
+    })
+}
+
+/// A window put into relative mode by [`hold_at_edge`], and the edge of its
+/// confinement each axis is held against: -1 the low one, 1 the high one, 0
+/// neither.
+#[derive(Clone, Copy)]
+struct Hold {
+    id: u32,
+    x: i8,
+    y: i8,
+}
+
+static EDGE_HOLD: std::sync::Mutex<Option<Hold>> = std::sync::Mutex::new(None);
+
+/// How far a held axis comes back inside before it is let go, in points. With
+/// none, a hand pressing against an edge wobbles straight out of the hold.
+const RELEASE_MARGIN: f32 = 2.0;
+
+/// Keep deltas coming from a confined pointer pushed against its edge.
+///
+/// A confined pointer stops at the edge, and one that does not move reports
+/// nothing: on Wayland no event arrives at all. The ports [`CONFINE_ENV`] is
+/// for measure drags in deltas and count on them continuing while the pointer
+/// strays and is warped back. So at the edge the window enters relative mode,
+/// whose deltas are raw input and whose position SDL clamps to the same
+/// rectangle, and leaves it once the pointer heads back inside. The visible
+/// cursor holds still meanwhile.
+pub(crate) fn hold_at_edge(id: u32, x: f32, y: f32, dx: f32, dy: f32) {
+    if !confining() || !mouse_is_associated() {
+        return;
+    }
+    let window = crate::event::object_for(id);
+    // SAFETY: null or an object this runtime allocated.
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    if sdl.is_null() {
+        return;
+    }
+    let Some(rect) = content_rect(window, sdl) else {
+        return;
+    };
+    let mut hold = EDGE_HOLD.lock().unwrap_or_else(|e| e.into_inner());
+    let current = hold.filter(|h| h.id == id && sdl3::video::relative_mouse_mode(sdl));
+    let next = Hold {
+        id,
+        x: press(current.map_or(0, |h| h.x), x, dx, rect.x, rect.w),
+        y: press(current.map_or(0, |h| h.y), y, dy, rect.y, rect.h),
+    };
+    let pressed = next.x != 0 || next.y != 0;
+    match (current.is_some(), pressed) {
+        (false, true) => {
+            sdl3::video::set_hint(sdl3::video::HINT_RELATIVE_CURSOR_VISIBLE, c"1");
+            *hold = sdl3::video::set_relative_mouse_mode(sdl, true).then_some(next);
+        }
+        (true, true) => *hold = Some(next),
+        (true, false) => {
+            *hold = None;
+            // The in-window warp is the lock's position hint on Wayland, where
+            // the physical cursor then reappears; elsewhere the host cursor
+            // kept moving under the grab and has to be brought back.
+            sdl3::video::warp_mouse_in_window(sdl, x, y);
+            sdl3::video::set_relative_mouse_mode(sdl, false);
+            if !sdl3::video::is_wayland() {
+                let origin = crate::window::global_position(sdl).unwrap_or((0, 0));
+                let global = (x + origin.0 as f32, y + origin.1 as f32);
+                warp_physical(Some(sdl), global, (x, y));
+            }
+        }
+        (false, false) => *hold = None,
+    }
+}
+
+/// Which edge of `[start, start + len)` one axis is pressed against, having
+/// moved `d` to `p` while `held` was.
+///
+/// Not only a pointer that reached the edge: KWin does not clamp a confined
+/// pointer, it drops a move that would leave the region, so a quick push stops
+/// up to a step short of the edge with nothing more to report. An axis is
+/// pressed once another step like this one would cross, and stays pressed
+/// until it has come back more than [`RELEASE_MARGIN`] inside.
+fn press(held: i8, p: f32, d: f32, start: i32, len: i32) -> i8 {
+    let to_low = p - start as f32;
+    // SDL's relative mode clamps to the last pixel, one short of the end.
+    let to_high = (start + len) as f32 - 1.0 - p;
+    // Outside is a pointer the confinement has not caught, over the chrome.
+    if to_low < 0.0 || to_high < -1.0 {
+        return 0;
+    }
+    let reach = 2.0 * d.abs() + 1.0;
+    match held {
+        -1 if !(d > 0.0 && to_low > RELEASE_MARGIN) => -1,
+        1 if !(d < 0.0 && to_high > RELEASE_MARGIN) => 1,
+        _ if d < 0.0 && to_low < reach => -1,
+        _ if d > 0.0 && to_high < reach => 1,
+        _ => 0,
+    }
+}
+
+/// Take the window [`hold_at_edge`] put into relative mode back out of it,
+/// without moving anything: the caller is about to put the pointer somewhere.
+fn end_edge_hold() {
+    let hold = EDGE_HOLD.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(hold) = hold.filter(|_| mouse_is_associated()) else {
+        return;
+    };
+    let held = crate::window::sdl_windows()
+        .into_iter()
+        .find(|w| sdl3::video::window_id(*w) == hold.id);
+    if let Some(sdl) = held {
+        sdl3::video::set_relative_mouse_mode(sdl, false);
     }
 }
 
@@ -1090,6 +1251,8 @@ pub fn confine_pointer(window: sdl3::Window) {
 /// Called again when a window takes focus, because SDL leaves the mode when
 /// focus goes and a window made after the guest disassociated never had it.
 pub fn apply_mouse_association() {
+    // From here the association decides relative mode, an edge hold included.
+    *EDGE_HOLD.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let relative = !mouse_is_associated();
     // Disassociating is not hiding: on macOS the cursor stays on screen where
     // it was, and only `+[NSCursor hide]` takes it away - which this tree

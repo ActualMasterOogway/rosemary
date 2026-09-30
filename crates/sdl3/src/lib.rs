@@ -232,6 +232,7 @@ struct Api {
     SDL_SetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetWindowMouseGrab: Option<unsafe extern "C" fn(Window, bool) -> bool>,
+    SDL_SetWindowMouseRect: Option<unsafe extern "C" fn(Window, *const Rect) -> bool>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
     SDL_GetKeyFromScancode: Option<unsafe extern "C" fn(u32, u16, bool) -> u32>,
     SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
@@ -449,6 +450,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetWindowRelativeMouseMode,
             SDL_GetWindowRelativeMouseMode,
             SDL_SetWindowMouseGrab,
+            SDL_SetWindowMouseRect,
             SDL_GetModState,
             SDL_GetKeyFromScancode,
             SDL_SetHint,
@@ -2956,6 +2958,17 @@ pub mod video {
         };
         // SAFETY: a window from SDL.
         unsafe { f(window, grabbed) }
+    }
+
+    /// Keep the pointer inside `rect` of `window` while it has focus, or
+    /// anywhere in the window for `None`. In window coordinates.
+    pub fn set_mouse_rect(window: Window, rect: Option<Rect>) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_SetWindowMouseRect) else {
+            return false;
+        };
+        let ptr = rect.as_ref().map_or(std::ptr::null(), |r| r as *const Rect);
+        // SAFETY: a window from SDL, and null or a rectangle SDL copies.
+        unsafe { f(window, ptr) }
     }
 
     /// Whether `window` is holding the pointer, asked of SDL rather than
