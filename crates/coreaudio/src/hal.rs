@@ -55,6 +55,8 @@ mod selector {
     pub const LATENCY: u32 = fourcc(b"ltnc");
     pub const SAFETY_OFFSET: u32 = fourcc(b"saft");
     pub const STREAM_FORMAT: u32 = fourcc(b"sfmt");
+    pub const PREFERRED_CHANNEL_LAYOUT: u32 = fourcc(b"srnd");
+    pub const PREFERRED_CHANNELS_FOR_STEREO: u32 = fourcc(b"dch2");
 }
 
 /// `AudioObjectPropertyScope`. All three are declared even though only the
@@ -261,6 +263,71 @@ fn stream_configuration(scope: u32) -> Vec<u8> {
     bytes
 }
 
+/// `kAudioChannelLabel_*` for each channel SDL's default order puts in a frame
+/// of `channels` channels.
+fn channel_labels(channels: u32) -> &'static [u32] {
+    const MONO: u32 = 42;
+    const LEFT: u32 = 1;
+    const RIGHT: u32 = 2;
+    const CENTER: u32 = 3;
+    const LFE: u32 = 4;
+    const LEFT_SURROUND: u32 = 5;
+    const RIGHT_SURROUND: u32 = 6;
+    const REAR_LEFT: u32 = 33;
+    const REAR_RIGHT: u32 = 34;
+    const REAR_CENTER: u32 = 9;
+    match channels {
+        1 => &[MONO],
+        2 => &[LEFT, RIGHT],
+        3 => &[LEFT, RIGHT, LFE],
+        4 => &[LEFT, RIGHT, REAR_LEFT, REAR_RIGHT],
+        5 => &[LEFT, RIGHT, LFE, REAR_LEFT, REAR_RIGHT],
+        6 => &[LEFT, RIGHT, CENTER, LFE, LEFT_SURROUND, RIGHT_SURROUND],
+        7 => &[
+            LEFT,
+            RIGHT,
+            CENTER,
+            LFE,
+            REAR_CENTER,
+            LEFT_SURROUND,
+            RIGHT_SURROUND,
+        ],
+        _ => &[
+            LEFT,
+            RIGHT,
+            CENTER,
+            LFE,
+            REAR_LEFT,
+            REAR_RIGHT,
+            LEFT_SURROUND,
+            RIGHT_SURROUND,
+        ],
+    }
+}
+
+/// `AudioChannelLayout` for the output side, as a real device reports it:
+/// `kAudioChannelLayoutTag_UseChannelDescriptions` and one description per
+/// channel.
+///
+/// Programs size their speaker setup from this rather than from the stream
+/// configuration, and one refused falls back to whatever was on its stack.
+fn preferred_channel_layout() -> Vec<u8> {
+    let channels = device().channels;
+    let labels = channel_labels(channels);
+    let count = (channels as usize).min(labels.len());
+    // mChannelLayoutTag, mChannelBitmap, mNumberChannelDescriptions.
+    let mut bytes = Vec::with_capacity(12 + count * 20);
+    bytes.extend_from_slice(as_bytes(&0u32));
+    bytes.extend_from_slice(as_bytes(&0u32));
+    bytes.extend_from_slice(as_bytes(&(count as u32)));
+    for label in &labels[..count] {
+        // mChannelLabel, mChannelFlags, mCoordinates[3].
+        bytes.extend_from_slice(as_bytes(label));
+        bytes.extend_from_slice(&[0; 16]);
+    }
+    bytes
+}
+
 /// The bytes one property answers with, or `None` for one this HAL does not
 /// have.
 fn property(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
@@ -308,6 +375,17 @@ fn described(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
             false => as_bytes(&OUTPUT_DEVICE).to_vec(),
         },
         (OUTPUT_DEVICE, selector::STREAM_FORMAT) => as_bytes(&device_format()).to_vec(),
+        // An output-only device: the input side has no channels to lay out.
+        (OUTPUT_DEVICE, selector::PREFERRED_CHANNEL_LAYOUT) if address.scope != scope::INPUT => {
+            preferred_channel_layout()
+        }
+        // Channel numbers are 1-based; a mono device plays both on its one.
+        (OUTPUT_DEVICE, selector::PREFERRED_CHANNELS_FOR_STEREO)
+            if address.scope != scope::INPUT =>
+        {
+            let right = device.channels.min(2);
+            [as_bytes(&1u32), as_bytes(&right)].concat()
+        }
         (OUTPUT_DEVICE, selector::BUFFER_FRAME_SIZE) => {
             as_bytes(&BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed)).to_vec()
         }
@@ -854,6 +932,34 @@ mod tests {
             )
         };
         assert_eq!(status, BAD_OBJECT);
+    }
+
+    /// Feral's Wwise sink sizes its speaker map from the preferred layout and
+    /// reads its own stack when the property is refused.
+    #[test]
+    fn the_preferred_layout_describes_every_output_channel() {
+        let layout = ask(
+            OUTPUT_DEVICE,
+            selector::PREFERRED_CHANNEL_LAYOUT,
+            scope::OUTPUT,
+        )
+        .expect("answered");
+        let word = |at: usize| u32::from_ne_bytes(layout[at..at + 4].try_into().unwrap());
+        let channels = device().channels;
+        assert_eq!(word(0), 0, "kAudioChannelLayoutTag_UseChannelDescriptions");
+        assert_eq!(word(8), channels);
+        assert_eq!(layout.len(), 12 + 20 * channels as usize);
+        if channels == 2 {
+            assert_eq!((word(12), word(32)), (1, 2), "left, then right");
+        }
+        assert!(
+            ask(
+                OUTPUT_DEVICE,
+                selector::PREFERRED_CHANNEL_LAYOUT,
+                scope::INPUT
+            )
+            .is_none()
+        );
     }
 
     /// The input side of an output-only device has no buffers, and that is how

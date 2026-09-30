@@ -470,6 +470,16 @@ pub unsafe extern "C" fn AudioUnitRender(
         return foreign::status(c"AudioUnitRender", handle).unwrap_or(INVALID_COMPONENT);
     };
     let mut unit = unit.lock().unwrap_or_else(|e| e.into_inner());
+    // A mixer or converter renders what feeds it, converted - often another
+    // unit a graph connected rather than a callback of its own.
+    if unit.kind != Kind::Output {
+        let format = unit.format;
+        // `render_into_list` takes the lock again, on this unit and on the
+        // units upstream of it.
+        drop(unit);
+        // SAFETY: the caller's obligation, as this function's.
+        return unsafe { render::render_into_list(handle as usize, format, frames as usize, list) };
+    }
     let Some(callback) = unit.callback else {
         // A unit with no callback has nothing to render, and the buffers are
         // left as they are: an `AudioUnitRender` that failed has not promised
@@ -857,6 +867,109 @@ mod tests {
             assert_eq!(AudioComponentInstanceDispose(handle), SUCCESS);
             // Twice is a guest bug, and it is named rather than crashing.
             assert_eq!(AudioComponentInstanceDispose(handle), INVALID_COMPONENT);
+        }
+    }
+
+    /// Fills channel 0 with 0.5 and channel 1 with -0.25, planar.
+    unsafe extern "C" fn constant_source(
+        _ref_con: *mut c_void,
+        _flags: *mut u32,
+        _timestamp: *const render::TimeStamp,
+        _bus: u32,
+        frames: u32,
+        list: *mut render::AudioBufferList,
+    ) -> i32 {
+        for (channel, value) in [0.5f32, -0.25].into_iter().enumerate() {
+            // SAFETY: the list this crate built, with one buffer per channel.
+            let data = unsafe { (*list).buffers[channel].data.cast::<f32>() };
+            for frame in 0..frames as usize {
+                unsafe { *data.add(frame) = value };
+            }
+        }
+        SUCCESS
+    }
+
+    /// Life Is Strange mixes its own voices, each a varispeed feeding a
+    /// converter, and pulls the converter with `AudioUnitRender`. The
+    /// converter's input is the connection, not a callback, and refusing it
+    /// left every voice silent.
+    #[test]
+    fn rendering_a_converter_pulls_the_unit_connected_to_it() {
+        let (mut varispeed, mut converter) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let callback: [*const c_void; 2] = [constant_source as *const c_void, std::ptr::null()];
+        const FRAMES: usize = 4;
+        let mut left = [0f32; FRAMES];
+        let mut right = [0f32; FRAMES];
+        let mut list = render::AudioBufferList {
+            count: 2,
+            buffers: [render::AudioBuffer {
+                channels: 1,
+                byte_size: (FRAMES * 4) as u32,
+                data: std::ptr::null_mut(),
+            }; render::MAX_BUFFERS],
+        };
+        list.buffers[0].data = left.as_mut_ptr().cast();
+        list.buffers[1].data = right.as_mut_ptr().cast();
+        // SAFETY: this crate's own components, live structures of the sizes
+        // declared, and a list whose buffers hold `FRAMES` samples each.
+        unsafe {
+            AudioComponentInstanceNew(varispeed_component(), &mut varispeed);
+            AudioComponentInstanceNew(converter_component(), &mut converter);
+            assert_eq!(
+                property::AudioUnitSetProperty(
+                    varispeed,
+                    23,
+                    1,
+                    0,
+                    callback.as_ptr().cast(),
+                    size_of_val(&callback) as u32,
+                ),
+                SUCCESS
+            );
+            assert!(connect(varispeed, converter, 0));
+            let status = AudioUnitRender(
+                converter,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                0,
+                FRAMES as u32,
+                &mut list,
+            );
+            AudioComponentInstanceDispose(converter);
+            AudioComponentInstanceDispose(varispeed);
+            assert_eq!(status, SUCCESS);
+        }
+        assert_eq!(left, [0.5; FRAMES]);
+        assert_eq!(right, [-0.25; FRAMES]);
+    }
+
+    /// A converter with nothing feeding it says so rather than handing back
+    /// buffers it never wrote.
+    #[test]
+    fn rendering_an_unconnected_converter_is_no_connection() {
+        let mut converter = std::ptr::null_mut();
+        let mut sample = 0f32;
+        let mut list = render::AudioBufferList {
+            count: 2,
+            buffers: [render::AudioBuffer {
+                channels: 1,
+                byte_size: 4,
+                data: (&mut sample as *mut f32).cast(),
+            }; render::MAX_BUFFERS],
+        };
+        // SAFETY: as above, one frame.
+        unsafe {
+            AudioComponentInstanceNew(converter_component(), &mut converter);
+            let status = AudioUnitRender(
+                converter,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                0,
+                1,
+                &mut list,
+            );
+            AudioComponentInstanceDispose(converter);
+            assert_eq!(status, status::NO_CONNECTION);
         }
     }
 

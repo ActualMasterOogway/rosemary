@@ -366,6 +366,79 @@ fn dump(bytes: &[u8]) {
     }
 }
 
+/// `AudioUnitRender` on a mixer or converter: pull it through whatever feeds
+/// it - a connection or a callback - and hand the result back in the caller's
+/// buffer list, laid out as `format` says.
+///
+/// A program that runs its own mixer pulls each voice's last unit this way,
+/// and that unit's input is usually another unit rather than a callback.
+///
+/// # Safety
+///
+/// `list` must be a writable `AudioBufferList` whose buffers are writable for
+/// their own `mDataByteSize`.
+pub(crate) unsafe fn render_into_list(
+    handle: usize,
+    format: Format,
+    frames: usize,
+    list: *mut AudioBufferList,
+) -> i32 {
+    let channels = format.channels_per_frame as usize;
+    // `render_from_unit` only produces interleaved 32-bit float, one or two
+    // channels; asking for anything else is refused there too.
+    if !format.is_float32() || !(1..=2).contains(&channels) {
+        report_unmixable(format);
+        return crate::status::FORMAT_NOT_SUPPORTED;
+    }
+    let sample = size_of::<f32>();
+    let mut rendered = vec![0u8; frames * channels * sample];
+    if !render_from_unit(handle, format, frames, &mut rendered, 0) {
+        return crate::status::NO_CONNECTION;
+    }
+
+    let wanted = match format.non_interleaved() {
+        true => channels,
+        false => 1,
+    };
+    // SAFETY: the caller's obligation. Only the header and the first `wanted`
+    // entries are touched: a guest's list is `mNumberBuffers` long, which may
+    // be shorter than this crate's declaration of it.
+    let buffers = unsafe {
+        if ((*list).count as usize) < wanted {
+            return crate::status::PARAM_ERROR;
+        }
+        let first = std::ptr::addr_of_mut!((*list).buffers).cast::<AudioBuffer>();
+        std::slice::from_raw_parts_mut(first, wanted)
+    };
+    let per_buffer = match format.non_interleaved() {
+        true => frames * sample,
+        false => rendered.len(),
+    };
+    for buffer in buffers.iter() {
+        // A null `mData` asks the unit to lend a buffer of its own, which
+        // nothing here keeps.
+        if buffer.data.is_null() || (buffer.byte_size as usize) < per_buffer {
+            return crate::status::PARAM_ERROR;
+        }
+    }
+    for (channel, buffer) in buffers.iter_mut().enumerate() {
+        // SAFETY: checked above to be non-null and at least this long.
+        let out = unsafe { std::slice::from_raw_parts_mut(buffer.data.cast::<u8>(), per_buffer) };
+        match format.non_interleaved() {
+            true => {
+                for frame in 0..frames {
+                    let from = (frame * channels + channel) * sample;
+                    out[frame * sample..(frame + 1) * sample]
+                        .copy_from_slice(&rendered[from..from + sample]);
+                }
+            }
+            false => out.copy_from_slice(&rendered),
+        }
+        buffer.byte_size = per_buffer as u32;
+    }
+    SUCCESS
+}
+
 /// Render `frames` frames of `format` from the unit `handle` names.
 ///
 /// `into` arrives zeroed and is what the caller plays. `depth` is the guard

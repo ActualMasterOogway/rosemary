@@ -14,6 +14,9 @@ pub const FORMAT_NOT_SUPPORTED: i32 = -10868;
 pub const UNINITIALIZED: i32 = -10867;
 /// `kAudioUnitErr_CannotDoInCurrentContext`.
 pub const CANNOT_DO_IN_CURRENT_CONTEXT: i32 = -10863;
+/// `kAudioUnitErr_NoConnection`: a unit asked to render with nothing feeding
+/// its input.
+pub const NO_CONNECTION: i32 = -10876;
 /// `kAudioUnitErr_InvalidScope`.
 pub const INVALID_SCOPE: i32 = -10866;
 /// `kAudioUnitErr_InvalidElement`, which stands in for "not a unit of this
