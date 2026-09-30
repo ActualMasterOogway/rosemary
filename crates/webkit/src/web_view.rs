@@ -835,23 +835,22 @@ unsafe fn user_agent(configuration: Id) -> String {
 /// WebKitGTK refuses a user agent that is not a list of `product/version`
 /// tokens and comments, and then sends its own. A product with a second `/` -
 /// Roblox's `Roblox/DarwinRobloxApp/0.740` - is one it refuses, although
-/// macOS WebKit sends it as it is; there the rest of the product becomes a
-/// product of its own.
+/// macOS WebKit sends it as it is. Only the last `/` of such a product is
+/// kept: servers match the innermost name with its version, and Roblox serves
+/// its app layout only for `DarwinRobloxApp/0.740`.
 pub(crate) fn header_user_agent(agent: &str) -> String {
     let mut out = String::with_capacity(agent.len());
     let mut depth = 0usize;
-    let mut slashes = 0;
+    // Where the current top-level product's last `/` was written.
+    let mut slash = None;
     for c in agent.chars() {
         match c {
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
-            c if c.is_whitespace() && depth == 0 => slashes = 0,
+            c if c.is_whitespace() && depth == 0 => slash = None,
             '/' if depth == 0 => {
-                slashes += 1;
-                if slashes > 1 {
-                    out.push(' ');
-                    slashes = 0;
-                    continue;
+                if let Some(at) = slash.replace(out.len()) {
+                    out.replace_range(at..at + 1, " ");
                 }
             }
             _ => {}
@@ -1975,7 +1974,7 @@ mod tests {
         assert_eq!(
             header_user_agent(agent),
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
-            (KHTML, like Gecko) Roblox/DarwinRobloxApp 0.740.0.7400927 (GlobalDist; a/b/c)"
+            (KHTML, like Gecko) Roblox DarwinRobloxApp/0.740.0.7400927 (GlobalDist; a/b/c)"
         );
         assert_eq!(header_user_agent(USER_AGENT), USER_AGENT);
     }
