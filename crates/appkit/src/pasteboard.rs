@@ -115,6 +115,32 @@ pub(crate) fn general_text() -> Option<Vec<u8>> {
         .and_then(|entry| entry.data.clone())
 }
 
+const HTML: &str = "public.html";
+
+/// The general pasteboard's plain text and HTML, with its change count: for a
+/// toolkit that keeps a clipboard of its own and has to be handed ours.
+pub fn general_text_and_html() -> (isize, Option<Vec<u8>>, Option<Vec<u8>>) {
+    let count = change_count_of(CLIPBOARD);
+    (
+        count,
+        flavor_data(CLIPBOARD, STRING.as_bytes()),
+        flavor_data(CLIPBOARD, HTML.as_bytes()),
+    )
+}
+
+/// Make the general pasteboard hold this text and HTML and nothing else, as
+/// a copy in another toolkit does; its new change count.
+pub fn set_general_text_and_html(text: Option<Vec<u8>>, html: Option<Vec<u8>>) -> isize {
+    clear_named(CLIPBOARD);
+    if let Some(text) = text {
+        put_flavor(CLIPBOARD, STRING.as_bytes(), text);
+    }
+    if let Some(html) = html {
+        put_flavor(CLIPBOARD, HTML.as_bytes(), html);
+    }
+    change_count_of(CLIPBOARD)
+}
+
 /// The board `PasteboardCreate(kPasteboardClipboard)` means.
 ///
 /// The same board as `+[NSPasteboard generalPasteboard]`, because on a Mac the

@@ -357,27 +357,6 @@ fn add_to_manager(engine: &Engine, manager: Ptr, script: &Script) {
     }
 }
 
-/// Register the input helper in its world. See [`crate::input`] for why it is
-/// a user script.
-fn add_input_helper(engine: &Engine, manager: Ptr) {
-    let api = engine.api;
-    let source = gtk::c_string(crate::input::HELPER);
-    // SAFETY: a live manager, a NUL-terminated source and world name, both
-    // copied.
-    unsafe {
-        let user_script = (api.webkit_user_script_new_for_world)(
-            source.as_ptr(),
-            gtk::USER_CONTENT_INJECT_TOP_FRAME,
-            gtk::USER_SCRIPT_INJECT_AT_DOCUMENT_START,
-            crate::input::WORLD.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-        );
-        (api.webkit_user_content_manager_add_script)(manager, user_script);
-        (api.webkit_user_script_unref)(user_script);
-    }
-}
-
 /// Make page scripts see `agent` as `navigator.userAgent`, in every frame
 /// from before the page's own scripts run.
 fn add_user_agent_override(engine: &Engine, manager: Ptr, agent: &str) {
@@ -385,7 +364,7 @@ fn add_user_agent_override(engine: &Engine, manager: Ptr, agent: &str) {
         "(() => {{ const agent = {}; \
          for (const [key, value] of [['userAgent', agent], ['appVersion', agent.replace(/^Mozilla\\//, '')]]) \
          Object.defineProperty(Navigator.prototype, key, {{ get() {{ return value; }}, configurable: true }}); }})();",
-        crate::input::quote(agent)
+        crate::js::quote(agent)
     );
     add_to_manager(
         engine,
@@ -404,7 +383,6 @@ fn rebuild_scripts(engine: &Engine, controller: &Controller) {
     let manager = controller.manager as Ptr;
     // SAFETY: the controller's own manager.
     unsafe { (engine.api.webkit_user_content_manager_remove_all_scripts)(manager) };
-    add_input_helper(engine, manager);
     if let Some(agent) = &controller.page_user_agent {
         add_user_agent_override(engine, manager, agent);
     }

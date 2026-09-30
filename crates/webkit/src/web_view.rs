@@ -9,12 +9,10 @@ use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
 
+use crate::compositor::{Command, Event};
 use crate::engine::{self, Block, Engine, HostBlock};
 use crate::gtk::{self, Ptr};
-use crate::{configuration, input, send};
-
-/// How often a visible page is read back.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(50);
+use crate::{clipboard, configuration, keys, send};
 
 /// What WebKit on macOS sends; with Studio's application name appended, as
 /// `applicationNameForUserAgent` appends it. Sites choose their Mac layout, and
@@ -29,6 +27,11 @@ struct View {
     object: usize,
     /// The `WebKitWebView`, owned; zero when there is no engine.
     gtk: usize,
+    /// The undecorated `GtkWindow` the web view is the child of, which GTK
+    /// owns until it is destroyed.
+    window: usize,
+    /// The window's `wl_surface`, by which the compositor names it.
+    surface: u32,
     /// Retained.
     configuration: usize,
     /// Weak, as WebKit's delegates are: a delegate that goes away while a
@@ -37,17 +40,22 @@ struct View {
     ui_delegate: Weak,
     /// The `WKNavigation` of the load in progress, retained.
     navigation: usize,
-    allocated: (c_int, c_int),
+    /// The size, scale and suspension last sent to the compositor.
+    configured: Option<Configured>,
     draws_background: bool,
-    snapshot_in_flight: bool,
-    last_snapshot: Option<Instant>,
-    /// The pixels last handed to the overlay, so an unchanged page is not
-    /// composited again.
-    shown: Vec<u8>,
-    /// A pointer move not yet sent: moves are coalesced to one per turn.
-    pending_move: Option<(f64, f64, u32, u32)>,
-    /// The widget's `GtkEventControllerFocus`, unowned; zero if it has none.
-    focus_controller: usize,
+    /// The modifier flags of the last key event, from which `-flagsChanged:`
+    /// works out which modifier key moved.
+    modifier_flags: u64,
+    /// The cursor the page asks for, by its CSS name.
+    cursor: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Configured {
+    width: c_int,
+    height: c_int,
+    scale: f64,
+    suspended: bool,
 }
 
 /// A zeroing weak reference, boxed so that its slot keeps its address while
@@ -905,18 +913,9 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
         let settings = (api.webkit_web_view_get_settings)(gtk);
         (api.webkit_settings_set_user_agent)(settings, agent.as_ptr());
         (api.webkit_settings_set_enable_developer_extras)(settings, c_int::from(developer));
-        // Accelerated compositing schedules rendering updates from the frame
-        // clock of the window the widget is in, and this widget is in none:
-        // `requestAnimationFrame` would never fire, and a page that animates
-        // something into view - a modal dialog - never shows it.
-        // Without it WebKit schedules updates itself.
         (api.webkit_settings_set_enable_write_console_messages_to_stdout)(
             settings,
             c_int::from(engine::tracing()),
-        );
-        (api.webkit_settings_set_hardware_acceleration_policy)(
-            settings,
-            gtk::HARDWARE_ACCELERATION_POLICY_NEVER,
         );
     }
     connect(
@@ -939,50 +938,79 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     gtk
 }
 
-/// The controller GTK tells a widget about keyboard focus through.
-fn focus_controller(engine: &Engine, gtk: Ptr) -> Ptr {
+/// Put `gtk` in a window of its own on the compositor, sized `width` by
+/// `height` until the compositor says otherwise. The window and its
+/// `wl_surface`'s id.
+fn make_window(engine: &Engine, gtk: Ptr, width: c_int, height: c_int) -> Option<(Ptr, u32)> {
     let api = engine.api;
-    // SAFETY: the view's own widget; the list model and each item are
-    // references this function releases, while the widget keeps the
-    // controllers alive.
+    // SAFETY: a new window, which GTK owns, and the view it takes a reference
+    // to; the native and surface belong to the window and live as long.
     unsafe {
-        let focus = (api.gtk_event_controller_focus_get_type)();
-        let controllers = (api.gtk_widget_observe_controllers)(gtk);
-        let mut found: Ptr = std::ptr::null_mut();
-        for index in 0..(api.g_list_model_get_n_items)(controllers) {
-            let controller = (api.g_list_model_get_item)(controllers, index);
-            if found.is_null() && (api.g_type_check_instance_is_a)(controller, focus) != 0 {
-                found = controller;
-            }
-            (api.g_object_unref)(controller);
+        let window = (api.gtk_window_new)();
+        if window.is_null() {
+            return None;
         }
-        (api.g_object_unref)(controllers);
-        found
+        (api.gtk_widget_add_css_class)(window, gtk::WINDOW_CLASS.as_ptr());
+        (api.gtk_window_set_decorated)(window, 0);
+        (api.gtk_window_set_default_size)(window, width.max(1), height.max(1));
+        (api.gtk_window_set_child)(window, gtk);
+        // The web view is the window's only widget, so it is the one the
+        // keyboard goes to whenever the window has it.
+        (api.gtk_widget_grab_focus)(gtk);
+        // Realized, the window has its `wl_surface`, whose id is what the
+        // compositor knows it by; presented, it becomes a toplevel.
+        (api.gtk_widget_realize)(window);
+        let surface = (api.gtk_native_get_surface)((api.gtk_widget_get_native)(window));
+        let proxy = match surface.is_null() {
+            true => std::ptr::null_mut(),
+            false => (api.gdk_wayland_surface_get_wl_surface)(surface),
+        };
+        if proxy.is_null() {
+            (api.gtk_window_destroy)(window);
+            return None;
+        }
+        let id = (api.wl_proxy_get_id)(proxy);
+        (api.gtk_window_present)(window);
+        Some((window, id))
     }
 }
 
-/// Tell the page it has, or has lost, the keyboard.
-///
-/// A widget outside any window never receives GTK focus, and a page without
-/// focus neither matches `:focus` nor draws a caret - a click into a field
-/// moves focus there with nothing on screen to show it. So the focus
-/// controller's own signals are emitted when the AppKit view becomes, or stops
-/// being, first responder, which is the same event WebKit follows on macOS.
+/// Give the page the keyboard, or take it away, as the AppKit view becomes
+/// or stops being first responder - the same event WebKit follows on macOS.
 fn set_focused(object: Id, focused: bool) {
-    let Some((engine, _)) = gtk_of(object) else {
+    let Some(engine) = engine::get() else {
         return;
     };
-    let controller = with_object(object, |v| v.focus_controller).unwrap_or_default();
-    if controller == 0 {
+    if let Some(surface) = with_object(object, |v| v.surface).filter(|s| *s != 0) {
+        focus(engine, surface, focused);
+    }
+}
+
+fn focus(engine: &Engine, surface: u32, focused: bool) {
+    thread_local! {
+        static FOCUSED: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    }
+    if focused {
+        clipboard::offer(engine);
+        FOCUSED.set(Some(surface));
+    } else if FOCUSED.get() == Some(surface) {
+        FOCUSED.set(None);
+    } else {
+        // Another view has taken the keyboard already.
         return;
     }
-    let signal = match focused {
-        true => c"enter",
-        false => c"leave",
-    };
-    // SAFETY: the view's focus controller, whose `enter` and `leave` signals
-    // take no arguments.
-    unsafe { (engine.api.g_signal_emit_by_name)(controller as Ptr, signal.as_ptr()) };
+    if engine::tracing() {
+        eprintln!(
+            "rosetta3: webkit: keyboard focus {} surface {surface}",
+            match focused {
+                true => "to",
+                false => "away from",
+            }
+        );
+    }
+    engine.compositor.send(Command::Focus {
+        surface: focused.then_some(surface),
+    });
 }
 
 unsafe extern "C" fn become_first_responder(receiver: Id, _sel: Sel) -> u8 {
@@ -1024,30 +1052,41 @@ unsafe extern "C" fn init_with_frame_configuration(
         false => objc::arc::retain(configuration),
     };
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let gtk = match engine::get() {
+    let mut gtk = std::ptr::null_mut();
+    let mut window = None;
+    if let Some(engine) = engine::get() {
         // SAFETY: a configuration, made or retained above.
-        Some(engine) => unsafe { make_gtk_view(engine, configuration, id) },
-        None => std::ptr::null_mut(),
-    };
+        gtk = unsafe { make_gtk_view(engine, configuration, id) };
+        if !gtk.is_null() {
+            window = make_window(
+                engine,
+                gtk,
+                frame.size.width.round() as c_int,
+                frame.size.height.round() as c_int,
+            );
+            if window.is_none() {
+                engine::warn_once(
+                    "a web view's GTK window has no Wayland surface; it will not show",
+                );
+            }
+        }
+    }
+    let (window, surface) = window.unwrap_or((std::ptr::null_mut(), 0));
     VIEWS.with(|views| {
         views.borrow_mut().push(View {
             id,
             object: receiver as usize,
             gtk: gtk as usize,
+            window: window as usize,
+            surface,
             configuration: configuration as usize,
             navigation_delegate: Weak::new(),
             ui_delegate: Weak::new(),
             navigation: 0,
-            allocated: (0, 0),
+            configured: None,
             draws_background: true,
-            snapshot_in_flight: false,
-            last_snapshot: None,
-            shown: Vec::new(),
-            pending_move: None,
-            focus_controller: match engine::get() {
-                Some(engine) if !gtk.is_null() => focus_controller(engine, gtk) as usize,
-                _ => 0,
-            },
+            modifier_flags: 0,
+            cursor: None,
         })
     });
     receiver
@@ -1086,8 +1125,17 @@ fn forget(object: Id) {
                 view.id as Ptr,
             );
             (api.webkit_web_view_stop_loading)(view.gtk as Ptr);
+            if view.window != 0 {
+                (api.gtk_window_destroy)(view.window as Ptr);
+            }
         }
         engine::unref(api, view.gtk);
+        if view.surface != 0 {
+            focus(engine, view.surface, false);
+            engine.compositor.send(Command::Forget {
+                surface: view.surface,
+            });
+        }
     }
     objc::arc::release(view.navigation as Id);
     objc::arc::release(view.configuration as Id);
@@ -1106,18 +1154,17 @@ unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
     }
 }
 
-/// Size each visible view's page to its view, send coalesced input, and read
-/// back pages that are due.
+/// Size each view's window to its view, suspend the hidden ones, and show
+/// the pictures the compositor has for the rest.
 pub fn tick(engine: &Engine) {
-    let api = engine.api;
-    let views: Vec<(usize, usize, usize)> = VIEWS.with(|views| {
+    let views: Vec<(usize, usize, usize, u32)> = VIEWS.with(|views| {
         views
             .borrow()
             .iter()
-            .map(|v| (v.id, v.object, v.gtk))
+            .map(|v| (v.id, v.object, v.gtk, v.surface))
             .collect()
     });
-    for (id, object, gtk) in views {
+    for (id, object, gtk, surface) in views {
         let (object, gtk) = (object as Id, gtk as Ptr);
         let hidden = appkit::view::is_hidden_or_has_hidden_ancestor(object);
         // SAFETY: a live view, registered while it is.
@@ -1126,82 +1173,124 @@ pub fn tick(engine: &Engine) {
         if engine::tracing() {
             trace_state(id, gtk, hidden, window, frame.as_ref());
         }
-        if gtk.is_null() || hidden || !appkit::window::is_shown(window) {
+        if gtk.is_null() || surface == 0 {
             continue;
         }
-        let Some(frame) = frame else {
-            continue;
+        let shown = !hidden && appkit::window::is_shown(window);
+        let configured = match &frame {
+            Some(frame) => {
+                let density = f64::from(sdl3::video::window_pixel_density(frame.window)).max(1.0);
+                Some(Configured {
+                    width: (f64::from(frame.width) / density).round().max(1.0) as c_int,
+                    height: (f64::from(frame.height) / density).round().max(1.0) as c_int,
+                    scale: density,
+                    suspended: !shown,
+                })
+            }
+            // Off every window: keep the size, and stop drawing.
+            None => with_view(id, |v| v.configured)
+                .flatten()
+                .map(|c| Configured {
+                    suspended: true,
+                    ..c
+                }),
         };
-        let density = f64::from(sdl3::video::window_pixel_density(frame.window)).max(1.0);
-        let size = (
-            (f64::from(frame.width) / density).round().max(1.0) as c_int,
-            (f64::from(frame.height) / density).round().max(1.0) as c_int,
-        );
-        let resized = with_view(id, |v| std::mem::replace(&mut v.allocated, size) != size);
-        if resized == Some(true) {
-            let mut ignored = [0; 4];
-            let allocation = gtk::Allocation {
-                x: 0,
-                y: 0,
-                width: size.0,
-                height: size.1,
-            };
-            // SAFETY: the view's own widget. GTK wants a widget measured before
-            // it is allocated, and says so on every allocation otherwise.
-            unsafe {
-                for orientation in [gtk::ORIENTATION_HORIZONTAL, gtk::ORIENTATION_VERTICAL] {
-                    let [a, b, c, d] = &mut ignored;
-                    (api.gtk_widget_measure)(gtk, orientation, -1, a, b, c, d);
-                }
-                (api.gtk_widget_size_allocate)(gtk, &allocation, -1);
-                // A page whose widget is not mapped is hidden to WebKit, which
-                // stops its animation frames and throttles its timers. Mapping
-                // a widget with no toplevel makes GTK warn once and GDK report
-                // the missing frame clock, but WebKit then treats the page as
-                // visible, which is what the view on screen is.
-                if (api.gtk_widget_get_mapped)(gtk) == 0 {
-                    (api.gtk_widget_map)(gtk);
-                }
-            }
+        if let Some(configured) = configured
+            && with_view(id, |v| v.configured.replace(configured) != Some(configured)) == Some(true)
+        {
+            engine.compositor.send(Command::Configure {
+                surface,
+                width: configured.width,
+                height: configured.height,
+                scale: configured.scale,
+                suspended: configured.suspended,
+            });
         }
-        if let Some(Some((x, y, buttons, modifiers))) = with_view(id, |v| v.pending_move.take()) {
-            run_input(
-                engine,
-                gtk,
-                &format!("r.move({x}, {y}, {buttons}, {modifiers})"),
-            );
-        }
-        let due = with_view(id, |v| {
-            let due = !v.snapshot_in_flight
-                && v.last_snapshot
-                    .is_none_or(|at| at.elapsed() >= SNAPSHOT_INTERVAL);
-            if due {
-                v.snapshot_in_flight = true;
-                v.last_snapshot = Some(Instant::now());
-            }
-            (due, v.draws_background)
-        });
         if engine::tracing() {
             trace_page(engine, id, gtk);
         }
-        if let Some((true, draws_background)) = due {
-            let options = match draws_background {
-                true => 0,
-                false => gtk::SNAPSHOT_OPTIONS_TRANSPARENT_BACKGROUND,
-            };
-            // SAFETY: the view's own widget; the id is a plain integer.
-            unsafe {
-                (api.webkit_web_view_get_snapshot)(
-                    gtk,
-                    gtk::SNAPSHOT_REGION_VISIBLE,
-                    options,
-                    std::ptr::null_mut(),
-                    Some(snapshot_ready),
-                    id as Ptr,
-                )
-            };
+        if !shown || frame.is_none() {
+            continue;
+        }
+        if let Some(picture) = engine.compositor.take_frame(surface) {
+            if engine::tracing() {
+                eprintln!(
+                    "rosetta3: webkit: view {id}: new {}x{} frame",
+                    picture.width, picture.height
+                );
+            }
+            appkit::backing::set_overlay(
+                object,
+                appkit::backing::Overlay {
+                    width: picture.width,
+                    height: picture.height,
+                    pixels: picture.pixels,
+                },
+            );
         }
     }
+    for event in engine.compositor.take_events() {
+        match event {
+            Event::Cursor { surface, name } => set_cursor(surface, name),
+            Event::Selection { entries } => clipboard::copied(entries),
+        }
+    }
+}
+
+/// The page under the pointer wants `name`'s cursor.
+fn set_cursor(surface: u32, name: Option<&'static str>) {
+    let object = VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        let view = views.iter_mut().find(|v| v.surface == surface)?;
+        (view.cursor != name).then(|| {
+            view.cursor = name;
+            view.object
+        })
+    });
+    if let Some(object) = object {
+        // SAFETY: a live view.
+        unsafe { appkit::cursor::reset_rects(object as Id) };
+    }
+}
+
+/// The `NSCursor` class method for a CSS cursor name.
+fn cursor_selector(name: &str) -> &'static str {
+    match name {
+        "pointer" => "pointingHandCursor",
+        "text" => "IBeamCursor",
+        "vertical-text" => "IBeamCursorForVerticalLayout",
+        "crosshair" | "cell" => "crosshairCursor",
+        "grab" => "openHandCursor",
+        "grabbing" => "closedHandCursor",
+        "not-allowed" | "no-drop" => "operationNotAllowedCursor",
+        "copy" => "dragCopyCursor",
+        "alias" => "dragLinkCursor",
+        "context-menu" => "contextualMenuCursor",
+        "col-resize" | "ew-resize" => "resizeLeftRightCursor",
+        "row-resize" | "ns-resize" => "resizeUpDownCursor",
+        "e-resize" => "resizeRightCursor",
+        "w-resize" => "resizeLeftCursor",
+        "n-resize" => "resizeUpCursor",
+        "s-resize" => "resizeDownCursor",
+        _ => "arrowCursor",
+    }
+}
+
+/// `-resetCursorRects`: the whole view shows the cursor the page asked for.
+unsafe extern "C" fn reset_cursor_rects(receiver: Id, _sel: Sel) {
+    let Some(name) = with_object(receiver, |v| v.cursor).flatten() else {
+        return;
+    };
+    let class = objc::class::lookup(c"NSCursor").expect("registered by AppKit");
+    // SAFETY: each cursor class method is `id (Class, SEL)`.
+    let cursor = unsafe {
+        let send: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        send(
+            objc::class::ptr(class) as Id,
+            objc::sel::get(cursor_selector(name)),
+        )
+    };
+    appkit::cursor::add_rect(receiver, appkit::view::bounds_of(receiver), cursor);
 }
 
 /// `ROSETTA3_TRACE_WEBKIT`: every few seconds, where the page is, whether
@@ -1282,67 +1371,6 @@ fn trace_state(id: usize, gtk: Ptr, hidden: bool, window: Id, frame: Option<&app
     });
 }
 
-unsafe extern "C" fn snapshot_ready(source: Ptr, result: Ptr, data: Ptr) {
-    let id = data as usize;
-    let Some(engine) = engine::get() else {
-        return;
-    };
-    let api = engine.api;
-    let mut error = std::ptr::null_mut();
-    // SAFETY: the view and result this callback was invoked with.
-    let texture = unsafe { (api.webkit_web_view_get_snapshot_finish)(source, result, &mut error) };
-    // SAFETY: an error this call owns, or null.
-    let failure = unsafe { gtk::take_error(api, error) };
-    let object = with_view(id, |v| {
-        v.snapshot_in_flight = false;
-        v.object
-    });
-    if texture.is_null() {
-        if let Some((_, message)) = failure
-            && engine::tracing()
-        {
-            eprintln!("rosetta3: webkit: snapshot failed: {message}");
-        }
-        return;
-    }
-    // SAFETY: a texture this call owns; `gdk_texture_download` writes
-    // premultiplied native-endian ARGB32, which on a little-endian host is
-    // the B, G, R, A the store holds.
-    let (width, height, pixels) = unsafe {
-        let width = (api.gdk_texture_get_width)(texture).max(0) as usize;
-        let height = (api.gdk_texture_get_height)(texture).max(0) as usize;
-        let mut pixels = vec![0u8; width * height * 4];
-        if !pixels.is_empty() {
-            (api.gdk_texture_download)(texture, pixels.as_mut_ptr(), width * 4);
-        }
-        (api.g_object_unref)(texture);
-        (width, height, pixels)
-    };
-    let Some(object) = object else {
-        return;
-    };
-    let changed = with_view(id, |v| {
-        let changed = v.shown != pixels;
-        if changed {
-            v.shown.clone_from(&pixels);
-        }
-        changed
-    });
-    if changed == Some(true) {
-        if engine::tracing() {
-            eprintln!("rosetta3: webkit: view {id}: new {width}x{height} frame");
-        }
-        appkit::backing::set_overlay(
-            object as Id,
-            appkit::backing::Overlay {
-                width: width as u32,
-                height: height as u32,
-                pixels,
-            },
-        );
-    }
-}
-
 unsafe extern "C" fn configuration_getter(receiver: Id, _sel: Sel) -> Id {
     with_object(receiver, |v| v.configuration).unwrap_or_default() as Id
 }
@@ -1396,9 +1424,9 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
 
 unsafe extern "C" fn can_go_back(receiver: Id, _sel: Sel) -> u8 {
     // SAFETY: the view's widget.
-    gtk_of(receiver).is_some_and(|(engine, gtk)| unsafe {
-        (engine.api.webkit_web_view_can_go_back)(gtk) != 0
-    }) as u8
+    gtk_of(receiver)
+        .is_some_and(|(engine, gtk)| unsafe { (engine.api.webkit_web_view_can_go_back)(gtk) != 0 })
+        as u8
 }
 
 unsafe extern "C" fn can_go_forward(receiver: Id, _sel: Sel) -> u8 {
@@ -1571,10 +1599,7 @@ unsafe extern "C" fn evaluate_javascript(receiver: Id, _sel: Sel, script: Id, co
 unsafe extern "C" fn set_value_for_key(receiver: Id, sel: Sel, value: Id, key: Id) {
     if engine::text_of(key) == "drawsBackground" {
         let draws = crate::bool_value(value);
-        with_object(receiver, |v| {
-            v.draws_background = draws;
-            v.shown.clear();
-        });
+        with_object(receiver, |v| v.draws_background = draws);
         if let Some((engine, gtk)) = gtk_of(receiver) {
             let color = gtk::Rgba {
                 red: 1.0,
@@ -1598,48 +1623,6 @@ unsafe extern "C" fn set_value_for_key(receiver: Id, sel: Sel, value: Id, key: I
     }
 }
 
-unsafe extern "C" fn input_ready(source: Ptr, result: Ptr, _data: Ptr) {
-    let Some(engine) = engine::get() else {
-        return;
-    };
-    let api = engine.api;
-    let mut error = std::ptr::null_mut();
-    // SAFETY: the view and result this callback was invoked with.
-    let value =
-        unsafe { (api.webkit_web_view_evaluate_javascript_finish)(source, result, &mut error) };
-    // SAFETY: an owned error or value.
-    unsafe {
-        if let Some((_, message)) = gtk::take_error(api, error) {
-            eprintln!("rosetta3: webkit: input script failed: {message}");
-        }
-        if !value.is_null() {
-            (api.g_object_unref)(value);
-        }
-    }
-}
-
-fn run_input(engine: &Engine, gtk: Ptr, body: &str) {
-    if engine::tracing() && !body.starts_with("r.move") {
-        eprintln!("rosetta3: webkit: input {body}");
-    }
-    let callback: Option<gtk::AsyncReady> = engine::tracing().then_some(input_ready);
-    let script = gtk::c_string(&input::call(body));
-    // SAFETY: the view's widget, a script and a world name it copies; no
-    // result is wanted.
-    unsafe {
-        (engine.api.webkit_web_view_evaluate_javascript)(
-            gtk,
-            script.as_ptr(),
-            -1,
-            input::WORLD.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            callback,
-            std::ptr::null_mut(),
-        )
-    };
-}
-
 /// Where an event happened in the page, in CSS pixels from its top left.
 fn page_point(object: Id, event: Id) -> Option<(f64, f64)> {
     let location = appkit::nsevent::location_of(event);
@@ -1651,24 +1634,25 @@ fn page_point(object: Id, event: Id) -> Option<(f64, f64)> {
     Some((x, y))
 }
 
-fn modifiers(event: Id) -> u32 {
-    // SAFETY: an event; `-modifierFlags` is `NSUInteger (id, SEL)`.
-    input::modifier_bits(unsafe { send!(event, "modifierFlags"; u64) })
+/// The compositor, and the surface `receiver`'s page is on.
+fn surface_of(receiver: Id) -> Option<(&'static Engine, u32)> {
+    let surface = with_object(receiver, |v| v.surface).filter(|s| *s != 0)?;
+    Some((engine::get()?, surface))
 }
 
-fn click_count(event: Id) -> i64 {
-    // SAFETY: an event; `-clickCount` is `NSInteger (id, SEL)`.
-    unsafe { send!(event, "clickCount"; i64) }.max(1)
+/// Move the page's pointer to where `event` happened.
+fn pointer_to(receiver: Id, event: Id) -> Option<&'static Engine> {
+    let (engine, surface) = surface_of(receiver)?;
+    let (x, y) = page_point(receiver, event)?;
+    engine.compositor.send(Command::Pointer { surface, x, y });
+    Some(engine)
 }
 
-fn mouse(receiver: Id, event: Id, action: &str, button: u8) {
-    let Some((engine, gtk)) = gtk_of(receiver) else {
-        return;
-    };
-    let Some((x, y)) = page_point(receiver, event) else {
-        return;
-    };
-    if action == "down" {
+/// `BTN_LEFT`, `BTN_RIGHT` and `BTN_MIDDLE`.
+const BUTTONS: [u32; 3] = [0x110, 0x111, 0x112];
+
+fn mouse(receiver: Id, event: Id, pressed: bool, button: usize) {
+    if pressed {
         // A click is what gives a web view the keyboard, as it does in AppKit.
         // SAFETY: a live view; both methods are AppKit's own prototypes.
         unsafe {
@@ -1678,166 +1662,168 @@ fn mouse(receiver: Id, event: Id, action: &str, button: u8) {
             }
         }
     }
-    // A move still pending would otherwise arrive after the button it preceded.
-    with_object(receiver, |v| v.pending_move = None);
-    let body = format!(
-        "r.{action}({x}, {y}, {button}, {}, {})",
-        click_count(event),
-        modifiers(event)
-    );
-    run_input(engine, gtk, &body);
+    if let Some(engine) = pointer_to(receiver, event) {
+        engine.compositor.send(Command::Button {
+            button: BUTTONS[button],
+            pressed,
+        });
+    }
 }
 
 unsafe extern "C" fn mouse_down(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "down", 0);
+    mouse(receiver, event, true, 0);
 }
 
 unsafe extern "C" fn mouse_up(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "up", 0);
+    mouse(receiver, event, false, 0);
 }
 
 unsafe extern "C" fn right_mouse_down(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "down", 2);
+    mouse(receiver, event, true, 1);
 }
 
 unsafe extern "C" fn right_mouse_up(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "up", 2);
+    mouse(receiver, event, false, 1);
 }
 
 unsafe extern "C" fn other_mouse_down(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "down", 1);
+    mouse(receiver, event, true, 2);
 }
 
 unsafe extern "C" fn other_mouse_up(receiver: Id, _sel: Sel, event: Id) {
-    mouse(receiver, event, "up", 1);
-}
-
-fn pointer_moved(receiver: Id, event: Id, buttons: u32) {
-    let Some((x, y)) = page_point(receiver, event) else {
-        return;
-    };
-    let modifiers = modifiers(event);
-    with_object(receiver, |v| {
-        v.pending_move = Some((x, y, buttons, modifiers))
-    });
+    mouse(receiver, event, false, 2);
 }
 
 unsafe extern "C" fn mouse_moved(receiver: Id, _sel: Sel, event: Id) {
-    pointer_moved(receiver, event, 0);
-}
-
-unsafe extern "C" fn mouse_dragged(receiver: Id, _sel: Sel, event: Id) {
-    pointer_moved(receiver, event, 1);
-}
-
-unsafe extern "C" fn right_mouse_dragged(receiver: Id, _sel: Sel, event: Id) {
-    pointer_moved(receiver, event, 2);
+    pointer_to(receiver, event);
 }
 
 unsafe extern "C" fn scroll_wheel(receiver: Id, _sel: Sel, event: Id) {
-    let Some((engine, gtk)) = gtk_of(receiver) else {
+    let Some(engine) = pointer_to(receiver, event) else {
         return;
     };
-    let Some((x, y)) = page_point(receiver, event) else {
-        return;
+    // SAFETY: an event; the deltas are `CGFloat (id, SEL)` and the precision
+    // flag `BOOL (id, SEL)`.
+    let (dx, dy, precise) = unsafe {
+        (
+            send!(event, "scrollingDeltaX"; f64),
+            send!(event, "scrollingDeltaY"; f64),
+            send!(event, "hasPreciseScrollingDeltas"; u8) != 0,
+        )
     };
-    // SAFETY: an event; both deltas are `CGFloat (id, SEL)`.
-    let (dx, dy) = unsafe { (send!(event, "deltaX"; f64), send!(event, "deltaY"; f64)) };
-    // AppKit's deltas are lines, positive toward the top and left of the
-    // content; the DOM's are pixels, positive toward the bottom and right.
-    const LINE: f64 = 40.0;
-    let body = format!(
-        "r.wheel({x}, {y}, {}, {}, {})",
-        -dx * LINE,
-        -dy * LINE,
-        modifiers(event)
-    );
-    run_input(engine, gtk, &body);
+    // AppKit's deltas are positive toward the top and left of the content,
+    // Wayland's toward the bottom and right. A wheel's are in lines, which
+    // become notches for GTK; a touchpad's are already pixels.
+    // libinput reports a notch as 15 pixels, which is what GTK expects.
+    const LINE: f64 = 15.0;
+    let command = match precise {
+        true => Command::Axis {
+            dx: -dx,
+            dy: -dy,
+            steps: None,
+        },
+        false => Command::Axis {
+            dx: -dx * LINE,
+            dy: -dy * LINE,
+            steps: Some(((-dx * 120.0).round() as i32, (-dy * 120.0).round() as i32)),
+        },
+    };
+    engine.compositor.send(command);
 }
 
-/// The editing command a Command-key shortcut performs.
-fn shortcut(characters: &str, shift: bool) -> Option<&'static std::ffi::CStr> {
-    Some(match characters.to_ascii_lowercase().as_str() {
-        "c" => c"Copy",
-        "x" => c"Cut",
-        "v" => c"Paste",
-        "a" => c"SelectAll",
-        "z" if shift => c"Redo",
-        "z" => c"Undo",
-        _ => return None,
-    })
+/// Bring the keyboard's modifiers into line with the event's, so a key is
+/// read with what is held when it is pressed even if a `-flagsChanged:` went
+/// elsewhere.
+fn sync_modifiers(engine: &Engine, receiver: Id, event: Id) {
+    // SAFETY: an event; `-modifierFlags` is `NSUInteger (id, SEL)`.
+    let flags = unsafe { send!(event, "modifierFlags"; u64) };
+    let before = with_object(receiver, |v| {
+        std::mem::replace(&mut v.modifier_flags, flags)
+    });
+    for (key, pressed) in keys::modifier_changes(before.unwrap_or_default(), flags) {
+        engine.compositor.send(Command::Key { key, pressed });
+    }
+}
+
+fn key(receiver: Id, event: Id, pressed: bool) {
+    let Some((engine, _)) = surface_of(receiver) else {
+        return;
+    };
+    sync_modifiers(engine, receiver, event);
+    // SAFETY: an event; both accessors are AppKit's own prototypes.
+    let (code, repeat) = unsafe { (send!(event, "keyCode"; u16), send!(event, "isARepeat"; u8)) };
+    // GTK repeats a held key itself, at the rate the compositor gives it.
+    if repeat != 0 {
+        return;
+    }
+    let Some(key) = keys::evdev(code) else {
+        return;
+    };
+    // Command-V: GTK is about to read the clipboard, which has to be the
+    // host's by then.
+    if pressed
+        && key == 47
+        && with_object(receiver, |v| v.modifier_flags).unwrap_or_default()
+            & appkit::keymap::flags::COMMAND
+            != 0
+    {
+        clipboard::offer(engine);
+    }
+    if engine::tracing() {
+        eprintln!(
+            "rosetta3: webkit: key {key} {}",
+            if pressed { "down" } else { "up" }
+        );
+    }
+    engine.compositor.send(Command::Key { key, pressed });
 }
 
 unsafe extern "C" fn key_down(receiver: Id, _sel: Sel, event: Id) {
-    let Some((engine, gtk)) = gtk_of(receiver) else {
-        return;
-    };
-    // SAFETY: an event; each accessor is AppKit's own prototype.
-    let (characters, flags, key_code, repeat) = unsafe {
-        (
-            engine::text_of(send!(event, "charactersIgnoringModifiers"; Id)),
-            send!(event, "modifierFlags"; u64),
-            send!(event, "keyCode"; u16),
-            send!(event, "isARepeat"; u8) != 0,
-        )
-    };
-    let text = engine::text_of(unsafe { send!(event, "characters"; Id) });
-    let modifiers = input::modifier_bits(flags);
-    if modifiers & 0b1000 != 0 {
-        if let Some(command) = shortcut(&characters, modifiers & 1 != 0) {
-            // SAFETY: the view's widget and a command name.
-            unsafe { (engine.api.webkit_web_view_execute_editing_command)(gtk, command.as_ptr()) };
-        }
-        return;
-    }
-    let key = input::key(key_code, &text);
-    let action = match (key.special, key.key.as_str()) {
-        // A space types in a text field and presses a button elsewhere; each
-        // half does nothing where the other applies.
-        (true, " ") => format!("r.text(\" \"); r.edit(\" \", {modifiers})"),
-        (true, name) => format!("r.edit({}, {modifiers})", input::quote(name)),
-        // Control-letter produces no text on a Mac.
-        (false, _) if modifiers & 0b10 != 0 => String::new(),
-        (false, _) if key.key == "Unidentified" => String::new(),
-        (false, _) => format!("r.text({})", input::quote(&key.key)),
-    };
-    let dispatch = format!(
-        "r.key(\"keydown\", {}, {}, {}, {modifiers}, {repeat})",
-        input::quote(&key.key),
-        input::quote(key.code),
-        key.key_code
-    );
-    let body = match action.is_empty() {
-        true => dispatch,
-        false => format!("if ({dispatch}) {{ {action}; }}"),
-    };
-    run_input(engine, gtk, &body);
+    key(receiver, event, true);
 }
 
 unsafe extern "C" fn key_up(receiver: Id, _sel: Sel, event: Id) {
-    let Some((engine, gtk)) = gtk_of(receiver) else {
-        return;
-    };
-    // SAFETY: an event; each accessor is AppKit's own prototype.
-    let (text, key_code) = unsafe {
+    key(receiver, event, false);
+}
+
+/// `-performKeyEquivalent:`: the editing shortcuts are the page's while it
+/// has the keyboard, as they are WebKit's on a Mac, and reach it as the keys
+/// they are, so the page sees them and GTK performs them. Every other
+/// shortcut is left to the menus.
+unsafe extern "C" fn perform_key_equivalent(receiver: Id, _sel: Sel, event: Id) -> u8 {
+    // SAFETY: a live view and an event; each accessor is AppKit's prototype.
+    let (first, code, flags) = unsafe {
+        let window = send!(receiver, "window"; Id);
+        let first = !window.is_null() && send!(window, "firstResponder"; Id) == receiver;
         (
-            engine::text_of(send!(event, "characters"; Id)),
+            first,
             send!(event, "keyCode"; u16),
+            send!(event, "modifierFlags"; u64),
         )
     };
-    let key = input::key(key_code, &text);
-    let body = format!(
-        "r.key(\"keyup\", {}, {}, {}, {}, false)",
-        input::quote(&key.key),
-        input::quote(key.code),
-        key.key_code,
-        modifiers(event)
-    );
-    run_input(engine, gtk, &body);
+    use appkit::keymap::flags::{COMMAND, CONTROL, OPTION};
+    // C, X, V, A and Z, by position.
+    const EDITING: [u16; 5] = [0x08, 0x07, 0x09, 0x00, 0x06];
+    let editing =
+        flags & COMMAND != 0 && flags & (CONTROL | OPTION) == 0 && EDITING.contains(&code);
+    if !first || !editing || surface_of(receiver).is_none() {
+        return 0;
+    }
+    key(receiver, event, true);
+    1
+}
+
+unsafe extern "C" fn flags_changed(receiver: Id, _sel: Sel, event: Id) {
+    if let Some((engine, _)) = surface_of(receiver) {
+        sync_modifiers(engine, receiver, event);
+    }
 }
 
 fn editing(receiver: Id, command: &std::ffi::CStr) {
     if let Some((engine, gtk)) = gtk_of(receiver) {
+        if engine::tracing() {
+            eprintln!("rosetta3: webkit: editing command {command:?}");
+        }
         // SAFETY: the view's widget and a command name.
         unsafe { (engine.api.webkit_web_view_execute_editing_command)(gtk, command.as_ptr()) };
     }
@@ -1852,6 +1838,9 @@ unsafe extern "C" fn cut(receiver: Id, _sel: Sel, _sender: Id) {
 }
 
 unsafe extern "C" fn paste(receiver: Id, _sel: Sel, _sender: Id) {
+    if let Some(engine) = engine::get() {
+        clipboard::offer(engine);
+    }
     editing(receiver, c"Paste");
 }
 
@@ -1902,11 +1891,15 @@ pub fn install() {
         "otherMouseDown:" => other_mouse_down, c"v24@0:8@16";
         "otherMouseUp:" => other_mouse_up, c"v24@0:8@16";
         "mouseMoved:" => mouse_moved, c"v24@0:8@16";
-        "mouseDragged:" => mouse_dragged, c"v24@0:8@16";
-        "rightMouseDragged:" => right_mouse_dragged, c"v24@0:8@16";
+        "mouseDragged:" => mouse_moved, c"v24@0:8@16";
+        "rightMouseDragged:" => mouse_moved, c"v24@0:8@16";
+        "otherMouseDragged:" => mouse_moved, c"v24@0:8@16";
         "scrollWheel:" => scroll_wheel, c"v24@0:8@16";
         "keyDown:" => key_down, c"v24@0:8@16";
         "keyUp:" => key_up, c"v24@0:8@16";
+        "flagsChanged:" => flags_changed, c"v24@0:8@16";
+        "performKeyEquivalent:" => perform_key_equivalent, c"c24@0:8@16";
+        "resetCursorRects" => reset_cursor_rects, c"v16@0:8";
         "copy:" => copy, c"v24@0:8@16";
         "cut:" => cut, c"v24@0:8@16";
         "paste:" => paste, c"v24@0:8@16";
@@ -1977,12 +1970,5 @@ mod tests {
             (KHTML, like Gecko) Roblox DarwinRobloxApp/0.740.0.7400927 (GlobalDist; a/b/c)"
         );
         assert_eq!(header_user_agent(USER_AGENT), USER_AGENT);
-    }
-
-    #[test]
-    fn command_shortcuts_are_editing_commands() {
-        assert_eq!(shortcut("V", false), Some(c"Paste"));
-        assert_eq!(shortcut("z", true), Some(c"Redo"));
-        assert_eq!(shortcut("q", false), None);
     }
 }

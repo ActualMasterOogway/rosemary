@@ -15,3 +15,10 @@ darwin.workspace = true
 foundation.workspace = true
 libc.workspace = true
 sdl3.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "desktop"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }

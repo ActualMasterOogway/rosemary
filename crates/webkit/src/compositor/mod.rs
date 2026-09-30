@@ -1,0 +1,162 @@
+//! A private Wayland compositor that WebKitGTK's windows live in.
+//!
+//! GTK connects to this rather than to the host's display, so each web view is
+//! a real toplevel with a frame clock, keyboard focus and popups, and nothing
+//! about it depends on the host session. What the windows draw comes back as
+//! pixels for `appkit::backing`'s overlays; input goes in as seat events.
+//!
+//! The compositor runs on its own thread: GTK makes blocking round trips to
+//! its display, which would never return if the server were only serviced by
+//! the thread GTK itself runs on.
+
+// Only Linux has WebKitGTK, and smithay is a Linux dependency; elsewhere the
+// compositor never starts and most of this is unused.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+mod composite;
+#[cfg(target_os = "linux")]
+mod state;
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+#[cfg(target_os = "linux")]
+use smithay::reexports::calloop::channel::Sender;
+
+/// A toplevel's latest picture: premultiplied B, G, R, A, top row first.
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// A toplevel is named by its `wl_surface`'s protocol id, which GTK's side
+/// reads with `wl_proxy_get_id`: there is only one client.
+pub type SurfaceId = u32;
+
+pub enum Command {
+    /// The size, in logical pixels, and scale the window is shown at; a
+    /// suspended window is not shown and gets no frame callbacks.
+    Configure {
+        surface: SurfaceId,
+        width: i32,
+        height: i32,
+        scale: f64,
+        suspended: bool,
+    },
+    /// The view is gone; drop anything held for its surface.
+    Forget { surface: SurfaceId },
+    /// The pointer is at `x`, `y` in the window's logical pixels.
+    Pointer { surface: SurfaceId, x: f64, y: f64 },
+    /// A `BTN_*` code.
+    Button { button: u32, pressed: bool },
+    /// Pixel deltas, and whole-notch steps in 120ths when the device has them.
+    Axis {
+        dx: f64,
+        dy: f64,
+        steps: Option<(i32, i32)>,
+    },
+    /// An evdev key code.
+    Key { key: u32, pressed: bool },
+    /// Which window has the keyboard, if any.
+    Focus { surface: Option<SurfaceId> },
+    /// The host's clipboard, offered to GTK as the selection: MIME type and
+    /// bytes.
+    Offer { entries: Vec<(String, Vec<u8>)> },
+}
+
+pub enum Event {
+    /// The pointer over `surface` wants this cursor, by its CSS name, or
+    /// none at all.
+    Cursor {
+        surface: SurfaceId,
+        name: Option<&'static str>,
+    },
+    /// GTK set the selection; these are its contents in the types asked for.
+    Selection { entries: Vec<(String, Vec<u8>)> },
+}
+
+/// What the compositor thread hands back.
+struct Shared {
+    frames: Mutex<HashMap<SurfaceId, Frame>>,
+    events: Mutex<Vec<Event>>,
+    /// Called from the compositor thread when there is something to take.
+    wake: fn(),
+}
+
+pub struct Compositor {
+    #[cfg(target_os = "linux")]
+    commands: Sender<Command>,
+    shared: Arc<Shared>,
+    /// The socket GTK connects to, which is removed once it has.
+    pub socket: PathBuf,
+}
+
+impl Compositor {
+    #[cfg(not(target_os = "linux"))]
+    pub fn start(_wake: fn()) -> Result<Compositor, String> {
+        Err("web views need WebKitGTK, which only a Linux host has".to_string())
+    }
+
+    /// Start the compositor, listening at a fresh socket. `wake` is called
+    /// from its thread whenever a frame or event is ready.
+    #[cfg(target_os = "linux")]
+    pub fn start(wake: fn()) -> Result<Compositor, String> {
+        let shared = Arc::new(Shared {
+            frames: Mutex::new(HashMap::new()),
+            events: Mutex::new(Vec::new()),
+            wake,
+        });
+        let socket = socket_path();
+        let _ = std::fs::remove_file(&socket);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_shared = shared.clone();
+        let thread_socket = socket.clone();
+        std::thread::Builder::new()
+            .name("rosetta3-webkit-compositor".to_string())
+            .spawn(move || state::run(thread_socket, thread_shared, sender))
+            .map_err(|e| format!("could not start the compositor thread: {e}"))?;
+        let commands = receiver
+            .recv()
+            .map_err(|_| "the compositor thread exited while starting".to_string())??;
+        Ok(Compositor {
+            commands,
+            shared,
+            socket,
+        })
+    }
+
+    pub fn send(&self, command: Command) {
+        // A send fails only once the compositor thread is gone, and then there
+        // is nobody left to tell.
+        #[cfg(target_os = "linux")]
+        let _ = self.commands.send(command);
+        #[cfg(not(target_os = "linux"))]
+        drop(command);
+    }
+
+    /// The newest picture of `surface` not yet taken.
+    pub fn take_frame(&self, surface: SurfaceId) -> Option<Frame> {
+        lock(&self.shared.frames).remove(&surface)
+    }
+
+    pub fn take_events(&self) -> Vec<Event> {
+        std::mem::take(&mut *lock(&self.shared.events))
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Somewhere only this user can reach, named so two processes cannot collide.
+fn socket_path() -> PathBuf {
+    let directory = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    directory.join(format!("rosetta3-webkit-{}", std::process::id()))
+}

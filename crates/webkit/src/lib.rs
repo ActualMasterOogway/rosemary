@@ -2,11 +2,14 @@ use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
 
+mod clipboard;
+mod compositor;
 mod configuration;
 mod data_store;
 mod engine;
 mod gtk;
-mod input;
+mod js;
+mod keys;
 mod legacy;
 mod web_view;
 

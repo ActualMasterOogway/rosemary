@@ -29,7 +29,7 @@
 #     container exec r3debian sh -c 'apt-get update -qq && \
 #         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 #         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
-#         libglu1-mesa libvulkan1 mesa-vulkan-drivers'
+#         libglu1-mesa libvulkan1 mesa-vulkan-drivers libxkbcommon-dev'
 #     container exec r3debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
 #         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
@@ -43,6 +43,8 @@
 # unresolved without it. See `darwin::load_host_libraries`.
 # `libvulkan1` is Metal's loader and `mesa-vulkan-drivers` supplies an ICD,
 # including lavapipe for the container's headless adapter-discovery tests.
+# `libxkbcommon-dev` is linked by smithay, the compositor WebKitGTK's windows
+# live in; see docs/webkit.md.
 #
 # There is no display in the container. SDL runs headless by default; see the
 # `SDL_*` variables set below.

@@ -4,10 +4,14 @@ use std::sync::OnceLock;
 
 use objc::object::Id;
 
+use crate::compositor::Compositor;
 use crate::gtk::{self, Api, Ptr};
 
 pub struct Engine {
     pub api: &'static Api,
+    /// Where GTK's windows are shown: every view's pictures and input go
+    /// through it.
+    pub compositor: Compositor,
     /// The `WebKitNetworkSession` every view shares, as every `WKWebView` with
     /// the default data store shares one cookie jar.
     pub session: usize,
@@ -55,13 +59,39 @@ fn start() -> Result<Engine, String> {
         );
     }
     let api = gtk::api()?;
+    let compositor = Compositor::start(wake)?;
     // GTK would otherwise call `setlocale(LC_ALL, "")`, which changes how the
     // host's C library formats numbers under the guest's feet.
-    // SAFETY: both are safe to call before anything else in GTK.
+    // SAFETY: safe to call before anything else in GTK.
     unsafe { (api.gtk_disable_setlocale)() };
-    if unsafe { (api.gtk_init_check)() } == 0 {
-        return Err("GTK could not open a display".to_string());
+    // GTK's display is the compositor, never the host's. GTK opens its
+    // display in `gtk_init` from the environment alone, and refuses to have
+    // one opened for it earlier, so the environment says where the compositor
+    // is for that one call. The guest reads its own copy of the environment,
+    // which this does not touch.
+    let socket = compositor.socket.clone();
+    let started = with_environment(
+        &[
+            ("WAYLAND_DISPLAY", socket.as_os_str()),
+            ("GDK_BACKEND", std::ffi::OsStr::new("wayland")),
+            // The compositor takes only shared memory, so GTK's GPU renderers
+            // could only run in software; cairo is the cheap way to get there.
+            ("GDK_DISABLE", std::ffi::OsStr::new("gl,vulkan")),
+        ],
+        // SAFETY: both are safe to call before anything else in GTK.
+        || unsafe {
+            (api.gdk_set_allowed_backends)(c"wayland".as_ptr());
+            (api.gtk_init_check)() != 0
+        },
+    );
+    if !started {
+        return Err("GTK could not connect to the web view compositor".to_string());
     }
+    // SAFETY: the display manager GTK just set up.
+    let display =
+        unsafe { (api.gdk_display_manager_get_default_display)((api.gdk_display_manager_get)()) };
+    // SAFETY: the display GTK now runs on.
+    unsafe { gtk::make_windows_transparent(api, display) };
     let identifier = foundation::bundle::main()
         .and_then(|bundle| bundle.identifier())
         .unwrap_or("rosetta3")
@@ -79,9 +109,41 @@ fn start() -> Result<Engine, String> {
     appkit::event::add_pump_hook(pump);
     Ok(Engine {
         api,
+        compositor,
         session: session as usize,
         thread: darwin::pthread::id(),
     })
+}
+
+/// Run `f` with `variables` set in the host's environment, then put back
+/// what was there.
+fn with_environment<T>(variables: &[(&str, &std::ffi::OsStr)], f: impl FnOnce() -> T) -> T {
+    let saved: Vec<_> = variables
+        .iter()
+        .map(|(name, _)| (*name, std::env::var_os(name)))
+        .collect();
+    for (name, value) in variables {
+        // SAFETY: not strictly - another host thread could be reading the
+        // environment. The window is one `gtk_init` long, at the first web
+        // view, and no other host code reads these two variables.
+        unsafe { std::env::set_var(name, value) };
+    }
+    let result = f();
+    for (name, value) in saved {
+        // SAFETY: as above.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+    result
+}
+
+/// Get the main thread to the pump, from the compositor's thread.
+fn wake() {
+    corefoundation::runloop::main().wake();
 }
 
 pub fn warn_once(message: &str) {

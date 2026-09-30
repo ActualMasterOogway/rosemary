@@ -340,16 +340,13 @@ fn set_window_value(object: Id, key: &str, value: Id) {
     if let Some(data) = expression(value) {
         run_script(
             object,
-            format!("window[{}] = {data};", crate::input::quote(key)),
+            format!("window[{}] = {data};", crate::js::quote(key)),
         );
         return;
     }
     let methods = web_methods(value);
     let id = NEXT_EXPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let names: Vec<String> = methods
-        .iter()
-        .map(|(n, _)| crate::input::quote(n))
-        .collect();
+    let names: Vec<String> = methods.iter().map(|(n, _)| crate::js::quote(n)).collect();
     if engine::tracing() {
         eprintln!(
             "rosetta3: webkit: window.{key} is an Objective-C object answering {}",
@@ -367,7 +364,7 @@ fn set_window_value(object: Id, key: &str, value: Id) {
         object,
         format!(
             "window.__rosetta3WebScript.define({{o: {id}, k: {}, m: [{}]}});",
-            crate::input::quote(key),
+            crate::js::quote(key),
             names.join(", ")
         ),
     );
@@ -621,10 +618,10 @@ fn handle(object: Id, request: &str) -> String {
         Ok(None) => {}
         Err(why) => {
             eprintln!("rosetta3: webkit: a page's call into native code failed: {why}");
-            out.push_str(&format!("\"e\": {}, ", crate::input::quote(&why)));
+            out.push_str(&format!("\"e\": {}, ", crate::js::quote(&why)));
         }
     }
-    let scripts: Vec<String> = scripts.iter().map(|s| crate::input::quote(s)).collect();
+    let scripts: Vec<String> = scripts.iter().map(|s| crate::js::quote(s)).collect();
     out.push_str(&format!("\"s\": [{}]}}", scripts.join(", ")));
     if engine::tracing() {
         let shown: String = out.chars().take(300).collect();
@@ -1300,7 +1297,7 @@ unsafe extern "C" fn script_set_value(receiver: Id, _sel: Sel, value: Id, key: I
 }
 
 unsafe extern "C" fn script_value(receiver: Id, _sel: Sel, key: Id) -> Id {
-    let script = format!("window[{}]", crate::input::quote(&engine::text_of(key)));
+    let script = format!("window[{}]", crate::js::quote(&engine::text_of(key)));
     let value = run_script(script_view(receiver), script);
     match value.is_null() {
         true => undefined(),
@@ -1311,7 +1308,7 @@ unsafe extern "C" fn script_value(receiver: Id, _sel: Sel, key: Id) -> Id {
 unsafe extern "C" fn script_remove_key(receiver: Id, _sel: Sel, key: Id) {
     let script = format!(
         "delete window[{}];",
-        crate::input::quote(&engine::text_of(key))
+        crate::js::quote(&engine::text_of(key))
     );
     run_script(script_view(receiver), script);
 }
@@ -1332,7 +1329,7 @@ unsafe extern "C" fn script_call(receiver: Id, _sel: Sel, name: Id, arguments: I
     };
     let script = format!(
         "window[{name}].apply(window, {arguments})",
-        name = crate::input::quote(&name)
+        name = crate::js::quote(&name)
     );
     let value = run_script(script_view(receiver), script);
     match value.is_null() {
