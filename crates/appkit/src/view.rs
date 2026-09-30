@@ -35,6 +35,9 @@ pub struct View {
     does_not_autoresize_subviews: usize,
     /// `-setHidden:`.
     hidden: usize,
+    /// `-setAlphaValue:`, as the bits of `1 - alpha` so that zero is AppKit's
+    /// fully opaque default.
+    transparency: u64,
     /// `-setTranslatesAutoresizingMaskIntoConstraints:`, inverted like
     /// `does_not_autoresize_subviews` so that zero is AppKit's `YES`.
     constrained: usize,
@@ -446,6 +449,46 @@ pub(crate) fn layer_of(view: Id) -> Id {
 /// Whether `-setHidden:` hid this view itself, ancestors aside.
 pub(crate) fn is_hidden_itself(view: Id) -> bool {
     is_view(view) && view_of(view).hidden != 0
+}
+
+/// `-alphaValue` of `view` alone, ancestors aside.
+pub(crate) fn alpha_of(view: Id) -> f64 {
+    match is_view(view) {
+        true => 1.0 - f64::from_bits(view_of(view).transparency),
+        false => 1.0,
+    }
+}
+
+/// The opacity `view` is composited with: its own `-alphaValue` times every
+/// ancestor's, since AppKit fades a view's whole subtree with it.
+pub(crate) fn effective_alpha(view: Id) -> f64 {
+    let mut alpha = 1.0;
+    let mut current = view;
+    for _ in 0..64 {
+        if !is_view(current) {
+            break;
+        }
+        alpha *= alpha_of(current);
+        current = view_of(current).superview;
+    }
+    alpha
+}
+
+unsafe extern "C" fn set_alpha_value(receiver: Id, _sel: Sel, alpha: CGFloat) {
+    // NaN clamps to opaque rather than poisoning every blend below it.
+    let alpha = match alpha.is_nan() {
+        true => 1.0,
+        false => alpha.clamp(0.0, 1.0),
+    };
+    let before = alpha_of(receiver);
+    view_of(receiver).transparency = (1.0 - alpha).to_bits();
+    if before != alpha {
+        crate::backing::needs_display(receiver);
+    }
+}
+
+unsafe extern "C" fn alpha_value(receiver: Id, _sel: Sel) -> CGFloat {
+    alpha_of(receiver)
 }
 
 unsafe extern "C" fn set_allowed_touch_types(receiver: Id, _sel: Sel, mask: usize) {
@@ -1693,6 +1736,8 @@ pub(crate) fn install() {
         "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setNeedsDisplay:" => set_needs_display, c"v20@0:8c16";
         "setHidden:" => set_hidden, c"v20@0:8c16";
+        "setAlphaValue:" => set_alpha_value, c"v24@0:8d16";
+        "alphaValue" => alpha_value, c"d16@0:8";
         // Drawing focus rings belongs to AppKit's control renderer, which this
         // view does not have; accepting the policy still lets Qt construct it.
         "setFocusRingType:" => ignored_integer, c"v24@0:8Q16";
@@ -1771,6 +1816,26 @@ mod tests {
         unsafe { add_subview(superview, objc::sel::get("addSubview:"), subview) };
         view_of(subview).autoresizing_mask = mask;
         (superview, subview)
+    }
+
+    /// A view starts opaque, reads back the clamped alpha it was given, and
+    /// fades its subviews with it.
+    #[test]
+    fn alpha_value_is_clamped_and_multiplies_down_the_tree() {
+        let (superview, subview) = tree(rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 5.0, 5.0), 0);
+        let set = objc::sel::get("setAlphaValue:");
+        let get = objc::sel::get("alphaValue");
+        // SAFETY: `-setAlphaValue:` is `void (id, SEL, CGFloat)` and
+        // `-alphaValue` is `CGFloat (id, SEL)`.
+        unsafe {
+            assert_eq!(alpha_value(subview, get), 1.0);
+            set_alpha_value(superview, set, 0.5);
+            set_alpha_value(subview, set, 2.0);
+            assert_eq!(alpha_value(subview, get), 1.0);
+            set_alpha_value(subview, set, 0.5);
+        }
+        assert_eq!(effective_alpha(subview), 0.25);
+        objc::arc::release(superview);
     }
 
     #[test]

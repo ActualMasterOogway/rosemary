@@ -722,6 +722,8 @@ struct Placed {
     /// show.
     rect: Rect,
     clip: Rect,
+    /// `-alphaValue` with its ancestors' folded in.
+    alpha: f64,
 }
 
 /// The shown views of a window, back to front, placed.
@@ -804,7 +806,13 @@ fn place_view(
         height: (frame.size.height * density).round() as i64,
     };
     let clip = clip.intersection(&rect);
-    out.push(Placed { view, rect, clip });
+    let alpha = crate::view::effective_alpha(view);
+    out.push(Placed {
+        view,
+        rect,
+        clip,
+        alpha,
+    });
     let flipped = crate::view::is_flipped(view);
     // SAFETY: a view this crate made.
     for child in unsafe { crate::view::children(view) } {
@@ -827,7 +835,7 @@ fn opaque_views(placed: &[Placed]) -> Vec<usize> {
     };
     placed[first + 1..]
         .iter()
-        .filter(|p| !p.clip.is_empty())
+        .filter(|p| !p.clip.is_empty() && p.alpha >= 1.0)
         .filter(|p| {
             stores.get(&(p.view as usize)).is_some_and(|store| {
                 i64::from(store.width) >= p.rect.width
@@ -993,7 +1001,7 @@ fn compose_window(window: Id) {
             .as_ref()
             .and_then(|views| views.get(&(p.view as usize)))
         {
-            blend_at(store, source, p.rect.x, p.rect.y, clip);
+            blend_at(store, source, p.rect.x, p.rect.y, clip, p.alpha);
         }
         if render(p.view, store, p.rect, clip, Pass::Sublayers) {
             animating.push(p.view as usize);
@@ -1071,8 +1079,14 @@ pub(crate) fn chrome_changed(sdl: sdl3::Window) {
 }
 
 /// Draw `source` with its top-left corner at `left`, `top` of `store`,
-/// source-over, within `clip`.
-fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect) {
+/// source-over, within `clip`, faded to `opacity`.
+fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect, opacity: f64) {
+    if opacity <= 0.0 {
+        return;
+    }
+    // 256 is exact: a scaled channel is then `texel * scale >> 8` with no
+    // rounding error at full opacity.
+    let scale = (opacity.min(1.0) * 256.0).round() as u32;
     let source_rect = Rect {
         x: left,
         y: top,
@@ -1095,8 +1109,12 @@ fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect) 
             .iter_mut()
             .zip(from_row.as_chunks::<4>().0)
         {
+            let texel = match scale {
+                256 => *texel,
+                _ => texel.map(|channel| ((u32::from(channel) * scale) >> 8) as u8),
+            };
             match texel[3] {
-                255 => target.copy_from_slice(texel),
+                255 => target.copy_from_slice(&texel),
                 0 => {}
                 alpha => {
                     let keep = 255 - u32::from(alpha);
@@ -1710,9 +1728,29 @@ mod tests {
             width: 2,
             height: 1,
         };
-        blend_at(&mut window, &parent, 0, 0, whole);
-        blend_at(&mut window, &child, 1, 0, whole);
+        blend_at(&mut window, &parent, 0, 0, whole, 1.0);
+        blend_at(&mut window, &child, 1, 0, whole, 1.0);
         assert_eq!(window.pixels, [1, 1, 1, 255, 9, 9, 9, 255]);
+    }
+
+    /// `-alphaValue` fades a view's pixels into what is under them.
+    #[test]
+    fn a_translucent_views_pixels_are_faded_over_the_store() {
+        let mut window = store_of(2, 1);
+        window.pixels = vec![0, 0, 200, 255, 0, 0, 200, 255];
+        let mut view = store_of(2, 1);
+        view.pixels = vec![200, 0, 0, 255, 200, 0, 0, 255];
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+        blend_at(&mut window, &view, 0, 0, whole, 0.5);
+        assert_eq!(window.pixels[..4], [100, 0, 100, 255]);
+        let before = window.pixels.clone();
+        blend_at(&mut window, &view, 0, 0, whole, 0.0);
+        assert_eq!(window.pixels, before);
     }
 
     fn store_of(width: u32, height: u32) -> Store {
