@@ -1047,6 +1047,7 @@ unsafe extern "C" fn init_with_frame_configuration(
         return receiver;
     }
     forget(receiver);
+    track_pointer(receiver);
     let configuration = match configuration.is_null() {
         true => configuration::new_configuration(),
         false => objc::arc::retain(configuration),
@@ -1095,6 +1096,36 @@ unsafe extern "C" fn init_with_frame_configuration(
 unsafe extern "C" fn init_with_frame(receiver: Id, sel: Sel, frame: NSRect) -> Id {
     // SAFETY: the designated initializer with the default configuration.
     unsafe { init_with_frame_configuration(receiver, sel, frame, std::ptr::null_mut()) }
+}
+
+/// Ask for `-mouseMoved:` over the view, as WebKit's own view does: AppKit
+/// sends it only to a window that accepts it or to a tracking area's owner,
+/// and without it the page sees the pointer only when a button changes.
+fn track_pointer(receiver: Id) {
+    // `NSTrackingMouseMoved | NSTrackingActiveInActiveApp |
+    // NSTrackingInVisibleRect`: the rectangle follows the bounds.
+    const OPTIONS: usize = 0x02 | 0x40 | 0x200;
+    let class = objc::class::lookup(c"NSTrackingArea").expect("registered by AppKit");
+    // SAFETY: `+alloc` is `id (Class, SEL)`, the initializer is
+    // `id (id, SEL, NSRect, NSUInteger, id, id)` and `-addTrackingArea:`,
+    // which retains the area, is `void (id, SEL, id)`.
+    unsafe {
+        let area = send!(objc::class::ptr(class) as Id, "alloc"; Id);
+        let area = send!(
+            area,
+            "initWithRect:options:owner:userInfo:",
+            NSRect::default() => NSRect,
+            OPTIONS => usize,
+            receiver => Id,
+            std::ptr::null_mut() => Id;
+            Id
+        );
+        if area.is_null() {
+            return;
+        }
+        send!(receiver, "addTrackingArea:", area => Id; ());
+        objc::arc::release(area);
+    }
 }
 
 /// Drop everything held for `object`.

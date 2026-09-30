@@ -222,6 +222,7 @@ struct Api {
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_CreateColorCursor: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> Cursor>,
+    SDL_CreateSystemCursor: Option<unsafe extern "C" fn(c_int) -> Cursor>,
     SDL_SetCursor: Option<unsafe extern "C" fn(Cursor) -> bool>,
     SDL_GetDefaultCursor: Option<unsafe extern "C" fn() -> Cursor>,
     SDL_DestroyCursor: Option<unsafe extern "C" fn(Cursor)>,
@@ -440,6 +441,7 @@ fn api() -> Option<&'static Api> {
             SDL_HideCursor,
             SDL_ShowCursor,
             SDL_CreateColorCursor,
+            SDL_CreateSystemCursor,
             SDL_SetCursor,
             SDL_GetDefaultCursor,
             SDL_DestroyCursor,
@@ -2765,6 +2767,31 @@ pub mod video {
         let cursor = unsafe { create(surface, hot_x, hot_y) };
         // SAFETY: as above; SDL has taken its own copy by now.
         unsafe { destroy(surface) };
+        (!cursor.is_null()).then_some(cursor)
+    }
+
+    /// `SDL_SystemCursor`, for [`create_system_cursor`].
+    pub mod system_cursor {
+        use std::ffi::c_int;
+
+        pub const TEXT: c_int = 1;
+        pub const CROSSHAIR: c_int = 3;
+        pub const EW_RESIZE: c_int = 7;
+        pub const NS_RESIZE: c_int = 8;
+        pub const NOT_ALLOWED: c_int = 10;
+        pub const POINTER: c_int = 11;
+        pub const N_RESIZE: c_int = 13;
+        pub const E_RESIZE: c_int = 15;
+        pub const S_RESIZE: c_int = 17;
+        pub const W_RESIZE: c_int = 19;
+    }
+
+    /// One of the desktop's own cursors, by its `SDL_SystemCursor` value. The
+    /// cursor belongs to the caller until [`destroy_cursor`].
+    pub fn create_system_cursor(id: c_int) -> Option<Cursor> {
+        let create = api()?.SDL_CreateSystemCursor?;
+        // SAFETY: SDL rejects an id outside its enumeration with null.
+        let cursor = unsafe { create(id) };
         (!cursor.is_null()).then_some(cursor)
     }
 

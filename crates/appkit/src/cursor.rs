@@ -25,16 +25,16 @@ pub const TRACKING_AREA_INSTANCE_SIZE: usize = size_of::<TrackingArea>();
 #[repr(C)]
 pub struct Cursor {
     isa: *const c_void,
-    /// Which of the named cursors this is. SDL has no shape to switch to, so
-    /// the value is kept for a program that reads it back and not used.
+    /// Which of the named cursors this is, an index into [`SHAPES`].
     shape: usize,
     /// The image a custom cursor was made from, retained, and where its point
     /// is. Both are read back by a program, and both are what `sdl` was built
     /// from.
     image: Id,
     hot_spot: foundation::geometry::NSPoint,
-    /// The SDL cursor `-set` shows, or null for a named cursor and for an
-    /// image this tree could not decode - both of which show the desktop's.
+    /// The SDL cursor `-set` shows, or null for the arrow, for a named cursor
+    /// the desktop has no shape for and for an image this tree could not
+    /// decode - all of which show the desktop's arrow.
     sdl: sdl3::Cursor,
     /// `-setOnMouseEntered:` and `-setOnMouseExited:`, stored to be read back.
     on_mouse_entered: usize,
@@ -125,7 +125,7 @@ pub fn tracing() -> bool {
 fn show(cursor: Id) {
     let sdl = match is_cursor(cursor) {
         // SAFETY: a cursor of this crate's.
-        true => unsafe { (*(cursor as *const Cursor)).sdl },
+        true => unsafe { sdl_of(&mut *(cursor as *mut Cursor)) },
         false => std::ptr::null_mut(),
     };
     // Recorded apart from `SHOWN`: every named cursor shares the null SDL
@@ -137,6 +137,19 @@ fn show(cursor: Id) {
         return;
     }
     sdl3::video::set_cursor(sdl);
+}
+
+/// The SDL cursor a cursor object shows. A named cursor's is made the first
+/// time it is shown rather than by `+pointingHandCursor`, which a program can
+/// call before SDL's video is up, and the object lives forever.
+fn sdl_of(cursor: &mut Cursor) -> sdl3::Cursor {
+    if cursor.sdl.is_null()
+        && cursor.image.is_null()
+        && let Some(id) = SHAPES.get(cursor.shape).and_then(|s| system_cursor(s))
+    {
+        cursor.sdl = sdl3::video::create_system_cursor(id).unwrap_or(std::ptr::null_mut());
+    }
+    cursor.sdl
 }
 
 /// The SDL cursor on screen, so [`show`] can skip the calls that change
@@ -239,7 +252,7 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     );
     if !cursor.sdl.is_null() {
         SHOWN.store(usize::MAX, std::sync::atomic::Ordering::Release);
-        // SAFETY: made by `create_color_cursor`, and destroyed once - the last
+        // SAFETY: made by SDL for this object, and destroyed once - the last
         // reference to the object holding it is gone.
         unsafe { sdl3::video::destroy_cursor(cursor.sdl) };
         cursor.sdl = std::ptr::null_mut();
@@ -743,8 +756,8 @@ unsafe extern "C" fn window_cursor_update(_receiver: Id, _sel: Sel, _event: Id) 
 
 /// The named cursors, made once each.
 ///
-/// The shape is the index in this list. Every one is the same pointer as far as
-/// SDL is concerned, and they are distinct objects because a program compares
+/// The shape is the index in this list. They are distinct objects even where
+/// SDL shows the same pointer for two, because a program compares
 /// `[NSCursor currentCursor]` against the one it set.
 static SHAPES: &[&str] = &[
     "arrowCursor",
@@ -782,6 +795,25 @@ fn cursor_for(shape: usize) -> Id {
     objc::arc::retain(cursor as Id);
     cursors.push((shape, cursor as usize));
     cursor as Id
+}
+
+/// The desktop's shape for a named cursor, or `None` to show its arrow. The
+/// hands, drag badges and menu cursor have no counterpart among SDL's shapes.
+fn system_cursor(name: &str) -> Option<std::ffi::c_int> {
+    use sdl3::video::system_cursor::*;
+    Some(match name {
+        "IBeamCursor" | "IBeamCursorForVerticalLayout" => TEXT,
+        "pointingHandCursor" => POINTER,
+        "crosshairCursor" => CROSSHAIR,
+        "resizeLeftCursor" => W_RESIZE,
+        "resizeRightCursor" => E_RESIZE,
+        "resizeLeftRightCursor" => EW_RESIZE,
+        "resizeUpCursor" => N_RESIZE,
+        "resizeDownCursor" => S_RESIZE,
+        "resizeUpDownCursor" => NS_RESIZE,
+        "operationNotAllowedCursor" => NOT_ALLOWED,
+        _ => return None,
+    })
 }
 
 unsafe extern "C" fn named_cursor(_class: Id, sel: Sel) -> Id {
