@@ -15,5 +15,6 @@ foundation.workspace = true
 sdl3.workspace = true
 chrome.workspace = true
 gamecontroller.workspace = true
+iosurface.workspace = true
 static_init.workspace = true
 owned_ttf_parser.workspace = true

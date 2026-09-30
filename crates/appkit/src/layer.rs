@@ -133,6 +133,14 @@ pub(crate) fn set_bounds_of(layer: Id, bounds: NSRect) {
     }
 }
 
+/// A layer's `-contentsScale`, one for something that is not a layer.
+pub(crate) fn contents_scale_of(layer: Id) -> f64 {
+    match is_layer(layer) {
+        true => layer_of(layer).contents_scale,
+        false => 1.0,
+    }
+}
+
 /// Whether `layer` is a `CAMetalLayer`, whose pixels are presented by Metal
 /// rather than drawn by the window's views.
 pub(crate) fn is_metal(layer: Id) -> bool {
@@ -144,6 +152,43 @@ pub(crate) fn is_metal(layer: Id) -> bool {
                 .any(|candidate| std::ptr::eq(candidate, metal))
         })
     })
+}
+
+/// A layer's `-delegate`, or null for something that is not a layer.
+pub(crate) fn delegate_of(layer: Id) -> Id {
+    match is_layer(layer) {
+        true => layer_of(layer).delegate,
+        false => std::ptr::null_mut(),
+    }
+}
+
+pub(crate) fn set_delegate_of(layer: Id, delegate: Id) {
+    if is_layer(layer) {
+        objc::arc::store_weak(&mut layer_of(layer).delegate, delegate);
+    }
+}
+
+/// Apply an `NSViewLayerContentsPlacement` to a backing layer, as AppKit maps
+/// each placement to the `contentsGravity` of the same name.
+pub(crate) fn set_contents_gravity_for_placement(layer: Id, placement: isize) {
+    use crate::coreanimation::Gravity;
+    let gravity = match placement {
+        1 => Gravity::ResizeAspect,
+        2 => Gravity::ResizeAspectFill,
+        3 => Gravity::Center,
+        4 => Gravity::Top,
+        5 => Gravity::TopRight,
+        6 => Gravity::Right,
+        7 => Gravity::BottomRight,
+        8 => Gravity::Bottom,
+        9 => Gravity::BottomLeft,
+        10 => Gravity::Left,
+        11 => Gravity::TopLeft,
+        _ => Gravity::Resize,
+    };
+    if is_layer(layer) {
+        crate::coreanimation::set_gravity(layer, gravity);
+    }
 }
 
 fn is_layer(object: Id) -> bool {
@@ -217,8 +262,10 @@ fn send_void(receiver: Id, name: &str) {
 /// `-display`: the delegate's `-displayLayer:` if it has one, otherwise a
 /// context sized to the bounds for `-drawInContext:`.
 ///
-/// This layer has no `contents`, so what is drawn is discarded; the calls are
-/// made because guests put their state updates in them.
+/// What `-drawInContext:` draws is discarded rather than becoming the layer's
+/// `contents`, which needs `CGBitmapContextCreateImage`; the calls are made
+/// because guests put their state updates in them. A delegate that sets
+/// `contents` itself from `-displayLayer:` is drawn.
 unsafe extern "C" fn display(receiver: Id, _sel: Sel) {
     layer_of(receiver).needs_display = 0;
     if let Some((delegate, sel)) = delegate_responding(receiver, "displayLayer:") {
@@ -281,8 +328,14 @@ unsafe extern "C" fn draw_in_context(receiver: Id, _sel: Sel, context: *const c_
     }
 }
 
+/// `-setNeedsDisplay`. A view's layer is displayed in its window's next display
+/// pass, which is where a layer that needs display is sent `-display`.
 unsafe extern "C" fn set_needs_display(receiver: Id, _sel: Sel) {
-    layer_of(receiver).needs_display = 1;
+    let layer = layer_of(receiver);
+    layer.needs_display = 1;
+    if !layer.view.is_null() {
+        crate::backing::needs_display(layer.view);
+    }
 }
 
 unsafe extern "C" fn needs_display(receiver: Id, _sel: Sel) -> u8 {

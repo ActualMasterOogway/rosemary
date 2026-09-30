@@ -122,6 +122,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(corevideo::symbol),
     },
     Framework {
+        leaf: "IOSurface",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(iosurface::provide),
+        data: Some(iosurface::data_symbols),
+        symbol: Some(iosurface::symbol),
+    },
+    Framework {
         leaf: "CoreAudio",
         version: 'A',
         umbrellas: &[],

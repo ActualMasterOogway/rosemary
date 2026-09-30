@@ -2063,6 +2063,16 @@ unsafe extern "C" fn are_cursor_rects_enabled(_receiver: Id, _sel: Sel) -> u8 {
     crate::cursor::rects_enabled() as u8
 }
 
+/// `-viewsNeedDisplay`: whether a view of this window is waiting for the next
+/// display pass.
+unsafe extern "C" fn views_need_display(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(crate::backing::window_needs_display(receiver))
+}
+
+/// `-setViewsNeedDisplay:`. Setting it asks for a display pass, which the event
+/// pump runs on every turn anyway; clearing it is what that pass does.
+unsafe extern "C" fn set_views_need_display(_receiver: Id, _sel: Sel, _flag: u8) {}
+
 pub(crate) fn install() {
     let responder = objc::class::lookup(c"NSResponder").expect("declared before its methods");
     methods!(responder, {
@@ -2210,6 +2220,8 @@ pub(crate) fn install() {
         "center" => ignored, c"v16@0:8";
         "display" => display_window, c"v16@0:8";
         "displayIfNeeded" => ignored, c"v16@0:8";
+        "viewsNeedDisplay" => views_need_display, c"c16@0:8";
+        "setViewsNeedDisplay:" => set_views_need_display, c"v20@0:8c16";
         "flushWindow" => ignored, c"v16@0:8";
         "flushWindowIfNeeded" => ignored, c"v16@0:8";
         "update" => ignored, c"v16@0:8";

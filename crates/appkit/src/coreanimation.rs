@@ -1,10 +1,12 @@
 //! Core Animation's layer tree and basic animations, drawn by the compositor.
 //!
-//! A layer here has geometry, a background colour, sublayers, `masksToBounds`,
-//! opacity and running animations. That is what a program builds a progress
-//! bar, a spinner or a highlight out of. Layer `contents`, borders, corner
-//! radii, shadows and transforms are not drawn; a program that relies on them
-//! gets its layer's background and no more.
+//! A layer here has geometry, a background colour, `contents` (an
+//! `IOSurfaceRef`, a `CGImageRef` or an `NSImage`) placed by
+//! `contentsGravity`, sublayers, `masksToBounds`, opacity and running
+//! animations. That is what a program builds a progress bar, a spinner or a
+//! highlight out of, and what a layer-backed view's content arrives as. Borders,
+//! corner radii, shadows, `contentsRect` and transforms are not drawn; a program
+//! that relies on them gets its layer's background and contents and no more.
 //!
 //! The state lives in side tables keyed by object address rather than in
 //! `crate::layer::Layer`, whose layout a `CAMetalLayer` extends.
@@ -32,6 +34,53 @@ pub const FILL_FORWARDS: &str = "forwards";
 pub const FILL_BACKWARDS: &str = "backwards";
 pub const FILL_BOTH: &str = "both";
 pub const FILL_REMOVED: &str = "removed";
+
+/// `kCAGravity...`, likewise.
+pub const GRAVITIES: &[(&str, &str, Gravity)] = &[
+    ("_kCAGravityCenter", "center", Gravity::Center),
+    ("_kCAGravityTop", "top", Gravity::Top),
+    ("_kCAGravityBottom", "bottom", Gravity::Bottom),
+    ("_kCAGravityLeft", "left", Gravity::Left),
+    ("_kCAGravityRight", "right", Gravity::Right),
+    ("_kCAGravityTopLeft", "topLeft", Gravity::TopLeft),
+    ("_kCAGravityTopRight", "topRight", Gravity::TopRight),
+    ("_kCAGravityBottomLeft", "bottomLeft", Gravity::BottomLeft),
+    (
+        "_kCAGravityBottomRight",
+        "bottomRight",
+        Gravity::BottomRight,
+    ),
+    ("_kCAGravityResize", "resize", Gravity::Resize),
+    (
+        "_kCAGravityResizeAspect",
+        "resizeAspect",
+        Gravity::ResizeAspect,
+    ),
+    (
+        "_kCAGravityResizeAspectFill",
+        "resizeAspectFill",
+        Gravity::ResizeAspectFill,
+    ),
+];
+
+/// Where a layer's contents sit in its bounds. The edges are the ones a
+/// person sees: `Top` is the top of the view on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Gravity {
+    #[default]
+    Resize,
+    ResizeAspect,
+    ResizeAspectFill,
+    Center,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
 
 /// The control points of each named timing function, as Apple defines them.
 fn named_timing(name: &str) -> Option<[f64; 4]> {
@@ -63,6 +112,13 @@ struct Node {
     hidden: bool,
     opacity: f64,
     animations: Vec<(String, Running)>,
+    /// `-contents`, retained. A surface also holds a use count while it is
+    /// here, which is what tells its owner it is on screen.
+    contents: usize,
+    gravity: Gravity,
+    /// `contents` as premultiplied BGRA, for the kinds that are not already:
+    /// the object it was made from, its width and height, and its pixels.
+    decoded: Option<(usize, usize, usize, Vec<u8>)>,
 }
 
 impl Default for Node {
@@ -78,6 +134,9 @@ impl Default for Node {
             hidden: false,
             opacity: 1.0,
             animations: Vec::new(),
+            contents: 0,
+            gravity: Gravity::Resize,
+            decoded: None,
         }
     }
 }
@@ -125,6 +184,7 @@ pub(crate) fn forget(layer: Id) {
         objc::arc::release(running.object as Id);
     }
     objc::arc::release(node.background_object as Id);
+    let_go_of_contents(node.contents);
 }
 
 /// The layer at the top of `layer`'s tree.
@@ -325,6 +385,64 @@ unsafe extern "C" fn set_opacity(receiver: Id, _sel: Sel, value: f32) {
         node.opacity = f64::from(value).clamp(0.0, 1.0)
     });
     changed(receiver);
+}
+
+/// Stop showing `contents`: its use count and the layer's reference go.
+fn let_go_of_contents(contents: usize) {
+    if contents == 0 {
+        return;
+    }
+    if iosurface::is_surface(contents as CFTypeRef) {
+        // SAFETY: a live surface this layer retained.
+        unsafe { iosurface::IOSurfaceDecrementUseCount(contents as CFTypeRef) };
+    }
+    objc::arc::release(contents as Id);
+}
+
+unsafe extern "C" fn contents(receiver: Id, _sel: Sel) -> Id {
+    read_node(receiver, |node| node.map_or(0, |node| node.contents)) as Id
+}
+
+/// `-setContents:`. A surface shown by a layer is in use for as long as it is
+/// shown, as the window server's use of one is on a Mac.
+unsafe extern "C" fn set_contents(receiver: Id, _sel: Sel, contents: Id) {
+    let retained = objc::arc::retain(contents) as usize;
+    if iosurface::is_surface(contents as CFTypeRef) {
+        // SAFETY: a live surface.
+        unsafe { iosurface::IOSurfaceIncrementUseCount(contents as CFTypeRef) };
+    }
+    let old = with_node(receiver, |node| {
+        node.decoded = None;
+        std::mem::replace(&mut node.contents, retained)
+    });
+    let_go_of_contents(old);
+    changed(receiver);
+}
+
+unsafe extern "C" fn contents_gravity(receiver: Id, _sel: Sel) -> Id {
+    let gravity = read_node(receiver, |node| {
+        node.map_or(Gravity::Resize, |node| node.gravity)
+    });
+    let name = GRAVITIES
+        .iter()
+        .find(|(_, _, g)| *g == gravity)
+        .map_or("resize", |(_, name, _)| name);
+    corefoundation::base::interned_name(name) as usize as Id
+}
+
+/// `-setContentsGravity:`, whose names are Core Animation's; one it does not
+/// define leaves the gravity as it was.
+unsafe extern "C" fn set_contents_gravity(receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: an `NSString`, or nil.
+    let name = unsafe { text(name) };
+    if let Some((_, _, gravity)) = GRAVITIES.iter().find(|(_, n, _)| *n == name) {
+        set_gravity(receiver, *gravity);
+    }
+}
+
+pub(crate) fn set_gravity(layer: Id, gravity: Gravity) {
+    with_node(layer, |node| node.gravity = gravity);
+    changed(layer);
 }
 
 //
@@ -1076,8 +1194,210 @@ fn fill(store: &mut Store, rect: Rect, color: [f64; 4], opacity: f64) {
     }
 }
 
+/// A layer's contents as pixels to draw: premultiplied B, G, R, A rows, or
+/// R, G, B, A where `swap` says so.
+struct Source<'a> {
+    width: usize,
+    height: usize,
+    stride: usize,
+    bytes: &'a [u8],
+    swap: bool,
+}
+
+/// Say once that a surface in `format` is not drawn.
+fn say_undrawn_format(format: u32) {
+    static SAID: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if !said.contains(&format) {
+        said.push(format);
+        eprintln!(
+            "rosetta3: appkit: layer contents in IOSurface pixel format {:?} are not drawn; only \
+             'BGRA' and 'RGBA' are",
+            String::from_utf8_lossy(&format.to_be_bytes())
+        );
+    }
+}
+
+/// Premultiplied BGRA pixels of a `CGImage` or an `NSImage`, top row first.
+fn decode_contents(contents: usize) -> Option<(usize, usize, Vec<u8>)> {
+    if let Some(decoded) = crate::graphics::image_bgra(contents as CFTypeRef) {
+        return Some(decoded);
+    }
+    let bitmap = crate::image::bitmap(contents as Id)?;
+    let mut pixels = bitmap.pixels;
+    for texel in pixels.as_chunks_mut::<4>().0 {
+        let a = u16::from(texel[3]);
+        let scale = |c: u8| ((u16::from(c) * a + 127) / 255) as u8;
+        *texel = [scale(texel[2]), scale(texel[1]), scale(texel[0]), texel[3]];
+    }
+    Some((bitmap.width as usize, bitmap.height as usize, pixels))
+}
+
+/// Run `f` over `layer`'s contents, if it has any this can draw.
+fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
+    let (contents, cached) = read_node(layer, |node| {
+        node.map_or((0, false), |node| {
+            let cached = node
+                .decoded
+                .as_ref()
+                .is_some_and(|(object, ..)| *object == node.contents);
+            (node.contents, cached)
+        })
+    });
+    if contents == 0 {
+        return None;
+    }
+    if let Some(surface) = iosurface::pixels(contents as CFTypeRef) {
+        let swap = match surface.pixel_format {
+            iosurface::PIXEL_FORMAT_BGRA => false,
+            format if format == u32::from_be_bytes(*b"RGBA") => true,
+            format => {
+                say_undrawn_format(format);
+                return None;
+            }
+        };
+        if surface.bytes_per_element != 4 || surface.width == 0 || surface.height == 0 {
+            return None;
+        }
+        // SAFETY: the surface is retained by the layer, and its allocation
+        // covers `bytes_per_row` bytes for each of its rows.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(surface.data, surface.bytes_per_row * surface.height)
+        };
+        return Some(f(Source {
+            width: surface.width,
+            height: surface.height,
+            stride: surface.bytes_per_row,
+            bytes,
+            swap,
+        }));
+    }
+    if !cached {
+        let decoded = decode_contents(contents)?;
+        with_node(layer, |node| {
+            if node.contents == contents {
+                node.decoded = Some((contents, decoded.0, decoded.1, decoded.2));
+            }
+        });
+    }
+    read_node(layer, |node| {
+        let (_, width, height, pixels) = node?.decoded.as_ref()?;
+        Some(f(Source {
+            width: *width,
+            height: *height,
+            stride: width * 4,
+            bytes: pixels,
+            swap: false,
+        }))
+    })
+}
+
+/// Where contents of `width` by `height` window pixels land in `bounds`.
+fn place(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> (f64, f64, f64, f64) {
+    let (bx, by) = (bounds.x as f64, bounds.y as f64);
+    let (bw, bh) = (bounds.width as f64, bounds.height as f64);
+    let fit = |scale: f64| {
+        let (w, h) = (width * scale, height * scale);
+        (bx + (bw - w) / 2.0, by + (bh - h) / 2.0, w, h)
+    };
+    match gravity {
+        Gravity::Resize => return (bx, by, bw, bh),
+        Gravity::ResizeAspect => return fit((bw / width).min(bh / height)),
+        Gravity::ResizeAspectFill => return fit((bw / width).max(bh / height)),
+        _ => {}
+    }
+    let x = match gravity {
+        Gravity::Left | Gravity::TopLeft | Gravity::BottomLeft => bx,
+        Gravity::Right | Gravity::TopRight | Gravity::BottomRight => bx + bw - width,
+        _ => bx + (bw - width) / 2.0,
+    };
+    let y = match gravity {
+        Gravity::Top | Gravity::TopLeft | Gravity::TopRight => by,
+        Gravity::Bottom | Gravity::BottomLeft | Gravity::BottomRight => by + bh - height,
+        _ => by + (bh - height) / 2.0,
+    };
+    (x, y, width, height)
+}
+
+/// Draw `layer`'s contents into `store` for a layer at `bounds` in window
+/// pixels, `scale` window pixels to the point, within `clip`, source-over.
+fn draw_contents(
+    store: &mut Store,
+    layer: Id,
+    bounds: Rect,
+    scale: (f64, f64),
+    clip: Rect,
+    opacity: f64,
+) {
+    if opacity <= 0.0 || bounds.is_empty() {
+        return;
+    }
+    let gravity = read_node(layer, |node| {
+        node.map_or(Gravity::Resize, |node| node.gravity)
+    });
+    let contents_scale = crate::layer::contents_scale_of(layer);
+    with_contents(layer, |source| {
+        let (x, y, width, height) = place(
+            gravity,
+            bounds,
+            source.width as f64 / contents_scale * scale.0,
+            source.height as f64 / contents_scale * scale.1,
+        );
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let area = Rect {
+            x: x.round() as i64,
+            y: y.round() as i64,
+            width: ((x + width).round() - x.round()) as i64,
+            height: ((y + height).round() - y.round()) as i64,
+        }
+        .intersection(&clip)
+        .intersection(&Rect {
+            x: 0,
+            y: 0,
+            width: i64::from(store.width),
+            height: i64::from(store.height),
+        });
+        if area.is_empty() {
+            return;
+        }
+        let columns: Vec<usize> = (area.x..area.x + area.width)
+            .map(|column| {
+                let u = (column as f64 + 0.5 - x) / width;
+                ((u * source.width as f64) as usize).min(source.width - 1)
+            })
+            .collect();
+        let fraction = (opacity.min(1.0) * 256.0).round() as u32;
+        for row in area.y..area.y + area.height {
+            let v = (row as f64 + 0.5 - y) / height;
+            let from = ((v * source.height as f64) as usize).min(source.height - 1);
+            let from = &source.bytes[from * source.stride..from * source.stride + source.width * 4];
+            let base = (row as usize * store.width as usize + area.x as usize) * 4;
+            let to = &mut store.pixels[base..base + area.width as usize * 4];
+            for (target, &column) in to.as_chunks_mut::<4>().0.iter_mut().zip(&columns) {
+                let t = &from[column * 4..column * 4 + 4];
+                let texel = match source.swap {
+                    true => [t[2], t[1], t[0], t[3]],
+                    false => [t[0], t[1], t[2], t[3]],
+                };
+                if fraction >= 256 && texel[3] == 255 {
+                    *target = texel;
+                    continue;
+                }
+                let alpha = u32::from(texel[3]) * fraction / 256;
+                for channel in 0..4 {
+                    let s = u32::from(texel[channel]) * fraction / 256;
+                    let d = u32::from(target[channel]) * (255 - alpha) / 255;
+                    target[channel] = (s + d).min(255) as u8;
+                }
+            }
+        }
+    });
+}
+
 /// Which part of a view's layer tree [`render`] draws: the root layer's own
-/// background goes under the view's drawing, the sublayers over it.
+/// background and contents go under the view's drawing, the sublayers over it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pass {
     Background,
@@ -1109,10 +1429,23 @@ pub(crate) fn render(view: Id, store: &mut Store, rect: Rect, clip: Rect, pass: 
     }
     match pass {
         Pass::Background => {
+            let whole = mapping.to_pixels(view_bounds);
             if let Some(color) = root_presented.background {
-                let whole = mapping.to_pixels(view_bounds).intersection(&clip);
-                fill(store, whole, color, root_presented.opacity);
+                fill(
+                    store,
+                    whole.intersection(&clip),
+                    color,
+                    root_presented.opacity,
+                );
             }
+            draw_contents(
+                store,
+                root,
+                whole,
+                (mapping.scale_x, mapping.scale_y),
+                clip,
+                root_presented.opacity,
+            );
             false
         }
         Pass::Sublayers => {
@@ -1176,6 +1509,14 @@ fn draw_layer(
     if let Some(color) = presented.background {
         fill(store, pixels.intersection(&clip), color, opacity);
     }
+    draw_contents(
+        store,
+        layer,
+        pixels,
+        (mapping.scale_x, mapping.scale_y),
+        clip,
+        opacity,
+    );
     let clip = match presented.masks_to_bounds {
         true => clip.intersection(&pixels),
         false => clip,
@@ -1202,7 +1543,9 @@ fn draw_layer(
 /// Whether `layer`'s tree has anything to draw beyond the view's own pixels.
 pub(crate) fn has_tree(layer: Id) -> bool {
     read_node(layer, |node| {
-        node.is_some_and(|node| node.background.is_some() || !node.sublayers.is_empty())
+        node.is_some_and(|node| {
+            node.background.is_some() || node.contents != 0 || !node.sublayers.is_empty()
+        })
     })
 }
 
@@ -1227,6 +1570,10 @@ pub(crate) fn install() {
         "isHidden" => is_hidden, c"c16@0:8";
         "setHidden:" => set_hidden, c"v20@0:8c16";
         "opacity" => opacity, c"f16@0:8";
+        "contents" => contents, c"@16@0:8";
+        "setContents:" => set_contents, c"v24@0:8@16";
+        "contentsGravity" => contents_gravity, c"@16@0:8";
+        "setContentsGravity:" => set_contents_gravity, c"v24@0:8@16";
         "setOpacity:" => set_opacity, c"v20@0:8f16";
         "addAnimation:forKey:" => add_animation, c"v32@0:8@16@24";
         "animationForKey:" => animation_for_key, c"@24@0:8@16";
@@ -1462,5 +1809,143 @@ mod tests {
         );
         assert_eq!(&store.pixels[0..4], &[0, 0, 128, 128]);
         assert_eq!(&store.pixels[4..8], &[0, 0, 0, 0]);
+    }
+
+    /// A 2x1 BGRA surface: a red pixel then a green one.
+    fn surface() -> CFTypeRef {
+        let number = |value: i64| {
+            corefoundation::collections::new_number(corefoundation::collections::Number::Integer(
+                value,
+            ))
+        };
+        let key = |text: &str| corefoundation::base::interned_name(text) as usize as CFTypeRef;
+        let options = corefoundation::collections::new_dictionary(
+            &[
+                (key("IOSurfaceWidth"), number(2)),
+                (key("IOSurfaceHeight"), number(1)),
+                (key("IOSurfaceBytesPerElement"), number(4)),
+                (
+                    key("IOSurfacePixelFormat"),
+                    number(i64::from(iosurface::PIXEL_FORMAT_BGRA)),
+                ),
+            ],
+            corefoundation::callbacks::Policy::from_key_callbacks(),
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        // SAFETY: a dictionary of numbers, and a surface four bytes a pixel.
+        unsafe {
+            let surface = iosurface::IOSurfaceCreate(options);
+            let base = iosurface::IOSurfaceGetBaseAddress(surface) as *mut u8;
+            std::ptr::copy_nonoverlapping([0, 0, 255, 255, 0, 255, 0, 255].as_ptr(), base, 8);
+            surface
+        }
+    }
+
+    unsafe extern "C" fn metal_backing_layer(_receiver: Id, _sel: Sel) -> Id {
+        let class = objc::class::ptr(objc::class::lookup(c"CAMetalLayer").unwrap()) as Id;
+        send(class, "layer", ())
+    }
+
+    /// `-setWantsLayer:` makes the layer with the view's own
+    /// `-makeBackingLayer`, as Qt's `QNSView` relies on to get a
+    /// `CAMetalLayer`, and the view becomes its delegate.
+    #[test]
+    fn a_wanted_layer_comes_from_the_views_make_backing_layer() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"R3MetalBackedView").unwrap_or_else(|| {
+            let class = corefoundation::base::register(
+                c"R3MetalBackedView",
+                objc::class::lookup(c"NSView"),
+                crate::view::INSTANCE_SIZE,
+                false,
+            );
+            methods!(class, {
+                "makeBackingLayer" => metal_backing_layer, c"@16@0:8";
+            });
+            class
+        });
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(class, 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 10.0, 4.0));
+        assert_eq!(send::<(), u8>(view, "wantsLayer", ()), 0);
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        assert_eq!(send::<(), u8>(view, "wantsLayer", ()), 1);
+        let layer: Id = send(view, "layer", ());
+        assert!(crate::layer::is_metal(layer));
+        assert_eq!(crate::layer::delegate_of(layer), view);
+        assert_eq!(crate::layer::bounds_of(layer).size.width, 10.0);
+        send::<u8, ()>(view, "setWantsLayer:", 0);
+        assert!(send::<(), Id>(view, "layer", ()).is_null(), "AppKit's layer goes");
+        objc::arc::pool_pop(pool);
+    }
+
+    /// A layer shows a surface at its top-left corner when its gravity says
+    /// so, and holds a use count on it for as long as it does.
+    #[test]
+    fn a_surface_is_drawn_by_gravity_and_in_use_while_shown() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 4.0, 2.0));
+        send::<isize, ()>(view, "setLayerContentsPlacement:", 11);
+        assert_eq!(send::<(), isize>(view, "layerContentsPlacement", ()), 11);
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let layer: Id = send(view, "layer", ());
+        let surface = surface();
+        send::<Id, ()>(layer, "setContents:", surface as Id);
+        // SAFETY: a live surface.
+        assert_eq!(unsafe { iosurface::IOSurfaceIsInUse(surface) }, 1);
+
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        };
+        let mut store = Store::for_tests(4, 2);
+        render(view, &mut store, whole, whole, Pass::Background);
+        // Top-left, unscaled: red, green, then nothing; the second row empty.
+        assert_eq!(&store.pixels[0..8], &[0, 0, 255, 255, 0, 255, 0, 255]);
+        assert_eq!(&store.pixels[8..32], &[0; 24]);
+
+        send::<Id, ()>(layer, "setContents:", std::ptr::null_mut());
+        // SAFETY: a live surface.
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceIsInUse(surface), 0);
+            corefoundation::api::CFRelease(surface);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn gravity_places_contents_in_the_bounds() {
+        let bounds = Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
+        assert_eq!(
+            place(Gravity::Resize, bounds, 5.0, 5.0),
+            (10.0, 20.0, 100.0, 50.0)
+        );
+        assert_eq!(
+            place(Gravity::TopLeft, bounds, 5.0, 5.0),
+            (10.0, 20.0, 5.0, 5.0)
+        );
+        assert_eq!(
+            place(Gravity::BottomRight, bounds, 5.0, 5.0),
+            (105.0, 65.0, 5.0, 5.0)
+        );
+        // Fitting a square into a wide rectangle: as tall as it, centred.
+        assert_eq!(
+            place(Gravity::ResizeAspect, bounds, 10.0, 10.0),
+            (35.0, 20.0, 50.0, 50.0)
+        );
+        assert_eq!(
+            place(Gravity::ResizeAspectFill, bounds, 10.0, 10.0),
+            (10.0, -5.0, 100.0, 100.0)
+        );
     }
 }

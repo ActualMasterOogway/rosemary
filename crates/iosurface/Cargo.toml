@@ -1,0 +1,11 @@
+[package]
+name = "iosurface"
+description = "IOSurface: shareable pixel buffers for Core Animation and Metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+exports.workspace = true
+corefoundation.workspace = true
+objc.workspace = true

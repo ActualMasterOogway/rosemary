@@ -20,6 +20,7 @@ coreservices.workspace = true
 audiotoolbox.workspace = true
 sdl3.workspace = true
 corevideo.workspace = true
+iosurface.workspace = true
 coreaudio.workspace = true
 contacts.workspace = true
 avfoundation.workspace = true

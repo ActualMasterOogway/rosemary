@@ -65,6 +65,7 @@ dependencies = [
  "exports",
  "foundation",
  "gamecontroller",
+ "iosurface",
  "objc",
  "owned_ttf_parser",
  "prefix",
@@ -1036,6 +1037,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iosurface"
+version = "0.1.0"
+dependencies = [
+ "corefoundation",
+ "exports",
+ "objc",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1534,6 +1544,7 @@ dependencies = [
  "gimli 0.34.0",
  "iced-x86",
  "iokit",
+ "iosurface",
  "libc",
  "machish",
  "metal",

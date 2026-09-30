@@ -164,6 +164,9 @@ exports::exports! {
         "CGColorSpaceCreateWithName" => graphics::CGColorSpaceCreateWithName,
         "CGColorSpaceCreateDeviceRGB" => graphics::CGColorSpaceCreateDeviceRGB,
         "CGColorSpaceRelease" => graphics::CGColorSpaceRelease,
+        "CGColorSpaceGetName" => graphics::CGColorSpaceGetName,
+        "CGColorSpaceCopyName" => graphics::CGColorSpaceCopyName,
+        "CGColorSpaceCopyPropertyList" => graphics::CGColorSpaceCopyPropertyList,
         "CGDataProviderCreateWithData" => graphics::CGDataProviderCreateWithData,
         "CGDataProviderRelease" => graphics::CGDataProviderRelease,
         "CGImageCreate" => graphics::CGImageCreate,
@@ -268,6 +271,11 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         textinput::STRING_GLOBALS,
     ));
     out.extend(corefoundation::base::string_globals(STRING_GLOBALS));
+    let gravities: Vec<(&str, &str)> = coreanimation::GRAVITIES
+        .iter()
+        .map(|(symbol, name, _)| (*symbol, *name))
+        .collect();
+    out.extend(corefoundation::base::string_globals(&gravities));
     // Doubles rather than pointers - see [`FONT_WEIGHTS`].
     for (symbol, weight) in FONT_WEIGHTS {
         out.push((

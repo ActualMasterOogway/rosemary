@@ -380,6 +380,16 @@ pub(crate) fn needs_display(view: Id) {
     }
 }
 
+/// Whether a view of `window` is waiting to be displayed.
+pub(crate) fn window_needs_display(window: Id) -> bool {
+    NEEDS_DISPLAY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        // SAFETY: a view recorded while live and forgotten on deallocation.
+        .any(|view| unsafe { crate::view::window_of(*view as Id) } == window)
+}
+
 /// Mark a view and everything under it, as a window that has nothing valid
 /// to show needs.
 fn needs_display_in_tree(view: Id, depth: usize) {
@@ -429,8 +439,36 @@ pub(crate) fn forget(view: Id) {
     }
 }
 
-/// Draw `view` now, with its focus locked, as `-display` does.
+/// Draw `view` now, as `-display` does.
+///
+/// A layer-backed view is displayed through its layer, as AppKit does it: a
+/// layer whose delegate implements `-displayLayer:` is sent `-display`, which
+/// hands the whole job to the delegate (Qt answers with an expose event and
+/// then sets the layer's `contents`); a view that answers `-wantsUpdateLayer`
+/// with YES is sent `-updateLayer`. Every other view has `-drawRect:` sent with
+/// its focus locked, and what it draws is its layer's content.
 pub(crate) fn display_view(view: Id) {
+    if crate::view::is_layer_backed(view) && focus_on(view).is_some() {
+        let layer = crate::view::layer_of(view);
+        let delegate = crate::layer::delegate_of(layer);
+        // SAFETY: null or a live object, which the weak slot guarantees.
+        let displays = !delegate.is_null()
+            && unsafe { objc::object::class_of(delegate) }
+                .is_some_and(|c| c.method(objc::sel::get("displayLayer:")).is_some());
+        if displays {
+            send(layer, "display");
+            return;
+        }
+        // SAFETY: `-wantsUpdateLayer` is `BOOL (id, SEL)`.
+        let updates = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
+            f(view, objc::sel::get("wantsUpdateLayer"))
+        } != 0;
+        if updates {
+            send(view, "updateLayer");
+            return;
+        }
+    }
     let sel_draw = objc::sel::get("drawRect:");
     // SAFETY: a live object this runtime allocated.
     let responds =
@@ -451,6 +489,14 @@ pub(crate) fn display_view(view: Id) {
         send(view, sel_draw, bounds);
     }
     pop_focus();
+}
+
+fn send(receiver: Id, name: &str) {
+    // SAFETY: a `void (id, SEL)` method on a live object.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(name));
+    }
 }
 
 /// Draw everything marked for display and present every window that changed.

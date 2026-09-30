@@ -7,6 +7,9 @@ use corefoundation::base::CFTypeRef;
 #[repr(C)]
 struct ColorSpace {
     isa: *const c_void,
+    /// The `kCGColorSpace...` name it was made with, retained, or null for one
+    /// made without a name.
+    name: CFTypeRef,
 }
 
 /// `CGDataProviderReleaseDataCallback`.
@@ -44,7 +47,13 @@ struct ImageSource {
 }
 
 pub fn install() {
-    corefoundation::base::register(c"__CGColorSpace", None, size_of::<ColorSpace>(), true);
+    let space =
+        corefoundation::base::register(c"__CGColorSpace", None, size_of::<ColorSpace>(), true);
+    space.replace_method(
+        objc::sel::get("dealloc"),
+        color_space_dealloc as *const c_void,
+        c"v16@0:8",
+    );
     let provider =
         corefoundation::base::register(c"__CGDataProvider", None, size_of::<DataProvider>(), true);
     provider.replace_method(
@@ -75,6 +84,18 @@ unsafe extern "C" fn provider_dealloc(receiver: objc::object::Id, _sel: objc::se
         let provider = &mut *(receiver as *mut DataProvider);
         if let Some(release) = provider.release.take() {
             release(provider.info, provider.data.cast(), provider.size);
+        }
+        objc::arc::finalize(receiver);
+    }
+}
+
+unsafe extern "C" fn color_space_dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
+    // SAFETY: `-dealloc` of a `__CGColorSpace`, whose body is `ColorSpace`.
+    unsafe {
+        let space = &mut *(receiver as *mut ColorSpace);
+        let name = std::mem::replace(&mut space.name, std::ptr::null());
+        if !name.is_null() {
+            corefoundation::api::CFRelease(name);
         }
         objc::arc::finalize(receiver);
     }
@@ -401,10 +422,50 @@ pub(crate) fn image_bgra(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
     Some((image.width, image.height, out))
 }
 
-pub unsafe extern "C" fn CGColorSpaceCreateWithName(_name: CFTypeRef) -> CFTypeRef {
+pub unsafe extern "C" fn CGColorSpaceCreateWithName(name: CFTypeRef) -> CFTypeRef {
     let class = objc::class::lookup(c"__CGColorSpace").expect("installed during bootstrap");
     // SAFETY: `ColorSpace` is the registered class layout.
-    unsafe { corefoundation::base::allocate::<ColorSpace>(class) as CFTypeRef }
+    let space = unsafe { corefoundation::base::allocate::<ColorSpace>(class) };
+    // SAFETY: a fresh allocation, and null or the caller's string.
+    unsafe {
+        (*space).name = match name.is_null() {
+            true => name,
+            false => corefoundation::api::CFRetain(name),
+        };
+    }
+    space as CFTypeRef
+}
+
+fn color_space_of<'a>(space: CFTypeRef) -> Option<&'a ColorSpace> {
+    let class = objc::class::lookup(c"__CGColorSpace").expect("installed during bootstrap");
+    // SAFETY: null or an object a guest received from this runtime.
+    let is_space = !space.is_null() && unsafe { corefoundation::base::is_kind_of(space, class) };
+    // SAFETY: checked to be a `__CGColorSpace`, whose body is `ColorSpace`.
+    is_space.then(|| unsafe { &*(space as *const ColorSpace) })
+}
+
+/// `CFStringRef CGColorSpaceGetName(CGColorSpaceRef)`, not retained.
+pub unsafe extern "C" fn CGColorSpaceGetName(space: CFTypeRef) -> CFTypeRef {
+    color_space_of(space).map_or(std::ptr::null(), |space| space.name)
+}
+
+/// `CFStringRef CGColorSpaceCopyName(CGColorSpaceRef)`, retained.
+pub unsafe extern "C" fn CGColorSpaceCopyName(space: CFTypeRef) -> CFTypeRef {
+    // SAFETY: as `CGColorSpaceGetName`.
+    let name = unsafe { CGColorSpaceGetName(space) };
+    match name.is_null() {
+        true => name,
+        // SAFETY: a live string the space holds.
+        false => unsafe { corefoundation::api::CFRetain(name) },
+    }
+}
+
+/// `CFPropertyListRef CGColorSpaceCopyPropertyList(CGColorSpaceRef)`: a named
+/// space is represented by its name. One made without a name - the device
+/// space - has no representation to give, and gets NULL.
+pub unsafe extern "C" fn CGColorSpaceCopyPropertyList(space: CFTypeRef) -> CFTypeRef {
+    // SAFETY: as `CGColorSpaceCopyName`.
+    unsafe { CGColorSpaceCopyName(space) }
 }
 
 pub unsafe extern "C" fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef {

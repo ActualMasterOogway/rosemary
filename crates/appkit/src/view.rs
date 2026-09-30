@@ -42,7 +42,18 @@ pub struct View {
     /// superview, which is a view's next responder until something is put
     /// between them.
     next_responder: Id,
+    /// `-setWantsLayer:` and whether the layer is one AppKit made for it, as
+    /// [`WANTS_LAYER`] and [`BACKING_LAYER`], and `-setLayerContentsPlacement:`
+    /// from [`PLACEMENT_SHIFT`] up.
+    layer_backing: usize,
 }
+
+/// The bits of [`View::layer_backing`]: the view asked for a layer, and the
+/// layer it has is the one `-makeBackingLayer` made rather than one a program
+/// set with `-setLayer:`.
+const WANTS_LAYER: usize = 1;
+const BACKING_LAYER: usize = 2;
+const PLACEMENT_SHIFT: u32 = 8;
 
 /// The bits of [`View::posts`].
 const POSTS_FRAME: usize = 1;
@@ -76,6 +87,11 @@ fn note_geometry_change(receiver: Id, before: NSRect) {
     }
     if view.frame.size != before.size {
         resize_subviews(receiver, before.size);
+    }
+    // AppKit keeps a view's layer the size of its bounds.
+    let layer = view_of(receiver).layer;
+    if !layer.is_null() {
+        crate::layer::set_bounds_of(layer, bounds_of(receiver));
     }
     crate::layout::solve();
     let view = view_of(receiver);
@@ -302,6 +318,9 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
     }
     let previous = view.layer;
     view.layer = objc::arc::retain(layer);
+    // Whatever replaced AppKit's layer is the program's; `-setWantsLayer:`
+    // marks its own again once this returns.
+    view.layer_backing &= !BACKING_LAYER;
     // SAFETY: a layer this runtime made, and a view which outlives it - the
     // view holds the only reference the layer is reached through.
     unsafe {
@@ -311,25 +330,105 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
     objc::arc::release(previous);
 }
 
-/// `-setWantsLayer:`. Asking for a layer makes the view layer-backed: it gets a
-/// plain `CALayer` whose sublayers are drawn over it, which is how a program
-/// adds animated pieces to a view it otherwise draws itself. A view that already
-/// has a layer - a `CAMetalLayer` a program set - keeps it.
+/// `-setWantsLayer:`. Asking for a layer makes the view layer-backed: AppKit
+/// sends the view `-makeBackingLayer` and then `-setLayer:` with what it
+/// answered, so a subclass that overrides either - Qt's `QNSView` overrides
+/// both - is the one that decides. A view that already has a layer, one a
+/// program set, keeps it. Giving the wish up takes away a layer AppKit made
+/// and leaves one a program set.
 unsafe extern "C" fn set_wants_layer(receiver: Id, _sel: Sel, wants: u8) {
-    if wants == 0 || !view_of(receiver).layer.is_null() {
+    let view = view_of(receiver);
+    if wants == 0 {
+        let made = view.layer_backing & BACKING_LAYER != 0;
+        view.layer_backing &= !(WANTS_LAYER | BACKING_LAYER);
+        if made {
+            send_object(receiver, "setLayer:", std::ptr::null_mut());
+        }
         return;
     }
-    let Some(class) = objc::class::lookup(c"CALayer") else {
+    view.layer_backing |= WANTS_LAYER;
+    if !view.layer.is_null() {
         return;
+    }
+    // SAFETY: `-makeBackingLayer` is `CALayer *(id, SEL)`, answered at +0.
+    let layer = unsafe {
+        let make: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        make(receiver, objc::sel::get("makeBackingLayer"))
     };
-    // SAFETY: `+layer` is `id (Class, SEL)`, and `-setBounds:` and
-    // `-setLayer:` are this crate's own.
+    if layer.is_null() {
+        return;
+    }
+    crate::layer::set_bounds_of(layer, bounds_of(receiver));
+    // A backing layer's delegate is its view, which is what routes the
+    // layer's `-display` to the view.
+    if crate::layer::delegate_of(layer).is_null() {
+        crate::layer::set_delegate_of(layer, receiver);
+    }
+    crate::layer::set_contents_gravity_for_placement(layer, contents_placement(receiver));
+    send_object(receiver, "setLayer:", layer);
+    // `-setLayer:` may be overridden to refuse; the flag describes the layer
+    // the view ended up with.
+    let view = view_of(receiver);
+    if view.layer == layer {
+        view.layer_backing |= BACKING_LAYER;
+    }
+}
+
+fn send_object(receiver: Id, name: &str, object: Id) {
+    // SAFETY: a `void (id, SEL, id)` method on a live view.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(name), object);
+    }
+}
+
+/// The view's `-layerContentsPlacement`, sent so an override answers.
+fn contents_placement(view: Id) -> isize {
+    // SAFETY: `-layerContentsPlacement` is `NSInteger (id, SEL)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc::msg::entry());
+        f(view, objc::sel::get("layerContentsPlacement"))
+    }
+}
+
+/// `-makeBackingLayer`: a plain `CALayer`, autoreleased.
+unsafe extern "C" fn make_backing_layer(_receiver: Id, _sel: Sel) -> Id {
+    let Some(class) = objc::class::lookup(c"CALayer") else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `+layer` is `id (Class, SEL)`.
     unsafe {
         let make: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
-        let layer = make(objc::class::ptr(class) as Id, objc::sel::get("layer"));
-        crate::layer::set_bounds_of(layer, bounds_of(receiver));
-        set_layer(receiver, objc::sel::get("setLayer:"), layer);
+        make(objc::class::ptr(class) as Id, objc::sel::get("layer"))
     }
+}
+
+unsafe extern "C" fn wants_layer(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(view_of(receiver).layer_backing & WANTS_LAYER != 0)
+}
+
+/// `-layerContentsPlacement`, whose default of zero is
+/// `NSViewLayerContentsPlacementScaleAxesIndependently`.
+unsafe extern "C" fn layer_contents_placement(receiver: Id, _sel: Sel) -> isize {
+    (view_of(receiver).layer_backing >> PLACEMENT_SHIFT) as isize
+}
+
+/// `-setLayerContentsPlacement:`, which AppKit applies to a backing layer's
+/// `contentsGravity`.
+unsafe extern "C" fn set_layer_contents_placement(receiver: Id, _sel: Sel, placement: isize) {
+    let view = view_of(receiver);
+    let flags = view.layer_backing & ((1 << PLACEMENT_SHIFT) - 1);
+    view.layer_backing = flags | ((placement.clamp(0, 11) as usize) << PLACEMENT_SHIFT);
+    if view.layer_backing & BACKING_LAYER != 0 {
+        crate::layer::set_contents_gravity_for_placement(view.layer, placement);
+    }
+}
+
+/// Whether `view` is layer-backed: it asked for a layer and has one.
+pub(crate) fn is_layer_backed(view: Id) -> bool {
+    is_view(view)
+        && view_of(view).layer_backing & WANTS_LAYER != 0
+        && !view_of(view).layer.is_null()
 }
 
 unsafe extern "C" fn layer(receiver: Id, _sel: Sel) -> Id {
@@ -1571,8 +1670,13 @@ pub(crate) fn install() {
         // A hint about when the backing store may be reused across a resize.
         // Nothing here keeps one, so every policy draws the same.
         "setLayerContentsRedrawPolicy:" => ignored_integer, c"v24@0:8q16";
-        "setLayerContentsPlacement:" => ignored_integer, c"v24@0:8q16";
-        "wantsLayer" => yes, c"c16@0:8";
+        "setLayerContentsPlacement:" => set_layer_contents_placement, c"v24@0:8q16";
+        "layerContentsPlacement" => layer_contents_placement, c"q16@0:8";
+        "makeBackingLayer" => make_backing_layer, c"@16@0:8";
+        // A view draws with `-drawRect:` unless it says otherwise.
+        "wantsUpdateLayer" => no, c"c16@0:8";
+        "updateLayer" => ignored, c"v16@0:8";
+        "wantsLayer" => wants_layer, c"c16@0:8";
         "setAllowedTouchTypes:" => set_allowed_touch_types, c"v24@0:8Q16";
         "allowedTouchTypes" => allowed_touch_types, c"Q16@0:8";
     });

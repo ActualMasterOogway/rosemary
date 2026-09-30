@@ -797,6 +797,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDisplayVendorNumber", U32, U32),
     sig!("CGDisplayRotation", F64, U32),
     sig!("CGColorSpaceCreateWithName", P, P),
+    sig!("CGColorSpaceGetName", P, P),
+    sig!("CGColorSpaceCopyName", P, P),
+    sig!("CGColorSpaceCopyPropertyList", P, P),
     sig!("CGGetActiveDisplayList", I32, U32, P, P),
     //
     // `NSOpenGLContext` is a thin wrapper, and a Unity player written before
@@ -940,6 +943,38 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([1], "CVDisplayLinkSetOutputCallback", I32, P, P, P),
     sig!("CVDisplayLinkStart", I32, P),
     sig!("CVDisplayLinkStop", I32, P),
+    //
+    // IOSurface. `IOSurfaceID`, `OSType` and `IOSurfaceLockOptions` are
+    // `uint32_t`; sizes are `size_t`; `IOReturn` is an `int`.
+    sig!("IOSurfaceCreate", P, P),
+    sig!("IOSurfaceLookup", P, U32),
+    sig!("IOSurfaceGetID", U32, P),
+    sig!("IOSurfaceGetTypeID", U64),
+    sig!("IOSurfaceLock", I32, P, U32, P),
+    sig!("IOSurfaceUnlock", I32, P, U32, P),
+    sig!("IOSurfaceGetSeed", U32, P),
+    sig!("IOSurfaceGetAllocSize", U64, P),
+    sig!("IOSurfaceGetWidth", U64, P),
+    sig!("IOSurfaceGetHeight", U64, P),
+    sig!("IOSurfaceGetBytesPerElement", U64, P),
+    sig!("IOSurfaceGetBytesPerRow", U64, P),
+    sig!("IOSurfaceGetElementWidth", U64, P),
+    sig!("IOSurfaceGetElementHeight", U64, P),
+    sig!("IOSurfaceGetPixelFormat", U32, P),
+    sig!("IOSurfaceGetBaseAddress", P, P),
+    sig!("IOSurfaceIncrementUseCount", V, P),
+    sig!("IOSurfaceDecrementUseCount", V, P),
+    sig!("IOSurfaceGetUseCount", I32, P),
+    sig!("IOSurfaceIsInUse", BOOL, P),
+    sig!("IOSurfaceSetValue", V, P, P, P),
+    sig!("IOSurfaceCopyValue", P, P, P),
+    sig!("IOSurfaceRemoveValue", V, P, P),
+    sig!("IOSurfaceSetValues", V, P, P),
+    sig!("IOSurfaceCopyAllValues", P, P),
+    sig!("IOSurfaceRemoveAllValues", V, P),
+    sig!("IOSurfaceAlignProperty", U64, P, U64),
+    sig!("IOSurfaceGetPropertyAlignment", U64, P),
+    sig!("IOSurfaceGetPropertyMaximum", U64, P),
     //
     // How a Unity player gets a decoded video frame onto the GPU: lock the
     // buffer, hand it to the cache, get a texture name back.
