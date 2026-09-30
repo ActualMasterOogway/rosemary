@@ -209,10 +209,58 @@ struct Focus {
     /// Window pixels per point.
     density: f64,
     flipped: bool,
+    /// Drawing into [`OFFSCREEN`]'s store keyed by `view`, an image being
+    /// rendered, rather than into a view in a window.
+    offscreen: bool,
 }
 
 thread_local! {
     static FOCUS: RefCell<Vec<Focus>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Images being rendered by [`begin_offscreen`], keyed by the caller's key.
+static OFFSCREEN: Mutex<Option<HashMap<usize, Store>>> = Mutex::new(None);
+
+/// Send drawing to a transparent `width` by `height` pixel image, at
+/// `density` pixels per point, until [`end_offscreen`] with the same key.
+pub(crate) fn begin_offscreen(key: usize, width: u32, height: u32, density: f64, flipped: bool) {
+    OFFSCREEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(key, Store::new(width.max(1), height.max(1)));
+    FOCUS.with(|stack| {
+        stack.borrow_mut().push(Focus {
+            view: key as Id,
+            window: std::ptr::null_mut(),
+            x: 0.0,
+            y: 0.0,
+            width: f64::from(width.max(1)),
+            height: f64::from(height.max(1)),
+            density: if density > 0.0 { density } else { 1.0 },
+            flipped,
+            offscreen: true,
+        })
+    });
+}
+
+/// The premultiplied B, G, R, A pixels, top row first, drawn since
+/// [`begin_offscreen`], and that focus undone.
+pub(crate) fn end_offscreen(key: usize) -> Option<Store> {
+    FOCUS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(at) = stack
+            .iter()
+            .rposition(|focus| focus.offscreen && focus.view as usize == key)
+        {
+            stack.truncate(at);
+        }
+    });
+    OFFSCREEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()?
+        .remove(&key)
 }
 
 fn focus_on(view: Id) -> Option<Focus> {
@@ -232,6 +280,7 @@ fn focus_on(view: Id) -> Option<Focus> {
         height: f64::from(frame.height),
         density: if density > 0.0 { density } else { 1.0 },
         flipped: crate::view::is_flipped(view),
+        offscreen: false,
     })
 }
 
@@ -251,6 +300,11 @@ fn current_focus() -> Option<Focus> {
     FOCUS.with(|stack| stack.borrow().last().copied())
 }
 
+/// Pixels per point of what is being drawn into, 1 with nothing focused.
+pub(crate) fn focus_density() -> f64 {
+    current_focus().map_or(1.0, |focus| focus.density)
+}
+
 fn damage(window: sdl3::Window, rect: Rect) {
     if rect.is_empty() {
         return;
@@ -266,6 +320,9 @@ fn damage(window: sdl3::Window, rect: Rect) {
 /// `NSCompositingOperation` values this draws with; any other is drawn as
 /// source-over.
 const COMPOSITE_COPY: usize = 1;
+/// Keeps the destination where the source is opaque: how a template image is
+/// tinted, by filling with the colour and then drawing the image this way.
+const COMPOSITE_DESTINATION_IN: usize = 7;
 
 /// Draw premultiplied BGRA `source` pixels into the focused view.
 ///
@@ -289,7 +346,11 @@ pub(crate) fn draw_image(
     };
     let (width, height) = (focus.width.max(1.0) as u32, focus.height.max(1.0) as u32);
     let drawn = {
-        let mut stores = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
+        let stores = match focus.offscreen {
+            true => &OFFSCREEN,
+            false => &VIEW_STORES,
+        };
+        let mut stores = stores.lock().unwrap_or_else(|e| e.into_inner());
         let store = stores
             .get_or_insert_with(HashMap::new)
             .entry(focus.view as usize)
@@ -308,6 +369,9 @@ pub(crate) fn draw_image(
             respect_flipped,
         )
     };
+    if focus.offscreen {
+        return;
+    }
     damage(
         focus.window,
         Rect {
@@ -402,6 +466,12 @@ fn draw_into(
                 continue;
             }
             let alpha = texel[3] as u32 * opacity / 256;
+            if operation == COMPOSITE_DESTINATION_IN {
+                for channel in target.iter_mut() {
+                    *channel = (u32::from(*channel) * alpha / 255) as u8;
+                }
+                continue;
+            }
             for channel in 0..4 {
                 let s = texel[channel] as u32 * opacity / 256;
                 let d = target[channel] as u32;
@@ -742,6 +812,33 @@ fn place_view(
     }
 }
 
+/// The views placed above a Metal layer whose own drawing covers all of their
+/// rectangle.
+fn opaque_views(placed: &[Placed]) -> Vec<usize> {
+    let Some(first) = placed
+        .iter()
+        .position(|p| crate::layer::is_metal(crate::view::layer_of(p.view)))
+    else {
+        return Vec::new();
+    };
+    let stores = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stores) = stores.as_ref() else {
+        return Vec::new();
+    };
+    placed[first + 1..]
+        .iter()
+        .filter(|p| !p.clip.is_empty())
+        .filter(|p| {
+            stores.get(&(p.view as usize)).is_some_and(|store| {
+                i64::from(store.width) >= p.rect.width
+                    && i64::from(store.height) >= p.rect.height
+                    && store.pixels.as_chunks::<4>().0.iter().all(|t| t[3] == 255)
+            })
+        })
+        .map(|p| p.view as usize)
+        .collect()
+}
+
 /// Bring a window's composite up to date with its views: recompose what was
 /// drawn over, and everywhere a view appeared, moved or went away.
 fn compose_window(window: Id) {
@@ -759,6 +856,7 @@ fn compose_window(window: Id) {
         .iter()
         .map(|(view, _)| *view)
         .collect();
+    let opaque = opaque_views(&placed);
     let mut holes = Vec::new();
     let mut covered = Vec::new();
     for (index, p) in placed.iter().enumerate() {
@@ -768,10 +866,13 @@ fn compose_window(window: Id) {
         }
         // An overlay is stacked above the layers of the views placed before
         // it - a web view inside a Metal-drawn panel - so there the store,
-        // which carries the overlay, shows instead of the layer.
+        // which carries the overlay, shows instead of the layer. So is a view
+        // that draws: a web view's title bar over a game. Only where it drew
+        // opaquely, since the store holds nothing of the layer to show
+        // through a label's transparent pixels.
         let above: Vec<Rect> = placed[index + 1..]
             .iter()
-            .filter(|q| overlaid.contains(&(q.view as usize)))
+            .filter(|q| overlaid.contains(&(q.view as usize)) || opaque.contains(&(q.view as usize)))
             .map(|q| q.clip.intersection(&p.clip))
             .filter(|rect| !rect.is_empty())
             .collect();
@@ -1636,6 +1737,7 @@ mod tests {
             height: 2.0,
             density: 1.0,
             flipped: true,
+            offscreen: false,
         };
         let size = NSSize {
             width: 1.0,
@@ -1736,6 +1838,7 @@ mod tests {
             height: 1.0,
             density: 1.0,
             flipped: true,
+            offscreen: false,
         };
         FOCUS.with(|stack| stack.borrow_mut().push(focus));
         let size = NSSize {

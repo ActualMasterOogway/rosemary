@@ -129,6 +129,12 @@ api! {
     webkit_user_script_new: fn(*const c_char, c_int, c_int, *const *const c_char, *const *const c_char) -> Ptr;
     webkit_user_script_new_for_world: fn(*const c_char, c_int, c_int, *const c_char, *const *const c_char, *const *const c_char) -> Ptr;
     webkit_user_script_unref: fn(Ptr);
+    webkit_user_content_manager_register_script_message_handler: fn(Ptr, *const c_char, *const c_char) -> c_int;
+    webkit_user_content_manager_unregister_script_message_handler: fn(Ptr, *const c_char, *const c_char);
+    webkit_web_view_can_go_back: fn(Ptr) -> c_int;
+    webkit_web_view_can_go_forward: fn(Ptr) -> c_int;
+    webkit_web_view_go_back: fn(Ptr);
+    webkit_web_view_go_forward: fn(Ptr);
     webkit_web_view_get_settings: fn(Ptr) -> Ptr;
     webkit_settings_set_user_agent: fn(Ptr, *const c_char);
     webkit_settings_set_enable_developer_extras: fn(Ptr, c_int);

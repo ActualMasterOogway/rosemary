@@ -443,7 +443,7 @@ fn holding_rect() -> Option<Id> {
 }
 
 /// `NSTrackingAreaOptions`.
-mod tracking {
+pub(crate) mod tracking {
     pub const MOUSE_ENTERED_AND_EXITED: usize = 0x01;
     pub const MOUSE_MOVED: usize = 0x02;
     pub const CURSOR_UPDATE: usize = 0x04;

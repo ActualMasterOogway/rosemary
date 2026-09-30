@@ -113,6 +113,55 @@ pub(crate) fn forget(object: Id) {
     }
 }
 
+/// The size a stack gives a view it arranges.
+///
+/// A label is as big as its text and a stack as big as what it arranges, as
+/// their intrinsic sizes make them in AppKit; anything else keeps the size its
+/// frame or its constraints gave it.
+fn fitting_size(v: Id, depth: usize) -> NSSize {
+    if let Some(size) = crate::label::intrinsic_size(v) {
+        return size;
+    }
+    let nested = stacks()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(v as usize))
+        .cloned();
+    let Some(stack) = nested.filter(|s| !s.views.is_empty() && depth < 16) else {
+        return view::frame_of(v).size;
+    };
+    let vertical = stack.orientation == VERTICAL;
+    let sizes: Vec<NSSize> = stack
+        .views
+        .iter()
+        .map(|(child, _)| *child as Id)
+        // SAFETY: views this crate made, still in the list `forget` keeps.
+        .filter(|child| unsafe { view::superview_of(*child) } == v)
+        .filter(|child| {
+            !(stack.detaches_hidden_views && view::is_hidden_or_has_hidden_ancestor(*child))
+        })
+        .map(|child| fitting_size(child, depth + 1))
+        .collect();
+    let gaps = stack.spacing * sizes.len().saturating_sub(1) as f64;
+    let insets = stack.insets;
+    let (along, across) = sizes.iter().fold((gaps, 0.0f64), |(along, across), s| {
+        match vertical {
+            true => (along + s.height, across.max(s.width)),
+            false => (along + s.width, across.max(s.height)),
+        }
+    });
+    match vertical {
+        true => NSSize {
+            width: across + insets.left + insets.right,
+            height: along + insets.top + insets.bottom,
+        },
+        false => NSSize {
+            width: along + insets.left + insets.right,
+            height: across + insets.top + insets.bottom,
+        },
+    }
+}
+
 /// Place one stack's arranged subviews; whether any of them moved.
 fn arrange(receiver: Id, stack: &Stack) -> bool {
     let size = view::frame_of(receiver).size;
@@ -143,7 +192,7 @@ fn arrange(receiver: Id, stack: &Stack) -> bool {
         (size.height, insets.bottom, insets.top)
     };
     let extent = |v: Id| {
-        let s = view::frame_of(v).size;
+        let s = fitting_size(v, 0);
         if vertical {
             (s.height, s.width)
         } else {
@@ -399,6 +448,9 @@ mod slot {
     pub const TRANSPARENT: usize = 3;
     /// An `f64`'s bits.
     pub const BORDER_WIDTH: usize = 4;
+    /// `-contentViewMargins`, each an `f64`'s bits.
+    pub const MARGIN_WIDTH: usize = 5;
+    pub const MARGIN_HEIGHT: usize = 6;
     pub const BOX_OBJECTS: [usize; 2] = [FILL_COLOR, BORDER_COLOR];
 
     pub const INDETERMINATE: usize = 0;
@@ -412,7 +464,12 @@ mod slot {
     pub const TITLE: usize = 3;
     pub const BUTTON_TYPE: usize = 4;
     pub const BUTTON_STATE: usize = 5;
-    pub const BUTTON_OBJECTS: [usize; 2] = [IMAGE, TITLE];
+    pub const ALTERNATE_IMAGE: usize = 6;
+    /// Stored inverted: a fresh button is bordered.
+    pub const NOT_BORDERED: usize = 7;
+    pub const BUTTON_TRANSPARENT: usize = 8;
+    pub const HIGHLIGHTED: usize = 9;
+    pub const BUTTON_OBJECTS: [usize; 3] = [IMAGE, TITLE, ALTERNATE_IMAGE];
 
     pub const VIEW_IMAGE: usize = 0;
     pub const SCALING: usize = 1;
@@ -424,7 +481,7 @@ mod slot {
     pub const KNOB_PROPORTION: usize = 1;
 }
 
-const ROW: usize = 6;
+const ROW: usize = 10;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -455,6 +512,20 @@ unsafe extern "C" fn box_set_box_type(receiver: Id, _sel: Sel, value: usize) {
 
 unsafe extern "C" fn box_box_type(receiver: Id, _sel: Sel) -> usize {
     read(boxes(), receiver, slot::BOX_TYPE)
+}
+
+/// `-setContentViewMargins:`. Only read back: a box here has no content view
+/// of its own to inset, and what a program puts in it places itself.
+unsafe extern "C" fn box_set_content_view_margins(receiver: Id, _sel: Sel, margins: NSSize) {
+    write(boxes(), receiver, slot::MARGIN_WIDTH, margins.width.to_bits() as usize);
+    write(boxes(), receiver, slot::MARGIN_HEIGHT, margins.height.to_bits() as usize);
+}
+
+unsafe extern "C" fn box_content_view_margins(receiver: Id, _sel: Sel) -> NSSize {
+    NSSize {
+        width: f64::from_bits(read(boxes(), receiver, slot::MARGIN_WIDTH) as u64),
+        height: f64::from_bits(read(boxes(), receiver, slot::MARGIN_HEIGHT) as u64),
+    }
 }
 
 unsafe extern "C" fn box_set_fill_color(receiver: Id, _sel: Sel, value: Id) {
@@ -599,6 +670,120 @@ unsafe extern "C" fn indicator_double_value(receiver: Id, _sel: Sel) -> f64 {
 
 unsafe extern "C" fn button_set_image(receiver: Id, _sel: Sel, value: Id) {
     write_object(buttons(), receiver, slot::IMAGE, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn button_set_alternate_image(receiver: Id, _sel: Sel, value: Id) {
+    write_object(buttons(), receiver, slot::ALTERNATE_IMAGE, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn button_alternate_image(receiver: Id, _sel: Sel) -> Id {
+    read(buttons(), receiver, slot::ALTERNATE_IMAGE) as Id
+}
+
+unsafe extern "C" fn button_set_bordered(receiver: Id, _sel: Sel, value: u8) {
+    write(buttons(), receiver, slot::NOT_BORDERED, usize::from(value == 0));
+}
+
+unsafe extern "C" fn button_is_bordered(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(read(buttons(), receiver, slot::NOT_BORDERED) == 0)
+}
+
+unsafe extern "C" fn button_set_transparent(receiver: Id, _sel: Sel, value: u8) {
+    write(buttons(), receiver, slot::BUTTON_TRANSPARENT, usize::from(value != 0));
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn button_is_transparent(receiver: Id, _sel: Sel) -> u8 {
+    read(buttons(), receiver, slot::BUTTON_TRANSPARENT) as u8
+}
+
+fn set_highlighted(receiver: Id, on: bool) {
+    if (read(buttons(), receiver, slot::HIGHLIGHTED) != 0) != on {
+        write(buttons(), receiver, slot::HIGHLIGHTED, usize::from(on));
+        crate::backing::needs_display(receiver);
+    }
+}
+
+unsafe extern "C" fn button_set_highlighted(receiver: Id, _sel: Sel, value: u8) {
+    set_highlighted(receiver, value != 0);
+}
+
+unsafe extern "C" fn button_is_highlighted(receiver: Id, _sel: Sel) -> u8 {
+    read(buttons(), receiver, slot::HIGHLIGHTED) as u8
+}
+
+/// `-drawRect:`: the image, or the alternate image while pressed.
+///
+/// No bezel or title is drawn: the buttons that reach here are image buttons,
+/// and a program that wants a bezel draws its own.
+unsafe extern "C" fn button_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
+    if read(buttons(), receiver, slot::BUTTON_TRANSPARENT) != 0 {
+        return;
+    }
+    let alternate = read(buttons(), receiver, slot::ALTERNATE_IMAGE) as Id;
+    let image = match read(buttons(), receiver, slot::HIGHLIGHTED) != 0 && !alternate.is_null() {
+        true => alternate,
+        false => read(buttons(), receiver, slot::IMAGE) as Id,
+    };
+    if image.is_null() {
+        return;
+    }
+    // SAFETY: `-size` answers an `NSSize`, and the draw call is the prototype
+    // `NSImage` declares for it.
+    unsafe {
+        let size: unsafe extern "C" fn(Id, Sel) -> NSSize = std::mem::transmute(objc::msg::entry());
+        let natural = size(image, objc::sel::get("size"));
+        if natural.width <= 0.0 || natural.height <= 0.0 {
+            return;
+        }
+        // Proportionally down and centred, `NSButton`'s defaults.
+        let destination = image_placement(view::bounds_of(receiver), natural, 0, 0);
+        let draw: unsafe extern "C" fn(Id, Sel, NSRect, NSRect, usize, f64) =
+            std::mem::transmute(objc::msg::entry());
+        draw(
+            image,
+            objc::sel::get("drawInRect:fromRect:operation:fraction:"),
+            destination,
+            NSRect::default(),
+            2,
+            1.0,
+        );
+    }
+}
+
+/// `-mouseDown:`: pressed until the button is released.
+unsafe extern "C" fn button_mouse_down(receiver: Id, _sel: Sel, _event: Id) {
+    set_highlighted(receiver, true);
+}
+
+/// `-mouseUp:`: a click, if the press began here. Events are delivered to the
+/// view under the pointer, so a release elsewhere never reaches this and the
+/// press is undone by the next one.
+unsafe extern "C" fn button_mouse_up(receiver: Id, _sel: Sel, _event: Id) {
+    if read(buttons(), receiver, slot::HIGHLIGHTED) == 0 {
+        return;
+    }
+    set_highlighted(receiver, false);
+    let action = read(buttons(), receiver, slot::ACTION) as Sel;
+    let app = crate::application::shared();
+    if action.is_null() || app.is_null() {
+        return;
+    }
+    let target = read(buttons(), receiver, slot::TARGET) as Id;
+    // SAFETY: `-sendAction:to:from:` is `BOOL (id, SEL, SEL, id, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Sel, Id, Id) -> u8 =
+            std::mem::transmute(objc::msg::entry());
+        f(
+            app,
+            objc::sel::get("sendAction:to:from:"),
+            action,
+            target,
+            receiver,
+        );
+    }
 }
 
 unsafe extern "C" fn button_image(receiver: Id, _sel: Sel) -> Id {
@@ -1046,6 +1231,8 @@ pub(crate) fn install() {
         "setTransparent:" => box_set_transparent, c"v20@0:8c16";
         "isTransparent" => box_is_transparent, c"c16@0:8";
         "setBorderWidth:" => box_set_border_width, c"v24@0:8d16";
+        "setContentViewMargins:" => box_set_content_view_margins, c"v32@0:8{CGSize=dd}16";
+        "contentViewMargins" => box_content_view_margins, c"{CGSize=dd}16@0:8";
         "borderWidth" => box_border_width, c"d16@0:8";
         "drawRect:" => box_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });
@@ -1079,6 +1266,18 @@ pub(crate) fn install() {
         "target" => button_target, c"@16@0:8";
         "setAction:" => button_set_action, c"v24@0:8:16";
         "action" => button_action, c":16@0:8";
+        "setAlternateImage:" => button_set_alternate_image, c"v24@0:8@16";
+        "alternateImage" => button_alternate_image, c"@16@0:8";
+        "setBordered:" => button_set_bordered, c"v20@0:8c16";
+        "isBordered" => button_is_bordered, c"c16@0:8";
+        "setTransparent:" => button_set_transparent, c"v20@0:8c16";
+        "isTransparent" => button_is_transparent, c"c16@0:8";
+        "setHighlighted:" => button_set_highlighted, c"v20@0:8c16";
+        "highlight:" => button_set_highlighted, c"v20@0:8c16";
+        "isHighlighted" => button_is_highlighted, c"c16@0:8";
+        "drawRect:" => button_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "mouseDown:" => button_mouse_down, c"v24@0:8@16";
+        "mouseUp:" => button_mouse_up, c"v24@0:8@16";
     });
 
     let class = objc::class::lookup(c"NSImageView").expect("declared before its methods");

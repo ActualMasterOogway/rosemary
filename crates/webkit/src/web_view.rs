@@ -31,9 +31,10 @@ struct View {
     gtk: usize,
     /// Retained.
     configuration: usize,
-    /// Unretained, as WebKit's delegates are weak.
-    navigation_delegate: usize,
-    ui_delegate: usize,
+    /// Weak, as WebKit's delegates are: a delegate that goes away while a
+    /// load is still reporting must read back as nil, not as freed memory.
+    navigation_delegate: Weak,
+    ui_delegate: Weak,
     /// The `WKNavigation` of the load in progress, retained.
     navigation: usize,
     allocated: (c_int, c_int),
@@ -47,6 +48,35 @@ struct View {
     pending_move: Option<(f64, f64, u32, u32)>,
     /// The widget's `GtkEventControllerFocus`, unowned; zero if it has none.
     focus_controller: usize,
+}
+
+/// A zeroing weak reference, boxed so that its slot keeps its address while
+/// the view list moves.
+struct Weak(Box<Id>);
+
+impl Weak {
+    fn new() -> Weak {
+        Weak(Box::new(std::ptr::null_mut()))
+    }
+
+    fn set(&mut self, object: Id) {
+        objc::arc::store_weak(&mut *self.0, object);
+    }
+
+    /// The object, autoreleased, or nil once it is gone.
+    fn get(&mut self) -> Id {
+        let object = objc::arc::load_weak_retained(&mut *self.0);
+        match object.is_null() {
+            true => object,
+            false => objc::arc::autorelease(object),
+        }
+    }
+}
+
+impl Drop for Weak {
+    fn drop(&mut self) {
+        objc::arc::destroy_weak(&mut *self.0);
+    }
 }
 
 thread_local! {
@@ -192,6 +222,12 @@ struct NavigationResponse {
     objects: Owned,
 }
 
+struct ScriptMessage {
+    name: String,
+    /// The body, the web view and the frame, each retained.
+    objects: Owned,
+}
+
 fn class<T: 'static>(name: &'static std::ffi::CStr) -> &'static Class {
     boxed::register::<T>(name, None)
 }
@@ -210,6 +246,52 @@ fn action_class() -> &'static Class {
 
 fn response_class() -> &'static Class {
     class::<NavigationResponse>(c"WKNavigationResponse")
+}
+
+fn message_class() -> &'static Class {
+    class::<ScriptMessage>(c"WKScriptMessage")
+}
+
+/// The `WKScriptMessage` for a page's message to handler `name`, from the
+/// first view showing pages through `manager`.
+///
+/// WebKitGTK does not say which view or frame posted it; views that share a
+/// manager share a content controller, and the main frame is the sender for
+/// the bridges that use this.
+pub(crate) fn script_message(manager: usize, name: &str, body: Id) -> Id {
+    let view = VIEWS.with(|views| {
+        views
+            .borrow()
+            .iter()
+            // SAFETY: each view's retained configuration.
+            .find(|v| unsafe { configuration::existing_manager(v.configuration as Id) } == manager)
+            .map(|v| (v.object, v.gtk))
+    });
+    let (object, gtk) = view.unwrap_or_default();
+    let url = match engine::get() {
+        // SAFETY: the view's own widget; the string is the view's.
+        Some(engine) if gtk != 0 => unsafe {
+            gtk::text((engine.api.webkit_web_view_get_uri)(gtk as Ptr))
+        },
+        _ => String::new(),
+    };
+    let body = match body.is_null() {
+        // A page that posts `null` or `undefined`, which WebKit hands over as
+        // `NSNull`.
+        true => {
+            let class = objc::class::lookup(c"NSNull").expect("registered by Foundation");
+            // SAFETY: `+null` is `id (Class, SEL)`.
+            unsafe { send!(objc::class::ptr(class) as Id, "null"; Id) }
+        }
+        false => body,
+    };
+    autoreleased(
+        message_class(),
+        ScriptMessage {
+            name: name.to_string(),
+            objects: Owned::new(&[body, object as Id, frame_info(&guest_url(&url), true)]),
+        },
+    )
 }
 
 fn autoreleased<T>(class: &'static Class, contents: T) -> Id {
@@ -319,6 +401,34 @@ getter!(
     Id,
     response_class,
     |r: &mut NavigationResponse| r.objects.get(0),
+    std::ptr::null_mut()
+);
+getter!(
+    message_name,
+    Id,
+    message_class,
+    |m: &mut ScriptMessage| engine::string(&m.name),
+    std::ptr::null_mut()
+);
+getter!(
+    message_body,
+    Id,
+    message_class,
+    |m: &mut ScriptMessage| m.objects.get(0),
+    std::ptr::null_mut()
+);
+getter!(
+    message_web_view,
+    Id,
+    message_class,
+    |m: &mut ScriptMessage| m.objects.get(1),
+    std::ptr::null_mut()
+);
+getter!(
+    message_frame_info,
+    Id,
+    message_class,
+    |m: &mut ScriptMessage| m.objects.get(2),
     std::ptr::null_mut()
 );
 getter!(
@@ -447,8 +557,8 @@ struct Delegates {
 fn delegates(id: usize) -> Option<Delegates> {
     with_view(id, |v| Delegates {
         object: v.object as Id,
-        navigation: v.navigation_delegate as Id,
-        ui: v.ui_delegate as Id,
+        navigation: v.navigation_delegate.get(),
+        ui: v.ui_delegate.get(),
         configuration: v.configuration as Id,
     })
 }
@@ -720,6 +830,37 @@ unsafe fn user_agent(configuration: Id) -> String {
     agent
 }
 
+/// `agent` as WebKitGTK accepts it for the `User-Agent` header.
+///
+/// WebKitGTK refuses a user agent that is not a list of `product/version`
+/// tokens and comments, and then sends its own. A product with a second `/` -
+/// Roblox's `Roblox/DarwinRobloxApp/0.740` - is one it refuses, although
+/// macOS WebKit sends it as it is; there the rest of the product becomes a
+/// product of its own.
+pub(crate) fn header_user_agent(agent: &str) -> String {
+    let mut out = String::with_capacity(agent.len());
+    let mut depth = 0usize;
+    let mut slashes = 0;
+    for c in agent.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => slashes = 0,
+            '/' if depth == 0 => {
+                slashes += 1;
+                if slashes > 1 {
+                    out.push(' ');
+                    slashes = 0;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
 unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     let api = engine.api;
     let controller = unsafe { configuration::controller_of(configuration) };
@@ -746,7 +887,16 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     if engine::tracing() {
         eprintln!("rosetta3: webkit: user agent {agent}");
     }
-    let agent = gtk::c_string(&agent);
+    let header = header_user_agent(&agent);
+    // SAFETY: the view's content controller.
+    unsafe {
+        configuration::set_page_user_agent(
+            controller,
+            engine,
+            (header != agent).then(|| agent.clone()),
+        )
+    };
+    let agent = gtk::c_string(&header);
     // SAFETY: a configuration's preferences.
     let developer =
         unsafe { configuration::preferences(configuration::preferences_of(configuration)) }
@@ -886,8 +1036,8 @@ unsafe extern "C" fn init_with_frame_configuration(
             object: receiver as usize,
             gtk: gtk as usize,
             configuration: configuration as usize,
-            navigation_delegate: 0,
-            ui_delegate: 0,
+            navigation_delegate: Weak::new(),
+            ui_delegate: Weak::new(),
             navigation: 0,
             allocated: (0, 0),
             draws_background: true,
@@ -1206,19 +1356,19 @@ unsafe extern "C" fn user_agent_getter(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn set_navigation_delegate(receiver: Id, _sel: Sel, delegate: Id) {
-    with_object(receiver, |v| v.navigation_delegate = delegate as usize);
+    with_object(receiver, |v| v.navigation_delegate.set(delegate));
 }
 
 unsafe extern "C" fn navigation_delegate(receiver: Id, _sel: Sel) -> Id {
-    with_object(receiver, |v| v.navigation_delegate).unwrap_or_default() as Id
+    with_object(receiver, |v| v.navigation_delegate.get()).unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn set_ui_delegate(receiver: Id, _sel: Sel, delegate: Id) {
-    with_object(receiver, |v| v.ui_delegate = delegate as usize);
+    with_object(receiver, |v| v.ui_delegate.set(delegate));
 }
 
 unsafe extern "C" fn ui_delegate(receiver: Id, _sel: Sel) -> Id {
-    with_object(receiver, |v| v.ui_delegate).unwrap_or_default() as Id
+    with_object(receiver, |v| v.ui_delegate.get()).unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
@@ -1238,14 +1388,60 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
     if method != "GET" || !headers.is_empty() {
         engine::warn_once("a request's method and headers are not sent; it is loaded as a GET");
     }
+    let navigation = start_navigation(receiver);
+    let url = gtk::c_string(&host_url(&url));
+    // SAFETY: the view's widget and a string it copies.
+    unsafe { (engine.api.webkit_web_view_load_uri)(gtk, url.as_ptr()) };
+    navigation
+}
+
+unsafe extern "C" fn can_go_back(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: the view's widget.
+    gtk_of(receiver).is_some_and(|(engine, gtk)| unsafe {
+        (engine.api.webkit_web_view_can_go_back)(gtk) != 0
+    }) as u8
+}
+
+unsafe extern "C" fn can_go_forward(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: the view's widget.
+    gtk_of(receiver).is_some_and(|(engine, gtk)| unsafe {
+        (engine.api.webkit_web_view_can_go_forward)(gtk) != 0
+    }) as u8
+}
+
+/// `-goBack`, answering the navigation it starts, or nil with nowhere to go.
+unsafe extern "C" fn go_back(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: as `can_go_back`.
+    if unsafe { can_go_back(receiver, sel) } == 0 {
+        return std::ptr::null_mut();
+    }
+    let Some((engine, gtk)) = gtk_of(receiver) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { (engine.api.webkit_web_view_go_back)(gtk) };
+    start_navigation(receiver)
+}
+
+unsafe extern "C" fn go_forward(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: as `can_go_forward`.
+    if unsafe { can_go_forward(receiver, sel) } == 0 {
+        return std::ptr::null_mut();
+    }
+    let Some((engine, gtk)) = gtk_of(receiver) else {
+        return std::ptr::null_mut();
+    };
+    unsafe { (engine.api.webkit_web_view_go_forward)(gtk) };
+    start_navigation(receiver)
+}
+
+/// A new current navigation for `receiver`, which the load it names reports
+/// through.
+fn start_navigation(receiver: Id) -> Id {
     let navigation = new_navigation();
     let old = with_object(receiver, |v| {
         std::mem::replace(&mut v.navigation, navigation as usize)
     });
     objc::arc::release(old.unwrap_or_default() as Id);
-    let url = gtk::c_string(&host_url(&url));
-    // SAFETY: the view's widget and a string it copies.
-    unsafe { (engine.api.webkit_web_view_load_uri)(gtk, url.as_ptr()) };
     navigation
 }
 
@@ -1689,6 +1885,10 @@ pub fn install() {
         "setUIDelegate:" => set_ui_delegate, c"v24@0:8@16";
         "loadRequest:" => load_request, c"@24@0:8@16";
         "stopLoading" => stop_loading, c"v16@0:8";
+        "canGoBack" => can_go_back, c"c16@0:8";
+        "canGoForward" => can_go_forward, c"c16@0:8";
+        "goBack" => go_back, c"@16@0:8";
+        "goForward" => go_forward, c"@16@0:8";
         "URL" => url, c"@16@0:8";
         "evaluateJavaScript:completionHandler:" => evaluate_javascript, c"v32@0:8@16@?24";
         "setValue:forKey:" => set_value_for_key, c"v32@0:8@16@24";
@@ -1737,6 +1937,12 @@ pub fn install() {
         "modifierFlags" => zero, c"Q16@0:8";
         "buttonNumber" => zero, c"q16@0:8";
     });
+    crate::methods!(message_class(), {
+        "name" => message_name, c"@16@0:8";
+        "body" => message_body, c"@16@0:8";
+        "webView" => message_web_view, c"@16@0:8";
+        "frameInfo" => message_frame_info, c"@16@0:8";
+    });
     crate::methods!(response_class(), {
         "response" => response_response, c"@16@0:8";
         "isForMainFrame" => response_is_main, c"c16@0:8";
@@ -1760,6 +1966,18 @@ mod tests {
             (origin.host.as_str(), origin.port),
             ("messages.example.test", 0)
         );
+    }
+
+    #[test]
+    fn a_product_with_two_slashes_is_split_for_the_header() {
+        let agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+            (KHTML, like Gecko) Roblox/DarwinRobloxApp/0.740.0.7400927 (GlobalDist; a/b/c)";
+        assert_eq!(
+            header_user_agent(agent),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+            (KHTML, like Gecko) Roblox/DarwinRobloxApp 0.740.0.7400927 (GlobalDist; a/b/c)"
+        );
+        assert_eq!(header_user_agent(USER_AGENT), USER_AGENT);
     }
 
     #[test]

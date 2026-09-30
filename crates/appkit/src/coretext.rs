@@ -343,6 +343,15 @@ fn font_size(font: CFTypeRef) -> f64 {
     get_number(font, "CTFontSizeAttribute").unwrap_or(0.0)
 }
 
+/// The face a font draws with and its size in points, for text AppKit draws
+/// itself.
+pub(crate) fn face_of(font: CFTypeRef) -> Option<(Arc<LoadedFace>, f64)> {
+    if font.is_null() {
+        return None;
+    }
+    Some((loaded(font)?, font_size(font)))
+}
+
 /// Points per font unit.
 fn scale(font: CFTypeRef, face: &LoadedFace) -> f64 {
     font_size(font) / f64::from(face.face().units_per_em().max(1))

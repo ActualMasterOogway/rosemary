@@ -964,6 +964,21 @@ unsafe extern "C" fn accepts_first_responder(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
 
+/// A text field's text, for drawing and measuring it.
+pub(crate) fn field_text(receiver: Id) -> String {
+    field(receiver).text
+}
+
+/// `-setStringValue:`, for this crate's own callers.
+///
+/// # Safety
+///
+/// `value` must be null or an `NSString`.
+#[cfg(test)]
+pub(crate) unsafe fn set_field_text(receiver: Id, value: Id) {
+    unsafe { field_set_string_value(receiver, objc::sel::get("setStringValue:"), value) };
+}
+
 unsafe extern "C" fn field_string_value(receiver: Id, _sel: Sel) -> Id {
     objc::arc::autorelease(foundation::string::from_str(&field(receiver).text))
 }
@@ -987,6 +1002,7 @@ unsafe extern "C" fn field_set_string_value(receiver: Id, _sel: Sel, value: Id) 
         };
         state.marked = None;
     }
+    crate::label::changed(receiver);
 }
 
 unsafe extern "C" fn field_set_editable(receiver: Id, _sel: Sel, value: u8) {

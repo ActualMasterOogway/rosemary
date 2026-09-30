@@ -24,6 +24,10 @@ pub struct Image {
     /// RGBA pixels for an image made with `-initWithSize:` and subsequently
     /// locked for offscreen drawing.
     focused_pixels: *mut Vec<u8>,
+    /// The copied `BOOL (^)(NSRect)` of `+imageWithSize:flipped:drawingHandler:`,
+    /// run once, when the image's pixels are first wanted.
+    handler: Id,
+    handler_flipped: usize,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Image>();
@@ -291,7 +295,11 @@ unsafe extern "C" fn init_with_data(receiver: Id, _sel: Sel, data: Id) -> Id {
 fn cg_image_of(receiver: Id) -> Option<*const c_void> {
     let image = image_of(receiver);
     if image.cg_image.is_null() {
-        image.cg_image = crate::graphics::image_from_bitmap(bitmap(receiver)?);
+        let pixels = match image.handler.is_null() {
+            true => bitmap(receiver)?,
+            false => render_handler(receiver)?,
+        };
+        image.cg_image = crate::graphics::image_from_bitmap(pixels);
     }
     (!image.cg_image.is_null()).then_some(image.cg_image)
 }
@@ -309,7 +317,7 @@ unsafe extern "C" fn cg_image_for_proposed_rect(
     _hints: Id,
 ) -> *const c_void {
     let image = image_of(receiver);
-    if image.cg_image.is_null() && image.data.is_null() && image.reps.is_null() {
+    if !has_content(image) {
         // Nothing to make one of, which Apple answers with NULL.
         return std::ptr::null();
     }
@@ -473,25 +481,108 @@ unsafe extern "C" fn is_template(receiver: Id, _sel: Sel) -> u8 {
     u8::from(image_of(receiver).template != 0)
 }
 
-/// `+imageWithSize:flipped:drawingHandler:`: an image of that size.
+/// `+imageWithSize:flipped:drawingHandler:`: an image of that size, whose
+/// pixels are what the handler draws.
 ///
-/// The handler is what AppKit calls each time the image is drawn, and an image
-/// here is never drawn into anything - so it is never called, and the image is
-/// only as good as its size, which is what a program lays itself out by.
+/// AppKit calls the handler each time the image is drawn, at the destination's
+/// resolution. Here it is called once, the first time the pixels are wanted,
+/// and what it drew is kept: a handler that tints an icon draws the same thing
+/// every time.
 unsafe extern "C" fn image_with_size(
     class: Id,
     _sel: Sel,
     size: NSSize,
-    _flipped: u8,
-    _handler: Id,
+    flipped: u8,
+    handler: Id,
 ) -> Id {
     // SAFETY: the receiver of a class method is a class.
     let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) }) else {
         return std::ptr::null_mut();
     };
     let image = objc::object::create_instance(class, 0);
-    image_of(image).size = size;
+    let state = image_of(image);
+    state.size = size;
+    if !handler.is_null() {
+        state.handler = objc::block::copy(handler);
+        state.handler_flipped = usize::from(flipped != 0);
+    }
     objc::arc::autorelease(image)
+}
+
+/// Run an image's drawing handler into a fresh bitmap.
+fn render_handler(receiver: Id) -> Option<crate::raster::Bitmap> {
+    let image = image_of(receiver);
+    // SAFETY: a block this image copied, whose `invoke` the `@?` in
+    // `+imageWithSize:flipped:drawingHandler:`'s encoding made callable.
+    let invoke = unsafe { crate::animation::invoke(image.handler) }?;
+    let (width, height) = pixel_extent(image.size)?;
+    let key = receiver as usize;
+    crate::backing::begin_offscreen(
+        key,
+        width as u32,
+        height as u32,
+        1.0,
+        image.handler_flipped != 0,
+    );
+    let rect = NSRect {
+        origin: foundation::geometry::NSPoint::default(),
+        size: image.size,
+    };
+    // SAFETY: `BOOL (^)(NSRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, NSRect) -> u8 = std::mem::transmute(invoke);
+        f(image.handler, rect);
+    }
+    let store = crate::backing::end_offscreen(key)?;
+    // Premultiplied B, G, R, A to the straight R, G, B, A a bitmap holds.
+    let mut pixels = store.pixels;
+    for texel in pixels.as_chunks_mut::<4>().0 {
+        let [b, g, r, a] = *texel;
+        let straight = |c: u8| match a {
+            0 => 0,
+            a => ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8,
+        };
+        *texel = [straight(r), straight(g), straight(b), a];
+    }
+    Some(crate::raster::Bitmap {
+        width: store.width,
+        height: store.height,
+        pixels,
+    })
+}
+
+/// Whether there is anything to make pixels of.
+fn has_content(image: &Image) -> bool {
+    !image.cg_image.is_null()
+        || !image.data.is_null()
+        || !image.reps.is_null()
+        || !image.handler.is_null()
+}
+
+/// `-copyWithZone:`: another image of the same pixels.
+///
+/// A program copies an image to change the copy - tint it, resize it - and
+/// the original must not change with it.
+unsafe extern "C" fn copy_with_zone(receiver: Id, _sel: Sel, _zone: *mut c_void) -> Id {
+    // SAFETY: a live object this runtime allocated.
+    let Some(class) = (unsafe { objc::object::class_of(receiver) }) else {
+        return std::ptr::null_mut();
+    };
+    let copy = objc::object::create_instance(class, 0);
+    let (from, to) = (image_of(receiver), image_of(copy));
+    to.data = objc::arc::retain(from.data);
+    to.reps = objc::arc::retain(from.reps);
+    to.size = from.size;
+    to.template = from.template;
+    if !from.cg_image.is_null() {
+        // SAFETY: a `CGImage` the original holds.
+        to.cg_image = unsafe { corefoundation::api::CFRetain(from.cg_image) };
+    }
+    if !from.handler.is_null() {
+        to.handler = objc::block::copy(from.handler);
+        to.handler_flipped = from.handler_flipped;
+    }
+    copy
 }
 
 unsafe extern "C" fn size(receiver: Id, _sel: Sel) -> NSSize {
@@ -539,6 +630,10 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
         drop(unsafe { Box::from_raw(image.focused_pixels) });
         image.focused_pixels = ptr::null_mut();
     }
+    if !image.handler.is_null() {
+        objc::block::release(image.handler);
+        image.handler = ptr::null_mut();
+    }
     objc::arc::finalize(receiver);
 }
 
@@ -554,7 +649,7 @@ fn draw(
     respect_flipped: bool,
 ) {
     let image = image_of(receiver);
-    if image.cg_image.is_null() && image.data.is_null() && image.reps.is_null() {
+    if !has_content(image) {
         // An image made with `-initWithSize:` and given nothing: there is
         // nothing to draw, and Apple draws nothing.
         return;
@@ -663,6 +758,7 @@ pub(crate) fn install() {
         "setSize:" => set_size, c"v32@0:8{CGSize=dd}16";
         "setTemplate:" => set_template, c"v20@0:8c16";
         "isTemplate" => is_template, c"c16@0:8";
+        "copyWithZone:" => copy_with_zone, c"@24@0:8^v16";
     });
     // The pixel family, each reached by the same implementation so that the one
     // that is wanted first names itself.

@@ -40,6 +40,7 @@ pub mod icon;
 pub mod image;
 mod input_context;
 pub mod keymap;
+mod label;
 pub mod layer;
 mod layout;
 pub mod menu;
@@ -97,6 +98,7 @@ pub fn bootstrap() {
         layer::install();
         coreanimation::install();
         text::install();
+        label::install();
         input_context::install();
         opengl::install();
         darwin::idle::on_idle(opengl::release_for_other_threads);

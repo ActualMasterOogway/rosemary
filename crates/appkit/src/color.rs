@@ -470,6 +470,8 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "setFill" => set_fill, c"v16@0:8";
+        // Both the fill and the stroke; nothing here strokes.
+        "set" => set_fill, c"v16@0:8";
         "CGColor" => cg_color, c"^{CGColor=}16@0:8";
         "redComponent" => component, c"d16@0:8";
         "greenComponent" => component, c"d16@0:8";

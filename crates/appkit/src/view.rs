@@ -1470,6 +1470,63 @@ unsafe extern "C" fn remove_tracking_area(receiver: Id, _sel: Sel, area: Id) {
     }
 }
 
+/// `-addTrackingRect:owner:userData:assumeInside:`, the API tracking areas
+/// replaced: an always-active enter-and-exit area, whose tag is the area.
+///
+/// `userData` is not carried to the events: an area's `userInfo` is a
+/// dictionary, and the events built from it answer that.
+unsafe extern "C" fn add_tracking_rect(
+    receiver: Id,
+    sel: Sel,
+    rect: NSRect,
+    owner: Id,
+    _data: *mut c_void,
+    inside: u8,
+) -> isize {
+    use crate::cursor::tracking;
+    let Some(class) = objc::class::lookup(c"NSTrackingArea") else {
+        return 0;
+    };
+    let mut options = tracking::MOUSE_ENTERED_AND_EXITED | tracking::ACTIVE_ALWAYS;
+    if inside != 0 {
+        options |= tracking::ASSUME_INSIDE;
+    }
+    let area = objc::object::create_instance(class, 0);
+    // SAFETY: `-initWithRect:options:owner:userInfo:` is
+    // `id (id, SEL, NSRect, NSUInteger, id, id)`.
+    let area = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect, usize, Id, Id) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(
+            area,
+            objc::sel::get("initWithRect:options:owner:userInfo:"),
+            rect,
+            options,
+            owner,
+            std::ptr::null_mut(),
+        )
+    };
+    if area.is_null() {
+        return 0;
+    }
+    // SAFETY: the list retains the area, so this reference is given up.
+    unsafe { add_tracking_area(receiver, sel, area) };
+    objc::arc::release(area);
+    area as isize
+}
+
+unsafe extern "C" fn remove_tracking_rect(receiver: Id, sel: Sel, tag: isize) {
+    // SAFETY: a tag is the area `-addTrackingRect:...` added, compared by
+    // address only.
+    unsafe { remove_tracking_area(receiver, sel, tag as Id) };
+}
+
+/// `-animator`: the view itself, so that what a program animates is set at
+/// once, which is where the animation would have ended.
+unsafe extern "C" fn animator(receiver: Id, _sel: Sel) -> Id {
+    receiver
+}
+
 unsafe extern "C" fn tracking_areas(receiver: Id, sel: Sel) -> Id {
     let view = view_of(receiver);
     if view.tracking_areas.is_null() {
@@ -1660,6 +1717,10 @@ pub(crate) fn install() {
         "addTrackingArea:" => add_tracking_area, c"v24@0:8@16";
         "removeTrackingArea:" => remove_tracking_area, c"v24@0:8@16";
         "trackingAreas" => tracking_areas, c"@16@0:8";
+        "addTrackingRect:owner:userData:assumeInside:" => add_tracking_rect,
+            c"q68@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48^v56c64";
+        "removeTrackingRect:" => remove_tracking_rect, c"v24@0:8q16";
+        "animator" => animator, c"@16@0:8";
         "setPostsFrameChangedNotifications:" => set_posts_frame_changed, c"v20@0:8c16";
         "setPostsBoundsChangedNotifications:" => set_posts_bounds_changed, c"v20@0:8c16";
         "postsFrameChangedNotifications" => posts_frame_changed, c"c16@0:8";

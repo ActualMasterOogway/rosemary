@@ -30,6 +30,129 @@ pub struct Controller {
     /// The `WebKitUserContentManager` the scripts are mirrored into, once a
     /// view has needed one.
     manager: usize,
+    /// Script message handlers by name, each retained, as WebKit retains them.
+    handlers: Vec<(String, usize)>,
+    /// The user agent page scripts are shown, where WebKitGTK is sent a
+    /// respelling of it; see [`crate::web_view::header_user_agent`].
+    page_user_agent: Option<String>,
+}
+
+impl Drop for Controller {
+    fn drop(&mut self) {
+        for (_, handler) in self.handlers.drain(..) {
+            objc::arc::release(handler as Id);
+        }
+        let manager = self.manager;
+        MANAGERS.with(|managers| managers.borrow_mut().retain(|(m, _)| *m != manager));
+    }
+}
+
+thread_local! {
+    /// Each manager's controller, which its message signals are delivered to.
+    static MANAGERS: std::cell::RefCell<Vec<(usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Every handler name registered, indexed by the data its signal carries.
+    static NAMES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn name_id(name: &str) -> usize {
+    NAMES.with(|names| {
+        let mut names = names.borrow_mut();
+        match names.iter().position(|n| n == name) {
+            Some(at) => at,
+            None => {
+                names.push(name.to_string());
+                names.len() - 1
+            }
+        }
+    })
+}
+
+/// `script-message-received::NAME`: a page called
+/// `window.webkit.messageHandlers.NAME.postMessage(body)`.
+unsafe extern "C" fn script_message_received(manager: Ptr, value: Ptr, data: Ptr) {
+    let Some(engine) = engine::get() else {
+        return;
+    };
+    let Some(name) = NAMES.with(|names| names.borrow().get(data as usize).cloned()) else {
+        return;
+    };
+    let Some(object) = MANAGERS.with(|managers| {
+        managers
+            .borrow()
+            .iter()
+            .find(|(m, _)| *m == manager as usize)
+            .map(|(_, c)| *c as Id)
+    }) else {
+        return;
+    };
+    // SAFETY: a live controller, registered while it is.
+    let Some(handler) = (unsafe { controller(object) }).and_then(|c| {
+        c.handlers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, h)| *h as Id)
+    }) else {
+        return;
+    };
+    // SAFETY: the signal's value, live for its duration.
+    let body = unsafe { crate::web_view::bridge(engine.api, value) };
+    if engine::tracing() {
+        eprintln!("rosetta3: webkit: script message to '{name}'");
+    }
+    let message = crate::web_view::script_message(manager as usize, &name, body);
+    // SAFETY: a handler answers the `WKScriptMessageHandler` method.
+    unsafe {
+        send!(handler, "userContentController:didReceiveScriptMessage:",
+            object => Id, message => Id; ())
+    };
+}
+
+/// Expose the handler `name` to pages as `window.webkit.messageHandlers`
+/// does on macOS.
+fn register_handler(engine: &Engine, manager: Ptr, name: &str) {
+    let api = engine.api;
+    let c_name = gtk::c_string(name);
+    let signal = gtk::c_string(&format!("script-message-received::{name}"));
+    // SAFETY: a live manager, strings it copies, and a handler of the signal's
+    // prototype whose data is a plain integer.
+    unsafe {
+        (api.webkit_user_content_manager_register_script_message_handler)(
+            manager,
+            c_name.as_ptr(),
+            std::ptr::null(),
+        );
+        (api.g_signal_connect_data)(
+            manager,
+            signal.as_ptr(),
+            script_message_received as Ptr,
+            name_id(name) as Ptr,
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+fn unregister_handler(engine: &Engine, manager: Ptr, name: &str) {
+    let api = engine.api;
+    let c_name = gtk::c_string(name);
+    // SAFETY: as `register_handler`; `G_SIGNAL_MATCH_FUNC | G_SIGNAL_MATCH_DATA`.
+    unsafe {
+        (api.webkit_user_content_manager_unregister_script_message_handler)(
+            manager,
+            c_name.as_ptr(),
+            std::ptr::null(),
+        );
+        (api.g_signal_handlers_disconnect_matched)(
+            manager,
+            8 | 16,
+            0,
+            0,
+            std::ptr::null_mut(),
+            script_message_received as Ptr,
+            name_id(name) as Ptr,
+        );
+    }
 }
 
 #[derive(Default)]
@@ -255,6 +378,41 @@ fn add_input_helper(engine: &Engine, manager: Ptr) {
     }
 }
 
+/// Make page scripts see `agent` as `navigator.userAgent`, in every frame
+/// from before the page's own scripts run.
+fn add_user_agent_override(engine: &Engine, manager: Ptr, agent: &str) {
+    let source = format!(
+        "(() => {{ const agent = {}; \
+         for (const [key, value] of [['userAgent', agent], ['appVersion', agent.replace(/^Mozilla\\//, '')]]) \
+         Object.defineProperty(Navigator.prototype, key, {{ get() {{ return value; }}, configurable: true }}); }})();",
+        crate::input::quote(agent)
+    );
+    add_to_manager(
+        engine,
+        manager,
+        &Script {
+            source,
+            at_document_start: true,
+            main_frame_only: false,
+        },
+    );
+}
+
+/// Put back every script a controller's manager should have: this port's own,
+/// then the guest's.
+fn rebuild_scripts(engine: &Engine, controller: &Controller) {
+    let manager = controller.manager as Ptr;
+    // SAFETY: the controller's own manager.
+    unsafe { (engine.api.webkit_user_content_manager_remove_all_scripts)(manager) };
+    add_input_helper(engine, manager);
+    if let Some(agent) = &controller.page_user_agent {
+        add_user_agent_override(engine, manager, agent);
+    }
+    for script in &controller.scripts {
+        add_to_manager(engine, manager, script);
+    }
+}
+
 /// The `WebKitUserContentManager` a controller's scripts live in, made the
 /// first time a view is created with the controller.
 ///
@@ -268,13 +426,46 @@ pub unsafe fn manager(object: Id, engine: &Engine) -> Ptr {
     if controller.manager == 0 {
         // SAFETY: makes a new object, owned by the controller from here on.
         let manager = unsafe { (engine.api.webkit_user_content_manager_new)() };
-        add_input_helper(engine, manager);
-        for script in &controller.scripts {
-            add_to_manager(engine, manager, script);
-        }
         controller.manager = manager as usize;
+        rebuild_scripts(engine, controller);
+        for (name, _) in &controller.handlers {
+            register_handler(engine, manager, name);
+        }
+        MANAGERS.with(|managers| {
+            managers
+                .borrow_mut()
+                .push((manager as usize, object as usize))
+        });
     }
     controller.manager as Ptr
+}
+
+/// The manager a configuration's views share, if one has been made.
+///
+/// # Safety
+///
+/// `configuration` must be null or an object this runtime allocated.
+pub unsafe fn existing_manager(configuration: Id) -> usize {
+    let controller = unsafe { self::configuration(configuration) }.map_or(0, |c| c.controller);
+    unsafe { self::controller(controller as Id) }.map_or(0, |c| c.manager)
+}
+
+/// Show page scripts `agent` rather than what WebKitGTK sends.
+///
+/// # Safety
+///
+/// `object` must be a content controller.
+pub unsafe fn set_page_user_agent(object: Id, engine: &Engine, agent: Option<String>) {
+    let Some(controller) = (unsafe { controller(object) }) else {
+        return;
+    };
+    if controller.page_user_agent == agent {
+        return;
+    }
+    controller.page_user_agent = agent;
+    if controller.manager != 0 {
+        rebuild_scripts(engine, controller);
+    }
 }
 
 unsafe extern "C" fn add_user_script(receiver: Id, _sel: Sel, user_script: Id) {
@@ -307,12 +498,8 @@ unsafe extern "C" fn remove_all_user_scripts(receiver: Id, _sel: Sel) {
     if controller.manager != 0
         && let Some(engine) = engine::get()
     {
-        // SAFETY: the controller's own manager.
-        unsafe {
-            (engine.api.webkit_user_content_manager_remove_all_scripts)(controller.manager as Ptr)
-        };
-        // The guest removed its own scripts, not the one input depends on.
-        add_input_helper(engine, controller.manager as Ptr);
+        // The guest removed its own scripts, not the ones this port adds.
+        rebuild_scripts(engine, controller);
     }
 }
 
@@ -334,17 +521,59 @@ unsafe extern "C" fn user_scripts(receiver: Id, _sel: Sel) -> Id {
     objc::arc::autorelease(array as Id)
 }
 
-/// Script message handlers are not wired to the page. Studio posts its messages
-/// through navigations instead; this accepts the registration so a guest that
-/// also registers a handler finishes configuring.
-unsafe extern "C" fn add_script_message_handler(_receiver: Id, _sel: Sel, _handler: Id, name: Id) {
-    engine::warn_once(&format!(
-        "script message handler '{}' is registered but never called",
-        engine::text_of(name)
-    ));
+/// `-addScriptMessageHandler:name:`. The handler is retained, as WebKit
+/// retains it, until it is removed or the controller goes.
+unsafe extern "C" fn add_script_message_handler(receiver: Id, _sel: Sel, handler: Id, name: Id) {
+    // SAFETY: a controller.
+    let Some(controller) = (unsafe { controller(receiver) }) else {
+        return;
+    };
+    let name = engine::text_of(name);
+    if handler.is_null() || name.is_empty() {
+        return;
+    }
+    let handler = objc::arc::retain(handler) as usize;
+    match controller.handlers.iter_mut().find(|(n, _)| *n == name) {
+        Some((_, old)) => objc::arc::release(std::mem::replace(old, handler) as Id),
+        None => {
+            controller.handlers.push((name.clone(), handler));
+            if controller.manager != 0
+                && let Some(engine) = engine::get()
+            {
+                register_handler(engine, controller.manager as Ptr, &name);
+            }
+        }
+    }
 }
 
-unsafe extern "C" fn remove_script_message_handler(_receiver: Id, _sel: Sel, _name: Id) {}
+unsafe extern "C" fn remove_script_message_handler(receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: a controller.
+    let Some(controller) = (unsafe { controller(receiver) }) else {
+        return;
+    };
+    let name = engine::text_of(name);
+    let Some(at) = controller.handlers.iter().position(|(n, _)| *n == name) else {
+        return;
+    };
+    let (_, handler) = controller.handlers.remove(at);
+    objc::arc::release(handler as Id);
+    if controller.manager != 0
+        && let Some(engine) = engine::get()
+    {
+        unregister_handler(engine, controller.manager as Ptr, &name);
+    }
+}
+
+unsafe extern "C" fn remove_all_script_message_handlers(receiver: Id, sel: Sel) {
+    // SAFETY: a controller.
+    let names: Vec<String> = unsafe { controller(receiver) }
+        .map(|c| c.handlers.iter().map(|(n, _)| n.clone()).collect())
+        .unwrap_or_default();
+    for name in names {
+        // SAFETY: the same controller, and a string made for the call.
+        unsafe { remove_script_message_handler(receiver, sel, engine::string(&name)) };
+    }
+}
 
 unsafe extern "C" fn init_user_script(
     receiver: Id,
@@ -439,6 +668,7 @@ pub fn install() {
         "userScripts" => user_scripts, c"@16@0:8";
         "addScriptMessageHandler:name:" => add_script_message_handler, c"v32@0:8@16@24";
         "removeScriptMessageHandlerForName:" => remove_script_message_handler, c"v24@0:8@16";
+        "removeAllScriptMessageHandlers" => remove_all_script_message_handlers, c"v16@0:8";
     });
 
     let script = script_class();

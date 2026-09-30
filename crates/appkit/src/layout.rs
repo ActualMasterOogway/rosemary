@@ -131,6 +131,26 @@ struct Known {
 }
 
 impl Known {
+    /// Whether both the position and the size along this axis are known.
+    fn determined(&self) -> bool {
+        let [min, max, center, _] = self.values;
+        let positions = [min, max, center].iter().filter(|v| v.is_some()).count();
+        positions >= 2 || (positions == 1 && self.values[SIZE].is_some())
+    }
+
+    /// Take what `other` knows where this does not, unless this axis is
+    /// already fixed.
+    fn fill_from(&mut self, other: &Known) {
+        if self.determined() {
+            return;
+        }
+        for (value, fallback) in self.values.iter_mut().zip(other.values) {
+            if value.is_none() {
+                *value = fallback;
+            }
+        }
+    }
+
     /// The view's new origin and size along this axis, from `current`.
     fn place(&self, current: (f64, f64)) -> (f64, f64) {
         let [min, max, center, size] = self.values;
@@ -165,7 +185,14 @@ fn place(target: Id, constraints: &[&Constraint]) -> Option<NSRect> {
     let current = view::frame_of(target);
     let mut x = Known::default();
     let mut y = Known::default();
+    // What constraints naming `target` second say about it, which only fills
+    // what none naming it first does: a box pinned to the edges of a stack
+    // inside it would otherwise size the stack from the box's own unsolved
+    // size, and each would keep the other at zero.
+    let mut inverse_x = Known::default();
+    let mut inverse_y = Known::default();
     for c in constraints {
+        let inverse = c.first != target;
         // The side `target` is on, and the value the other side gives it.
         let (attribute, relation, value) = if c.first == target {
             let value = if c.second.is_null() || c.second_attribute == 0 {
@@ -200,7 +227,12 @@ fn place(target: Id, constraints: &[&Constraint]) -> Option<NSRect> {
         let Some((axis, what)) = classify(attribute, flipped) else {
             continue;
         };
-        let known = if axis == Axis::X { &mut x } else { &mut y };
+        let known = match (axis, inverse) {
+            (Axis::X, false) => &mut x,
+            (Axis::Y, false) => &mut y,
+            (Axis::X, true) => &mut inverse_x,
+            (Axis::Y, true) => &mut inverse_y,
+        };
         match (relation, what) {
             (EQUAL, _) => known.values[what] = Some(value),
             (LESS_OR_EQUAL, SIZE) => known.largest = Some(value),
@@ -208,6 +240,8 @@ fn place(target: Id, constraints: &[&Constraint]) -> Option<NSRect> {
             _ => {}
         }
     }
+    x.fill_from(&inverse_x);
+    y.fill_from(&inverse_y);
     let (ox, width) = x.place(along(current, Axis::X));
     let (oy, height) = y.place(along(current, Axis::Y));
     Some(NSRect {
@@ -318,6 +352,7 @@ pub(crate) fn forget(view: Id) {
         objc::arc::release(c as Id);
     }
     crate::controls::forget(view);
+    crate::label::forget(view);
 }
 
 fn set_active(constraint: Id, on: bool) -> bool {
@@ -498,6 +533,10 @@ mod tests {
     }
 
     fn pin(first: Id, attribute: isize, second: Id, constant: f64) -> Id {
+        relate(first, attribute, second, attribute, constant)
+    }
+
+    fn relate(first: Id, attribute: isize, second: Id, other: isize, constant: f64) -> Id {
         let class = objc::class::lookup(c"NSLayoutConstraint").expect("NSLayoutConstraint");
         // SAFETY: direct calls with the signature installed above.
         unsafe {
@@ -508,7 +547,7 @@ mod tests {
                 attribute,
                 EQUAL,
                 second,
-                attribute,
+                other,
                 1.0,
                 constant,
             )
@@ -523,8 +562,78 @@ mod tests {
         }
     }
 
+    /// The active set is global and the solver's re-entry flag per thread,
+    /// so tests that solve must not overlap.
+    static SOLVING_TESTS: Mutex<()> = Mutex::new(());
+
+    fn constrain(view: Id) {
+        // SAFETY: `-setTranslatesAutoresizingMaskIntoConstraints:` takes a BOOL.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, u8) = std::mem::transmute(objc::msg::entry());
+            f(
+                view,
+                objc::sel::get("setTranslatesAutoresizingMaskIntoConstraints:"),
+                0,
+            );
+        }
+    }
+
+    fn activate(constraints: &[Id]) -> Id {
+        let values: Vec<*const c_void> = constraints.iter().map(|c| *c as *const c_void).collect();
+        let array = corefoundation::collections::new_array(
+            &values,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        ) as Id;
+        let class = objc::class::lookup(c"NSLayoutConstraint").expect("NSLayoutConstraint");
+        send(objc::class::ptr(class) as Id, "activateConstraints:", array);
+        array
+    }
+
+    #[test]
+    fn a_background_pinned_to_the_stack_inside_it_takes_the_stacks_place() {
+        let _serial = SOLVING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Roblox's web view header: a box whose content is a stack, the box
+        // pinned to the stack and the stack to the root, then a container
+        // below the stack.
+        let root = view(rect(0.0, 0.0, 400.0, 300.0));
+        let background = view(rect(0.0, 0.0, 0.0, 0.0));
+        let stack = view(rect(0.0, 0.0, 0.0, 0.0));
+        let container = view(rect(0.0, 0.0, 0.0, 0.0));
+        send(root, "addSubview:", background);
+        send(background, "addSubview:", stack);
+        send(root, "addSubview:", container);
+        for v in [background, stack, container] {
+            constrain(v);
+        }
+        let mut constraints = vec![
+            pin(stack, 1, root, 0.0),
+            pin(stack, 2, root, 0.0),
+            pin(stack, 3, root, 0.0),
+            relate(stack, 8, std::ptr::null_mut(), 0, 48.0),
+        ];
+        constraints.extend((1..=4).map(|edge| pin(background, edge, stack, 0.0)));
+        constraints.extend([
+            pin(container, 1, stack, 0.0),
+            pin(container, 2, stack, 0.0),
+            relate(container, 3, stack, 4, 0.0),
+            pin(container, 4, root, 0.0),
+        ]);
+        let array = activate(&constraints);
+        assert_eq!(view::frame_of(background), rect(0.0, 252.0, 400.0, 48.0));
+        assert_eq!(view::frame_of(stack), rect(0.0, 0.0, 400.0, 48.0));
+        assert_eq!(view::frame_of(container), rect(0.0, 0.0, 400.0, 252.0));
+        let class = objc::class::lookup(c"NSLayoutConstraint").expect("NSLayoutConstraint");
+        send(
+            objc::class::ptr(class) as Id,
+            "deactivateConstraints:",
+            array,
+        );
+    }
+
     #[test]
     fn a_view_pinned_to_its_superviews_edges_follows_it() {
+        let _serial = SOLVING_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let parent = view(rect(0.0, 0.0, 400.0, 300.0));
         let child = view(rect(0.0, 0.0, 0.0, 0.0));
         send(parent, "addSubview:", child);
