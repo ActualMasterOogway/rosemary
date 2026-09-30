@@ -641,6 +641,59 @@ unsafe extern "C" fn dictionary_value_for_key(receiver: Id, sel: Sel, key: Id) -
     unsafe { object_for_key(receiver, sel, key) }
 }
 
+/// `-[NSArray valueForKey:]`, which maps the key over the elements.
+///
+/// Apple answers an array of each element's own `-valueForKey:`, nil becoming
+/// `NSNull`; a guest chains it into array methods, so answering for the array
+/// itself sends those to whatever the inherited lookup finds.
+unsafe extern "C" fn array_value_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let name = unsafe { crate::string::bytes(key) };
+    if name.first() == Some(&b'@') {
+        objc::fail!(
+            "-[NSArray valueForKey:]: {} is a key-value coding operator, which this runtime \
+             does not implement",
+            String::from_utf8_lossy(&name)
+        );
+    }
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let send: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+        // SAFETY: `-valueForKey:` is `id (id, SEL, id)`.
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    let null = objc::class::lookup(c"NSNull").map(|class| {
+        let null: unsafe extern "C" fn(Id, Sel) -> Id =
+            // SAFETY: `+null` is `id (Class, SEL)`.
+            unsafe { std::mem::transmute(objc::msg::entry()) };
+        // SAFETY: the class answers `+null`.
+        unsafe { null(class as *const _ as Id, objc::sel::get("null")) }
+    });
+    let sel = objc::sel::get("valueForKey:");
+    let values: Vec<CFTypeRef> = array
+        .values
+        .iter()
+        .map(|value| {
+            // SAFETY: an element of a live array, sent a KVC question.
+            let answer = unsafe { send(*value as Id, sel, key) };
+            match answer.is_null() {
+                true => null.unwrap_or(answer) as CFTypeRef,
+                false => answer as CFTypeRef,
+            }
+        })
+        .filter(|value| !value.is_null())
+        .collect();
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
 /// `-[NSMutableDictionary setValue:forKey:]`, whose nil means *remove*.
 unsafe extern "C" fn dictionary_set_value_for_key(receiver: Id, sel: Sel, value: Id, key: Id) {
     match value.is_null() {
@@ -1694,6 +1747,7 @@ pub(crate) fn install() {
         "firstObject" => first_object, c"@16@0:8";
         "lastObject" => last_object, c"@16@0:8";
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
+        "valueForKey:" => array_value_for_key, c"@24@0:8@16";
         "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
         "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
         "indexOfObjectWithOptions:passingTest:" => index_of_object_with_options_passing_test, c"Q32@0:8Q16@?24";

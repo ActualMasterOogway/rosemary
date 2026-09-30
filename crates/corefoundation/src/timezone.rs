@@ -129,16 +129,83 @@ pub unsafe extern "C" fn copy_system() -> CFTypeRef {
     new(&system_name())
 }
 
+/// CFTimeZone's default abbreviation dictionary, which is what
+/// `+[NSTimeZone abbreviationDictionary]` starts as on a Mac.
+const ABBREVIATIONS: &[(&str, &str)] = &[
+    ("ADT", "America/Halifax"),
+    ("AKDT", "America/Juneau"),
+    ("AKST", "America/Juneau"),
+    ("ART", "America/Argentina/Buenos_Aires"),
+    ("AST", "America/Halifax"),
+    ("BDT", "Asia/Dhaka"),
+    ("BRST", "America/Sao_Paulo"),
+    ("BRT", "America/Sao_Paulo"),
+    ("BST", "Europe/London"),
+    ("CAT", "Africa/Harare"),
+    ("CDT", "America/Chicago"),
+    ("CEST", "Europe/Paris"),
+    ("CET", "Europe/Paris"),
+    ("CLST", "America/Santiago"),
+    ("CLT", "America/Santiago"),
+    ("COT", "America/Bogota"),
+    ("CST", "America/Chicago"),
+    ("EAT", "Africa/Addis_Ababa"),
+    ("EDT", "America/New_York"),
+    ("EEST", "Europe/Athens"),
+    ("EET", "Europe/Athens"),
+    ("EST", "America/New_York"),
+    ("GMT", "GMT"),
+    ("GST", "Asia/Dubai"),
+    ("HKT", "Asia/Hong_Kong"),
+    ("HST", "Pacific/Honolulu"),
+    ("ICT", "Asia/Bangkok"),
+    ("IRST", "Asia/Tehran"),
+    ("IST", "Asia/Kolkata"),
+    ("JST", "Asia/Tokyo"),
+    ("KST", "Asia/Seoul"),
+    ("MDT", "America/Denver"),
+    ("MSD", "Europe/Moscow"),
+    ("MSK", "Europe/Moscow"),
+    ("MST", "America/Phoenix"),
+    ("NZDT", "Pacific/Auckland"),
+    ("NZST", "Pacific/Auckland"),
+    ("PDT", "America/Los_Angeles"),
+    ("PET", "America/Lima"),
+    ("PHT", "Asia/Manila"),
+    ("PKT", "Asia/Karachi"),
+    ("PST", "America/Los_Angeles"),
+    ("SGT", "Asia/Singapore"),
+    ("TRT", "Europe/Istanbul"),
+    ("UTC", "UTC"),
+    ("WAT", "Africa/Lagos"),
+    ("WEST", "Europe/Lisbon"),
+    ("WET", "Europe/Lisbon"),
+    ("WIT", "Asia/Jakarta"),
+];
+
+/// The zone name an abbreviation stands for, per [`ABBREVIATIONS`].
+pub fn name_for_abbreviation(abbreviation: &str) -> Option<&'static str> {
+    ABBREVIATIONS
+        .iter()
+        .find(|(short, _)| *short == abbreviation)
+        .map(|(_, name)| *name)
+}
+
 pub unsafe extern "C" fn create_with_name(
     _allocator: CFTypeRef,
     name: CFTypeRef,
-    _try_abbreviation: u8,
+    try_abbreviation: u8,
 ) -> CFTypeRef {
     // SAFETY: a string or null.
     let Some(name) = (unsafe { crate::string::as_string(name) }) else {
         return std::ptr::null();
     };
-    let name = String::from_utf8_lossy(&name.utf8()).into_owned();
+    let mut name = String::from_utf8_lossy(&name.utf8()).into_owned();
+    if try_abbreviation != 0
+        && let Some(full) = name_for_abbreviation(&name)
+    {
+        name = full.to_owned();
+    }
     // A name the host has no zone for is NULL, as it is on a Mac, rather than
     // an object every later question about would have to refuse.
     match zone(&name) {

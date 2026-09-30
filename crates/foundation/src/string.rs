@@ -1414,6 +1414,39 @@ mod tests {
         assert_eq!(unsafe { bytes(joined) }, b"alpha::beta::gamma");
     }
 
+    /// `-[NSArray valueForKey:]` answers an array, which is what lets Roblox's
+    /// installer join an argument list's descriptions.
+    #[test]
+    fn an_array_value_for_key_maps_over_the_elements() {
+        crate::bootstrap();
+        let text = from_str("alpha::beta");
+        // SAFETY: `-componentsSeparatedByString:` is `id (id, SEL, id)`.
+        let parts = unsafe {
+            components_separated_by_string(
+                text,
+                objc::sel::get("componentsSeparatedByString:"),
+                from_str("::"),
+            )
+        };
+        // SAFETY: both are `id (id, SEL, id)`, sent through dispatch.
+        let joined = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let described = f(
+                parts,
+                objc::sel::get("valueForKey:"),
+                from_str("description"),
+            );
+            f(
+                described,
+                objc::sel::get("componentsJoinedByString:"),
+                from_str("-"),
+            )
+        };
+        // SAFETY: a string.
+        assert_eq!(unsafe { bytes(joined) }, b"alpha-beta");
+    }
+
     /// The path methods on the two cases a search for the last dot gets wrong.
     #[test]
     fn a_path_extension_is_in_the_last_component_and_is_not_the_whole_name() {

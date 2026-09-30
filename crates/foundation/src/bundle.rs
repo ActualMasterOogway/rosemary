@@ -128,9 +128,14 @@ impl Layout {
             return None;
         }
         let info = plist::parse(&std::fs::read(&info_path).ok()?).ok()?;
-        let executable = info
-            .get("CFBundleExecutable")
-            .and_then(|name| name.as_str())
+        // CFBundle's rule: an empty or missing name falls back to the bundle's
+        // own, extension stripped. Roblox Studio's protocol handler ships
+        // `CFBundleExecutable` as an empty string.
+        let executable = ["CFBundleExecutable", "NSExecutable"]
+            .iter()
+            .find_map(|key| info.get(key)?.as_str().filter(|name| !name.is_empty()))
+            .map(std::ffi::OsStr::new)
+            .or_else(|| root.file_stem())
             .map(|name| contents.join("MacOS").join(name))
             .unwrap_or_default();
         Some(Layout {
@@ -709,6 +714,19 @@ mod tests {
         assert!(layout.main_nib().is_some(), "the nib is in English.lproj");
         assert!(layout.resource("nothing", "txt").is_none());
         assert_eq!(layout.localization_names(), ["English"]);
+    }
+
+    #[test]
+    fn an_empty_executable_name_falls_back_to_the_bundle_name() {
+        let exe = scratch(
+            "empty-executable",
+            r#"<?xml version="1.0"?><plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string></string>
+            </dict></plist>"#,
+        );
+        let root = exe.parent().unwrap().parent().unwrap().parent().unwrap();
+        let layout = Layout::at(root).expect("a bundle");
+        assert_eq!(layout.executable.file_name().unwrap(), "Thing");
     }
 
     #[test]

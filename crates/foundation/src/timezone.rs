@@ -106,6 +106,26 @@ unsafe extern "C" fn time_zone_with_name(_class: Id, _sel: Sel, name: Id) -> Id 
     }
 }
 
+/// `+[NSTimeZone timeZoneWithAbbreviation:]`: nil unless the abbreviation is
+/// in the default dictionary, as on a Mac.
+unsafe extern "C" fn time_zone_with_abbreviation(_class: Id, sel: Sel, abbreviation: Id) -> Id {
+    // SAFETY: a string, or nil.
+    let text = unsafe { crate::string::bytes(abbreviation) };
+    let Some(name) = std::str::from_utf8(&text)
+        .ok()
+        .and_then(corefoundation::timezone::name_for_abbreviation)
+    else {
+        return std::ptr::null_mut();
+    };
+    let name = crate::string::from_str(name);
+    // SAFETY: a fresh string, released once the zone is made from it.
+    unsafe {
+        let zone = time_zone_with_name(std::ptr::null_mut(), sel, name);
+        corefoundation::api::CFRelease(name as _);
+        zone
+    }
+}
+
 /// The receiver's zone data. Every zone object is made from a name the
 /// database resolved, so a miss here is a broken invariant, not an answer.
 fn zone_of(receiver: Id) -> std::sync::Arc<corefoundation::tzif::Zone> {
@@ -224,6 +244,7 @@ pub(crate) fn install() {
         "defaultTimeZone" => system_time_zone, c"@16@0:8";
         "knownTimeZoneNames" => known_time_zone_names, c"@16@0:8";
         "timeZoneWithName:" => time_zone_with_name, c"@24@0:8@16";
+        "timeZoneWithAbbreviation:" => time_zone_with_abbreviation, c"@24@0:8@16";
     });
     methods!(class, {
         "name" => name, c"@16@0:8";
@@ -323,6 +344,30 @@ mod tests {
             let zone = unsafe { time_zone_with_name(std::ptr::null_mut(), sel, text) };
             assert!(zone.is_null(), "{bogus:?} resolved");
         }
+    }
+
+    /// An abbreviation resolves through the default dictionary, and one that
+    /// is not in it is nil.
+    #[test]
+    fn a_zone_is_found_by_abbreviation() {
+        crate::bootstrap();
+        if database().is_none() {
+            return;
+        }
+        let sel = objc::sel::get("timeZoneWithAbbreviation:");
+        for (short, full) in [("UTC", &b"UTC"[..]), ("PST", b"America/Los_Angeles")] {
+            let text = crate::string::from_str(short);
+            // SAFETY: `+timeZoneWithAbbreviation:` is `id (Class, SEL, id)`.
+            let zone = unsafe { time_zone_with_abbreviation(std::ptr::null_mut(), sel, text) };
+            assert!(!zone.is_null(), "{short} did not resolve");
+            // SAFETY: the zone made just above.
+            let named = unsafe { name(zone, objc::sel::get("name")) };
+            assert_eq!(unsafe { crate::string::bytes(named) }, full);
+        }
+        let text = crate::string::from_str("XYZ");
+        // SAFETY: as above.
+        let zone = unsafe { time_zone_with_abbreviation(std::ptr::null_mut(), sel, text) };
+        assert!(zone.is_null());
     }
 
     /// A named zone answers for the date it is asked about, not for now and
