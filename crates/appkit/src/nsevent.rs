@@ -291,7 +291,7 @@ unsafe extern "C" fn mouse_location(_class: Id, _sel: Sel) -> NSPoint {
     if let Some((x, y)) = crate::event::frozen_pointer() {
         return crate::geometry::point_from_sdl(x as f64, y as f64);
     }
-    match sdl3::video::global_mouse_state() {
+    match crate::window::desktop_mouse_state() {
         Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),
         None => NSPoint::default(),
     }

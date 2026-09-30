@@ -276,10 +276,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         }
         // A program that keeps its own copy of where its window is - a Win32
         // layer mapping client rectangles to the desktop does - learns of a move
-        // from this alone. On Wayland SDL first reports the position it was
-        // asked for and corrects it once the compositor has placed the window;
-        // a missed correction leaves that copy out by the difference, and every
-        // pointer position the program checks against it with it.
+        // from this alone. A Wayland toplevel does not move in the desktop
+        // this runtime reports (see `window::global_position`), because a
+        // program that only listens for the moves it makes itself would keep
+        // mapping the pointer against the origin it asked for.
         Event::WindowMoved { window } => post(window, window::DID_MOVE),
         Event::WindowResized { window, .. } => {
             // The content view follows the window, as it does on
@@ -948,7 +948,7 @@ pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
     }
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
     let origin = pointer_window()
-        .and_then(sdl3::video::window_position)
+        .and_then(window::global_position)
         .unwrap_or((0, 0));
     Some((x + origin.0 as f32, y + origin.1 as f32))
 }

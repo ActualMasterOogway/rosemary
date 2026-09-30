@@ -85,7 +85,7 @@ fn new(location: NSPoint, kind: u32) -> CFTypeRef {
 pub fn global_pointer() -> NSPoint {
     let (x, y) = crate::script::pointer()
         .or_else(crate::event::frozen_pointer)
-        .or_else(|| sdl3::video::global_mouse_state().map(|(x, y, _)| (x, y)))
+        .or_else(|| crate::window::desktop_mouse_state().map(|(x, y, _)| (x, y)))
         .unwrap_or((0.0, 0.0));
     NSPoint {
         x: x as f64,

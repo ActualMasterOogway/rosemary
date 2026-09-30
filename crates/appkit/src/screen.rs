@@ -936,7 +936,7 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     let windows = crate::window::sdl_windows();
     let target = crate::event::pointer_window();
     let origin = target
-        .and_then(sdl3::video::window_position)
+        .and_then(crate::window::global_position)
         .unwrap_or((0, 0));
     let local = local_warp_point(point, origin);
     let from = crate::event::pointer_position();
@@ -950,11 +950,7 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     if relative.is_empty() {
         forget_relative_warp();
         crate::event::expect_warp_echo(from, local);
-        if !sdl3::video::warp_mouse_global(point.0, point.1)
-            && let Some(window) = target
-        {
-            sdl3::video::warp_mouse_in_window(window, local.0, local.1);
-        }
+        warp_physical(target, point, local);
         return 0;
     }
     if known_relative_warp() == Some(point) {
@@ -962,7 +958,7 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
         // even when the physical cursor needs no second warp, or SDL exposes
         // the accumulated drag when relative mode ends.
         for window in relative {
-            let origin = sdl3::video::window_position(window).unwrap_or((0, 0));
+            let origin = crate::window::global_position(window).unwrap_or((0, 0));
             let local = local_warp_point(point, origin);
             sdl3::video::warp_mouse_in_window(window, local.0, local.1);
         }
@@ -974,8 +970,7 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     for window in &relative {
         released &= sdl3::video::set_relative_mouse_mode(*window, false);
     }
-    let warped = sdl3::video::warp_mouse_global(point.0, point.1)
-        || target.is_some_and(|window| sdl3::video::warp_mouse_in_window(window, local.0, local.1));
+    let warped = warp_physical(target, point, local);
     for window in relative {
         sdl3::video::set_relative_mouse_mode(window, true);
     }
@@ -1003,6 +998,19 @@ pub unsafe extern "C" fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i3
         });
     }
     0
+}
+
+/// Move the physical cursor to a desktop point, `local` being the same point
+/// in `window`'s coordinates.
+///
+/// On Wayland the desktop is this runtime's own (see
+/// `window::global_position`) and SDL would measure a global warp from its
+/// placeholder window origin, so the warp goes through the window instead.
+fn warp_physical(window: Option<sdl3::Window>, global: (f32, f32), local: (f32, f32)) -> bool {
+    if !sdl3::video::is_wayland() && sdl3::video::warp_mouse_global(global.0, global.1) {
+        return true;
+    }
+    window.is_some_and(|window| sdl3::video::warp_mouse_in_window(window, local.0, local.1))
 }
 
 fn local_warp_point(point: (f32, f32), origin: (i32, i32)) -> (f32, f32) {
@@ -1098,11 +1106,9 @@ pub fn apply_mouse_association() {
                 let point = crate::event::pointer_position();
                 sdl3::video::warp_mouse_in_window(window, point.0, point.1);
                 sdl3::video::set_relative_mouse_mode(window, false);
-                let origin = sdl3::video::window_position(window).unwrap_or((0, 0));
+                let origin = crate::window::global_position(window).unwrap_or((0, 0));
                 let global = (point.0 + origin.0 as f32, point.1 + origin.1 as f32);
-                if !sdl3::video::warp_mouse_global(global.0, global.1) {
-                    sdl3::video::warp_mouse_in_window(window, point.0, point.1);
-                }
+                warp_physical(Some(window), global, point);
             } else {
                 sdl3::video::set_relative_mouse_mode(window, true);
             }

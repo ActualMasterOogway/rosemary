@@ -227,13 +227,61 @@ fn presentation_of_sdl(sdl: sdl3::Window) -> Presentation {
 /// A popup's own position is measured from its parent's origin, which is what
 /// SDL both takes and answers for one; every caller here wants the desktop.
 pub(crate) fn global_position(sdl: sdl3::Window) -> Option<(i32, i32)> {
-    let (x, y) = sdl3::video::window_position(sdl)?;
     let parent = sdl3::video::window_parent(sdl);
     if parent.is_null() {
-        return Some((x, y));
+        return placed_origin(sdl).or_else(|| sdl3::video::window_position(sdl));
     }
+    let (x, y) = sdl3::video::window_position(sdl)?;
     let (parent_x, parent_y) = global_position(parent)?;
     Some((x + parent_x, y + parent_y))
+}
+
+/// Where a Wayland toplevel is on the desktop: where the guest put it.
+///
+/// A Wayland client is never told where its toplevels are, and SDL answers
+/// with a placeholder origin once the compositor has mapped one. On a Mac the
+/// window is where it was asked to be, and a program may keep its own copy of
+/// that origin without ever asking again - Feral's Win32 layer does, and maps
+/// every pointer position against it. So the desktop here is a virtual one in
+/// which each toplevel sits at its requested origin; every desktop position
+/// (the frame, the pointer, a warp) is measured from it, so they agree.
+///
+/// Not for a full-screen or maximized window, which the compositor has placed
+/// somewhere the guest did not ask for and SDL does report.
+fn placed_origin(sdl: sdl3::Window) -> Option<(i32, i32)> {
+    if !sdl3::video::is_wayland() {
+        return None;
+    }
+    let placed_by_host = sdl3::video::flags::FULLSCREEN | sdl3::video::flags::MAXIMIZED;
+    if sdl3::video::window_flags(sdl) & placed_by_host != 0 {
+        return None;
+    }
+    let object = window_for(sdl);
+    if object.is_null() {
+        return None;
+    }
+    let requested = window_of(object).requested;
+    if requested.size.width <= 0.0 || requested.size.height <= 0.0 {
+        return None;
+    }
+    let (x, y, _, _) = crate::geometry::rect_to_sdl(requested);
+    Some((x, y))
+}
+
+/// The pointer on the desktop, in SDL's coordinates, and the held buttons.
+///
+/// Measured from the window the pointer is in rather than asked of SDL, whose
+/// global answer on Wayland adds its own placeholder origin instead of the one
+/// [`global_position`] reports.
+pub(crate) fn desktop_mouse_state() -> Option<(f32, f32, u32)> {
+    if !sdl3::video::is_wayland() {
+        return sdl3::video::global_mouse_state();
+    }
+    let (x, y, buttons) = sdl3::video::mouse_state()?;
+    let origin = crate::event::pointer_window()
+        .and_then(global_position)
+        .unwrap_or((0, 0));
+    Some((x + origin.0 as f32, y + origin.1 as f32, buttons))
 }
 
 /// The reverse: a desktop position as the offset SDL wants for this window.
@@ -879,7 +927,7 @@ pub fn pointer_location(window: Id) -> NSPoint {
     }
     let point = match crate::script::pointer().or_else(crate::event::frozen_pointer) {
         Some((x, y)) => crate::geometry::point_from_sdl(x as f64, y as f64),
-        None => match sdl3::video::global_mouse_state() {
+        None => match desktop_mouse_state() {
             Some((x, y, _)) => crate::geometry::point_from_sdl(x as f64, y as f64),
             None => return NSPoint::default(),
         },
