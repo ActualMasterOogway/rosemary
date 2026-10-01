@@ -906,6 +906,14 @@ impl Convert for Classes<'_> {
             return Ok(self.vm.objc_host_protocol(raw));
         }
         match self.classes.contains(&(index as u8)) || self.objects.contains(&(index as u8)) {
+            // A block passed as a plain `id` (`objc_retain`, `objc_storeStrong`,
+            // an `@` argument) gets copied by the runtime just as one passed to
+            // `objc_retainBlock` does, and the copy runs its helpers.
+            true if crate::shims::block::is_block(raw, &self.vm.view()) => {
+                let mut view = self.vm.view();
+                crate::shims::block::substitute_block(symbol, raw, &mut view, self.vm)?;
+                Ok(raw)
+            }
             // Not `objc_host_class`: an `@` in a method encoding is `id`,
             // `Class` and `Protocol *` alike, so both maps are consulted. See
             // [`Vm::objc_host_id`].

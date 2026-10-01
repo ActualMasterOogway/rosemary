@@ -997,3 +997,120 @@ fn every_table_entry_is_marshallable_or_variadic() {
         );
     }
 }
+
+/// Three `NSUInteger`s, as `MTLOrigin` and `MTLSize` are.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+/// `-[MTLBlitCommandEncoder copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:
+/// sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:]` with
+/// `self` and `_cmd` in front: three 24-byte structs SysV sends to memory, seventeen
+/// integer slots in all.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn copy_from_texture(
+    receiver: u64,
+    sel: u64,
+    source: u64,
+    source_slice: u64,
+    source_level: u64,
+    source_origin: Triple,
+    source_size: Triple,
+    destination: u64,
+    destination_slice: u64,
+    destination_level: u64,
+    destination_origin: Triple,
+) -> u64 {
+    let words = [
+        receiver,
+        sel,
+        source,
+        source_slice,
+        source_level,
+        source_origin.a,
+        source_origin.b,
+        source_origin.c,
+        source_size.a,
+        source_size.b,
+        source_size.c,
+        destination,
+        destination_slice,
+        destination_level,
+        destination_origin.a,
+        destination_origin.b,
+        destination_origin.c,
+    ];
+    words
+        .iter()
+        .enumerate()
+        .map(|(n, w)| w * (n as u64 + 1))
+        .sum()
+}
+
+#[test]
+fn a_blit_with_three_structs_in_memory_is_marshalled() {
+    use rosetta3::abi::aggregate::{Aggregate, Leaf, Shape};
+
+    let triple = || {
+        Shape::Struct(Aggregate {
+            size: 24,
+            align: 8,
+            leaves: (0..3)
+                .map(|i| Leaf {
+                    ty: T::UnsignedDoubleword,
+                    offset: i * 8,
+                })
+                .collect(),
+        })
+    };
+    let word = || Shape::Scalar(T::UnsignedDoubleword);
+    let shapes = [
+        word(),
+        word(),
+        word(),
+        word(),
+        word(),
+        word(),
+        triple(),
+        triple(),
+        word(),
+        word(),
+        word(),
+        triple(),
+    ];
+
+    // Where SysV puts each argument: the first six integer-class scalars in
+    // registers - `destination` among them, since the structs before it went
+    // to memory - and everything else on the stack in order.
+    let mut mem = guest_stack();
+    let mut ctx = RegisterContext::new();
+    ctx.rsp = STACK_BASE;
+    ctx.rdi = 1;
+    ctx.rsi = 2;
+    ctx.rdx = 3;
+    ctx.rcx = 4;
+    ctx.r8 = 5;
+    ctx.r9 = 12;
+    let stack = [6u64, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17];
+    for (i, w) in stack.iter().enumerate() {
+        AddressSpace::write(&mut mem, STACK_BASE + 8 * i as u64, &w.to_le_bytes())
+            .expect("write stack argument");
+    }
+
+    marshal::call_shapes(
+        "copy_from_texture",
+        &shapes,
+        copy_from_texture as *const () as usize as u64,
+        &mut ctx,
+        &mut mem,
+        &marshal::Verbatim,
+    )
+    .expect("seventeen integer slots are marshallable");
+
+    let want: u64 = (1..=17u64).map(|n| n * n).sum();
+    assert_eq!(ctx.rax, want);
+}

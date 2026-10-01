@@ -631,6 +631,12 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         if pc == 0 {
             say_unbound_call(out, context);
         }
+        // Host code that called a guest address directly: under the emulated
+        // backend guest pages are not executable, so this is the callee's first
+        // instruction and the word at `sp` names the host caller.
+        else if in_image(pc) && !in_translation(pc) {
+            say_host_call_into_guest(out, context);
+        }
         if !in_translation(pc) {
             say_caller(out, context);
         }
@@ -759,6 +765,29 @@ fn say_unbound_call(out: &mut Buffer, context: *mut libc::c_void) {
     out.str(", an import nothing satisfied - its stub ");
     out.hex(stub);
     out.str(" jumps through a slot left zero");
+}
+
+/// Name the host caller of a guest address that was called as host code - a
+/// guest function pointer that reached the host without a thunk.
+fn say_host_call_into_guest(out: &mut Buffer, context: *mut libc::c_void) {
+    let Some((_, sp, lr)) = host_frame(context) else {
+        return;
+    };
+    let ret = match lr {
+        Some(lr) => lr,
+        None if sp != 0 && sp % 8 == 0 => {
+            // SAFETY: `sp` is the kernel's value for this thread's stack
+            // pointer, and the fault is on the callee's first instruction, so
+            // the word there is the return address the call pushed.
+            unsafe { std::ptr::read(sp as *const u64) }
+        }
+        None => return,
+    };
+    out.str("\n  called as host code from ");
+    out.hex(ret);
+    if !say_image(out, ret) {
+        say_host_mapping(out, ret);
+    }
 }
 
 /// The address the call just before `ret` was made to.

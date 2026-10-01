@@ -736,6 +736,9 @@ impl<M: Regions> Program<M> {
         // And last, because it is stated in terms of what everything above
         // settled on.
         crate::interpose::apply(&mut report, &mut memory)?;
+        // Without this the guest's own `mi_malloc` hands out blocks that a
+        // libc++ `operator delete`, bound to the host's `free`, then releases.
+        crate::hostheap::apply(&mut report, &mut memory)?;
 
         // Say what did not bind, now that the repairs above have had their say
         // and `missing` means missing. See [`announce_unbound_imports`] for why

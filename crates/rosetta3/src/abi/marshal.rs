@@ -13,7 +13,7 @@ const MAX_INT_ARGS: usize = 8;
 
 /// Integer argument registers SysV has, past which an argument is on the stack.
 ///
-/// The prototypes below declare sixteen `u64`, and the compiler places the first six
+/// The prototypes below declare twenty-four `u64`, and the compiler places the first six
 /// of them in registers and the rest on the stack - so an index into `ints` at or
 /// above this is a stack slot, which is what lets an aggregate SysV sends to memory be
 /// written there.
@@ -22,7 +22,7 @@ const HOST_INT_REGS: usize = 6;
 const MAX_FP_ARGS: usize = 8;
 
 /// Integer arguments the over-wide prototype declares, registers and stack together.
-const MAX_INT_ARGS_TOTAL: usize = 16;
+const MAX_INT_ARGS_TOTAL: usize = 24;
 
 /// Whether `ty` occupies a full eight bytes.
 #[cfg(target_arch = "aarch64")]
@@ -265,7 +265,7 @@ pub fn call_types(
             if n_int == MAX_INT_ARGS_TOTAL {
                 return Err(AbiError::Unmarshallable {
                     symbol: symbol.to_string(),
-                    reason: "more than sixteen integer arguments",
+                    reason: "more than twenty-four integer arguments",
                 });
             }
             if n_int >= MAX_INT_ARGS {
@@ -439,6 +439,14 @@ type IntFn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -450,6 +458,14 @@ type IntFn = unsafe extern "C" fn(
 ) -> u64;
 
 type F64Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -493,6 +509,14 @@ type F32Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -507,7 +531,8 @@ macro_rules! call_through {
     ($f:expr, $i:expr, $v:expr) => {
         $f(
             $i[0], $i[1], $i[2], $i[3], $i[4], $i[5], $i[6], $i[7], $i[8], $i[9], $i[10], $i[11],
-            $i[12], $i[13], $i[14], $i[15], $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
+            $i[12], $i[13], $i[14], $i[15], $i[16], $i[17], $i[18], $i[19], $i[20], $i[21], $i[22],
+            $i[23], $v[0], $v[1], $v[2], $v[3], $v[4], $v[5], $v[6], $v[7],
         )
     };
 }
@@ -586,7 +611,7 @@ unsafe fn call_int_tail(
     }
 }
 
-/// # Safety `host` must be a native C function of at most twelve integer and eight
+/// # Safety `host` must be a native C function of at most twenty-four integer and eight
 /// floating-point scalar arguments returning an integer or pointer, with every integer
 /// argument past the eighth a full doubleword.
 unsafe fn call_int(host: u64, ints: &[u64; MAX_INT_ARGS_TOTAL], fps: &[f64; MAX_FP_ARGS]) -> u64 {
@@ -915,7 +940,7 @@ fn gather_args(
     let mut push_int =
         |v: u64, ty: ArgType, n_int: &mut usize, overflow: &mut Vec<ArgType>| -> Result<()> {
             if *n_int == MAX_INT_ARGS_TOTAL {
-                return Err(unmarshallable("more than sixteen integer arguments"));
+                return Err(unmarshallable("more than twenty-four integer arguments"));
             }
             if *n_int >= MAX_INT_ARGS {
                 overflow.push(ty);
@@ -1066,12 +1091,12 @@ fn gather_args(
         }
     }
 
-    // The prototype declares sixteen `u64`; the compiler puts the first of them
+    // The prototype declares twenty-four `u64`; the compiler puts the first of them
     // in the registers the hidden pointer left free, and the rest on the stack
     // in order - which is the area the offsets above index.
     let regs = HOST_INT_REGS - shift;
     if regs + stack.len() > MAX_INT_ARGS_TOTAL {
-        return Err(unmarshallable("more than sixteen integer arguments"));
+        return Err(unmarshallable("more than twenty-four integer arguments"));
     }
     ints[regs..regs + stack.len()].copy_from_slice(&stack);
 
@@ -1288,6 +1313,14 @@ type F64x4Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1326,6 +1359,14 @@ type F32x4Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1348,6 +1389,14 @@ unsafe fn call_f32x4(
 }
 
 type U64x2Fn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -1421,6 +1470,14 @@ type F64x2Fn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1443,6 +1500,14 @@ unsafe fn call_f64x2(
 }
 
 type IntSseFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,
@@ -1497,6 +1562,14 @@ type SseIntFn = unsafe extern "C" fn(
     u64,
     u64,
     u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     f64,
     f64,
     f64,
@@ -1519,6 +1592,14 @@ unsafe fn call_sse_int(
 }
 
 type IndirectFn = unsafe extern "C" fn(
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
     u64,
     u64,
     u64,

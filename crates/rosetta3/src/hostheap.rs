@@ -55,6 +55,12 @@ unsafe extern "C" fn realloc_aligned(
     fresh
 }
 
+/// `mi_zalloc(size)`, which zeroes, so it cannot be bound to `malloc`.
+unsafe extern "C" fn zalloc(size: usize) -> *mut c_void {
+    // SAFETY: `calloc` accepts any size; a null return is the caller's to handle.
+    unsafe { libc::calloc(1, size) }
+}
+
 /// `mi_is_in_heap_region`. Every pointer is, once there is one heap.
 unsafe extern "C" fn in_heap_region(_p: *const c_void) -> bool {
     true
@@ -91,7 +97,7 @@ fn replacements() -> Vec<(&'static str, u64)> {
     same("mi_strndup", "strndup");
     same("mi_usable_size", "malloc_usable_size");
     same("mi_malloc_usable_size", "malloc_usable_size");
-    same("mi_zalloc", "malloc");
+    out.push(("mi_zalloc", zalloc as *const () as u64));
     out.push(("mi_malloc_aligned", malloc_aligned as *const () as u64));
     out.push(("mi_realloc_aligned", realloc_aligned as *const () as u64));
     out.push(("mi_is_in_heap_region", in_heap_region as *const () as u64));

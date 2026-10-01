@@ -60,6 +60,48 @@ fn substitute_pointer(
     Ok(())
 }
 
+/// The selected runtime's three `_NSConcrete*Block` classes.
+fn block_classes() -> &'static [u64] {
+    static CLASSES: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    CLASSES.get_or_init(|| {
+        let builtin = crate::objc::host::block_data();
+        [
+            "_NSConcreteStackBlock",
+            "_NSConcreteGlobalBlock",
+            "_NSConcreteMallocBlock",
+        ]
+        .iter()
+        .filter_map(|name| {
+            builtin
+                .iter()
+                .find(|(n, _)| n.strip_prefix('_') == Some(name))
+                .map(|&(_, addr)| addr)
+                .or_else(|| crate::host::symbol(name))
+        })
+        .filter(|&addr| addr != 0)
+        .collect()
+    })
+}
+
+/// Whether `object` is a block literal, judged by its `isa`.
+///
+/// For an argument typed as a plain `id`: the runtime copies a block it is
+/// asked to retain, which runs the block's copy helper, so the helpers must be
+/// thunked before the host sees it - see [`substitute_block`].
+pub(crate) fn is_block(object: u64, mem: &dyn GuestMemory) -> bool {
+    // Objects are aligned; a tagged pointer or a misaligned value is not one,
+    // and is not worth the mapping check a read would cost.
+    if object == 0 || object % 8 != 0 {
+        return false;
+    }
+    let mut isa = [0u8; 8];
+    if mem.read(object, &mut isa).is_err() {
+        return false;
+    }
+    let isa = u64::from_le_bytes(isa);
+    isa != 0 && block_classes().contains(&isa)
+}
+
 fn read_u64(symbol: &str, mem: &mut dyn GuestMemory, at: u64) -> Result<u64> {
     let mut buf = [0u8; 8];
     mem.read(at, &mut buf)

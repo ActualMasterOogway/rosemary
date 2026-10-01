@@ -1116,6 +1116,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDValueGetElement", P, P),
     sig!("IOHIDValueGetIntegerValue", I64, P),
     sig!("IOHIDValueGetLength", I64, P),
+    // `double IOHIDValueGetScaledValue(IOHIDValueRef, IOHIDValueScaleType)`,
+    // whose scale type is a `uint32_t`.
+    sig!("IOHIDValueGetScaledValue", F64, P, U32),
     sig!("IOHIDValueGetTypeID", U64),
     sig!("IOIteratorIsValid", I32, U32),
     sig!("IOIteratorNext", U32, U32),
@@ -1169,6 +1172,20 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IORegistryEntryFromPath", U32, U32, P),
     sig!("IORegistryEntrySearchCFProperty", P, U32, P, P, P, U32),
     sig!("IORegistryEntryGetParentEntry", I32, U32, P, P),
+    // `kern_return_t IOServiceAddMatchingNotification(IONotificationPortRef,
+    // const io_name_t, CFDictionaryRef, IOServiceMatchingCallback, void *refCon,
+    // io_iterator_t *)`. The callback is `void (*)(void *, io_iterator_t)`.
+    cbsig!(
+        [3],
+        "IOServiceAddMatchingNotification",
+        I32,
+        P,
+        P,
+        P,
+        P,
+        P,
+        P
+    ),
     sig!("IOServiceGetMatchingServices", I32, U32, P, P),
     sig!("IOServiceMatching", P, P),
     sig!("IOServiceNameMatching", P, P),
@@ -2662,6 +2679,32 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // optimize it away.
     sig!("memset_s", I32, P, U64, I32, U64),
     sig!("memset_pattern16", V, P, P, U64),
+    // mimalloc's public API, reached only once `crate::hostheap` rebinds a
+    // guest's imports of it to host functions; until then they resolve into
+    // the guest's own copy and never consult this table.
+    sig!("mi_calloc", P, U64, U64),
+    // `void mi_collect(bool force)`.
+    sig!("mi_collect", V, BOOL),
+    sig!("mi_free", V, P),
+    sig!("mi_is_in_heap_region", BOOL, P),
+    sig!("mi_malloc", P, U64),
+    sig!("mi_malloc_aligned", P, U64, U64),
+    sig!("mi_malloc_usable_size", U64, P),
+    // `mi_option_t` is an enum, so an `int`; option values are `long`.
+    sig!("mi_option_disable", V, I32),
+    sig!("mi_option_enable", V, I32),
+    sig!("mi_option_get", I64, I32),
+    sig!("mi_option_set", V, I32, I64),
+    sig!("mi_option_set_default", V, I32, I64),
+    sig!("mi_realloc", P, P, U64),
+    sig!("mi_realloc_aligned", P, P, U64, U64),
+    // `void mi_register_output(mi_output_fun *out, void *arg)`. The callback is
+    // never called, since the host's version ignores it, so no thunk.
+    sig!("mi_register_output", V, P, P),
+    sig!("mi_strdup", P, P),
+    sig!("mi_strndup", P, P, U64),
+    sig!("mi_usable_size", U64, P),
+    sig!("mi_zalloc", P, U64),
     // Answered honestly rather than usefully.
     sig!("mincore", I32, P, U64, P),
     sig!("mkdir", I32, P, U32),

@@ -2,6 +2,9 @@ use microlift::arch::x86_64::context::RegisterContext;
 
 use crate::abi::{AbiError, GuestMemory, Result};
 
+/// Not gated, for the reason [`coregraphics`] is not: the tree's own AppKit
+/// takes these structs by value too.
+pub mod appkit;
 pub mod atexit;
 /// Not gated: the callback substitution is this runtime's business on either
 /// host, and which implementation the call lands on is decided inside.
@@ -35,8 +38,6 @@ pub mod vmmap;
 pub mod zlib;
 
 #[cfg(target_os = "macos")]
-pub mod appkit;
-#[cfg(target_os = "macos")]
 pub mod cfuuid;
 #[cfg(target_os = "macos")]
 pub mod coremedia;
@@ -67,6 +68,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
     crate::objc::dispatch::shim_for(name)
         .or_else(|| component::shim_for(name))
         .or_else(|| coregraphics::shim_for(name))
+        .or_else(|| appkit::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -76,7 +78,6 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
 fn macos_shim_for(name: &str) -> Option<Shim> {
     coremedia::shim_for(name)
         .or_else(|| cfuuid::shim_for(name))
-        .or_else(|| appkit::shim_for(name))
         .or_else(|| machthread::shim_for(name))
         // The overlay's OpenGL seam. Only present when the overlay is on;
         // see [`crate::gui::hook::shim_for`].
