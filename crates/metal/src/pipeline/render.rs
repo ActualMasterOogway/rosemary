@@ -330,6 +330,7 @@ impl RenderPipeline {
                 1 => vk::FrontFace::COUNTER_CLOCKWISE,
                 _ => vk::FrontFace::CLOCKWISE,
             })
+            .depth_bias_enable(true)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(self.samples)
