@@ -47,7 +47,7 @@ impl Table {
                 host: PathBuf::from("/dev"),
             },
             Mount {
-                guest: "/etc/resolv.conf".to_string(),
+                guest: "/private/etc/resolv.conf".to_string(),
                 host: PathBuf::from("/etc/resolv.conf"),
             },
             // The escape hatch, and the reason `to_guest` is total: every host
