@@ -78,36 +78,30 @@ impl Attributes {
             return Some(Attributes::default());
         }
         #[cfg(target_os = "macos")]
-        {
-            // SAFETY: the caller's guarantee. On a Mac the guest's `pthread_attr_t`
-            // and this process's are the same type, so the settings are read with the
-            // host's own getters rather than decoded.
-            unsafe { Attributes::of_host_attr(at as usize as *const libc::pthread_attr_t) }
+        if !crate::libc_backend::using_builtin() {
+            // SAFETY: native mode binds the guest's attribute calls to the host.
+            return unsafe { Attributes::of_host_attr(at as usize as *const libc::pthread_attr_t) };
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // SAFETY: as above. Every `pthread_attr_*` the guest can have called is
-            // this module's, so the bytes are this module's record.
-            let r = unsafe { Record::at(at, Kind::Attr) };
-            if !r.is_ours() {
-                return None;
-            }
-            Some(Attributes {
-                detached: get(&r, slot::DETACH) == PTHREAD_CREATE_DETACHED as u64,
-                stack_size: unset_or(get(&r, slot::STACK_SIZE)).map(|n| n as usize),
-                stack_top: unset_or(get(&r, slot::STACK_TOP)),
-                guard_size: unset_or(get(&r, slot::GUARD_SIZE)).map(|n| n as usize),
-                scope: get(&r, slot::SCOPE) as i32,
-                inherit_sched: get(&r, slot::INHERIT) as i32,
-                sched_policy: (get(&r, slot::SCHED) & 0xffff_ffff) as i32,
-                sched_priority: (get(&r, slot::SCHED) >> 32) as i32,
-                qos_class: (get(&r, slot::SCOPE) >> 32) as u32,
-                qos_relative_priority: (get(&r, slot::INHERIT) >> 32) as i32,
-            })
+        // SAFETY: builtin mode binds all guest attribute calls to this record.
+        let r = unsafe { Record::at(at, Kind::Attr) };
+        if !r.is_ours() {
+            return None;
         }
+        Some(Attributes {
+            detached: get(&r, slot::DETACH) == PTHREAD_CREATE_DETACHED as u64,
+            stack_size: unset_or(get(&r, slot::STACK_SIZE)).map(|n| n as usize),
+            stack_top: unset_or(get(&r, slot::STACK_TOP)),
+            guard_size: unset_or(get(&r, slot::GUARD_SIZE)).map(|n| n as usize),
+            scope: get(&r, slot::SCOPE) as i32,
+            inherit_sched: get(&r, slot::INHERIT) as i32,
+            sched_policy: (get(&r, slot::SCHED) & 0xffff_ffff) as i32,
+            sched_priority: (get(&r, slot::SCHED) >> 32) as i32,
+            qos_class: (get(&r, slot::SCOPE) >> 32) as u32,
+            qos_relative_priority: (get(&r, slot::INHERIT) >> 32) as i32,
+        })
     }
 
-    /// Read a **host** `pthread_attr_t`, which on a Mac is also the guest's.
+    /// Read a host `pthread_attr_t`, also used by guests in macOS native mode.
     ///
     /// # Safety
     ///

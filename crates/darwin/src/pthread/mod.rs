@@ -827,7 +827,6 @@ pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
 /// this crate runs on their behalf, and those are deeper than the Darwin libc the
 /// guest was compiled against. A guest reading `pthread_get_stacksize_np` back
 /// therefore sees a larger number than it would on a Mac.
-#[cfg(not(target_os = "macos"))]
 const DEFAULT_STACK: usize = 8 * 1024 * 1024;
 
 /// The floor under a guest's own request.
@@ -836,10 +835,8 @@ const DEFAULT_STACK: usize = 8 * 1024 * 1024;
 /// own frames on, and those are deeper than the Darwin libc the guest sized itself
 /// against. Only ever raises a request, so the thread has at least the room the guest
 /// asked for.
-#[cfg(not(target_os = "macos"))]
 const MIN_STACK: usize = 1024 * 1024;
 
-#[cfg(not(target_os = "macos"))]
 fn stack_size(attributes: &Attributes) -> usize {
     attributes
         .stack_size
@@ -848,7 +845,6 @@ fn stack_size(attributes: &Attributes) -> usize {
 }
 
 /// What [`create`] hands the host thread: the guest's start routine and its argument.
-#[cfg(not(target_os = "macos"))]
 struct Start {
     entry: u64,
     arg: u64,
@@ -866,7 +862,6 @@ struct Start {
 /// `context` is the [`Start`] [`create`] leaked, handed back unchanged - which is the
 /// only value the host can pass, and why this is not an `unsafe fn`: `pthread_create`
 /// takes a safe pointer.
-#[cfg(not(target_os = "macos"))]
 extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     // Reclaimed and copied out before the guest runs, because a start routine may
     // call `pthread_exit` - which ends the thread from under these frames without
@@ -913,7 +908,6 @@ extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
 ///
 /// `out` is a writable `pthread_t`, `attr` is null or a guest `pthread_attr_t`, and
 /// `start` is guest code of this host's architecture.
-#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn create(out: u64, attr: u64, start: u64, arg: u64) -> i32 {
     if out == 0 || start == 0 {
         return err::EINVAL;
@@ -1067,10 +1061,7 @@ exports::exports! {
         "pthread_getspecific" => getspecific,
         "pthread_setspecific" => setspecific,
 
-        #[cfg(not(target_os = "macos"))]
         "pthread_create" => create,
-        #[cfg(target_os = "macos")]
-        "pthread_create" => libc::pthread_create,
         "pthread_join" => join,
         "pthread_detach" => detach,
         "pthread_kill" => kill,
@@ -1102,7 +1093,6 @@ exports::exports! {
         "pthread_testcancel" => pthread_testcancel,
         "pthread_getconcurrency" => pthread_getconcurrency,
         "pthread_setconcurrency" => pthread_setconcurrency,
-        "sched_yield" => libc::sched_yield,
     }
 }
 

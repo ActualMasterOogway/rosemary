@@ -75,3 +75,77 @@ int main(int argc, char **argv) {
     assert!(builtin.1.contains("regex=2:0-3:0-2"), "{}", builtin.1);
     assert!(builtin.1.contains("regex-bounded=0-3"), "{}", builtin.1);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn builtin_pthreads_run_with_guest_attributes_and_callbacks() {
+    const SOURCE: &str = r#"
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
+static pthread_once_t once = PTHREAD_ONCE_INIT;
+static pthread_key_t key;
+static int ready, initialized, destroyed;
+
+static void initialize(void) { initialized++; }
+static void destroy(void *value) { if (value == (void *)42) destroyed++; }
+static void *worker(void *arg) {
+    if (pthread_once(&once, initialize) || pthread_once(&once, initialize)) return (void *)1;
+    if (pthread_setspecific(key, (void *)42) || pthread_getspecific(key) != (void *)42) return (void *)2;
+    if (pthread_rwlock_wrlock(&rwlock) || pthread_rwlock_unlock(&rwlock)) return (void *)3;
+    if (pthread_mutex_lock(&mutex)) return (void *)4;
+    ready = 1;
+    if (pthread_cond_signal(&cond) || pthread_mutex_unlock(&mutex)) return (void *)5;
+    return arg;
+}
+int main(void) {
+    pthread_attr_t attr;
+    size_t size = 0;
+    if (pthread_attr_init(&attr) || pthread_attr_setstacksize(&attr, 1024 * 1024)) return 10;
+    if (pthread_attr_getstacksize(&attr, &size) || size != 1024 * 1024) return 11;
+    if (pthread_key_create(&key, destroy) || pthread_mutex_lock(&mutex)) return 12;
+    pthread_t thread;
+    if (pthread_create(&thread, &attr, worker, (void *)99)) return 13;
+    if (pthread_attr_destroy(&attr)) return 14;
+    while (!ready) if (pthread_cond_wait(&cond, &mutex)) return 15;
+    if (pthread_mutex_unlock(&mutex)) return 16;
+    void *result = 0;
+    if (pthread_join(thread, &result) || result != (void *)99) return 17;
+    if (initialized != 1 || destroyed != 1) return 18;
+    if (pthread_key_delete(key) || pthread_cond_destroy(&cond) ||
+        pthread_mutex_destroy(&mutex) || pthread_rwlock_destroy(&rwlock)) return 19;
+    puts("pthread=ok");
+    return 0;
+}
+"#;
+    let Some(emulated) = common::build_x86_64("libc_mode_pthread", SOURCE, &[]) else {
+        skip!("cannot build x86_64 fixtures");
+    };
+    let Some(native) = common::build_native("libc_mode_pthread_native", SOURCE) else {
+        skip!("cannot build native fixtures");
+    };
+    for mode in ["native", "builtin"] {
+        for (path, flags) in [(&emulated, &["--emulated"][..]), (&native, &[][..])] {
+            let output = common::driver_command()
+                .env("ROSETTA3_PREFIX", "off")
+                .env("ROSETTA3_LIBC", mode)
+                .env("ROSETTA3_DEBUG_MUTEX", "1")
+                .arg("run")
+                .args(flags)
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode} {flags:?}: {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "pthread=ok\n");
+        }
+    }
+}

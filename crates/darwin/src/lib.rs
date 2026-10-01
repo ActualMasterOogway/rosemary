@@ -410,6 +410,7 @@ fn implemented(name: &str) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 static MAC_BUILTIN_MODULES: &[exports::Module] = &[
+    pthread::MODULE,
     clock::MODULE,
     glob::MODULE,
     regex::MODULE,
@@ -490,18 +491,37 @@ mod tests {
         };
         assert_eq!(libc_backend::using_builtin(), want == "builtin");
         assert!(is_implemented("_sysctl"));
-        for name in ["_clock_gettime", "_glob", "_res_9_init", "_strerror"] {
+        for name in [
+            "_clock_gettime",
+            "_glob",
+            "_res_9_init",
+            "_strerror",
+            "_pthread_mutex_lock",
+            "_pthread_attr_init",
+            "_pthread_once",
+            "_pthread_create",
+        ] {
             assert_eq!(is_implemented(name), want == "builtin", "{name}");
         }
-        let addr = symbol("_glob").expect("native or builtin glob");
-        assert_eq!(
-            addr,
-            if want == "builtin" {
-                (glob::MODULE.symbol)("glob").unwrap()
-            } else {
-                host_symbol("glob").unwrap()
-            }
-        );
+        for name in [
+            "glob",
+            "pthread_mutex_lock",
+            "pthread_attr_init",
+            "pthread_once",
+            "pthread_create",
+        ] {
+            let addr = symbol(name).expect("native or builtin symbol");
+            assert_eq!(
+                addr,
+                if want == "builtin" {
+                    (glob::MODULE.symbol)(name)
+                        .or_else(|| (pthread::MODULE.symbol)(name))
+                        .unwrap()
+                } else {
+                    host_symbol(name).unwrap()
+                }
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

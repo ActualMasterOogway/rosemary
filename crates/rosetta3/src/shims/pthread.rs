@@ -29,8 +29,8 @@ pub fn pthread_create(
     }
 
     // The guest's attributes, read before anything is created. Read rather than
-    // byte-copied: a Darwin `pthread_attr_t` and this host's are the same structure
-    // only on a Mac, so what crosses is what the set *says*. See
+    // byte-copied: builtin mode owns the guest layout, so what crosses is what
+    // the set says. See
     // [`darwin::pthread::Attributes`].
     //
     // SAFETY: `attr` is null or the guest's own `pthread_attr_t`, which is
@@ -99,10 +99,9 @@ fn stack_request(attributes: &darwin::pthread::Attributes) -> StackRequest {
 /// the control word cannot be handed to the host at all. See [`darwin::pthread::once`],
 /// which owns the once-and-only-once and the waiting.
 ///
-/// Only registered where this runtime implements the pthread family. On macOS the
+/// Only registered in builtin libc mode. In macOS native mode the
 /// host's `pthread_once` reads the same sixteen bytes the guest wrote, and the generic
 /// marshaller already gives it a thunk - see the `cbsig!` entry in [`crate::abi::table`].
-#[cfg(not(target_os = "macos"))]
 fn pthread_once(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -131,7 +130,6 @@ fn pthread_once(
 /// letting the host write through the guest's pointer fills four of the eight bytes
 /// the guest will read and leaves the other four holding whatever was there. The key
 /// is written out as a full eight bytes here instead.
-#[cfg(not(target_os = "macos"))]
 fn pthread_key_create(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -172,11 +170,12 @@ pub type Shim = crate::signal::Shim;
 pub fn shim_for(name: &str) -> Option<Shim> {
     // The two whose object this runtime owns rather than the host, and which are
     // therefore shims only where that is true. See [`pthread_once`].
-    #[cfg(not(target_os = "macos"))]
-    match name {
-        "pthread_once" => return Some(pthread_once),
-        "pthread_key_create" => return Some(pthread_key_create),
-        _ => {}
+    if darwin::libc_backend::using_builtin() {
+        match name {
+            "pthread_once" => return Some(pthread_once),
+            "pthread_key_create" => return Some(pthread_key_create),
+            _ => {}
+        }
     }
     match name {
         "pthread_create" => Some(pthread_create),
@@ -203,10 +202,15 @@ fn mutex_lock(
     _callbacks: &dyn Callbacks,
 ) -> Result<()> {
     let at = ctx.rdi;
-    // SAFETY: the mutex is guest memory, which is this process's memory, and
-    // `pthread_mutex_lock` is the host's own - the passthrough the table
-    // declares, performed here so its result can be looked at.
-    let rc = unsafe { libc::pthread_mutex_lock(at as *mut libc::pthread_mutex_t) };
+    // SAFETY: the mutex is identity-mapped guest memory. Use the implementation
+    // selected for its initialization so the diagnostic reads the same layout.
+    let rc = unsafe {
+        if darwin::libc_backend::using_builtin() {
+            darwin::pthread::sync::mutex_lock(at)
+        } else {
+            libc::pthread_mutex_lock(at as *mut libc::pthread_mutex_t)
+        }
+    };
     if rc != 0 {
         let mut head = [0u8; 16];
         let read = mem.read(at, &mut head).is_ok();
