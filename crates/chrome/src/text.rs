@@ -101,6 +101,25 @@ impl Font {
         Font::from_faces(faces)
     }
 
+    /// [`Font::from_faces`], then the symbol fallbacks the system font has,
+    /// for a program's own face that lacks a character the interface needs.
+    pub fn from_faces_with_fallback(mut faces: Vec<Arc<LoadedFace>>) -> Option<Font> {
+        let fallbacks: Vec<Arc<LoadedFace>> = {
+            static FALLBACKS: OnceLock<Vec<Arc<LoadedFace>>> = OnceLock::new();
+            FALLBACKS
+                .get_or_init(|| {
+                    FALLBACK_FAMILIES
+                        .iter()
+                        .filter_map(|family| exact_family(family, 400))
+                        .filter_map(|info| fonts::load(&info.path, info.index))
+                        .collect()
+                })
+                .clone()
+        };
+        faces.extend(fallbacks);
+        Font::from_faces(faces)
+    }
+
     /// A font from faces already loaded, the first preferred.
     pub fn from_faces(faces: Vec<Arc<LoadedFace>>) -> Option<Font> {
         (!faces.is_empty()).then(|| Font {

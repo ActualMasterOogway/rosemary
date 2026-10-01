@@ -52,6 +52,8 @@ pub struct MenuItem {
     /// menu here never does, so an alternate is never shown.
     alternate: usize,
     indentation: isize,
+    /// `-representedObject`, retained.
+    represented: Id,
 }
 
 pub const MENU_INSTANCE_SIZE: usize = size_of::<Menu>();
@@ -521,6 +523,59 @@ unsafe extern "C" fn perform_action_for_item_at_index(receiver: Id, _sel: Sel, i
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
+unsafe extern "C" fn set_represented_object(receiver: Id, _sel: Sel, object: Id) {
+    let item = item_of(receiver);
+    let old = std::mem::replace(&mut item.represented, objc::arc::retain(object));
+    objc::arc::release(old);
+}
+
+unsafe extern "C" fn represented_object(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).represented
+}
+
+/// `-insertItemWithTitle:action:keyEquivalent:atIndex:`: a new item, owned by
+/// the menu, which is what the caller gets back.
+unsafe extern "C" fn insert_item_with_title(
+    receiver: Id,
+    _sel: Sel,
+    title: Id,
+    action: Sel,
+    key: Id,
+    index: isize,
+) -> Id {
+    let class = objc::class::lookup(c"NSMenuItem").expect("declared before its methods");
+    let item = objc::object::create_instance(class, 0);
+    // SAFETY: the item's own initialiser, and the menu's own insert.
+    unsafe {
+        let init: unsafe extern "C" fn(Id, Sel, Id, Sel, Id) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        let item = init(
+            item,
+            objc::sel::get("initWithTitle:action:keyEquivalent:"),
+            title,
+            action,
+            key,
+        );
+        insert_item(receiver, objc::sel::get("insertItem:atIndex:"), item, index);
+        objc::arc::release(item);
+        item
+    }
+}
+
+/// `-addItemWithTitle:action:keyEquivalent:`, at the end.
+unsafe extern "C" fn add_item_with_title(
+    receiver: Id,
+    sel: Sel,
+    title: Id,
+    action: Sel,
+    key: Id,
+) -> Id {
+    // SAFETY: the same menu.
+    let count = unsafe { number_of_items(receiver, objc::sel::get("numberOfItems")) };
+    // SAFETY: as above.
+    unsafe { insert_item_with_title(receiver, sel, title, action, key, count) }
+}
+
 pub(crate) fn install() {
     let menu = objc::class::lookup(c"NSMenu").expect("declared before its methods");
     methods!(menu, {
@@ -533,6 +588,8 @@ pub(crate) fn install() {
         "itemAtIndex:" => item_at_index, c"@24@0:8q16";
         "addItem:" => add_item, c"v24@0:8@16";
         "insertItem:atIndex:" => insert_item, c"v32@0:8@16q24";
+        "insertItemWithTitle:action:keyEquivalent:atIndex:" => insert_item_with_title, c"@48@0:8@16:24@32q40";
+        "addItemWithTitle:action:keyEquivalent:" => add_item_with_title, c"@40@0:8@16:24@32";
         "removeItem:" => remove_item, c"v24@0:8@16";
         "removeItemAtIndex:" => remove_item_at_index, c"v24@0:8q16";
         "removeAllItems" => remove_all_items, c"v16@0:8";
@@ -595,7 +652,8 @@ pub(crate) fn install() {
         "setView:" => set_item_view, c"v24@0:8@16";
         "setOnStateImage:" => ignored_object, c"v24@0:8@16";
         "setMixedStateImage:" => ignored_object, c"v24@0:8@16";
-        "setRepresentedObject:" => ignored_object, c"v24@0:8@16";
+        "setRepresentedObject:" => set_represented_object, c"v24@0:8@16";
+        "representedObject" => represented_object, c"@16@0:8";
     });
 }
 
@@ -722,7 +780,8 @@ pub(crate) fn is_item_enabled(item: Id) -> bool {
     let body = item_of(item);
     let menu = body.menu;
     let automatic = is_menu(menu) && menu_of(menu).no_autoenable == 0;
-    if !automatic {
+    // A pop-up button answers for an item of its menu that has no action.
+    if !automatic || (body.action.is_null() && crate::popup::owns_menu(menu)) {
         return body.enabled != 0;
     }
     if !body.submenu.is_null() {

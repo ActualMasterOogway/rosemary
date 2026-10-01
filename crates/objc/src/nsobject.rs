@@ -63,6 +63,7 @@ pub(crate) fn install() {
     add(class, "retainCount", retain_count as Imp, c"Q16@0:8");
     add(class, "self", itself as Imp, c"@16@0:8");
     add(class, "copy", copy as Imp, c"@16@0:8");
+    add(class, "mutableCopy", mutable_copy as Imp, c"@16@0:8");
     add(class, "class", class_of as Imp, c"#16@0:8");
     add(class, "superclass", instance_superclass as Imp, c"#16@0:8");
     add(class, "isEqual:", is_equal as Imp, c"B24@0:8@16");
@@ -375,6 +376,20 @@ unsafe extern "C" fn copy(receiver: Id, _sel: Sel) -> Id {
         f(
             receiver,
             crate::sel::get("copyWithZone:"),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+/// `-mutableCopy` is `[self mutableCopyWithZone:nil]`, as [`copy`].
+unsafe extern "C" fn mutable_copy(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: `-mutableCopyWithZone:` is `id (id, SEL, NSZone *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, *mut c_void) -> Id =
+            std::mem::transmute(crate::msg::entry());
+        f(
+            receiver,
+            crate::sel::get("mutableCopyWithZone:"),
             std::ptr::null_mut(),
         )
     }

@@ -890,7 +890,11 @@ pub(crate) fn rewrite_refs(
 fn unique_selectors(r: &dyn Realizer, image: &ObjcImage) -> Result<usize, VmError> {
     let mut uniqued = 0;
     let mut view = r.memory();
-    for &slot in &image.selector_refs {
+    for &slot in image
+        .selector_refs
+        .iter()
+        .chain(&image.message_ref_selectors)
+    {
         let mut buf = [0u8; 8];
         if view.read(slot, &mut buf).is_err() {
             continue;

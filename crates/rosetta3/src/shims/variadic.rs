@@ -5,13 +5,14 @@ use crate::objc::host::{self, Imp, Sel};
 /// The methods whose implementation this module stands in front of, as
 /// `(class, selector, whether it is a class method)`.
 ///
-/// All four take the format as the *first* message argument, which is what lets
+/// Each takes the format as the *first* message argument, which is what lets
 /// one trampoline serve them.
 const FORMATTERS: &[(&str, &str, bool)] = &[
     ("NSString", "stringWithFormat:", true),
     ("NSString", "localizedStringWithFormat:", true),
     ("NSString", "initWithFormat:", false),
     ("NSMutableString", "appendFormat:", false),
+    ("NSString", "stringByAppendingFormat:", false),
 ];
 
 /// The implementation each selector had before this module replaced it.
@@ -155,23 +156,41 @@ unsafe extern "C" fn trampoline() {
     )
 }
 
-/// Nil-terminated object lists, as `(class, variadic, counted, pairs)`: the
-/// class method a program sends, and the counted one that says the same thing
+/// Nil-terminated object lists, as `(class, variadic, counted, pairs,
+/// instance)`: the method a program sends, and the counted one that says the same thing
 /// without an ellipsis. `pairs` reads the list as `object, key, object, key`.
 ///
 /// The emulated backend rewrites these in `objc::dispatch` before any `IMP` is
 /// reached; a native image reaches one, so it has to be a variadic one.
-const OBJECT_LISTS: &[(&str, &str, &str, bool)] = &[
+const OBJECT_LISTS: &[(&str, &str, &str, bool, bool)] = &[
     (
         "NSArray",
         "arrayWithObjects:",
         "arrayWithObjects:count:",
+        false,
         false,
     ),
     (
         "NSDictionary",
         "dictionaryWithObjectsAndKeys:",
         "dictionaryWithObjects:forKeys:count:",
+        true,
+        false,
+    ),
+    // The initialiser spellings, as instance methods: `instance` is the last
+    // field. The counted method is found on the receiver's class either way.
+    (
+        "NSArray",
+        "initWithObjects:",
+        "initWithObjects:count:",
+        false,
+        true,
+    ),
+    (
+        "NSDictionary",
+        "initWithObjectsAndKeys:",
+        "initWithObjects:forKeys:count:",
+        true,
         true,
     ),
 ];
@@ -185,7 +204,7 @@ static LISTS: OnceLock<Vec<(u64, u64, bool)>> = OnceLock::new();
 /// already has one of these is left with what it has.
 fn install_object_lists() {
     let mut lists = Vec::new();
-    for (class, variadic, counted, pairs) in OBJECT_LISTS {
+    for (class, variadic, counted, pairs, instance) in OBJECT_LISTS {
         let (Some(c), Some(v), Some(n)) = (
             host::c_string(class),
             host::c_string(variadic),
@@ -202,12 +221,18 @@ fn install_object_lists() {
             }
             let variadic = host::sel_registerName(v.as_ptr());
             let counted = host::sel_registerName(n.as_ptr());
-            if host::class_getClassMethod(cls, counted).is_null() {
+            let (found, owner) = match instance {
+                true => (host::class_getInstanceMethod(cls, counted), cls),
+                false => (
+                    host::class_getClassMethod(cls, counted),
+                    host::object_getClass(cls),
+                ),
+            };
+            if found.is_null() {
                 continue;
             }
-            let meta = host::object_getClass(cls);
             host::class_addMethod(
-                meta,
+                owner,
                 variadic,
                 list_trampoline as Imp,
                 c"@24@0:8@16".as_ptr(),
@@ -264,8 +289,8 @@ unsafe extern "C" fn list_service(
         }
         object = next();
     }
-    // SAFETY: the receiver is a class, and the counted method was found on it
-    // at install time with the prototype each arm transmutes to.
+    // SAFETY: the receiver is a class or an instance of one, and the counted
+    // method was found on it at install time with the prototype each arm transmutes to.
     unsafe {
         let imp = host::class_getMethodImplementation(
             host::object_getClass(receiver as host::Class),

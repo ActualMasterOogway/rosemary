@@ -4,7 +4,7 @@ use std::path::Path;
 use foundation::unarchiver::{Archive, Uid};
 use objc::object::Id;
 
-use crate::define::methods;
+use crate::define::{class_methods, methods};
 
 /// `-[NSBundle loadNibNamed:owner:topLevelObjects:]` is an AppKit category on
 /// Foundation's bundle class.
@@ -54,10 +54,30 @@ unsafe extern "C" fn load_named(
     1
 }
 
+/// `+[NSBundle loadNibNamed:owner:]`, the pre-10.8 spelling. It searches the
+/// bundle of the owner's class. The top-level objects stay retained for the owner to release, which
+/// is what the old API promised and what [`load`] already does.
+unsafe extern "C" fn load_named_class(class: Id, _sel: objc::sel::Sel, name: Id, owner: Id) -> u8 {
+    // SAFETY: `+bundleForClass:` is `id (Class, SEL, Class)`, and the owner is
+    // an object or nil.
+    let bundle = unsafe {
+        let owner_class = objc::object::class_of(owner)
+            .map_or(std::ptr::null_mut(), |c| objc::class::ptr(c) as Id);
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(class, objc::sel::get("bundleForClass:"), owner_class)
+    };
+    // SAFETY: the same arguments, with no top-level array asked for.
+    unsafe { load_named(bundle, _sel, name, owner, std::ptr::null_mut()) }
+}
+
 pub(crate) fn install() {
     let bundle = objc::class::lookup(c"NSBundle").expect("Foundation registered NSBundle");
     methods!(bundle, {
         "loadNibNamed:owner:topLevelObjects:" => load_named, c"B40@0:8@16@24^@32";
+    });
+    class_methods!(bundle, {
+        "loadNibNamed:owner:" => load_named_class, c"c32@0:8@16@24";
     });
 }
 

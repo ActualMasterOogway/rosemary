@@ -104,11 +104,27 @@ mod number_style {
     pub const CURRENCY_ACCOUNTING: i32 = 10;
 }
 
+#[derive(Default)]
 struct NumberFormat {
     style: i32,
     /// What [`cf::CFNumberFormatterSetProperty`] was told to use, which a caller
     /// formatting a price in another currency than the locale's sets.
     currency_symbol: Option<String>,
+    /// What the Objective-C setters changed from the style's defaults.
+    settings: Settings,
+}
+
+/// `NSNumberFormatter`'s own properties, each `None` until set so the
+/// style's default shows through.
+#[derive(Default)]
+struct Settings {
+    maximum_fraction_digits: Option<usize>,
+    minimum_fraction_digits: Option<usize>,
+    uses_grouping_separator: Option<bool>,
+    grouping_size: Option<usize>,
+    decimal_separator: Option<String>,
+    grouping_separator: Option<String>,
+    generates_decimal_numbers: bool,
 }
 
 impl NumberFormat {
@@ -158,6 +174,65 @@ impl NumberFormat {
                 false => grouped(value, None),
             },
         }
+    }
+}
+
+impl NumberFormat {
+    /// The decimal separator this formatter writes.
+    fn decimal_separator(&self) -> &str {
+        self.settings.decimal_separator.as_deref().unwrap_or(".")
+    }
+
+    fn grouping_separator(&self) -> &str {
+        self.settings.grouping_separator.as_deref().unwrap_or(",")
+    }
+
+    /// Whether the Objective-C settings shape the digits, which they do for
+    /// the plain and decimal styles; the others keep [`NumberFormat::format`].
+    fn digit_style(&self) -> bool {
+        matches!(self.style, number_style::NONE | number_style::DECIMAL)
+    }
+
+    /// `-stringFromNumber:` for the plain and decimal styles: `value` rounded
+    /// half-even to the maximum fraction digits, padded to the minimum, and
+    /// grouped when grouping is on - the defaults being the style's, as
+    /// `NSNumberFormatter` documents them.
+    fn format_decimal(&self, value: &crate::decimal::Decimal) -> String {
+        use crate::decimal::Rounding;
+        if value.is_nan() {
+            return "NaN".to_string();
+        }
+        let decimal = self.style == number_style::DECIMAL;
+        let settings = &self.settings;
+        let maximum = settings
+            .maximum_fraction_digits
+            .unwrap_or(if decimal { 3 } else { 0 });
+        let minimum = settings.minimum_fraction_digits.unwrap_or(0).min(maximum);
+        let grouping = settings.uses_grouping_separator.unwrap_or(decimal);
+        let size = settings.grouping_size.unwrap_or(3);
+        let scale = i16::try_from(maximum).unwrap_or(i16::MAX - 1);
+        let text = value.round(scale, Rounding::Bankers).to_string_with(".");
+        let (sign, digits) = match text.strip_prefix('-') {
+            Some(rest) => ("-", rest),
+            None => ("", text.as_str()),
+        };
+        let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+        let mut fraction = fraction.to_string();
+        while fraction.len() < minimum {
+            fraction.push('0');
+        }
+        let mut out = String::from(sign);
+        for (seen, ch) in whole.chars().enumerate() {
+            if grouping && size > 0 && seen > 0 && (whole.len() - seen) % size == 0 {
+                out.push_str(self.grouping_separator());
+            }
+            out.push(ch);
+        }
+        if !fraction.is_empty() {
+            out.push_str(self.decimal_separator());
+            out.push_str(&fraction);
+        }
+        out
     }
 }
 
@@ -624,6 +699,246 @@ mod objc_api {
     }
 }
 
+/// `NSNumberFormatter`'s Objective-C interface over the same settings the
+/// CoreFoundation functions use.
+mod number_api {
+    use objc::object::Id;
+    use objc::sel::Sel;
+
+    use super::{CFTypeRef, NumberFormat, contents, make, number_class, number_style};
+
+    /// # Safety
+    ///
+    /// `object` is null or an object this runtime allocated.
+    unsafe fn format<'a>(object: Id) -> Option<&'a mut NumberFormat> {
+        unsafe { contents::<NumberFormat>(object as CFTypeRef, number_class()) }
+    }
+
+    fn autoreleased(text: &str) -> Id {
+        let string = crate::string::from_str(text);
+        // SAFETY: a fresh string.
+        unsafe { corefoundation::api::CFAutorelease(string as CFTypeRef) as Id }
+    }
+
+    fn text_of(string: Id) -> Option<String> {
+        // SAFETY: a string, or nil.
+        (!string.is_null())
+            .then(|| String::from_utf8_lossy(&unsafe { crate::string::bytes(string) }).into_owned())
+    }
+
+    /// `-init`, replacing the abstract class's placeholder as the date
+    /// formatter's does.
+    unsafe extern "C" fn init(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: an object this runtime allocated.
+        if unsafe { format(receiver) }.is_some() {
+            return receiver;
+        }
+        objc::arc::release(receiver);
+        make(
+            number_class(),
+            NumberFormat {
+                style: number_style::NONE,
+                ..Default::default()
+            },
+        ) as Id
+    }
+
+    macro_rules! with_format {
+        ($receiver:expr, $default:expr, |$f:ident| $body:expr) => {
+            // SAFETY: a formatter this module made, or anything else, which
+            // answers the default.
+            match unsafe { format($receiver) } {
+                Some($f) => $body,
+                None => $default,
+            }
+        };
+    }
+
+    unsafe extern "C" fn set_number_style(receiver: Id, _sel: Sel, style: usize) {
+        with_format!(receiver, (), |f| f.style = style as i32)
+    }
+
+    unsafe extern "C" fn number_style(receiver: Id, _sel: Sel) -> usize {
+        with_format!(receiver, 0, |f| f.style as usize)
+    }
+
+    unsafe extern "C" fn set_maximum_fraction_digits(receiver: Id, _sel: Sel, digits: usize) {
+        with_format!(receiver, (), |f| f.settings.maximum_fraction_digits =
+            Some(digits))
+    }
+
+    unsafe extern "C" fn maximum_fraction_digits(receiver: Id, _sel: Sel) -> usize {
+        with_format!(receiver, 0, |f| f
+            .settings
+            .maximum_fraction_digits
+            .unwrap_or(if f.style == number_style::DECIMAL {
+                3
+            } else {
+                0
+            }))
+    }
+
+    unsafe extern "C" fn set_minimum_fraction_digits(receiver: Id, _sel: Sel, digits: usize) {
+        with_format!(receiver, (), |f| f.settings.minimum_fraction_digits =
+            Some(digits))
+    }
+
+    unsafe extern "C" fn minimum_fraction_digits(receiver: Id, _sel: Sel) -> usize {
+        with_format!(receiver, 0, |f| f
+            .settings
+            .minimum_fraction_digits
+            .unwrap_or(0))
+    }
+
+    unsafe extern "C" fn set_uses_grouping_separator(receiver: Id, _sel: Sel, on: u8) {
+        with_format!(receiver, (), |f| f.settings.uses_grouping_separator =
+            Some(on != 0))
+    }
+
+    unsafe extern "C" fn uses_grouping_separator(receiver: Id, _sel: Sel) -> u8 {
+        with_format!(receiver, 0, |f| u8::from(
+            f.settings
+                .uses_grouping_separator
+                .unwrap_or(f.style == number_style::DECIMAL)
+        ))
+    }
+
+    unsafe extern "C" fn set_grouping_size(receiver: Id, _sel: Sel, size: usize) {
+        with_format!(receiver, (), |f| f.settings.grouping_size = Some(size))
+    }
+
+    unsafe extern "C" fn grouping_size(receiver: Id, _sel: Sel) -> usize {
+        with_format!(receiver, 3, |f| f.settings.grouping_size.unwrap_or(3))
+    }
+
+    unsafe extern "C" fn set_decimal_separator(receiver: Id, _sel: Sel, text: Id) {
+        with_format!(receiver, (), |f| f.settings.decimal_separator =
+            text_of(text))
+    }
+
+    unsafe extern "C" fn decimal_separator(receiver: Id, _sel: Sel) -> Id {
+        autoreleased(&with_format!(receiver, ".".to_string(), |f| f
+            .decimal_separator()
+            .to_string()))
+    }
+
+    unsafe extern "C" fn set_grouping_separator(receiver: Id, _sel: Sel, text: Id) {
+        with_format!(receiver, (), |f| f.settings.grouping_separator =
+            text_of(text))
+    }
+
+    unsafe extern "C" fn grouping_separator(receiver: Id, _sel: Sel) -> Id {
+        autoreleased(&with_format!(receiver, ",".to_string(), |f| f
+            .grouping_separator()
+            .to_string()))
+    }
+
+    unsafe extern "C" fn currency_symbol(receiver: Id, _sel: Sel) -> Id {
+        autoreleased(&with_format!(receiver, "$".to_string(), |f| f
+            .currency_symbol
+            .clone()
+            .unwrap_or_else(|| "$".to_string())))
+    }
+
+    unsafe extern "C" fn set_currency_symbol(receiver: Id, _sel: Sel, text: Id) {
+        with_format!(receiver, (), |f| f.currency_symbol = text_of(text))
+    }
+
+    unsafe extern "C" fn set_generates_decimal_numbers(receiver: Id, _sel: Sel, on: u8) {
+        with_format!(receiver, (), |f| f.settings.generates_decimal_numbers =
+            on != 0)
+    }
+
+    unsafe extern "C" fn generates_decimal_numbers(receiver: Id, _sel: Sel) -> u8 {
+        with_format!(receiver, 0, |f| u8::from(
+            f.settings.generates_decimal_numbers
+        ))
+    }
+
+    /// Settings this tree keeps no model of: the locale is the process's own,
+    /// and a 10.0-style format string only ever restates the style.
+    unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _value: Id) {}
+
+    unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _value: u8) {}
+
+    unsafe extern "C" fn string_from_number(receiver: Id, _sel: Sel, number: Id) -> Id {
+        // SAFETY: a number, or nil.
+        let Some(value) = (unsafe { crate::decimal::value_of(number) }) else {
+            return std::ptr::null_mut();
+        };
+        let text = with_format!(receiver, None, |f| Some(match f.digit_style() {
+            true => f.format_decimal(&value),
+            false => f.format(value.to_f64(), false),
+        }));
+        text.map_or(std::ptr::null_mut(), |text| autoreleased(&text))
+    }
+
+    /// `-numberFromString:`: the digits with this formatter's separators read
+    /// back, as an `NSDecimalNumber` when it generates them. Nil for text that
+    /// is not entirely a number.
+    unsafe extern "C" fn number_from_string(receiver: Id, _sel: Sel, text: Id) -> Id {
+        let Some(text) = text_of(text) else {
+            return std::ptr::null_mut();
+        };
+        let parsed = with_format!(receiver, None, |f| {
+            let plain = text.trim().replace(f.grouping_separator(), "");
+            let value = crate::decimal::Decimal::parse(&plain, f.decimal_separator());
+            let whole = plain.replace(f.decimal_separator(), ".");
+            let exact = !value.is_nan()
+                && whole.trim_start_matches(['+', '-']).chars().all(|c| {
+                    c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+'
+                });
+            exact.then_some((value, f.settings.generates_decimal_numbers))
+        });
+        let Some((value, decimal)) = parsed else {
+            return std::ptr::null_mut();
+        };
+        match decimal {
+            true => objc::arc::autorelease(crate::decimal::make(value)),
+            // SAFETY: a fresh number.
+            false => unsafe {
+                corefoundation::api::CFAutorelease(corefoundation::collections::new_number(
+                    corefoundation::collections::Number::Float(value.to_f64()),
+                )) as Id
+            },
+        }
+    }
+
+    pub(super) fn install() {
+        let base = objc::class::lookup(c"NSNumberFormatter").expect("registered by number_class");
+        crate::define::methods!(base, {
+            "init" => init, c"@16@0:8";
+            "setNumberStyle:" => set_number_style, c"v24@0:8Q16";
+            "numberStyle" => number_style, c"Q16@0:8";
+            "setMaximumFractionDigits:" => set_maximum_fraction_digits, c"v24@0:8Q16";
+            "maximumFractionDigits" => maximum_fraction_digits, c"Q16@0:8";
+            "setMinimumFractionDigits:" => set_minimum_fraction_digits, c"v24@0:8Q16";
+            "minimumFractionDigits" => minimum_fraction_digits, c"Q16@0:8";
+            "setUsesGroupingSeparator:" => set_uses_grouping_separator, c"v20@0:8c16";
+            "usesGroupingSeparator" => uses_grouping_separator, c"c16@0:8";
+            "setGroupingSize:" => set_grouping_size, c"v24@0:8Q16";
+            "groupingSize" => grouping_size, c"Q16@0:8";
+            "setDecimalSeparator:" => set_decimal_separator, c"v24@0:8@16";
+            "decimalSeparator" => decimal_separator, c"@16@0:8";
+            "setGroupingSeparator:" => set_grouping_separator, c"v24@0:8@16";
+            "groupingSeparator" => grouping_separator, c"@16@0:8";
+            "setThousandSeparator:" => set_grouping_separator, c"v24@0:8@16";
+            "thousandSeparator" => grouping_separator, c"@16@0:8";
+            "setCurrencySymbol:" => set_currency_symbol, c"v24@0:8@16";
+            "currencySymbol" => currency_symbol, c"@16@0:8";
+            "setGeneratesDecimalNumbers:" => set_generates_decimal_numbers, c"v20@0:8c16";
+            "generatesDecimalNumbers" => generates_decimal_numbers, c"c16@0:8";
+            "setLocale:" => ignored_object, c"v24@0:8@16";
+            "setFormat:" => ignored_object, c"v24@0:8@16";
+            "setLocalizesFormat:" => ignored_flag, c"v20@0:8c16";
+            "setHasThousandSeparators:" => set_uses_grouping_separator, c"v20@0:8c16";
+            "stringFromNumber:" => string_from_number, c"@24@0:8@16";
+            "stringForObjectValue:" => string_from_number, c"@24@0:8@16";
+            "numberFromString:" => number_from_string, c"@24@0:8@16";
+        });
+    }
+}
+
 //
 // Calendars
 //
@@ -699,6 +1014,7 @@ pub fn install() {
     date_class();
     calendar_class();
     objc_api::install();
+    number_api::install();
 }
 
 /// The C entry points, and the property keys that go with them.
@@ -725,7 +1041,7 @@ pub mod cf {
             super::number_class(),
             NumberFormat {
                 style,
-                currency_symbol: None,
+                ..Default::default()
             },
         )
     }
@@ -1354,7 +1670,7 @@ mod tests {
     fn a_decimal_style_groups_by_thousands() {
         let format = NumberFormat {
             style: number_style::DECIMAL,
-            currency_symbol: None,
+            ..Default::default()
         };
         assert_eq!(format.format(1234567.0, true), "1,234,567");
         assert_eq!(format.format(-1234.0, true), "-1,234");
@@ -1367,7 +1683,7 @@ mod tests {
     fn no_style_writes_a_bare_number() {
         let format = NumberFormat {
             style: number_style::NONE,
-            currency_symbol: None,
+            ..Default::default()
         };
         assert_eq!(format.format(0.0, true), "0");
         assert_eq!(format.format(1234.0, true), "1234", "no grouping separator");
@@ -1377,7 +1693,7 @@ mod tests {
     fn a_currency_keeps_two_places_and_its_symbol() {
         let mut format = NumberFormat {
             style: number_style::CURRENCY,
-            currency_symbol: None,
+            ..Default::default()
         };
         assert_eq!(format.format(1234.5, false), "$1,234.50");
         assert_eq!(format.format(-2.0, true), "-$2.00");

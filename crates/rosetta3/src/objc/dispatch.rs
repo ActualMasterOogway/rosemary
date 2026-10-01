@@ -339,6 +339,7 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Direct,
             stret: false,
+            fixup: false,
         },
     ),
     (
@@ -346,6 +347,7 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Super { skip_one: false },
             stret: false,
+            fixup: false,
         },
     ),
     (
@@ -353,6 +355,7 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Super { skip_one: true },
             stret: false,
+            fixup: false,
         },
     ),
     // The struct-returning spellings. Nothing about the *search* differs.
@@ -361,6 +364,7 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Direct,
             stret: true,
+            fixup: false,
         },
     ),
     (
@@ -368,6 +372,7 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Super { skip_one: false },
             stret: true,
+            fixup: false,
         },
     ),
     (
@@ -375,6 +380,41 @@ static MESSAGES: &[(&str, Send)] = &[
         Send {
             message: Message::Super { skip_one: true },
             stret: true,
+            fixup: false,
+        },
+    ),
+    // The pre-10.9 `message_ref_t` spellings: the selector register holds a
+    // `{IMP, SEL}` ref whose `SEL` was uniqued at load.
+    (
+        "objc_msgSend_fixup",
+        Send {
+            message: Message::Direct,
+            stret: false,
+            fixup: true,
+        },
+    ),
+    (
+        "objc_msgSend_stret_fixup",
+        Send {
+            message: Message::Direct,
+            stret: true,
+            fixup: true,
+        },
+    ),
+    (
+        "objc_msgSendSuper2_fixup",
+        Send {
+            message: Message::Super { skip_one: true },
+            stret: false,
+            fixup: true,
+        },
+    ),
+    (
+        "objc_msgSendSuper2_stret_fixup",
+        Send {
+            message: Message::Super { skip_one: true },
+            stret: true,
+            fixup: true,
         },
     ),
 ];
@@ -489,6 +529,8 @@ struct Send {
     message: Message,
     /// `objc_msgSend_stret`.
     stret: bool,
+    /// `objc_msgSend_fixup`: the selector register holds a `message_ref_t`.
+    fixup: bool,
 }
 
 impl Send {
@@ -894,6 +936,11 @@ fn send(
 ) -> Result<()> {
     let _debug_context = objc::debug::guest_context(ctx.rip, symbol);
     let base = send.receiver_reg();
+    if send.fixup {
+        let msg_ref = arg_reg(ctx, base + 1);
+        let sel = (mem as &dyn GuestMemory).read_u64(msg_ref.wrapping_add(8), symbol)?;
+        set_arg_reg(ctx, base + 1, sel);
+    }
     let sel = arg_reg(ctx, base + 1);
 
     // Where the receiver is, and where the method search starts, which for a

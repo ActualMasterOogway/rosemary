@@ -289,6 +289,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             let object = object_for(window);
             let content = window::content_view_of(object);
             if !object.is_null() {
+                window::size_settled(object);
                 window::fit_content_view(object);
                 crate::screen::confine_pointer(object);
             }

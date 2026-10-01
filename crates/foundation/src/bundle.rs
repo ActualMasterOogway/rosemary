@@ -262,6 +262,31 @@ impl Layout {
         seen
     }
 
+    /// `-preferredLocalizations`: the `.lproj` names strings are read from,
+    /// most preferred first, restricted to the ones that exist.
+    pub fn preferred_localizations(&self) -> Vec<String> {
+        self.string_localizations()
+            .into_iter()
+            .filter(|path| path.is_dir())
+            .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
+            .collect()
+    }
+
+    /// `-pathsForResourcesOfType:inDirectory:`: every entry with that extension
+    /// (any, for an empty one) in `Resources/directory`, then in the preferred
+    /// localization's copy of it.
+    pub fn resources_of_type(&self, extension: &str, directory: &str) -> Vec<PathBuf> {
+        let roots = std::iter::once(self.resources.clone()).chain(
+            self.preferred_localizations()
+                .into_iter()
+                .take(1)
+                .map(|name| self.resources.join(format!("{name}.lproj"))),
+        );
+        roots
+            .flat_map(|root| entries_of_type(&root.join(directory), extension))
+            .collect()
+    }
+
     /// `-localizedStringForKey:value:table:`: the key's entry in the first
     /// table of that name that has one, else `value`, else the key itself -
     /// Apple's fallback order.
@@ -639,7 +664,7 @@ pub mod cf {
 
     /// The loader's handle for a bundle's executable, loading it if it is not
     /// yet. The main bundle's is the program itself.
-    fn executable_handle(bundle: Id) -> Option<u64> {
+    pub(super) fn executable_handle(bundle: Id) -> Option<u64> {
         let layout = layout(bundle)?;
         if super::main().is_some_and(|main| std::ptr::eq(main, layout)) {
             return darwin::images::open(None);
@@ -752,6 +777,24 @@ pub fn set_main(executable: &Path) -> bool {
     true
 }
 
+/// The entries of `directory` with `extension` (any, for an empty one), sorted.
+fn entries_of_type(directory: &Path, extension: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut found = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| {
+            extension.is_empty()
+                || path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    found
+}
+
 /// The main bundle, or `None` for a program that is not in one.
 pub fn main() -> Option<&'static Layout> {
     *MAIN.read().unwrap_or_else(|e| e.into_inner())
@@ -785,6 +828,7 @@ mod tests {
             },
             open: |_| None,
             symbol: |_, _| None,
+            image_path: |_| None,
         });
         let layout = Layout::provided_framework("/System/Library/Frameworks/R3Probe.framework/")
             .expect("a provided framework");
@@ -947,6 +991,52 @@ pub(crate) mod class {
         of(class)
     }
 
+    /// `+bundleForClass:`. The runtime does not record which image defined a
+    /// class, so every class answers with the main bundle - Apple's answer for
+    /// the guest's own classes, which are the ones a program asks about.
+    unsafe extern "C" fn bundle_for_class(class: Id, sel: Sel, of: Id) -> Id {
+        // SAFETY: a class object, or nil.
+        let image = unsafe { objc::class::from_ptr(of as *const objc::class::Class) }
+            .and_then(|of| of.own_methods().first().map(|m| m.implementation() as u64))
+            .and_then(darwin::images::image_path);
+        let main = super::main();
+        let layout = image
+            .and_then(|path| super::Layout::enclosing(std::path::Path::new(&path)))
+            .filter(|layout| main.is_none_or(|main| main.root != layout.root));
+        match layout {
+            Some(layout) => interned(class, layout),
+            // SAFETY: as `+mainBundle`, with the same receiver.
+            None => unsafe { main_bundle(class, sel) },
+        }
+    }
+
+    /// One `NSBundle` per bundle directory for the life of the process, as
+    /// Apple's: a program compares bundles by identity.
+    fn interned(class: Id, layout: super::Layout) -> Id {
+        static MADE: std::sync::Mutex<Vec<(std::path::PathBuf, usize)>> =
+            std::sync::Mutex::new(Vec::new());
+        // Keyed by the resolved directory: the loader and a guest's path may
+        // spell one bundle two ways.
+        let key = layout
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| layout.root.clone());
+        let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&(_, object)) = made.iter().find(|(root, _)| *root == key) {
+            return object as Id;
+        }
+        // SAFETY: `class` is `NSBundle`, which this crate registered.
+        let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) })
+        else {
+            return std::ptr::null_mut();
+        };
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: a live instance whose second word is ours to fill in.
+        unsafe { (*(object as *mut Body)).layout = Box::leak(Box::new(layout)) };
+        made.push((key, object as usize));
+        object
+    }
+
     /// The one main-bundle object, which `+mainBundle` and
     /// `CFBundleGetMainBundle` both have to answer with.
     fn of(class: &'static objc::class::Class) -> Id {
@@ -973,18 +1063,9 @@ pub(crate) mod class {
             // A `+` getter, so the interned object is handed out unretained.
             return provided(guest);
         };
-        // SAFETY: `class` is `NSBundle`, which this crate registered.
-        let Some(class) = (unsafe { objc::class::from_ptr(class as *const objc::class::Class) })
-        else {
-            return std::ptr::null_mut();
-        };
-        let object = objc::object::create_instance(class, 0);
-        // Leaked rather than owned by the object: a bundle is interned by Apple's
-        // Foundation too, and a `-dealloc` freeing it would leave every string
-        // this runtime handed out from it pointing at nothing.
-        // SAFETY: a live instance whose second word is ours to fill in.
-        unsafe { (*(object as *mut Body)).layout = Box::leak(Box::new(layout)) };
-        objc::arc::autorelease(object)
+        // Interned, and never freed: a `-dealloc` would leave every string this
+        // runtime handed out from it pointing at nothing.
+        interned(class, layout)
     }
 
     /// The bundle of a framework this runtime provides, named by its guest
@@ -1103,6 +1184,154 @@ pub(crate) mod class {
         unsafe {
             corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id
         }
+    }
+
+    /// An autoreleased `NSArray` of strings.
+    fn string_array<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> Id {
+        let strings = items
+            .into_iter()
+            .map(|item| crate::string::from_str(item.as_ref()) as corefoundation::base::CFTypeRef)
+            .collect::<Vec<_>>();
+        let array = corefoundation::collections::new_array(
+            &strings,
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        for string in strings {
+            // SAFETY: the array retained each one, and this reference is ours.
+            unsafe { corefoundation::api::CFRelease(string) };
+        }
+        // SAFETY: a fresh array.
+        unsafe { corefoundation::api::CFAutorelease(array) as Id }
+    }
+
+    unsafe extern "C" fn preferred_localizations(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`.
+        let names = unsafe { layout_of(receiver) }
+            .map(|b| b.preferred_localizations())
+            .unwrap_or_default();
+        string_array(names)
+    }
+
+    unsafe extern "C" fn localizations(receiver: Id, _sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`.
+        let names = unsafe { layout_of(receiver) }
+            .map(|b| b.localization_names())
+            .unwrap_or_default();
+        string_array(names)
+    }
+
+    unsafe extern "C" fn paths_for_resources_of_type(
+        receiver: Id,
+        _sel: Sel,
+        kind: Id,
+        directory: Id,
+    ) -> Id {
+        // SAFETY: both are `NSString`s or nil.
+        let (kind, directory) =
+            unsafe { (crate::string::bytes(kind), crate::string::bytes(directory)) };
+        let (Ok(kind), Ok(directory)) =
+            (std::str::from_utf8(&kind), std::str::from_utf8(&directory))
+        else {
+            return string_array::<&str>([]);
+        };
+        // SAFETY: the receiver is an `NSBundle`.
+        let paths = unsafe { layout_of(receiver) }
+            .map(|b| b.resources_of_type(kind, directory))
+            .unwrap_or_default();
+        string_array(
+            paths
+                .iter()
+                .filter_map(|p| super::spelled(p))
+                .map(|p| p.to_string_lossy().into_owned()),
+        )
+    }
+
+    /// `-load`: the executable, through the same loader `CFBundleLoadExecutable`
+    /// uses, which registers its Objective-C classes as it binds them.
+    unsafe extern "C" fn load(receiver: Id, _sel: Sel) -> u8 {
+        u8::from(super::cf::executable_handle(receiver).is_some())
+    }
+
+    /// `-loadAndReturnError:`. The loader reports its own failure on stderr;
+    /// the error is left nil rather than invented.
+    unsafe extern "C" fn load_and_return_error(receiver: Id, sel: Sel, error: *mut Id) -> u8 {
+        if !error.is_null() {
+            // SAFETY: the caller passed a writable `NSError **`.
+            unsafe { *error = std::ptr::null_mut() };
+        }
+        // SAFETY: the same receiver.
+        unsafe { load(receiver, sel) }
+    }
+
+    /// `-isLoaded`. Asking loads nothing new for an executable already open,
+    /// and every caller that asks is about to load it anyway.
+    unsafe extern "C" fn is_loaded(receiver: Id, sel: Sel) -> u8 {
+        // SAFETY: the same receiver.
+        unsafe { load(receiver, sel) }
+    }
+
+    /// `-classNamed:`, loading the executable first as Apple's does.
+    unsafe extern "C" fn class_named(receiver: Id, sel: Sel, name: Id) -> Id {
+        // SAFETY: an `NSString`, or nil.
+        let name = unsafe { crate::string::bytes(name) };
+        // SAFETY: the same receiver.
+        if name.is_empty() || unsafe { load(receiver, sel) } == 0 {
+            return std::ptr::null_mut();
+        }
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return std::ptr::null_mut();
+        };
+        objc::class::lookup(&name).map_or(std::ptr::null_mut(), |c| objc::class::ptr(c) as Id)
+    }
+
+    /// `-principalClass`: `NSPrincipalClass`, after loading. Apple falls back
+    /// to the executable's first class, which this loader does not record, so
+    /// a bundle that names none answers nil.
+    unsafe extern "C" fn principal_class(receiver: Id, sel: Sel) -> Id {
+        // SAFETY: the receiver is an `NSBundle`.
+        let Some(name) = unsafe { layout_of(receiver) }.and_then(|b| b.principal_class()) else {
+            return std::ptr::null_mut();
+        };
+        let name = crate::string::from_str(name);
+        // SAFETY: the same receiver, and a string this call owns.
+        let class = unsafe { class_named(receiver, sel, name) };
+        objc::arc::release(name);
+        class
+    }
+
+    /// `+pathsForResourcesOfType:inDirectory:`, where the directory is a
+    /// bundle's path rather than a subdirectory of one.
+    unsafe extern "C" fn class_paths_for_resources_of_type(
+        _class: Id,
+        _sel: Sel,
+        kind: Id,
+        bundle_path: Id,
+    ) -> Id {
+        // SAFETY: both are `NSString`s or nil.
+        let (kind, guest) = unsafe {
+            (
+                crate::string::bytes(kind),
+                crate::string::bytes(bundle_path),
+            )
+        };
+        let (Ok(kind), Ok(guest)) = (std::str::from_utf8(&kind), std::str::from_utf8(&guest))
+        else {
+            return string_array::<&str>([]);
+        };
+        // A directory that is not a bundle - `-builtInPlugInsPath` is the usual
+        // one - is searched as it stands, as CFBundle does.
+        let host = super::opened(std::path::Path::new(guest));
+        let paths = match super::Layout::at(&host) {
+            Some(bundle) => bundle.resources_of_type(kind, ""),
+            None => super::entries_of_type(&host, kind),
+        };
+        string_array(
+            paths
+                .iter()
+                .filter_map(|p| super::spelled(p))
+                .map(|p| p.to_string_lossy().into_owned()),
+        )
     }
 
     fn path(p: Option<std::path::PathBuf>) -> Id {
@@ -1296,10 +1525,20 @@ pub(crate) mod class {
             "pathForResource:ofType:inDirectory:" => path_for_resource_in_directory, c"@40@0:8@16@24@32";
             "infoDictionary" => info_dictionary, c"@16@0:8";
             "executableName" => executable_name, c"*16@0:8";
-            "localizedStringForKey:value:table:" => localized_string_for_key, c"@40@0:8@16@24@32"
+            "localizedStringForKey:value:table:" => localized_string_for_key, c"@40@0:8@16@24@32";
+            "preferredLocalizations" => preferred_localizations, c"@16@0:8";
+            "load" => load, c"c16@0:8";
+            "loadAndReturnError:" => load_and_return_error, c"c24@0:8^@16";
+            "isLoaded" => is_loaded, c"c16@0:8";
+            "classNamed:" => class_named, c"#24@0:8@16";
+            "principalClass" => principal_class, c"#16@0:8";
+            "localizations" => localizations, c"@16@0:8";
+            "pathsForResourcesOfType:inDirectory:" => paths_for_resources_of_type, c"@32@0:8@16@24"
         });
         class_methods!(class, {
             "mainBundle" => main_bundle, c"@16@0:8";
+            "bundleForClass:" => bundle_for_class, c"@24@0:8#16";
+            "pathsForResourcesOfType:inDirectory:" => class_paths_for_resources_of_type, c"@32@0:8@16@24";
             "bundleWithPath:" => bundle_with_path, c"@24@0:8@16"
         });
     }

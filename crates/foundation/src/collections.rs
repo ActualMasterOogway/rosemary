@@ -354,6 +354,57 @@ unsafe extern "C" fn add_object(receiver: Id, _sel: Sel, object: Id) {
     a.values.push(a.policy.retain(object as CFTypeRef));
 }
 
+/// `-insertObject:atIndex:`. Past the end is Apple's range exception, which
+/// fails here by name.
+unsafe extern "C" fn insert_object_at_index(receiver: Id, _sel: Sel, object: Id, index: usize) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "insertObject:atIndex:");
+    }
+    if object.is_null() || index > a.values.len() {
+        objc::fail!(
+            "-[NSMutableArray insertObject:atIndex:]: {} at index {index} of {}",
+            if object.is_null() {
+                "nil object"
+            } else {
+                "an object"
+            },
+            a.values.len()
+        );
+    }
+    let retained = a.policy.retain(object as CFTypeRef);
+    a.values.insert(index, retained);
+}
+
+/// `-replaceObjectAtIndex:withObject:`. Past the end is Apple's range
+/// exception, which fails here by name.
+unsafe extern "C" fn replace_object_at_index(receiver: Id, _sel: Sel, index: usize, object: Id) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", "replaceObjectAtIndex:withObject:");
+    }
+    if object.is_null() || index >= a.values.len() {
+        objc::fail!(
+            "-[NSMutableArray replaceObjectAtIndex:withObject:]: {} at index {index} of {}",
+            if object.is_null() {
+                "nil object"
+            } else {
+                "an object"
+            },
+            a.values.len()
+        );
+    }
+    let retained = a.policy.retain(object as CFTypeRef);
+    let old = std::mem::replace(&mut a.values[index], retained);
+    a.policy.release(old);
+}
+
 unsafe extern "C" fn add_objects_from_array(receiver: Id, _sel: Sel, other: Id) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -387,6 +438,81 @@ unsafe extern "C" fn remove_object_at_index(receiver: Id, _sel: Sel, index: usiz
     if index < a.values.len() {
         let gone = a.values.remove(index);
         a.policy.release(gone);
+    }
+}
+
+unsafe extern "C" fn remove_last_object(receiver: Id, sel: Sel) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if let Some(last) = a.values.len().checked_sub(1) {
+        // SAFETY: the same receiver, at an index it has.
+        unsafe { remove_object_at_index(receiver, sel, last) };
+    }
+}
+
+/// An `NSComparisonResult (*)(id, id, void *)`, called directly: a native
+/// image's function is this process's code, as `qsort`'s comparator is.
+type Comparator = unsafe extern "C" fn(Id, Id, *mut std::ffi::c_void) -> isize;
+
+/// `values` ordered by `compare`, stably, as Apple's merge sort is.
+fn sort_by_function(values: &mut [CFTypeRef], compare: Comparator, context: *mut std::ffi::c_void) {
+    // SAFETY: the guest's comparator, given two of the array's objects.
+    values.sort_by(
+        |a, b| match unsafe { compare(*a as Id, *b as Id, context) } {
+            ..0 => std::cmp::Ordering::Less,
+            0 => std::cmp::Ordering::Equal,
+            _ => std::cmp::Ordering::Greater,
+        },
+    );
+}
+
+unsafe extern "C" fn sorted_array_using_function(
+    receiver: Id,
+    _sel: Sel,
+    compare: Option<Comparator>,
+    context: *mut std::ffi::c_void,
+) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let mut values = array.values.clone();
+    if let Some(compare) = compare {
+        sort_by_function(&mut values, compare, context);
+    }
+    // SAFETY: a fresh array follows the convenience-constructor rule.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+unsafe extern "C" fn sort_using_function(
+    receiver: Id,
+    _sel: Sel,
+    compare: Option<Comparator>,
+    context: *mut std::ffi::c_void,
+) {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !array.mutable {
+        immutable("NSArray", "sortUsingFunction:context:");
+    }
+    // Sorted out of place: the comparator may read the array it is sorting.
+    let mut values = array.values.clone();
+    if let Some(compare) = compare {
+        sort_by_function(&mut values, compare, context);
+    }
+    // SAFETY: the same array; the comparator is done with it.
+    if let Some(array) = unsafe { collections::array(receiver as CFTypeRef) } {
+        array.values = values;
     }
 }
 
@@ -552,27 +678,94 @@ unsafe extern "C" fn data_with_contents_of_file_options(
     data
 }
 
-/// `+[NSDictionary dictionaryWithContentsOfFile:]`.
-///
-/// This convenience constructor accepts XML and binary property lists through
-/// the same parser used for bundle metadata. It answers nil when the file is
-/// unreadable, malformed, or its root is not a dictionary.
-unsafe extern "C" fn dictionary_with_contents_of_file(_class: Id, _sel: Sel, path: Id) -> Id {
-    // SAFETY: an `NSString`, or nil.
-    let path = unsafe { crate::string::bytes(path) };
-    let Ok(path) = String::from_utf8(path) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
+/// A property list file's root object, autoreleased, if it is an array
+/// (`want_array`) or a dictionary (otherwise). XML and binary lists go
+/// through the parser bundle metadata uses; nil for a file that is unreadable,
+/// malformed, or has the other root.
+fn plist_file(path: &str, want_array: bool) -> Id {
+    let Ok(bytes) = std::fs::read(prefix::ns::host_path(path)) else {
         return std::ptr::null_mut();
     };
     let Ok(value) = crate::plist::parse(&bytes) else {
         return std::ptr::null_mut();
     };
-    if !matches!(value, crate::plist::Value::Dictionary(_)) {
+    let matches = match want_array {
+        true => matches!(value, crate::plist::Value::Array(_)),
+        false => matches!(value, crate::plist::Value::Dictionary(_)),
+    };
+    if !matches {
         return std::ptr::null_mut();
     }
-    crate::objectify::object(&value, &path)
+    crate::objectify::object(&value, path)
+}
+
+/// The guest path an `NSString` names, or the file path of a `file:` `NSURL`.
+unsafe fn file_argument(argument: Id, url: bool) -> Option<String> {
+    match url {
+        // SAFETY: an `NSURL`, or nil.
+        true => unsafe { corefoundation::url::as_url(argument as CFTypeRef) }?.file_path(),
+        // SAFETY: an `NSString`, or nil.
+        false => String::from_utf8(unsafe { crate::string::bytes(argument) }).ok(),
+    }
+}
+
+/// The `...WithContentsOfFile:` and `...WithContentsOfURL:` family, class and
+/// instance forms. An instance form replaces the `+alloc` placeholder, and a
+/// mutable class gets a mutable copy, as with every cluster initialiser here.
+unsafe fn contents_of(receiver: Id, argument: Id, want_array: bool, url: bool, init: bool) -> Id {
+    // SAFETY: as `file_argument` requires.
+    let found = match unsafe { file_argument(argument, url) } {
+        Some(path) => plist_file(&path, want_array),
+        None => std::ptr::null_mut(),
+    };
+    // SAFETY: a class object, or an instance of one this runtime knows.
+    let class = match init {
+        true => unsafe { objc::object::class_of(receiver) },
+        false => unsafe { objc::class::from_ptr(receiver as *const objc::class::Class) },
+    };
+    let mutable = match want_array {
+        true => c"NSMutableArray",
+        false => c"NSMutableDictionary",
+    };
+    let mutable = objc::class::lookup(mutable)
+        .is_some_and(|m| class.is_some_and(|c| c.chain().any(|k| std::ptr::eq(k, m))));
+    let owned = match (found.is_null(), mutable) {
+        (true, _) => std::ptr::null_mut(),
+        // SAFETY: `-mutableCopy` is `id (id, SEL)` and answers +1.
+        (false, true) => unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(found, objc::sel::get("mutableCopy"))
+        },
+        (false, false) => objc::arc::retain(found),
+    };
+    if init {
+        objc::arc::release(receiver);
+        owned
+    } else if owned.is_null() {
+        owned
+    } else {
+        objc::arc::autorelease(owned)
+    }
+}
+
+macro_rules! contents_of {
+    ($($name:ident => $array:literal, $url:literal, $init:literal;)*) => {$(
+        unsafe extern "C" fn $name(receiver: Id, _sel: Sel, argument: Id) -> Id {
+            // SAFETY: forwarded from a method of the matching class and arity.
+            unsafe { contents_of(receiver, argument, $array, $url, $init) }
+        }
+    )*};
+}
+
+contents_of! {
+    dictionary_with_contents_of_file => false, false, false;
+    dictionary_with_contents_of_url => false, true, false;
+    dictionary_init_with_contents_of_file => false, false, true;
+    dictionary_init_with_contents_of_url => false, true, true;
+    array_with_contents_of_file => true, false, false;
+    array_with_contents_of_url => true, true, false;
+    array_init_with_contents_of_file => true, false, true;
+    array_init_with_contents_of_url => true, true, true;
 }
 
 /// `-writeToFile:atomically:`.
@@ -877,6 +1070,43 @@ fn mutable_receiver(class: Id, mutable: &std::ffi::CStr) -> bool {
     class.chain().any(|c| {
         // SAFETY: a realized class names itself with a live C string.
         unsafe { std::ffi::CStr::from_ptr(c.name()) == mutable }
+    })
+}
+
+/// The class an `-init...` placeholder was allocated as, for a constructor
+/// that decides mutability by its receiver.
+fn class_of_placeholder(receiver: Id) -> Id {
+    // SAFETY: an instance `+alloc` made, or nil.
+    unsafe { objc::object::class_of(receiver) }
+        .map_or(std::ptr::null_mut(), |c| objc::class::ptr(c) as Id)
+}
+
+/// `-initWithObjects:count:`, the counted method `-initWithObjects:` reaches.
+unsafe extern "C" fn array_init_with_objects_count(
+    receiver: Id,
+    sel: Sel,
+    objects: *const Id,
+    count: usize,
+) -> Id {
+    let class = class_of_placeholder(receiver);
+    objc::arc::release(receiver);
+    // SAFETY: forwarded; the answer is autoreleased and the caller owns an init.
+    objc::arc::retain(unsafe { array_with_objects_count(class, sel, objects, count) })
+}
+
+/// `-initWithObjects:forKeys:count:`.
+unsafe extern "C" fn dictionary_init_with_objects_for_keys_count(
+    receiver: Id,
+    sel: Sel,
+    objects: *const Id,
+    keys: *const Id,
+    count: usize,
+) -> Id {
+    let class = class_of_placeholder(receiver);
+    objc::arc::release(receiver);
+    // SAFETY: as above.
+    objc::arc::retain(unsafe {
+        dictionary_with_objects_for_keys_count(class, sel, objects, keys, count)
     })
 }
 
@@ -1670,6 +1900,33 @@ unsafe extern "C" fn number_with_bool(_class: Id, _sel: Sel, value: bool) -> Id 
     collections::boolean(value) as Id
 }
 
+/// The `-initWith...:` forms of the constructors above. A number is a
+/// CoreFoundation object whatever `+alloc` made, so the placeholder is
+/// released and a new number returned in its place, owned by the caller.
+macro_rules! number_init {
+    ($($name:ident => $with:ident: $ty:ty),* $(,)?) => {$(
+        unsafe extern "C" fn $name(receiver: Id, sel: Sel, value: $ty) -> Id {
+            objc::arc::release(receiver);
+            // SAFETY: the constructor ignores its receiver.
+            objc::arc::retain(unsafe { $with(std::ptr::null_mut(), sel, value) })
+        }
+    )*};
+}
+
+number_init! {
+    number_init_int => number_with_int: i32,
+    number_init_integer => number_with_integer: i64,
+    number_init_double => number_with_double: f64,
+    number_init_bool => number_with_bool: bool,
+    number_init_unsigned_long => number_with_unsigned_long: u64,
+    number_init_unsigned_int => number_with_unsigned_int: u32,
+    number_init_short => number_with_short: i16,
+    number_init_unsigned_short => number_with_unsigned_short: u16,
+    number_init_char => number_with_char: i8,
+    number_init_unsigned_char => number_with_unsigned_char: u8,
+    number_init_float => number_with_float: f32,
+}
+
 unsafe extern "C" fn set_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
     let values: &[CFTypeRef] = match object.is_null() {
         true => &[],
@@ -1777,6 +2034,7 @@ pub(crate) fn install() {
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
         "valueForKey:" => array_value_for_key, c"@24@0:8@16";
         "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
+        "sortedArrayUsingFunction:context:" => sorted_array_using_function, c"@32@0:8^?16^v24";
         "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
         "indexOfObjectWithOptions:passingTest:" => index_of_object_with_options_passing_test, c"Q32@0:8Q16@?24";
         "countByEnumeratingWithState:objects:count:" => array_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
@@ -1792,6 +2050,13 @@ pub(crate) fn install() {
         "array" => array_fn, c"@16@0:8";
         "arrayWithObject:" => array_with_object, c"@24@0:8@16";
         "arrayWithObjects:count:" => array_with_objects_count, c"@32@0:8^@16Q24";
+        "arrayWithContentsOfFile:" => array_with_contents_of_file, c"@24@0:8@16";
+        "arrayWithContentsOfURL:" => array_with_contents_of_url, c"@24@0:8@16";
+    });
+    methods!(array, {
+        "initWithObjects:count:" => array_init_with_objects_count, c"@32@0:8^@16Q24";
+        "initWithContentsOfFile:" => array_init_with_contents_of_file, c"@24@0:8@16";
+        "initWithContentsOfURL:" => array_init_with_contents_of_url, c"@24@0:8@16";
     });
     methods!(mutable_array, {
         "init" => init_mutable_array, c"@16@0:8";
@@ -1799,6 +2064,10 @@ pub(crate) fn install() {
         "addObject:" => add_object, c"v24@0:8@16";
         "addObjectsFromArray:" => add_objects_from_array, c"v24@0:8@16";
         "removeObjectAtIndex:" => remove_object_at_index, c"v24@0:8Q16";
+        "removeLastObject" => remove_last_object, c"v16@0:8";
+        "insertObject:atIndex:" => insert_object_at_index, c"v32@0:8@16Q24";
+        "replaceObjectAtIndex:withObject:" => replace_object_at_index, c"v32@0:8Q16@24";
+        "sortUsingFunction:context:" => sort_using_function, c"v32@0:8^?16^v24";
         "removeAllObjects" => remove_all_objects, c"v16@0:8";
     });
     class_methods!(mutable_array, {
@@ -1831,6 +2100,12 @@ pub(crate) fn install() {
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
         "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
         "dictionaryWithContentsOfFile:" => dictionary_with_contents_of_file, c"@24@0:8@16";
+        "dictionaryWithContentsOfURL:" => dictionary_with_contents_of_url, c"@24@0:8@16";
+    });
+    methods!(dictionary_class, {
+        "initWithObjects:forKeys:count:" => dictionary_init_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
+        "initWithContentsOfFile:" => dictionary_init_with_contents_of_file, c"@24@0:8@16";
+        "initWithContentsOfURL:" => dictionary_init_with_contents_of_url, c"@24@0:8@16";
     });
     methods!(mutable_dictionary, {
         "init" => init_mutable_dictionary, c"@16@0:8";
@@ -1931,6 +2206,23 @@ pub(crate) fn install() {
         "boolValue" => bool_value, c"B16@0:8";
         "stringValue" => string_value, c"@16@0:8";
         "description" => string_value, c"@16@0:8";
+    });
+    methods!(number, {
+        "initWithInt:" => number_init_int, c"@24@0:8i16";
+        "initWithInteger:" => number_init_integer, c"@24@0:8q16";
+        "initWithLong:" => number_init_integer, c"@24@0:8q16";
+        "initWithLongLong:" => number_init_integer, c"@24@0:8q16";
+        "initWithDouble:" => number_init_double, c"@24@0:8d16";
+        "initWithBool:" => number_init_bool, c"@24@0:8B16";
+        "initWithUnsignedInteger:" => number_init_unsigned_long, c"@24@0:8Q16";
+        "initWithUnsignedLong:" => number_init_unsigned_long, c"@24@0:8Q16";
+        "initWithUnsignedLongLong:" => number_init_unsigned_long, c"@24@0:8Q16";
+        "initWithUnsignedInt:" => number_init_unsigned_int, c"@24@0:8I16";
+        "initWithShort:" => number_init_short, c"@24@0:8s16";
+        "initWithUnsignedShort:" => number_init_unsigned_short, c"@24@0:8S16";
+        "initWithChar:" => number_init_char, c"@24@0:8c16";
+        "initWithUnsignedChar:" => number_init_unsigned_char, c"@24@0:8C16";
+        "initWithFloat:" => number_init_float, c"@24@0:8f16";
     });
     class_methods!(number, {
         "numberWithInt:" => number_with_int, c"@24@0:8i16";

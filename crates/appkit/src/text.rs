@@ -367,6 +367,92 @@ fn edit(receiver: Id, with: impl FnOnce(&mut Contents)) {
     }
     sync_field(receiver);
     notify_text_changed(receiver);
+    crate::backing::needs_display(receiver);
+}
+
+/// The room `NSTextContainer` leaves either side of a line, its default
+/// `lineFragmentPadding`.
+const LINE_PADDING: f32 = 5.0;
+
+/// AppKit's default text view font size, the user font's.
+const TEXT_SIZE: f64 = 12.0;
+
+/// `-drawRect:` of a text view a program shows - not the field editor, whose
+/// text its field draws: a white page, and the text wrapped to its width.
+///
+/// FIXME (ACCURACY): one font and colour for all of it, and no scrolling: a
+/// text longer than its clip view shows its last lines, which is where
+/// `-moveToEndOfDocument:` and typing leave a text view scrolled to.
+unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
+    if get(receiver).field_editor {
+        return;
+    }
+    let bounds = crate::view::bounds_of(receiver);
+    let density = crate::backing::focus_density();
+    let width = (bounds.size.width * density).ceil() as usize;
+    let height = (bounds.size.height * density).ceil() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut pixels = vec![0u8; width * height * 4];
+    let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
+    let (w, h) = (bounds.size.width as f32, bounds.size.height as f32);
+    canvas.fill_rect(
+        chrome::Rect::new(0.0, 0.0, w, h),
+        chrome::Color::rgba(255, 255, 255, 1.0),
+    );
+    let text = read(receiver).text;
+    let font = crate::label::chrome_font(std::ptr::null_mut());
+    if let Some((font, _)) = font
+        && !text.is_empty()
+    {
+        let size = TEXT_SIZE as f32;
+        let (ascent, descent) = font.metrics(size);
+        let leading = (ascent + descent).ceil();
+        let lines: Vec<String> = text
+            .split('\n')
+            .flat_map(|paragraph| match paragraph.is_empty() {
+                true => vec![String::new()],
+                false => font.wrap(paragraph, size, (w - 2.0 * LINE_PADDING).max(1.0)),
+            })
+            .collect();
+        // Visible is the clip view's height when the view is in one.
+        // SAFETY: a view of this crate's.
+        let visible = match unsafe { crate::view::superview_of(receiver) } {
+            clip if !clip.is_null() => crate::view::bounds_of(clip).size.height as f32,
+            _ => h,
+        };
+        let total = lines.len() as f32 * leading;
+        let offset = (total - visible.min(h)).max(0.0);
+        for (i, line) in lines.iter().enumerate() {
+            let baseline = ascent.round() + i as f32 * leading - offset;
+            if baseline + descent < 0.0 || baseline - ascent > h {
+                continue;
+            }
+            canvas.draw_text(
+                line,
+                &font,
+                size,
+                chrome::Point::new(LINE_PADDING, baseline),
+                chrome::Color::rgba(0, 0, 0, 1.0),
+            );
+        }
+    }
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        bounds.size,
+        bounds,
+        NSRect {
+            origin: NSPoint::default(),
+            size: bounds.size,
+        },
+        // Source-over.
+        2,
+        1.0,
+        true,
+    );
 }
 
 fn utf16_len(text: &str) -> usize {
@@ -471,6 +557,29 @@ unsafe extern "C" fn selected_range(receiver: Id, _sel: Sel) -> NSRange {
 
 unsafe extern "C" fn set_selected_range(receiver: Id, _sel: Sel, range: NSRange) {
     change_selection(receiver, range);
+}
+
+/// `-moveToEndOfDocument:`: the insertion point after the last character.
+unsafe extern "C" fn move_to_end_of_document(receiver: Id, _sel: Sel, _sender: Id) {
+    let end = read(receiver).text.encode_utf16().count();
+    change_selection(
+        receiver,
+        NSRange {
+            location: end,
+            length: 0,
+        },
+    );
+}
+
+/// `-moveToBeginningOfDocument:`.
+unsafe extern "C" fn move_to_beginning_of_document(receiver: Id, _sel: Sel, _sender: Id) {
+    change_selection(
+        receiver,
+        NSRange {
+            location: 0,
+            length: 0,
+        },
+    );
 }
 
 fn change_selection(receiver: Id, range: NSRange) {
@@ -1356,6 +1465,8 @@ pub(crate) fn install() {
         "setString:" => set_string, c"v24@0:8@16";
         "selectedRange" => selected_range, c"{_NSRange=QQ}16@0:8";
         "setSelectedRange:" => set_selected_range, c"v32@0:8{_NSRange=QQ}16";
+        "moveToEndOfDocument:" => move_to_end_of_document, c"v24@0:8@16";
+        "moveToBeginningOfDocument:" => move_to_beginning_of_document, c"v24@0:8@16";
         "markedRange" => marked_range, c"{_NSRange=QQ}16@0:8";
         "hasMarkedText" => has_marked_text, c"c16@0:8";
         "unmarkText" => unmark_text, c"v16@0:8";
@@ -1388,6 +1499,7 @@ pub(crate) fn install() {
     let view = objc::class::lookup(c"NSTextView").expect("declared before its methods");
     methods!(view, {
         "textStorage" => text_storage, c"@16@0:8";
+        "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });
     let field = objc::class::lookup(c"NSTextField").expect("declared before its methods");
     methods!(field, {

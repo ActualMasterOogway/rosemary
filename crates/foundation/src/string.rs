@@ -625,6 +625,17 @@ unsafe extern "C" fn append_format(receiver: Id, _sel: Sel, format: Id) {
     unsafe { replace(receiver, "appendFormat:", &joined) };
 }
 
+/// `-stringByAppendingFormat:`, reached with the format already rendered, as
+/// `-appendFormat:` is.
+unsafe extern "C" fn appending_format(receiver: Id, _sel: Sel, format: Id) -> Id {
+    // SAFETY: two `NSString`s, or nil.
+    let mut joined = unsafe { bytes(receiver) };
+    joined.extend_from_slice(&unescape_rendered(&unsafe { bytes(format) }));
+    let s = corefoundation::string::from_bytes(&joined, false);
+    // SAFETY: a fresh string.
+    unsafe { corefoundation::api::CFAutorelease(s as CFTypeRef) as Id }
+}
+
 unsafe extern "C" fn set_string(receiver: Id, _sel: Sel, other: Id) {
     // SAFETY: two `NSString`s, or nil.
     let bytes = unsafe { bytes(other) };
@@ -660,6 +671,197 @@ unsafe extern "C" fn mutable_copy(receiver: Id, _sel: Sel) -> Id {
 
 /// `NSNotFound`, which is `NSIntegerMax`.
 const NOT_FOUND: usize = usize::MAX >> 1;
+
+/// `-rangeOfCharacterFromSet:options:range:`: the first (or, backwards, the
+/// last) code unit in `range` whose character is in `set`.
+unsafe extern "C" fn range_of_character_in_range(
+    receiver: Id,
+    _sel: Sel,
+    set: Id,
+    options: usize,
+    range: NSRange,
+) -> NSRange {
+    // SAFETY: an `NSString`, or nil.
+    let units = unsafe { units(receiver) };
+    let end = range.location.saturating_add(range.length).min(units.len());
+    let start = range.location.min(end);
+    // A surrogate half is not a character; the pair is, at its first unit.
+    let member = |at: usize| {
+        char::decode_utf16(units[at..].iter().copied())
+            .next()
+            .and_then(Result::ok)
+            // SAFETY: the caller's set.
+            .is_some_and(|c| unsafe { crate::characterset::contains_char(set, c) })
+    };
+    let found = match options & 4 != 0 {
+        true => (start..end).rev().find(|at| member(*at)),
+        false => (start..end).find(|at| member(*at)),
+    };
+    match found {
+        Some(at) => {
+            let width = char::decode_utf16(units[at..].iter().copied())
+                .next()
+                .and_then(Result::ok)
+                .map_or(1, char::len_utf16);
+            NSRange {
+                location: at,
+                length: width,
+            }
+        }
+        None => NSRange {
+            location: NOT_FOUND,
+            length: 0,
+        },
+    }
+}
+
+unsafe extern "C" fn range_of_character_options(
+    receiver: Id,
+    sel: Sel,
+    set: Id,
+    options: usize,
+) -> NSRange {
+    // SAFETY: an `NSString`, or nil.
+    let length = unsafe { units(receiver) }.len();
+    // SAFETY: the same receiver, over all of it.
+    unsafe {
+        range_of_character_in_range(
+            receiver,
+            sel,
+            set,
+            options,
+            NSRange {
+                location: 0,
+                length,
+            },
+        )
+    }
+}
+
+unsafe extern "C" fn range_of_character(receiver: Id, sel: Sel, set: Id) -> NSRange {
+    // SAFETY: as above.
+    unsafe { range_of_character_options(receiver, sel, set, 0) }
+}
+
+/// Replace `range` of a mutable string's UTF-16 units with `insertion`.
+/// Past the end is Apple's range exception, which fails here by name.
+unsafe fn splice(receiver: Id, selector: &str, range: NSRange, insertion: &[u16]) {
+    // SAFETY: an `NSString`.
+    let mut units = unsafe { units(receiver) };
+    let end = range.location.saturating_add(range.length);
+    if end > units.len() {
+        objc::fail!(
+            "-[NSMutableString {selector}]: range {range:?} past the end of {}",
+            units.len()
+        );
+    }
+    units.splice(range.location..end, insertion.iter().copied());
+    let text = String::from_utf16_lossy(&units);
+    // SAFETY: the same receiver.
+    unsafe { replace(receiver, selector, text.as_bytes()) };
+}
+
+unsafe extern "C" fn delete_characters_in_range(receiver: Id, _sel: Sel, range: NSRange) {
+    // SAFETY: a mutable string.
+    unsafe { splice(receiver, "deleteCharactersInRange:", range, &[]) };
+}
+
+unsafe extern "C" fn insert_string_at_index(receiver: Id, _sel: Sel, other: Id, index: usize) {
+    // SAFETY: two strings.
+    let insertion = unsafe { units(other) };
+    // SAFETY: a mutable string.
+    unsafe {
+        splice(
+            receiver,
+            "insertString:atIndex:",
+            NSRange {
+                location: index,
+                length: 0,
+            },
+            &insertion,
+        )
+    };
+}
+
+unsafe extern "C" fn replace_characters_in_range(
+    receiver: Id,
+    _sel: Sel,
+    range: NSRange,
+    other: Id,
+) {
+    // SAFETY: two strings.
+    let insertion = unsafe { units(other) };
+    // SAFETY: a mutable string.
+    unsafe {
+        splice(
+            receiver,
+            "replaceCharactersInRange:withString:",
+            range,
+            &insertion,
+        )
+    };
+}
+
+/// `-replaceOccurrencesOfString:withString:options:range:`, case-insensitively
+/// under `NSCaseInsensitiveSearch` (ASCII letters only, as `-rangeOfString:options:`
+/// folds them), answering how many it replaced.
+unsafe extern "C" fn replace_occurrences(
+    receiver: Id,
+    _sel: Sel,
+    target: Id,
+    replacement: Id,
+    options: usize,
+    range: NSRange,
+) -> usize {
+    // SAFETY: three strings.
+    let (units, needle, insertion) =
+        unsafe { (units(receiver), units(target), units(replacement)) };
+    let end = range.location.saturating_add(range.length);
+    if end > units.len() {
+        objc::fail!(
+            "-[NSMutableString replaceOccurrencesOfString:withString:options:range:]: range {range:?} past the end of {}",
+            units.len()
+        );
+    }
+    if needle.is_empty() {
+        return 0;
+    }
+    let fold = |unit: u16| match options & 1 != 0 && unit <= 0x7f {
+        true => u16::from((unit as u8).to_ascii_lowercase()),
+        false => unit,
+    };
+    let mut out = units[..range.location].to_vec();
+    let mut at = range.location;
+    let mut count = 0;
+    while at < end {
+        let matches = at + needle.len() <= end
+            && units[at..at + needle.len()]
+                .iter()
+                .zip(&needle)
+                .all(|(a, b)| fold(*a) == fold(*b));
+        if matches {
+            out.extend_from_slice(&insertion);
+            at += needle.len();
+            count += 1;
+        } else {
+            out.push(units[at]);
+            at += 1;
+        }
+    }
+    out.extend_from_slice(&units[end..]);
+    if count > 0 {
+        let text = String::from_utf16_lossy(&out);
+        // SAFETY: the same receiver, a mutable string.
+        unsafe {
+            replace(
+                receiver,
+                "replaceOccurrencesOfString:withString:options:range:",
+                text.as_bytes(),
+            )
+        };
+    }
+    count
+}
 
 unsafe extern "C" fn range_of_string(receiver: Id, _sel: Sel, needle: Id) -> NSRange {
     unsafe { range_of_string_options(receiver, _sel, needle, 0) }
@@ -926,6 +1128,58 @@ unsafe extern "C" fn compare(receiver: Id, _sel: Sel, other: Id) -> isize {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
+    }
+}
+
+fn ordering(order: std::cmp::Ordering) -> isize {
+    match order {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// The two strings' text, each lowercased for comparison.
+unsafe fn folded(receiver: Id, other: Id) -> (String, String) {
+    // SAFETY: two `NSString`s, or nil.
+    let (a, b) = unsafe { (bytes(receiver), bytes(other)) };
+    (
+        String::from_utf8_lossy(&a).to_lowercase(),
+        String::from_utf8_lossy(&b).to_lowercase(),
+    )
+}
+
+/// `-caseInsensitiveCompare:`: by character, case folded.
+unsafe extern "C" fn case_insensitive_compare(receiver: Id, _sel: Sel, other: Id) -> isize {
+    // SAFETY: the caller's two strings.
+    let (a, b) = unsafe { folded(receiver, other) };
+    ordering(a.cmp(&b))
+}
+
+/// `-localizedCompare:`: case folded first, as a collation's primary
+/// strength is, and lowercase before uppercase between strings that differ
+/// only in case, which is the root collation's tie-break.
+///
+/// FIXME (ACCURACY): no accent or locale tailoring: "é" sorts after "z".
+unsafe extern "C" fn localized_compare(receiver: Id, sel: Sel, other: Id) -> isize {
+    // SAFETY: the caller's two strings.
+    match unsafe { case_insensitive_compare(receiver, sel, other) } {
+        0 => {
+            // SAFETY: as above.
+            let (a, b) = unsafe { (bytes(receiver), bytes(other)) };
+            // Swapping case turns "lowercase first" into byte order.
+            let swap = |text: &[u8]| -> Vec<u8> {
+                text.iter()
+                    .map(|c| match c {
+                        b'a'..=b'z' => c.to_ascii_uppercase(),
+                        b'A'..=b'Z' => c.to_ascii_lowercase(),
+                        _ => *c,
+                    })
+                    .collect()
+            };
+            ordering(swap(&a).cmp(&swap(&b)))
+        }
+        order => order,
     }
 }
 
@@ -1249,6 +1503,10 @@ pub(crate) fn install() {
         "copyWithZone:" => copy, c"@24@0:8^v16";
         "mutableCopy" => mutable_copy, c"@16@0:8";
         "rangeOfString:" => range_of_string, c"{_NSRange=QQ}24@0:8@16";
+        "rangeOfCharacterFromSet:" => range_of_character, c"{_NSRange=QQ}24@0:8@16";
+        "rangeOfCharacterFromSet:options:" => range_of_character_options, c"{_NSRange=QQ}32@0:8@16Q24";
+        "rangeOfCharacterFromSet:options:range:" => range_of_character_in_range,
+            c"{_NSRange=QQ}48@0:8@16Q24{_NSRange=QQ}32";
         "rangeOfString:options:" => range_of_string_options, c"{_NSRange=QQ}32@0:8@16Q24";
         "containsString:" => contains_string, c"B24@0:8@16";
         "hasPrefix:" => has_prefix, c"B24@0:8@16";
@@ -1261,7 +1519,9 @@ pub(crate) fn install() {
         "lowercaseString" => lowercase, c"@16@0:8";
         "uppercaseString" => uppercase, c"@16@0:8";
         "compare:" => compare, c"q24@0:8@16";
-        "caseInsensitiveCompare:" => compare, c"q24@0:8@16";
+        "caseInsensitiveCompare:" => case_insensitive_compare, c"q24@0:8@16";
+        "localizedCaseInsensitiveCompare:" => case_insensitive_compare, c"q24@0:8@16";
+        "localizedCompare:" => localized_compare, c"q24@0:8@16";
         "intValue" => int_value, c"i16@0:8";
         "integerValue" => integer_value, c"q16@0:8";
         "longLongValue" => integer_value, c"q16@0:8";
@@ -1285,6 +1545,7 @@ pub(crate) fn install() {
         "initWithUTF8String:" => init_with_utf8, c"@24@0:8*16";
         "initWithCString:encoding:" => init_with_cstring_encoding, c"@32@0:8*16Q24";
         "initWithFormat:" => init_with_format, c"@24@0:8@16";
+        "stringByAppendingFormat:" => appending_format, c"@24@0:8@16";
         "stringByRemovingPercentEncoding" => removing_percent_encoding, c"@16@0:8";
         "stringByAddingPercentEncodingWithAllowedCharacters:" => adding_percent_encoding, c"@24@0:8@16";
         "stringByTrimmingCharactersInSet:" => trimming_characters, c"@24@0:8@16";
@@ -1296,6 +1557,11 @@ pub(crate) fn install() {
     methods!(mutable, {
         "appendString:" => append_string_in_place, c"v24@0:8@16";
         "appendFormat:" => append_format, c"v24@0:8@16";
+        "deleteCharactersInRange:" => delete_characters_in_range, c"v32@0:8{_NSRange=QQ}16";
+        "insertString:atIndex:" => insert_string_at_index, c"v32@0:8@16Q24";
+        "replaceCharactersInRange:withString:" => replace_characters_in_range, c"v40@0:8{_NSRange=QQ}16@32";
+        "replaceOccurrencesOfString:withString:options:range:" => replace_occurrences,
+            c"Q48@0:8@16@24Q32{_NSRange=QQ}40";
         "setString:" => set_string, c"v24@0:8@16";
         "init" => init_mutable, c"@16@0:8";
         "initWithString:" => init_mutable_with_string, c"@24@0:8@16";

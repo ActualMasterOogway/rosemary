@@ -90,6 +90,11 @@ pub(crate) fn has_stacks() -> bool {
 
 /// Drop a view that is going away, as a stack or as something arranged in one.
 pub(crate) fn forget(object: Id) {
+    crate::cell::forget(object);
+    crate::popup::forget(object);
+    crate::scroll::forget(object);
+    crate::segmented::forget(object);
+    crate::table::forget(object);
     let mut table = stacks().lock().unwrap_or_else(|e| e.into_inner());
     table.remove(&(object as usize));
     for stack in table.values_mut() {
@@ -451,6 +456,8 @@ mod slot {
     /// `-contentViewMargins`, each an `f64`'s bits.
     pub const MARGIN_WIDTH: usize = 5;
     pub const MARGIN_HEIGHT: usize = 6;
+    /// Unretained: the content view is one of the box's subviews.
+    pub const CONTENT_VIEW: usize = 7;
     pub const BOX_OBJECTS: [usize; 2] = [FILL_COLOR, BORDER_COLOR];
 
     pub const INDETERMINATE: usize = 0;
@@ -472,7 +479,28 @@ mod slot {
     /// Any control's, in the button table. Inverted: a fresh control is
     /// enabled.
     pub const DISABLED: usize = 10;
-    pub const BUTTON_OBJECTS: [usize; 3] = [IMAGE, TITLE, ALTERNATE_IMAGE];
+    /// Any control's `-tag`, in the button table.
+    pub const TAG: usize = 11;
+    pub const FONT: usize = 12;
+    pub const ALTERNATE_TITLE: usize = 13;
+    pub const KEY_EQUIVALENT: usize = 14;
+    pub const KEY_MODIFIERS: usize = 15;
+    /// `NSBezelStyle`, 0 until one is set.
+    pub const BEZEL: usize = 16;
+    pub const TEXT_ALIGNMENT: usize = 17;
+    pub const ATTRIBUTED_TITLE: usize = 18;
+    /// Whether the state shows by swapping in the alternate title and image
+    /// (`showsStateBy` includes `NSContentsCellMask`).
+    pub const SHOWS_ALTERNATE: usize = 19;
+    pub const BUTTON_OBJECTS: [usize; 7] = [
+        IMAGE,
+        TITLE,
+        ALTERNATE_IMAGE,
+        FONT,
+        ALTERNATE_TITLE,
+        KEY_EQUIVALENT,
+        ATTRIBUTED_TITLE,
+    ];
 
     pub const VIEW_IMAGE: usize = 0;
     pub const SCALING: usize = 1;
@@ -484,7 +512,7 @@ mod slot {
     pub const KNOB_PROPORTION: usize = 1;
 }
 
-const ROW: usize = 11;
+const ROW: usize = 20;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -539,6 +567,38 @@ unsafe extern "C" fn box_content_view_margins(receiver: Id, _sel: Sel) -> NSSize
         width: f64::from_bits(read(boxes(), receiver, slot::MARGIN_WIDTH) as u64),
         height: f64::from_bits(read(boxes(), receiver, slot::MARGIN_HEIGHT) as u64),
     }
+}
+
+/// `-setContentView:`: the view the box's content is in, made a subview filling
+/// the box if it is not one already.
+unsafe extern "C" fn box_set_content_view(receiver: Id, _sel: Sel, content: Id) {
+    let old = read(boxes(), receiver, slot::CONTENT_VIEW) as Id;
+    write(boxes(), receiver, slot::CONTENT_VIEW, content as usize);
+    if old == content || content.is_null() {
+        return;
+    }
+    // SAFETY: both are views of this crate's, or nil.
+    unsafe {
+        if view::superview_of(content) == receiver {
+            return;
+        }
+        let send: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        if !old.is_null() && view::superview_of(old) == receiver {
+            send(old, objc::sel::get("removeFromSuperview"));
+        }
+        let frame: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        frame(
+            content,
+            objc::sel::get("setFrame:"),
+            view::bounds_of(receiver),
+        );
+        let add: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        add(receiver, objc::sel::get("addSubview:"), content);
+    }
+}
+
+unsafe extern "C" fn box_content_view(receiver: Id, _sel: Sel) -> Id {
+    read(boxes(), receiver, slot::CONTENT_VIEW) as Id
 }
 
 unsafe extern "C" fn box_set_fill_color(receiver: Id, _sel: Sel, value: Id) {
@@ -745,6 +805,7 @@ unsafe extern "C" fn button_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     if read(buttons(), receiver, slot::BUTTON_TRANSPARENT) != 0 {
         return;
     }
+    draw_bezel_and_title(receiver);
     let alternate = read(buttons(), receiver, slot::ALTERNATE_IMAGE) as Id;
     let image = match read(buttons(), receiver, slot::HIGHLIGHTED) != 0 && !alternate.is_null() {
         true => alternate,
@@ -776,6 +837,283 @@ unsafe extern "C" fn button_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     }
 }
 
+unsafe extern "C" fn control_set_tag(receiver: Id, _sel: Sel, tag: isize) {
+    write(buttons(), receiver, slot::TAG, tag as usize);
+}
+
+unsafe extern "C" fn control_tag(receiver: Id, _sel: Sel) -> isize {
+    read(buttons(), receiver, slot::TAG) as isize
+}
+
+/// The bezel of a bordered button and its title, which is how a text button
+/// built in Interface Builder looks. An image button that is not bordered
+/// draws neither.
+///
+/// FIXME (ACCURACY): one rounded, lightly shaded bezel stands in for every
+/// `NSBezelStyle`; Apple's artwork differs per style.
+fn draw_bezel_and_title(receiver: Id) {
+    let bordered = read(buttons(), receiver, slot::NOT_BORDERED) == 0;
+    let title = button_text(receiver);
+    if !bordered && title.is_empty() {
+        return;
+    }
+    let bounds = view::bounds_of(receiver);
+    let density = crate::backing::focus_density();
+    let width = (bounds.size.width * density).ceil() as usize;
+    let height = (bounds.size.height * density).ceil() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut pixels = vec![0u8; width * height * 4];
+    let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
+    let (w, h) = (bounds.size.width as f32, bounds.size.height as f32);
+    let pressed = read(buttons(), receiver, slot::HIGHLIGHTED) != 0;
+    let enabled = read(buttons(), receiver, slot::DISABLED) == 0;
+    if bordered {
+        let face = match pressed {
+            true => chrome::Color::rgba(178, 178, 178, 1.0),
+            false => chrome::Color::rgba(236, 236, 236, 1.0),
+        };
+        let inset = chrome::Rect::new(1.0, 1.0, w - 2.0, h - 3.0);
+        canvas.fill_rounded_rect(inset, 3.0, face);
+        canvas.stroke_rounded_rect(
+            chrome::Rect::new(1.5, 1.5, w - 3.0, h - 4.0),
+            3.0,
+            1.0,
+            chrome::Color::rgba(0, 0, 0, 0.35),
+        );
+    }
+    if !title.is_empty()
+        && let Some((font, size)) = crate::label::chrome_font(title_font(receiver))
+    {
+        let size = size as f32;
+        let alpha = if enabled { 0.85 } else { 0.35 };
+        let line = font.truncate(&title, size, (w - 4.0).max(0.0));
+        let advance = font.measure(&line, size);
+        let x = match read(buttons(), receiver, slot::TEXT_ALIGNMENT) as isize {
+            0 => 4.0,
+            1 => w - 4.0 - advance,
+            _ => (w - advance) / 2.0,
+        };
+        // The bezel's face sits a point above the shadow under it.
+        let baseline = font.centered_baseline(size, 0.0, if bordered { h - 1.0 } else { h });
+        canvas.draw_text(
+            &line,
+            &font,
+            size,
+            chrome::Point::new(x, baseline),
+            chrome::Color::rgba(0, 0, 0, alpha),
+        );
+    }
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        bounds.size,
+        bounds,
+        NSRect {
+            origin: NSPoint::default(),
+            size: bounds.size,
+        },
+        // Source-over.
+        2,
+        1.0,
+        true,
+    );
+}
+
+/// The font the title is drawn in: the attributed title's, which a program
+/// sets to reach a font of its own, else the button's.
+fn title_font(receiver: Id) -> Id {
+    let attributed = read(buttons(), receiver, slot::ATTRIBUTED_TITLE) as Id;
+    // SAFETY: an attributed string this button retained, or nil.
+    let attributes = unsafe { foundation::attributed_string::parts(attributed) }
+        .map_or(std::ptr::null_mut(), |(_, attributes)| attributes);
+    if !attributes.is_null() {
+        let key = foundation::string::from_str("NSFont");
+        // SAFETY: `-objectForKey:` is `id (id, SEL, id)` on a dictionary.
+        let font = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            f(attributes, objc::sel::get("objectForKey:"), key)
+        };
+        objc::arc::release(key);
+        if !font.is_null() {
+            return font;
+        }
+    }
+    read(buttons(), receiver, slot::FONT) as Id
+}
+
+/// The title a button shows: the attributed title's characters if it has
+/// one, else the plain title.
+fn button_text(receiver: Id) -> String {
+    let attributed = read(buttons(), receiver, slot::ATTRIBUTED_TITLE) as Id;
+    let title = match attributed.is_null() {
+        // SAFETY: `-string` is `id (id, SEL)` on an attributed string.
+        false => unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            f(attributed, objc::sel::get("string"))
+        },
+        // A button that shows its state by its contents shows the alternate
+        // title while on, as a toggle built in Interface Builder does.
+        true => match read(buttons(), receiver, slot::ALTERNATE_TITLE) as Id {
+            alternate
+                if read(buttons(), receiver, slot::BUTTON_STATE) != 0
+                    && read(buttons(), receiver, slot::SHOWS_ALTERNATE) != 0
+                    // SAFETY: a string this button retained.
+                    && !unsafe { foundation::string::bytes(alternate) }.is_empty() =>
+            {
+                alternate
+            }
+            _ => read(buttons(), receiver, slot::TITLE) as Id,
+        },
+    };
+    // SAFETY: an `NSString`, or nil.
+    String::from_utf8_lossy(&unsafe { foundation::string::bytes(title) }).into_owned()
+}
+
+macro_rules! button_object {
+    ($($set:ident, $get:ident => $slot:ident;)*) => {$(
+        unsafe extern "C" fn $set(receiver: Id, _sel: Sel, value: Id) {
+            write_object(buttons(), receiver, slot::$slot, value);
+            crate::backing::needs_display(receiver);
+        }
+
+        unsafe extern "C" fn $get(receiver: Id, _sel: Sel) -> Id {
+            read(buttons(), receiver, slot::$slot) as Id
+        }
+    )*};
+}
+
+button_object! {
+    button_set_font, button_font => FONT;
+    button_set_alternate_title, button_alternate_title => ALTERNATE_TITLE;
+    button_set_attributed_title, button_attributed_title_stored => ATTRIBUTED_TITLE;
+}
+
+/// `-setKeyEquivalent:`, kept as a copy: Apple's is a copied property.
+unsafe extern "C" fn button_set_key_equivalent(receiver: Id, _sel: Sel, value: Id) {
+    let copy = match value.is_null() {
+        true => std::ptr::null_mut(),
+        false => {
+            // SAFETY: an `NSString`.
+            let bytes = unsafe { foundation::string::bytes(value) };
+            foundation::string::from_str(&String::from_utf8_lossy(&bytes))
+        }
+    };
+    write_object(buttons(), receiver, slot::KEY_EQUIVALENT, copy);
+    objc::arc::release(copy);
+}
+
+/// `-keyEquivalent`: the empty string for a button that has none.
+unsafe extern "C" fn button_key_equivalent(receiver: Id, _sel: Sel) -> Id {
+    let stored = read(buttons(), receiver, slot::KEY_EQUIVALENT) as Id;
+    match stored.is_null() {
+        false => stored,
+        true => empty_string(),
+    }
+}
+
+/// `-attributedTitle`: the one set, or the plain title as attributed text.
+unsafe extern "C" fn button_attributed_title(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the same receiver.
+    let stored = unsafe { button_attributed_title_stored(receiver, sel) };
+    if !stored.is_null() {
+        return stored;
+    }
+    let Some(class) = objc::class::lookup(c"NSAttributedString") else {
+        return std::ptr::null_mut();
+    };
+    let title = read(buttons(), receiver, slot::TITLE) as Id;
+    // SAFETY: `+attributedStringWithString:`... is not universal; `-initWithString:`
+    // is, and the result is autoreleased for the caller as a getter's is.
+    unsafe {
+        let object = objc::object::create_instance(class, 0);
+        let init: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc::msg::entry());
+        let title = if title.is_null() {
+            empty_string()
+        } else {
+            title
+        };
+        let object = init(object, objc::sel::get("initWithString:"), title);
+        objc::arc::autorelease(object)
+    }
+}
+
+/// One empty string for the process, for a getter that answers "" rather than nil.
+fn empty_string() -> Id {
+    static EMPTY: OnceLock<usize> = OnceLock::new();
+    *EMPTY.get_or_init(|| foundation::string::from_str("") as usize) as Id
+}
+
+macro_rules! button_word {
+    ($($set:ident, $get:ident => $slot:ident;)*) => {$(
+        unsafe extern "C" fn $set(receiver: Id, _sel: Sel, value: usize) {
+            write(buttons(), receiver, slot::$slot, value);
+            crate::backing::needs_display(receiver);
+        }
+
+        unsafe extern "C" fn $get(receiver: Id, _sel: Sel) -> usize {
+            read(buttons(), receiver, slot::$slot)
+        }
+    )*};
+}
+
+button_word! {
+    button_set_key_modifiers, button_key_modifiers => KEY_MODIFIERS;
+    button_set_bezel_style, button_bezel_style => BEZEL;
+    button_set_alignment, button_alignment => TEXT_ALIGNMENT;
+}
+
+/// Whether the state shows as the alternate contents, for a button built in
+/// Interface Builder, whose cell flags say so rather than its type.
+pub(crate) fn set_shows_alternate(receiver: Id, on: bool) {
+    write(buttons(), receiver, slot::SHOWS_ALTERNATE, usize::from(on));
+}
+
+/// `-performKeyEquivalent:`: a click, when the event's characters and
+/// device-independent modifiers are this button's key equivalent.
+unsafe extern "C" fn button_perform_key_equivalent(receiver: Id, _sel: Sel, event: Id) -> u8 {
+    let wanted = read(buttons(), receiver, slot::KEY_EQUIVALENT) as Id;
+    if wanted.is_null() || read(buttons(), receiver, slot::DISABLED) != 0 {
+        return 0;
+    }
+    // SAFETY: a string this button copied.
+    let wanted = unsafe { foundation::string::bytes(wanted) };
+    if wanted.is_empty() {
+        return 0;
+    }
+    // SAFETY: `-charactersIgnoringModifiers` and `-modifierFlags` are the
+    // prototypes `NSEvent` declares.
+    let (characters, modifiers) = unsafe {
+        let text: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        let flags: unsafe extern "C" fn(Id, Sel) -> usize = std::mem::transmute(objc::msg::entry());
+        (
+            foundation::string::bytes(text(event, objc::sel::get("charactersIgnoringModifiers"))),
+            flags(event, objc::sel::get("modifierFlags")),
+        )
+    };
+    // Shift, Control, Option and Command; a key's own Shift is in its character.
+    const RELEVANT: usize = 0x001E_0000;
+    const SHIFT: usize = 0x0002_0000;
+    let mask = read(buttons(), receiver, slot::KEY_MODIFIERS) & RELEVANT;
+    if characters != wanted || (modifiers & RELEVANT & !SHIFT) != (mask & !SHIFT) {
+        return 0;
+    }
+    // SAFETY: `-performClick:` is `void (id, SEL, id)` on every button.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("performClick:"), receiver);
+    }
+    1
+}
+
+/// `-performClick:`: the action, as a click would send it.
+unsafe extern "C" fn button_perform_click(receiver: Id, _sel: Sel, _sender: Id) {
+    send_button_action(receiver);
+}
+
 /// `-mouseDown:`: pressed until the button is released.
 unsafe extern "C" fn button_mouse_down(receiver: Id, _sel: Sel, _event: Id) {
     set_highlighted(receiver, true);
@@ -789,6 +1127,24 @@ unsafe extern "C" fn button_mouse_up(receiver: Id, _sel: Sel, _event: Id) {
         return;
     }
     set_highlighted(receiver, false);
+    send_button_action(receiver);
+}
+
+/// Whether a control is enabled, for a subclass drawing or tracking itself.
+pub(crate) fn is_enabled(receiver: Id) -> bool {
+    read(buttons(), receiver, slot::DISABLED) == 0
+}
+
+/// A control's action to its target, as a click sends it.
+pub(crate) fn send_action(receiver: Id) {
+    send_button_action(receiver);
+}
+
+/// The button's action to its target through `NSApp`, as a click sends it.
+fn send_button_action(receiver: Id) {
+    if read(buttons(), receiver, slot::DISABLED) != 0 {
+        return;
+    }
     let action = read(buttons(), receiver, slot::ACTION) as Sel;
     let app = crate::application::shared();
     if action.is_null() || app.is_null() {
@@ -823,6 +1179,13 @@ unsafe extern "C" fn button_title(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn button_set_type(receiver: Id, _sel: Sel, value: usize) {
     write(buttons(), receiver, slot::BUTTON_TYPE, value);
+    // `NSToggleButton` shows its state by its contents; the rest do not.
+    write(
+        buttons(),
+        receiver,
+        slot::SHOWS_ALTERNATE,
+        usize::from(value == 2),
+    );
 }
 
 unsafe extern "C" fn button_type(receiver: Id, _sel: Sel) -> usize {
@@ -831,6 +1194,7 @@ unsafe extern "C" fn button_type(receiver: Id, _sel: Sel) -> usize {
 
 unsafe extern "C" fn button_set_state(receiver: Id, _sel: Sel, value: isize) {
     write(buttons(), receiver, slot::BUTTON_STATE, value as usize);
+    crate::backing::needs_display(receiver);
 }
 
 unsafe extern "C" fn button_state(receiver: Id, _sel: Sel) -> isize {
@@ -1279,6 +1643,8 @@ pub(crate) fn install() {
     let class = objc::class::lookup(c"NSBox").expect("declared before its methods");
     methods!(class, {
         "setBoxType:" => box_set_box_type, c"v24@0:8Q16";
+        "setContentView:" => box_set_content_view, c"v24@0:8@16";
+        "contentView" => box_content_view, c"@16@0:8";
         "boxType" => box_box_type, c"Q16@0:8";
         "setFillColor:" => box_set_fill_color, c"v24@0:8@16";
         "fillColor" => box_fill_color, c"@16@0:8";
@@ -1316,6 +1682,8 @@ pub(crate) fn install() {
         "setEnabled:" => control_set_enabled, c"v20@0:8c16";
         "isEnabled" => control_is_enabled, c"c16@0:8";
         "sendAction:to:" => control_send_action, c"c32@0:8:16@24";
+        "setTag:" => control_set_tag, c"v24@0:8q16";
+        "tag" => control_tag, c"q16@0:8";
     });
 
     let class = objc::class::lookup(c"NSButton").expect("declared before its methods");
@@ -1345,6 +1713,22 @@ pub(crate) fn install() {
         "highlight:" => button_set_highlighted, c"v20@0:8c16";
         "isHighlighted" => button_is_highlighted, c"c16@0:8";
         "drawRect:" => button_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "setFont:" => button_set_font, c"v24@0:8@16";
+        "font" => button_font, c"@16@0:8";
+        "setAlternateTitle:" => button_set_alternate_title, c"v24@0:8@16";
+        "alternateTitle" => button_alternate_title, c"@16@0:8";
+        "setAttributedTitle:" => button_set_attributed_title, c"v24@0:8@16";
+        "attributedTitle" => button_attributed_title, c"@16@0:8";
+        "setKeyEquivalent:" => button_set_key_equivalent, c"v24@0:8@16";
+        "keyEquivalent" => button_key_equivalent, c"@16@0:8";
+        "setKeyEquivalentModifierMask:" => button_set_key_modifiers, c"v24@0:8Q16";
+        "keyEquivalentModifierMask" => button_key_modifiers, c"Q16@0:8";
+        "setBezelStyle:" => button_set_bezel_style, c"v24@0:8Q16";
+        "bezelStyle" => button_bezel_style, c"Q16@0:8";
+        "setAlignment:" => button_set_alignment, c"v24@0:8Q16";
+        "alignment" => button_alignment, c"Q16@0:8";
+        "performKeyEquivalent:" => button_perform_key_equivalent, c"c24@0:8@16";
+        "performClick:" => button_perform_click, c"v24@0:8@16";
         "mouseDown:" => button_mouse_down, c"v24@0:8@16";
         "mouseUp:" => button_mouse_up, c"v24@0:8@16";
     });

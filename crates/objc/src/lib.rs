@@ -140,6 +140,14 @@ exports::exports! {
         "objc_msgSend_stret" => msg::entry_stret() as usize as u64,
         "objc_msgSendSuper_stret" => msg::entry_super_stret() as usize as u64,
         "objc_msgSendSuper2_stret" => msg::entry_super2_stret() as usize as u64,
+        #[cfg(target_arch = "x86_64")]
+        "objc_msgSend_fixup" => msg::msg_send_fixup,
+        #[cfg(target_arch = "x86_64")]
+        "objc_msgSend_stret_fixup" => msg::msg_send_stret_fixup,
+        #[cfg(target_arch = "x86_64")]
+        "objc_msgSendSuper2_fixup" => msg::msg_send_super2_fixup,
+        #[cfg(target_arch = "x86_64")]
+        "objc_msgSendSuper2_stret_fixup" => msg::msg_send_super2_stret_fixup,
     }
     // libclosure, which is this runtime's for the reason `block` gives.
     groups {

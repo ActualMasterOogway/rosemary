@@ -44,6 +44,30 @@ unsafe extern "C" fn set_menu(receiver: Id, _sel: Sel, value: Id) {
     }
 }
 
+/// `(responder, next responder)` for responders that are neither views nor
+/// windows - a controller a program links into the chain. Not retained, as
+/// Apple's is not; same lifetime trade as [`menus`].
+fn links() -> &'static Mutex<Vec<(usize, usize)>> {
+    static LINKS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+    &LINKS
+}
+
+unsafe extern "C" fn next_responder(receiver: Id, _sel: Sel) -> Id {
+    let links = links().lock().unwrap_or_else(|e| e.into_inner());
+    links
+        .iter()
+        .find(|(object, _)| *object == receiver as usize)
+        .map_or(std::ptr::null_mut(), |(_, next)| *next as Id)
+}
+
+unsafe extern "C" fn set_next_responder(receiver: Id, _sel: Sel, next: Id) {
+    let mut links = links().lock().unwrap_or_else(|e| e.into_inner());
+    links.retain(|(object, _)| *object != receiver as usize);
+    if !next.is_null() {
+        links.push((receiver as usize, next as usize));
+    }
+}
+
 /// Send an event method on to the next responder: a view's superview, then its
 /// window. A window is the end of the chain here, as it has no window of its own.
 ///
@@ -54,8 +78,13 @@ unsafe extern "C" fn set_menu(receiver: Id, _sel: Sel, value: Id) {
 pub(crate) unsafe fn forward(receiver: Id, sel: Sel, event: Id) {
     // A next responder set with `-setNextResponder:` comes first: a program
     // puts a controller between a view and its superview that way.
-    let set = match crate::view::is_view(receiver) || crate::window::is_window(receiver) {
-        // SAFETY: `-nextResponder` is `id (id, SEL)` on views and windows.
+    let responds = crate::view::is_view(receiver)
+        || crate::window::is_window(receiver)
+        // SAFETY: null or an object this runtime allocated.
+        || unsafe { objc::object::class_of(receiver) }
+            .is_some_and(|c| c.method(objc::sel::get("nextResponder")).is_some());
+    let set = match responds {
+        // SAFETY: `-nextResponder` is `id (id, SEL)` on every responder.
         true => unsafe {
             let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
             f(receiver, objc::sel::get("nextResponder"))
@@ -360,6 +389,21 @@ unsafe extern "C" fn window_perform_key_equivalent(receiver: Id, sel: Sel, event
     }
 }
 
+/// `-[NSWindow keyDown:]`, where a key nothing in the window took arrives: it
+/// is offered to the window's views as a key equivalent, which is how a button
+/// whose equivalent is a plain key - `=` on a calculator, Return in a dialog -
+/// is pressed from the keyboard.
+unsafe extern "C" fn window_key_down(receiver: Id, sel: Sel, event: Id) {
+    // SAFETY: the window's own `-performKeyEquivalent:`, with the same event.
+    let taken = unsafe {
+        window_perform_key_equivalent(receiver, objc::sel::get("performKeyEquivalent:"), event)
+    };
+    if taken == 0 {
+        // SAFETY: as `forward_event`.
+        unsafe { forward(receiver, sel, event) }
+    }
+}
+
 /// An `NSResponder` event method: a responder that does not handle the event
 /// passes it up. These methods also matter when a guest override calls `super`;
 /// they are real methods on AppKit's base class rather than absent selectors.
@@ -373,6 +417,8 @@ pub(crate) fn install() {
     methods!(class, {
         "menu" => menu, c"@16@0:8";
         "setMenu:" => set_menu, c"v24@0:8@16";
+        "nextResponder" => next_responder, c"@16@0:8";
+        "setNextResponder:" => set_next_responder, c"v24@0:8@16";
         "mouseDown:" => forward_event, c"v24@0:8@16";
         "mouseUp:" => forward_event, c"v24@0:8@16";
         "rightMouseDown:" => forward_event, c"v24@0:8@16";
@@ -405,6 +451,7 @@ pub(crate) fn install() {
     let window = objc::class::lookup(c"NSWindow").expect("declared before its methods");
     methods!(window, {
         "performKeyEquivalent:" => window_perform_key_equivalent, c"c24@0:8@16";
+        "keyDown:" => window_key_down, c"v24@0:8@16";
     });
 }
 

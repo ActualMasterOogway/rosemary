@@ -20,6 +20,9 @@ pub struct Loader {
     /// `dlsym` on a handle [`Loader::open`] returned, as a guest-callable
     /// address. Takes the C name, without the Mach-O underscore.
     pub symbol: fn(u64, &str) -> Option<u64>,
+    /// The host path of the guest image an address lies in, the main program
+    /// included.
+    pub image_path: fn(u64) -> Option<String>,
 }
 
 static LOADER: OnceLock<Loader> = OnceLock::new();
@@ -41,6 +44,11 @@ pub fn virtual_directory(path: &str) -> bool {
 /// `None`.
 pub fn open(path: Option<&str>) -> Option<u64> {
     (LOADER.get()?.open)(path)
+}
+
+/// The host path of the guest image containing `address`.
+pub fn image_path(address: u64) -> Option<String> {
+    (LOADER.get()?.image_path)(address)
 }
 
 /// Find `name` in the image `handle` names.

@@ -1256,6 +1256,35 @@ struct Tracking {
     /// The panel the arrow keys move in: the one the pointer was last in,
     /// or the one the keyboard last entered.
     focus: usize,
+    /// The pop-up button these menus belong to, which is told what was
+    /// chosen; zero for the menu bar's.
+    chooser: usize,
+}
+
+/// `title` for menus that hang from no bar title.
+const NO_TITLE: usize = usize::MAX;
+
+/// Pop `menu` up at `(x, y)` points from `window`'s top left, as a pop-up
+/// button does; choosing an item is reported to `chooser` through
+/// [`crate::popup::chose`].
+pub(crate) fn pop_up(window: Id, menu: Id, x: f32, y: f32, chooser: Id) {
+    close_menus();
+    // SAFETY: a window this crate made.
+    let parent = unsafe { crate::window::sdl_window(window) };
+    let items = crate::menu::prepare(menu);
+    let Some(level) = make_level(parent, x, y, menu, items) else {
+        return;
+    };
+    TRACKING.with(|t| {
+        *t.borrow_mut() = Some(Tracking {
+            window,
+            row: Row::Titlebar,
+            title: NO_TITLE,
+            levels: vec![level],
+            focus: 0,
+            chooser: chooser as usize,
+        })
+    });
 }
 
 thread_local! {
@@ -1329,6 +1358,7 @@ fn begin(window: Id, row: Row, title: usize, anchor: Rect, menu: Id, items: Vec<
             title,
             levels: vec![level],
             focus: 0,
+            chooser: 0,
         })
     });
 }
@@ -1585,20 +1615,25 @@ fn tracking_release(id: u32, x: f32, y: f32) {
 
 /// Choose the item at `row` of the panel at `depth`, if it can be chosen.
 fn choose(depth: usize, row: usize) {
-    let item = TRACKING.with(|t| {
+    let chosen = TRACKING.with(|t| {
         let t = t.borrow();
-        let level = t.as_ref()?.levels.get(depth)?;
+        let t = t.as_ref()?;
+        let level = t.levels.get(depth)?;
         let item = *level.items.get(row)?;
         (level.panel.selectable(row) && crate::menu::submenu_of(item).is_null())
-            .then(|| objc::arc::retain(item))
+            .then(|| (objc::arc::retain(item), objc::arc::retain(t.chooser as Id)))
     });
-    let Some(item) = item else {
+    let Some((item, chooser)) = chosen else {
         return;
     };
     // Closed before the action runs: an action may run a modal loop, which
     // pumps events, and the menu must not be open underneath it.
     close_menus();
-    crate::menu::perform(item);
+    match chooser.is_null() {
+        true => crate::menu::perform(item),
+        false => crate::popup::chose(chooser, item),
+    }
+    objc::arc::release(chooser);
     objc::arc::release(item);
 }
 
@@ -1677,6 +1712,9 @@ fn next_title(step: isize) {
     let Some((window, (row, title))) = tracking_window().zip(tracking_title()) else {
         return;
     };
+    if title == NO_TITLE {
+        return;
+    }
     let count = with_chromes(|chromes| {
         let chrome = chromes.get(&(window as usize))?;
         let layout = match row {

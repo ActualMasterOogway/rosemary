@@ -11,9 +11,11 @@ pub mod attributed_string;
 mod block;
 pub mod boxed;
 pub mod bundle;
+pub mod calculate;
 mod characterset;
 mod constant;
 pub mod cookies;
+pub mod decimal;
 pub mod defaults;
 mod define;
 pub mod error;
@@ -60,6 +62,7 @@ pub fn bootstrap() {
         characterset::install();
         attributed_string::install();
         collections::install();
+        decimal::install();
         pool::install();
         geometry::install();
         value::install();
@@ -100,6 +103,7 @@ exports::group! {
     bundle::cf,
     notification::cf,
     runtime,
+    calculate,
     locale::cf,
     formatter::cf,
     timer::cf,
@@ -232,6 +236,7 @@ fn declare_abstract() {
 pub const CLASSES: &[&str] = &[
     "NSString",
     "NSAttributedString",
+    "NSMutableAttributedString",
     "NSCharacterSet",
     "NSURLComponents",
     "NSHTTPCookie",
@@ -247,6 +252,8 @@ pub const CLASSES: &[&str] = &[
     "NSData",
     "NSMutableData",
     "NSNumber",
+    "NSDecimalNumber",
+    "NSDecimalNumberHandler",
     "NSPredicate",
     "NSEnumerator",
     "NSValue",
@@ -273,6 +280,7 @@ pub const CLASSES: &[&str] = &[
     "NSJSONSerialization",
     "NSProcessInfo",
     "NSDateFormatter",
+    "NSNumberFormatter",
     "NSFileHandle",
     "NSPipe",
     "NSTask",
@@ -291,7 +299,13 @@ pub const CLASSES: &[&str] = &[
 /// each goes through a cell - see `corefoundation::base::global_cell`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     let mut out = class_data();
-    for table in [locale::KEYS, formatter::cf::KEYS, kvo::KEYS, STRING_GLOBALS] {
+    for table in [
+        locale::KEYS,
+        formatter::cf::KEYS,
+        kvo::KEYS,
+        decimal::KEYS,
+        STRING_GLOBALS,
+    ] {
         out.extend(corefoundation::base::string_globals(table));
     }
     out.extend(corefoundation::base::named_string_globals(

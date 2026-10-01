@@ -18,6 +18,7 @@ pub mod application;
 pub mod backing;
 mod bezier;
 pub mod button;
+mod cell;
 pub mod cgcontext;
 pub mod cgevent;
 pub mod cgl;
@@ -54,15 +55,20 @@ pub mod panel;
 mod paragraph;
 pub mod pasteboard;
 mod pasteboard_manager;
+mod popup;
 pub mod raster;
 mod responder;
 pub mod screen;
 pub mod script;
+mod scroll;
+mod segmented;
+mod table;
 pub mod text;
 pub mod textinput;
 mod transform;
 pub mod uchr;
 pub mod view;
+mod view_animation;
 pub mod window;
 mod window_controller;
 pub mod workspace;
@@ -98,6 +104,13 @@ pub fn bootstrap() {
         transform::install();
         paragraph::install();
         backing::install();
+        popup::install();
+        scroll::install();
+        segmented::install();
+        table::install();
+        view_animation::install();
+        // Last of the controls: a cell forwards what its control implements.
+        cell::install();
         bezier::install();
         layer::install();
         coreanimation::install();
@@ -198,6 +211,7 @@ exports::exports! {
         "NSMouseInRect" => geometry::NSMouseInRect,
         "NSInsetRect" => geometry::NSInsetRect,
         "NSRectFill" => color::NSRectFill,
+        "NSDrawNinePartImage" => image::NSDrawNinePartImage,
         "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
         "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
         "CGRectEqualToRect" | "NSEqualRects" => geometry::CGRectEqualToRect,
@@ -444,6 +458,28 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSDocumentTypeDocumentAttribute", "DocumentType"),
     ("_NSHTMLTextDocumentType", "NSHTML"),
     ("_NSRTFTextDocumentType", "NSRTF"),
+    ("_NSBaselineOffsetAttributeName", "NSBaselineOffset"),
+    // `NSViewAnimation`'s dictionary keys and effects, Apple's strings.
+    ("_NSViewAnimationTargetKey", "NSViewAnimationTargetKey"),
+    (
+        "_NSViewAnimationStartFrameKey",
+        "NSViewAnimationStartFrameKey",
+    ),
+    ("_NSViewAnimationEndFrameKey", "NSViewAnimationEndFrameKey"),
+    ("_NSViewAnimationEffectKey", "NSViewAnimationEffectKey"),
+    (
+        "_NSViewAnimationFadeInEffect",
+        "NSViewAnimationFadeInEffect",
+    ),
+    (
+        "_NSViewAnimationFadeOutEffect",
+        "NSViewAnimationFadeOutEffect",
+    ),
+    // Accessibility attribute names, whose values are Apple's strings. Nothing
+    // here reads accessibility overrides, but a program sets them by name.
+    ("_NSAccessibilityHelpAttribute", "AXHelp"),
+    ("_NSAccessibilityTitleAttribute", "AXTitle"),
+    ("_NSAccessibilityDescriptionAttribute", "AXDescription"),
     // The only named system image a program asks for here.
     ("_NSImageNameApplicationIcon", "NSApplicationIcon"),
 ];

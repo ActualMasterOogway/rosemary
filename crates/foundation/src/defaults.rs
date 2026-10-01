@@ -335,7 +335,8 @@ unsafe extern "C" fn string_for_key(receiver: Id, sel: Sel, key: Id) -> Id {
     unsafe { object_for_key(receiver, sel, key) }
 }
 
-/// This string-backed defaults store has no values whose persisted type is an array.
+/// This string-backed defaults store has no values whose persisted type is an
+/// array, a dictionary or data, so each of those getters answers nil.
 unsafe extern "C" fn string_array_for_key(_receiver: Id, _sel: Sel, _key: Id) -> Id {
     std::ptr::null_mut()
 }
@@ -453,6 +454,9 @@ pub(crate) fn install() {
         "objectForKey:" => object_for_key, c"@24@0:8@16";
         "stringForKey:" => string_for_key, c"@24@0:8@16";
         "stringArrayForKey:" => string_array_for_key, c"@24@0:8@16";
+        "arrayForKey:" => string_array_for_key, c"@24@0:8@16";
+        "dictionaryForKey:" => string_array_for_key, c"@24@0:8@16";
+        "dataForKey:" => string_array_for_key, c"@24@0:8@16";
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
         "boolForKey:" => bool_for_key, c"c24@0:8@16";

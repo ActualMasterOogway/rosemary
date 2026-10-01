@@ -60,6 +60,10 @@ pub struct Window {
     /// request, so what a guest asked for is not readable back from the window
     /// system - and it is what a window remade as a popup has to be placed at.
     requested: NSRect,
+    /// Nonzero from a `-setFrame:` until SDL reports the window's new size.
+    /// SDL answers the old size in between, and AppKit's frame and content
+    /// view already have the new one: a program reads them back at once.
+    size_pending: usize,
     /// `-setTitlebarAppearsTransparent:`.
     titlebar_transparent: usize,
     /// `-setTitleVisibility:`, `NSWindowTitleHidden` being 1.
@@ -525,6 +529,22 @@ pub(crate) fn fit_content_view(object: Id) {
     let Some((width, height)) = sdl3::video::window_size(window.sdl) else {
         return;
     };
+    fit_content_view_to(object, width, height);
+}
+
+/// SDL has reported the window's size, so it is the one to answer with again.
+pub(crate) fn size_settled(object: Id) {
+    if !object.is_null() {
+        window_of(object).size_pending = 0;
+    }
+}
+
+/// The content view sized to a window `width` by `height`, titlebar included.
+fn fit_content_view_to(object: Id, width: i32, height: i32) {
+    let window = window_of(object);
+    if window.content_view.is_null() {
+        return;
+    }
     let frame = NSRect {
         origin: NSPoint::default(),
         size: NSSize {
@@ -855,7 +875,13 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     if window.sdl.is_null() {
         return NSRect::default();
     }
-    let (w, h) = sdl3::video::window_size(window.sdl).unwrap_or((0, 0));
+    let (w, h) = match window.size_pending != 0 {
+        true => {
+            let (_, _, w, h) = crate::geometry::rect_to_sdl(window.requested);
+            (w, h)
+        }
+        false => sdl3::video::window_size(window.sdl).unwrap_or((0, 0)),
+    };
     let (x, y) = match global_position(window.sdl) {
         Some(position) => position,
         None => return window.requested,
@@ -1050,6 +1076,12 @@ unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
     );
     sdl3::video::set_window_size(sdl, width.max(1), height.max(1));
     sdl3::video::set_window_position(sdl, local_x, local_y);
+    // A hidden window takes the size at once and reports no resize, and a
+    // shown one reports it later: the content view follows now either way.
+    if sdl3::video::window_size(sdl) != Some((width.max(1), height.max(1))) {
+        window.size_pending = 1;
+    }
+    fit_content_view_to(receiver, width.max(1), height.max(1));
 }
 
 unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _display: u8) {
@@ -1107,7 +1139,12 @@ unsafe extern "C" fn set_content_size(receiver: Id, _sel: Sel, size: NSSize) {
     window.requested.size = size;
     let sdl = window.sdl;
     if !sdl.is_null() {
-        sdl3::video::set_window_size(sdl, (size.width as i32).max(1), (size.height as i32).max(1));
+        let (width, height) = ((size.width as i32).max(1), (size.height as i32).max(1));
+        sdl3::video::set_window_size(sdl, width, height);
+        if sdl3::video::window_size(sdl) != Some((width, height)) {
+            window.size_pending = 1;
+        }
+        fit_content_view_to(receiver, width, height);
     }
 }
 
@@ -2075,6 +2112,14 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
     0
 }
 
+unsafe extern "C" fn no_with_object(_receiver: Id, _sel: Sel, _object: Id) -> u8 {
+    0
+}
+
+unsafe extern "C" fn yes_with_object(_receiver: Id, _sel: Sel, _object: Id) -> u8 {
+    1
+}
+
 unsafe extern "C" fn nil(_receiver: Id, _sel: Sel) -> Id {
     std::ptr::null_mut()
 }
@@ -2082,6 +2127,10 @@ unsafe extern "C" fn nil(_receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn zero_depth(_receiver: Id, _sel: Sel) -> i32 {
     0
 }
+
+unsafe extern "C" fn ignored_border(_receiver: Id, _sel: Sel, _thickness: f64, _edge: usize) {}
+
+unsafe extern "C" fn ignored_border_flag(_receiver: Id, _sel: Sel, _flag: u8, _edge: usize) {}
 
 unsafe extern "C" fn ignored_depth(_receiver: Id, _sel: Sel, _depth: i32) {}
 
@@ -2216,6 +2265,17 @@ pub(crate) fn install() {
         "setOpaque:" => ignored_flag, c"v20@0:8c16";
         "setHidesOnDeactivate:" => ignored_flag, c"v20@0:8c16";
         "setRestorable:" => ignored_flag, c"v20@0:8c16";
+        // No state restoration, so nothing ever asks the class to restore.
+        "setRestorationClass:" => ignored_integer, c"v24@0:8#16";
+        "restorationClass" => nil, c"#16@0:8";
+        "invalidateRestorableState" => ignored, c"v16@0:8";
+        // Frames are not persisted, so a saved one is never there to restore.
+        "saveFrameUsingName:" => ignored_integer, c"v24@0:8@16";
+        "setFrameUsingName:" => no_with_object, c"c24@0:8@16";
+        "setFrameAutosaveName:" => yes_with_object, c"c24@0:8@16";
+        // The textured bottom bar: no such chrome is drawn here.
+        "setContentBorderThickness:forEdge:" => ignored_border, c"v32@0:8d16Q24";
+        "setAutorecalculatesContentBorderThickness:forEdge:" => ignored_border_flag, c"v28@0:8c16Q20";
         "setShowsResizeIndicator:" => ignored_flag, c"v20@0:8c16";
         "standardWindowButton:" => standard_window_button, c"@24@0:8Q16";
         "windowNumber" => window_number, c"q16@0:8";

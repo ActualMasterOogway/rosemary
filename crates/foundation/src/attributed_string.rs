@@ -117,6 +117,14 @@ unsafe extern "C" fn add_attribute(
 ) {
 }
 
+/// AppKit's `-superscriptRange:`, `-subscriptRange:` and `-unscriptRange:`,
+/// which are `NSSuperscriptAttributeName` over a range. Per-range attributes are
+/// not kept, as [`add_attribute`] already drops them.
+///
+/// FIXME (ACCURACY): the text keeps its baseline; "x2" draws where Apple's
+/// draws a raised "2".
+unsafe extern "C" fn script_range(_receiver: Id, _sel: Sel, _range: NSRange) {}
+
 unsafe extern "C" fn set_attributed_string(receiver: Id, _sel: Sel, value: Id) {
     // SAFETY: both objects use this module's boxed storage.
     let replacement = unsafe { contents(value) }.cloned().unwrap_or_default();
@@ -165,5 +173,8 @@ pub(crate) fn install() {
         "addAttribute:value:range:" => add_attribute, c"v48@0:8@16@24{_NSRange=QQ}32";
         "setAttributedString:" => set_attributed_string, c"v24@0:8@16";
         "appendAttributedString:" => append_attributed_string, c"v24@0:8@16";
+        "superscriptRange:" => script_range, c"v32@0:8{_NSRange=QQ}16";
+        "subscriptRange:" => script_range, c"v32@0:8{_NSRange=QQ}16";
+        "unscriptRange:" => script_range, c"v32@0:8{_NSRange=QQ}16";
     });
 }

@@ -22,6 +22,7 @@ mod sect {
     pub const NLCATLIST: &str = "__objc_nlcatlist";
     pub const PROTOLIST: &str = "__objc_protolist";
     pub const SELREFS: &str = "__objc_selrefs";
+    pub const MSGREFS: &str = "__objc_msgrefs";
     pub const CLASSREFS: &str = "__objc_classrefs";
     pub const SUPERREFS: &str = "__objc_superrefs";
     pub const PROTOREFS: &str = "__objc_protorefs";
@@ -263,6 +264,10 @@ pub struct ObjcImage {
     /// Addresses of the `__objc_selrefs` slots. Each holds a pointer to a
     /// selector string until the runtime uniques it and writes back a `SEL`.
     pub selector_refs: Vec<Word>,
+    /// The selector word of each `__objc_msgrefs` entry (`{IMP, SEL}`), which a
+    /// pre-10.9 toolchain emits for `objc_msgSend_fixup` call sites. Uniqued
+    /// exactly like a `__objc_selrefs` slot.
+    pub message_ref_selectors: Vec<Word>,
     /// `__objc_classrefs` slot addresses - where `[Greeter new]` reads the
     /// class from.
     pub class_refs: Vec<Word>,
@@ -414,6 +419,7 @@ impl Cx<'_> {
             non_lazy_categories: self.pointer_section(sect::NLCATLIST)?,
             protocols,
             selector_refs: self.slot_addresses(sect::SELREFS),
+            message_ref_selectors: self.message_ref_selectors(),
             class_refs: self.slot_addresses(sect::CLASSREFS),
             super_refs: self.slot_addresses(sect::SUPERREFS),
             protocol_refs: self.slot_addresses(sect::PROTOREFS),
@@ -493,6 +499,17 @@ impl Cx<'_> {
         for (base, count) in self.sections(name) {
             for i in 0..count {
                 out.push(base.wrapping_add(i as u64 * 8));
+            }
+        }
+        out
+    }
+
+    /// The `SEL` half of every 16-byte `message_ref_t`.
+    fn message_ref_selectors(&self) -> Vec<Word> {
+        let mut out = Vec::new();
+        for (base, words) in self.sections(sect::MSGREFS) {
+            for i in 0..words / 2 {
+                out.push(base.wrapping_add(i as u64 * 16 + 8));
             }
         }
         out

@@ -334,10 +334,24 @@ unsafe extern "C" fn init_with_contents_of_file(receiver: Id, sel: Sel, path: Id
     let Ok(path) = String::from_utf8(path) else {
         return std::ptr::null_mut();
     };
+    init_with_guest_file(receiver, sel, &path)
+}
+
+/// `-initWithContentsOfURL:`, for a `file:` URL; nil for any other.
+unsafe extern "C" fn init_with_contents_of_url(receiver: Id, sel: Sel, url: Id) -> Id {
+    // SAFETY: an `NSURL`, or nil.
+    let path = unsafe { corefoundation::url::as_url(url as _) }.and_then(|url| url.file_path());
+    match path {
+        Some(path) => init_with_guest_file(receiver, sel, &path),
+        None => std::ptr::null_mut(),
+    }
+}
+
+fn init_with_guest_file(receiver: Id, sel: Sel, path: &str) -> Id {
     // The guest named it, so it is read at this host's spelling. Without this a
     // prefixed guest gets nil for a file that is plainly there, and a program
     // that does not expect nil from its own splash screen crashes on it.
-    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
+    let Ok(bytes) = std::fs::read(prefix::ns::host_path(path)) else {
         return std::ptr::null_mut();
     };
     let data = corefoundation::collections::new_data(bytes);
@@ -426,6 +440,43 @@ unsafe extern "C" fn image_named(_class: Id, _sel: Sel, name: Id) -> Id {
     }
     named.insert(name, image as usize);
     image
+}
+
+/// `-[NSBundle pathForImageResource:]` and `-URLForImageResource:`, AppKit
+/// categories: the bundle's own `sel` (`pathForResource:ofType:` or
+/// `URLForResource:withExtension:`) asked for the name as given, then with
+/// each extension `+imageNamed:` tries.
+fn image_resource(bundle: Id, sel: &str, name: Id) -> Id {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: both selectors are `id (id, SEL, id, id)` on an `NSBundle`.
+    let lookup = |kind: Id| unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(bundle, objc::sel::get(sel), name, kind)
+    };
+    let found = lookup(std::ptr::null_mut());
+    if !found.is_null() {
+        return found;
+    }
+    NAMED_EXTENSIONS
+        .iter()
+        .find_map(|extension| {
+            let kind = foundation::string::from_str(extension);
+            let found = lookup(kind);
+            objc::arc::release(kind);
+            (!found.is_null()).then_some(found)
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
+unsafe extern "C" fn path_for_image_resource(bundle: Id, _sel: Sel, name: Id) -> Id {
+    image_resource(bundle, "pathForResource:ofType:", name)
+}
+
+unsafe extern "C" fn url_for_image_resource(bundle: Id, _sel: Sel, name: Id) -> Id {
+    image_resource(bundle, "URLForResource:withExtension:", name)
 }
 
 /// `-addRepresentation:`, and the list it appends to.
@@ -674,6 +725,92 @@ fn draw(
     );
 }
 
+/// `NSDrawNinePartImage`: corners at their own size, edges and center
+/// stretched over what is left.
+///
+/// FIXME (ACCURACY): Apple tiles the edge and center fills rather than
+/// stretching them; the two agree for the uniform fills this is used with.
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub unsafe extern "C" fn NSDrawNinePartImage(
+    frame: NSRect,
+    top_left: Id,
+    top: Id,
+    top_right: Id,
+    left: Id,
+    center: Id,
+    right: Id,
+    bottom_left: Id,
+    bottom: Id,
+    bottom_right: Id,
+    operation: usize,
+    fraction: f64,
+    flipped: u8,
+) {
+    let size = |image: Id| match image.is_null() {
+        true => NSSize {
+            width: 0.0,
+            height: 0.0,
+        },
+        false => image_of(image).size,
+    };
+    let (tl, br) = (size(top_left), size(bottom_right));
+    let x = [
+        frame.origin.x,
+        frame.origin.x + tl.width,
+        frame.origin.x + frame.size.width - br.width,
+    ];
+    let widths = [tl.width, (x[2] - x[1]).max(0.0), br.width];
+    // Rows bottom to top in an unflipped context, top to bottom in a flipped one.
+    let (first, last) = match flipped != 0 {
+        true => (tl.height, br.height),
+        false => (br.height, tl.height),
+    };
+    let y = [
+        frame.origin.y,
+        frame.origin.y + first,
+        frame.origin.y + frame.size.height - last,
+    ];
+    let heights = [first, (y[2] - y[1]).max(0.0), last];
+    let grid = [
+        [bottom_left, bottom, bottom_right],
+        [left, center, right],
+        [top_left, top, top_right],
+    ];
+    let sel = objc::sel::get("drawInRect:fromRect:operation:fraction:respectFlipped:hints:");
+    for (row, images) in grid.iter().enumerate() {
+        // Grid rows run bottom to top; a flipped context lays them out the other way.
+        let at = match flipped != 0 {
+            true => 2 - row,
+            false => row,
+        };
+        for (column, &image) in images.iter().enumerate() {
+            if image.is_null() || widths[column] <= 0.0 || heights[at] <= 0.0 {
+                continue;
+            }
+            let destination = NSRect {
+                origin: foundation::geometry::NSPoint {
+                    x: x[column],
+                    y: y[at],
+                },
+                size: NSSize {
+                    width: widths[column],
+                    height: heights[at],
+                },
+            };
+            let whole = NSRect::default();
+            draw(
+                image,
+                sel,
+                destination,
+                whole,
+                operation,
+                fraction,
+                flipped != 0,
+            );
+        }
+    }
+}
+
 unsafe extern "C" fn draw_in_rect_respect_flipped(
     receiver: Id,
     sel: Sel,
@@ -741,6 +878,11 @@ unsafe extern "C" fn tiff_representation(receiver: Id, _sel: Sel) -> Id {
 }
 
 pub(crate) fn install() {
+    let bundle = objc::class::lookup(c"NSBundle").expect("Foundation registered NSBundle");
+    methods!(bundle, {
+        "pathForImageResource:" => path_for_image_resource, c"@24@0:8@16";
+        "URLForImageResource:" => url_for_image_resource, c"@24@0:8@16";
+    });
     let class = objc::class::lookup(c"NSImage").expect("declared before its methods");
     class_methods!(class, {
         "imageNamed:" => image_named, c"@24@0:8@16";
@@ -754,6 +896,11 @@ pub(crate) fn install() {
         "addRepresentation:" => add_representation, c"v24@0:8@16";
         "representations" => representations, c"@16@0:8";
         "initWithContentsOfFile:" => init_with_contents_of_file, c"@24@0:8@16";
+        "initWithContentsOfURL:" => init_with_contents_of_url, c"@24@0:8@16";
+        // Read now rather than on first draw, which differs only for a file
+        // that changes or disappears in between.
+        "initByReferencingFile:" => init_with_contents_of_file, c"@24@0:8@16";
+        "initByReferencingURL:" => init_with_contents_of_url, c"@24@0:8@16";
         "size" => size, c"{CGSize=dd}16@0:8";
         "setSize:" => set_size, c"v32@0:8{CGSize=dd}16";
         "setTemplate:" => set_template, c"v20@0:8c16";

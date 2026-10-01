@@ -54,6 +54,7 @@ pub mod glob;
 pub mod heap;
 #[cfg(not(target_os = "macos"))]
 pub mod humanize;
+pub mod icu;
 pub mod idle;
 pub mod images;
 pub mod ioctl;
@@ -380,6 +381,7 @@ static MODULES: &[exports::Module] = &[
     acl::MODULE,
     #[cfg(not(target_os = "macos"))]
     fmtcheck::MODULE,
+    icu::MODULE,
     #[cfg(not(target_os = "macos"))]
     fts::MODULE,
     #[cfg(not(target_os = "macos"))]

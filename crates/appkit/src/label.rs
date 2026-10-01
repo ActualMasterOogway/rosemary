@@ -125,15 +125,21 @@ pub(crate) fn forget(receiver: Id) {
 
 /// The font a field draws with, and its size in points.
 fn font_of(look: &Look) -> Option<(Arc<chrome::Font>, f64)> {
-    if let Some((face, size)) = crate::coretext::face_of(look.font as *const _)
-        && let Some(font) = chrome::Font::from_faces(vec![face])
+    chrome_font(look.font as Id)
+}
+
+/// An `NSFont` as the face and point size chrome draws with; the system font
+/// for nil or a font with no face here.
+pub(crate) fn chrome_font(font: Id) -> Option<(Arc<chrome::Font>, f64)> {
+    if let Some((face, size)) = crate::coretext::face_of(font as *const _)
+        && let Some(font) = chrome::Font::from_faces_with_fallback(vec![face])
     {
         return Some((Arc::new(font), if size > 0.0 { size } else { SYSTEM_SIZE }));
     }
     Some((chrome::Font::system(400)?, SYSTEM_SIZE))
 }
 
-fn color_of(color: usize, default: chrome::Color) -> chrome::Color {
+pub(crate) fn color_of(color: usize, default: chrome::Color) -> chrome::Color {
     if color == 0 {
         return default;
     }

@@ -800,6 +800,7 @@ pub(crate) fn display_view(view: Id) {
     if !responds || !push_focus(view) {
         return;
     }
+    clear_focused_store();
     let bounds = current_focus().map_or(NSRect::default(), |focus| NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
         size: NSSize {
@@ -813,6 +814,33 @@ pub(crate) fn display_view(view: Id) {
         send(view, sel_draw, bounds);
     }
     pop_focus();
+}
+
+/// Start a `-drawRect:` from a transparent store. What the view drew last time
+/// is gone on a Mac too: the window behind a view that is not opaque is drawn
+/// again first, so only this draw's pixels end up over it.
+fn clear_focused_store() {
+    let Some(focus) = current_focus() else {
+        return;
+    };
+    let cleared = VIEW_STORES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .and_then(|stores| stores.get_mut(&(focus.view as usize)))
+        .map(|store| {
+            store.pixels.fill(0);
+            store.dirty = true;
+            Rect {
+                x: focus.x as i64,
+                y: focus.y as i64,
+                width: i64::from(store.width),
+                height: i64::from(store.height),
+            }
+        });
+    if let Some(area) = cleared {
+        damage(focus.window, area);
+    }
 }
 
 fn send(receiver: Id, name: &str) {
@@ -1187,8 +1215,9 @@ fn compose_window(window: Id) {
 
     // What no view covers shows the window's `backgroundColor`, which a
     // program that draws only a logo and a bar relies on for everything else.
-    // With none set it stays transparent, as it always has here.
-    let background = crate::window::background_pixel(window).unwrap_or([0; 4]);
+    // With none set it is `windowBackgroundColor`, AppKit's default; a layer
+    // view's hole is the layer's either way.
+    let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
         for pixel in store.pixels[base..base + region.width as usize * 4]
@@ -1253,6 +1282,9 @@ pub fn present_again(sdl: sdl3::Window) {
 }
 
 /// Recompose the whole of a window, whose background changed.
+/// `windowBackgroundColor` (0.93 grey, opaque) as premultiplied BGRA.
+const DEFAULT_BACKGROUND: [u8; 4] = [237, 237, 237, 255];
+
 pub(crate) fn window_background_changed(window: Id) {
     // SAFETY: a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };

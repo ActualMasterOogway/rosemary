@@ -686,7 +686,27 @@ pub fn install_image_hooks() {
             Some(path) => open(path).ok().or_else(|| open_native(path)),
         },
         symbol: lookup,
+        image_path,
     });
+}
+
+/// The host path of the guest image `addr` is in, the main executable included.
+fn image_path(addr: u64) -> Option<String> {
+    if addr == 0 {
+        return None;
+    }
+    if let Some(path) = find(|i| region_of(i, addr).map(|_| i.path.clone())) {
+        return Some(path);
+    }
+    let vm = crate::thunk::current()?;
+    if !vm.program.is_guest_address(addr) {
+        return None;
+    }
+    EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(path, _)| path.clone())
 }
 
 /// The directory a guest reaches a provided framework through:

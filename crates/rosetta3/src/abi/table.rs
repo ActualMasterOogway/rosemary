@@ -3014,6 +3014,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strlcat", U64, P, P, U64),
     sig!("strlcpy", U64, P, P, U64),
     sig!("strlen", U64, P),
+    sig!("u_charDigitValue", I32, I32),
     sig!("strmode", V, I32, P),
     sig!("strncasecmp", I32, P, P, U64),
     sig!("strncat", P, P, P, U64),
@@ -3709,6 +3710,7 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("CGRectInset", AGGREGATE),
     ("NSMouseInRect", AGGREGATE),
     ("NSRectFill", AGGREGATE),
+    ("NSDrawNinePartImage", AGGREGATE),
     ("CTFontGetBoundingBox", AGGREGATE),
     ("CTFontGetBoundingRectsForGlyphs", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of

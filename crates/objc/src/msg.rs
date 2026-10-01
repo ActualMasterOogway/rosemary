@@ -605,3 +605,57 @@ macro_rules! super_stret_trampoline {
 super_stret_trampoline!(msg_send_super_stret, lookup_super);
 #[cfg(target_arch = "x86_64")]
 super_stret_trampoline!(msg_send_super2_stret, lookup_super2);
+
+/// The `_fixup` spellings a pre-10.9 x86-64 toolchain calls through a
+/// `message_ref_t` (`{IMP, SEL}`): the selector register holds the ref, not the
+/// `SEL`. Apple's runtime rewrites each ref's `IMP` to a trampoline that loads
+/// the `SEL` and carries on; binding the import to that trampoline directly is
+/// the same thing without the rewrite. The `SEL` half is uniqued at load.
+macro_rules! fixup_trampoline {
+    ($name:ident, $reg:literal, $target:ident) => {
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        pub(crate) unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                concat!("mov ", $reg, ", [", $reg, " + 8]"),
+                "jmp {target}",
+                target = sym $target,
+            )
+        }
+    };
+}
+
+fixup_trampoline!(msg_send_fixup, "rsi", msg_send);
+fixup_trampoline!(msg_send_stret_fixup, "rdx", msg_send_stret);
+fixup_trampoline!(msg_send_super2_fixup, "rsi", msg_send_super2);
+fixup_trampoline!(msg_send_super2_stret_fixup, "rdx", msg_send_super2_stret);
+
+/// An `IMP` that sends the same message, every argument untouched, to the
+/// object in the receiver's first instance word (the one after `isa`).
+///
+/// For a companion object that answers for another: AppKit's `-cell` here is
+/// state its control already owns, so a cell's methods are its control's.
+/// Not for a method returning through a buffer, whose receiver is elsewhere.
+pub fn entry_forward_to_first_word() -> *const c_void {
+    forward_to_first_word as *const c_void
+}
+
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn forward_to_first_word() {
+    core::arch::naked_asm!(
+        "mov rdi, [rdi + 8]",
+        "jmp {send}",
+        send = sym msg_send,
+    )
+}
+
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn forward_to_first_word() {
+    core::arch::naked_asm!(
+        "ldr x0, [x0, #8]",
+        "b {send}",
+        send = sym msg_send,
+    )
+}

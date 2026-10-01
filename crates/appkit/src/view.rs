@@ -1249,6 +1249,109 @@ unsafe extern "C" fn convert_rect_to_view(receiver: Id, _sel: Sel, rect: NSRect,
     convert_rect(rect, receiver, to)
 }
 
+/// `-convertSize:toView:` and `-convertSize:fromView:`: a rect at the origin
+/// converted, keeping only its extent, which is how scale applies to a size.
+unsafe extern "C" fn convert_size_to_view(receiver: Id, _sel: Sel, size: NSSize, to: Id) -> NSSize {
+    convert_rect(
+        NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size,
+        },
+        receiver,
+        to,
+    )
+    .size
+}
+
+unsafe extern "C" fn convert_size_from_view(
+    receiver: Id,
+    _sel: Sel,
+    size: NSSize,
+    from: Id,
+) -> NSSize {
+    convert_rect(
+        NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size,
+        },
+        from,
+        receiver,
+    )
+    .size
+}
+
+/// `(view, next key view)`, unretained as Apple's are. Kept for the keyboard
+/// loop a program wires and reads back; nothing here tabs through it yet.
+fn key_views() -> &'static std::sync::Mutex<Vec<(usize, usize)>> {
+    static KEY_VIEWS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    &KEY_VIEWS
+}
+
+unsafe extern "C" fn set_next_key_view(receiver: Id, _sel: Sel, next: Id) {
+    let mut views = key_views().lock().unwrap_or_else(|e| e.into_inner());
+    views.retain(|(view, _)| *view != receiver as usize);
+    if !next.is_null() {
+        views.push((receiver as usize, next as usize));
+    }
+}
+
+unsafe extern "C" fn next_key_view(receiver: Id, _sel: Sel) -> Id {
+    let views = key_views().lock().unwrap_or_else(|e| e.into_inner());
+    views
+        .iter()
+        .find(|(view, _)| *view == receiver as usize)
+        .map_or(std::ptr::null_mut(), |(_, next)| *next as Id)
+}
+
+/// `(view, retained tool tip)`. Kept for `-toolTip`; nothing here shows one.
+fn tool_tips() -> &'static std::sync::Mutex<Vec<(usize, usize)>> {
+    static TIPS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    &TIPS
+}
+
+unsafe extern "C" fn set_tool_tip(receiver: Id, _sel: Sel, tip: Id) {
+    let mut tips = tool_tips().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = tips.iter().position(|(view, _)| *view == receiver as usize) {
+        let (_, old) = tips.remove(at);
+        objc::arc::release(old as Id);
+    }
+    if !tip.is_null() {
+        tips.push((receiver as usize, objc::arc::retain(tip) as usize));
+    }
+}
+
+unsafe extern "C" fn tool_tip(receiver: Id, _sel: Sel) -> Id {
+    let tips = tool_tips().lock().unwrap_or_else(|e| e.into_inner());
+    tips.iter()
+        .find(|(view, _)| *view == receiver as usize)
+        .map_or(std::ptr::null_mut(), |(_, tip)| *tip as Id)
+}
+
+/// `-tag`: a plain view has none, which Apple spells -1. `NSControl`
+/// overrides it with a stored one.
+unsafe extern "C" fn tag(_receiver: Id, _sel: Sel) -> isize {
+    -1
+}
+
+/// `-viewWithTag:`: the receiver or the first descendant, depth first, whose
+/// `-tag` is `wanted`.
+unsafe extern "C" fn view_with_tag(receiver: Id, sel: Sel, wanted: isize) -> Id {
+    // SAFETY: `-tag` is `NSInteger (id, SEL)` on every view.
+    let own = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("tag"))
+    };
+    if own == wanted {
+        return receiver;
+    }
+    subviews_of(receiver)
+        .into_iter()
+        // SAFETY: each is a live subview, searched with the same selector.
+        .map(|view| unsafe { view_with_tag(view, sel, wanted) })
+        .find(|found| !found.is_null())
+        .unwrap_or(std::ptr::null_mut())
+}
+
 unsafe extern "C" fn window(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a view of this crate's.
     unsafe { window_of(receiver) }
@@ -1710,6 +1813,14 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "convertRect:toView:" => convert_rect_to_view,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "convertSize:toView:" => convert_size_to_view, c"{CGSize=dd}40@0:8{CGSize=dd}16@32";
+        "convertSize:fromView:" => convert_size_from_view, c"{CGSize=dd}40@0:8{CGSize=dd}16@32";
+        "tag" => tag, c"q16@0:8";
+        "setNextKeyView:" => set_next_key_view, c"v24@0:8@16";
+        "setToolTip:" => set_tool_tip, c"v24@0:8@16";
+        "toolTip" => tool_tip, c"@16@0:8";
+        "nextKeyView" => next_key_view, c"@16@0:8";
+        "viewWithTag:" => view_with_tag, c"@24@0:8q16";
         "window" => window, c"@16@0:8";
         "isInFullScreenMode" => is_in_full_screen_mode, c"c16@0:8";
         "superview" => superview, c"@16@0:8";
