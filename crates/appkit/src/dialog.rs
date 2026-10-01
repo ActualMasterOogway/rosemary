@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use chrome::alert::{Alert, AlertLayout, Part};
 use chrome::{Canvas, Image, Point, Rect, Theme, View};
 
+pub use chrome::RichText;
+
 /// What to show. The first button is the default.
 #[derive(Clone, Debug, Default)]
 pub struct Request {
@@ -16,6 +18,10 @@ pub struct Request {
     pub title: String,
     pub message: String,
     pub informative: String,
+    /// Styled informative text with links, shown in place of `informative`.
+    /// For Rosetta 3's own prompts only: what a program asks to show stays
+    /// plain, so its text can never become something to click.
+    pub rich_informative: Option<RichText>,
     pub buttons: Vec<String>,
     /// The button Escape and closing the window answer. The one titled Cancel
     /// when not given.
@@ -29,8 +35,8 @@ pub struct Request {
     pub accessories: Vec<chrome::alert::Accessory>,
 }
 
-/// The button areas of each open dialog's window, for [`hit_test`], which
-/// SDL calls with nothing else to go on.
+/// The clickable areas (buttons, checkboxes, links) of each open dialog's
+/// window, for [`hit_test`], which SDL calls with nothing else to go on.
 static BUTTONS: Mutex<Vec<(usize, Vec<Rect>)>> = Mutex::new(Vec::new());
 
 unsafe extern "C" fn hit_test(
@@ -80,6 +86,9 @@ struct Dialog {
     armed: Option<usize>,
     armed_checkbox: bool,
     armed_accessory: Option<usize>,
+    armed_link: Option<usize>,
+    /// The pointer is on a link, showing the pointing hand.
+    over_link: bool,
     /// A modal dialog holds the pointer shown for as long as it is up; a
     /// modeless one only while the pointer is over it, so a game that hid the
     /// pointer keeps it hidden over its own window.
@@ -131,7 +140,7 @@ impl Dialog {
             .hit(&self.layout, Point::new(x, y))
             .and_then(|part| match part {
                 Part::Button(at) => Some(at),
-                Part::Checkbox | Part::Accessory(_) => None,
+                Part::Checkbox | Part::Accessory(_) | Part::Link(_) => None,
             })
     }
 
@@ -161,6 +170,7 @@ impl Dialog {
         let alert = Alert {
             message: request.message.clone(),
             informative: request.informative.clone(),
+            rich_informative: request.rich_informative.clone(),
             buttons: request.buttons.clone(),
             icon: match request.application_icon {
                 true => icon(),
@@ -206,16 +216,10 @@ impl Dialog {
         }
         crate::icon::apply(window);
         center(window, parent, size.width, size.height);
-        BUTTONS.lock().unwrap_or_else(|e| e.into_inner()).push((
-            window as usize,
-            layout
-                .buttons
-                .iter()
-                .copied()
-                .chain(layout.checkbox.map(|c| c.bounds))
-                .chain(layout.accessories.iter().map(|c| c.bounds))
-                .collect(),
-        ));
+        BUTTONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((window as usize, layout.controls().collect()));
         sdl3::video::set_window_hit_test(window, Some(hit_test));
         sdl3::video::show_window(window);
         sdl3::video::raise_window(window);
@@ -230,6 +234,8 @@ impl Dialog {
             armed: None,
             armed_checkbox: false,
             armed_accessory: None,
+            armed_link: None,
+            over_link: false,
             modal,
             showed_cursor: false,
             started_video,
@@ -251,6 +257,32 @@ impl Dialog {
         }
         sdl3::video::set_cursor_visible(shown);
         self.showed_cursor = shown;
+    }
+
+    /// The link under `point`.
+    fn link_at(&self, x: f32, y: f32) -> Option<usize> {
+        match self.alert.hit(&self.layout, Point::new(x, y)) {
+            Some(Part::Link(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    fn set_over_link(&mut self, over: bool) {
+        if self.over_link != over {
+            self.over_link = over;
+            crate::cursor::set_over_link(over);
+        }
+    }
+
+    /// Open the link `index` with the desktop's handler. The dialog stays up:
+    /// reading the page is not an answer.
+    fn follow(&self, index: usize) {
+        let Some(url) = self.layout.link_url(index) else {
+            return;
+        };
+        if !sdl3::open_url(url) {
+            eprintln!("rosetta3: appkit: could not open {url}: {}", sdl3::error());
+        }
     }
 
     /// What closing the window answers: Cancel, or the only button there is.
@@ -278,9 +310,14 @@ impl Dialog {
                     Some(Part::Accessory(index)) => Some(index),
                     _ => None,
                 };
+                let link = self.link_at(*x, *y);
                 if *down {
                     self.armed_checkbox = checkbox;
                     self.armed_accessory = accessory;
+                    self.armed_link = link;
+                } else if let Some(index) = self.armed_link.take().filter(|i| Some(*i) == link) {
+                    self.follow(index);
+                    return Outcome::Handled;
                 } else if std::mem::take(&mut self.armed_checkbox) && checkbox {
                     self.alert.checkbox_checked = !self.alert.checkbox_checked;
                     self.paint();
@@ -306,6 +343,8 @@ impl Dialog {
                 }
             }
             Event::MouseMotion { window, x, y, .. } if ours(window) => {
+                let over = self.link_at(*x, *y).is_some();
+                self.set_over_link(over);
                 if let Some(armed) = self.armed {
                     let over = self.button_at(*x, *y) == Some(armed);
                     self.set_pressed(over.then_some(armed));
@@ -336,6 +375,9 @@ impl Dialog {
                 self.paint();
             }
             Event::WindowMouse { window, entered } if ours(window) => {
+                if !entered {
+                    self.set_over_link(false);
+                }
                 if !self.modal {
                     self.show_cursor(*entered);
                 }
@@ -364,6 +406,7 @@ impl Dialog {
     }
 
     fn close(mut self) {
+        self.set_over_link(false);
         self.show_cursor(false);
         BUTTONS
             .lock()

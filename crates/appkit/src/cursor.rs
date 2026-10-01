@@ -854,6 +854,31 @@ pub fn set_over_chrome(over: bool) {
     apply();
 }
 
+/// Put the pointing hand up while the pointer is on a link in one of Rosetta
+/// 3's own dialogs, and whatever the program shows back after.
+pub(crate) fn set_over_link(over: bool) {
+    static OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static HAND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if OVER.swap(over, std::sync::atomic::Ordering::AcqRel) == over {
+        return;
+    }
+    // Forget what `show` last put up either way, so it puts it back.
+    SHOWN.store(usize::MAX, std::sync::atomic::Ordering::Release);
+    if !over {
+        apply();
+        return;
+    }
+    let mut hand = HAND.load(std::sync::atomic::Ordering::Acquire);
+    if hand == 0 {
+        hand = sdl3::video::create_system_cursor(sdl3::video::system_cursor::POINTER)
+            .map_or(0, |cursor| cursor as usize);
+        HAND.store(hand, std::sync::atomic::Ordering::Release);
+    }
+    if hand != 0 {
+        sdl3::video::set_cursor(hand as sdl3::Cursor);
+    }
+}
+
 /// The cursor a program last set, which `+currentCursor` answers.
 static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
