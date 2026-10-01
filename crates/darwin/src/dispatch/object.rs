@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Which object an allocation is, so a handle can be turned back into its type.
 ///
@@ -30,16 +30,26 @@ pub struct Header {
     isa: u64,
     kind: Kind,
     refs: AtomicUsize,
+    /// The process owns it, as it does the main and global queues: Darwin
+    /// ignores retains and releases of those, and ARC sends plenty.
+    global: AtomicBool,
     context: AtomicU64,
     finalizer: AtomicU64,
 }
 
 impl Header {
     pub fn new(kind: Kind) -> Header {
+        objc::arc::set_os_object_refcount(objc::arc::OsObjectRefcount {
+            retain: |object| retain(object as u64),
+            // SAFETY: ARC releases only what it holds a reference to.
+            release: |object| unsafe { release(object as u64) },
+            count: |object| retain_count(object as u64),
+        });
         Header {
             isa: objc::class::ptr(objc::class::os_object_class()) as u64,
             kind,
             refs: AtomicUsize::new(1),
+            global: AtomicBool::new(false),
             context: AtomicU64::new(0),
             finalizer: AtomicU64::new(0),
         }
@@ -47,6 +57,17 @@ impl Header {
 
     pub fn kind(&self) -> Kind {
         self.kind
+    }
+}
+
+/// Mark `handle` as the process's own, so no release can free it.
+///
+/// # Safety
+///
+/// As [`header`].
+pub unsafe fn make_global(handle: u64) {
+    if let Some(h) = unsafe { header(handle) } {
+        h.global.store(true, Ordering::Release);
     }
 }
 
@@ -78,8 +99,20 @@ pub unsafe fn typed<'a>(handle: u64, kind: Kind) -> Option<&'a Header> {
 /// Take one more reference. Returns the handle, as `dispatch_retain` does not.
 pub fn retain(handle: u64) {
     // SAFETY: a live object, by the caller of the entry point above this.
-    if let Some(h) = unsafe { header(handle) } {
+    if let Some(h) = unsafe { header(handle) }
+        && !h.global.load(Ordering::Acquire)
+    {
         h.refs.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The reference count, as `-retainCount` reports it.
+pub fn retain_count(handle: u64) -> usize {
+    // SAFETY: a live object, by the caller of the entry point above this.
+    match unsafe { header(handle) } {
+        Some(h) if h.global.load(Ordering::Acquire) => usize::MAX,
+        Some(h) => h.refs.load(Ordering::Relaxed),
+        None => 0,
     }
 }
 
@@ -93,6 +126,9 @@ pub unsafe fn release(handle: u64) {
     let Some(h) = (unsafe { header(handle) }) else {
         return;
     };
+    if h.global.load(Ordering::Acquire) {
+        return;
+    }
     if h.refs.fetch_sub(1, Ordering::AcqRel) != 1 {
         return;
     }
@@ -199,6 +235,40 @@ mod tests {
             assert!(objc::class::is_known(isa as *const objc::class::Class));
             release(queue);
         }
+    }
+
+    /// ARC's retains and releases land on the same count `dispatch_release`
+    /// reads, so a queue held by both survives until both let go.
+    #[test]
+    fn arc_and_dispatch_share_one_count() {
+        FINALIZED.store(0, Ordering::Release);
+        let queue = super::super::queue::create_serial("shared count test");
+        // SAFETY: a live object of this module's.
+        unsafe {
+            set_context(queue, 91 as *mut c_void);
+            set_finalizer_f(queue, finalize as *const () as usize as u64);
+            objc::arc::retain(queue as objc::object::Id);
+            assert_eq!(retain_count(queue), 2);
+            release(queue);
+            assert_ne!(FINALIZED.load(Ordering::Acquire), 91, "ARC still holds it");
+            objc::arc::release(queue as objc::object::Id);
+        }
+        assert_eq!(FINALIZED.load(Ordering::Acquire), 91);
+    }
+
+    /// ARC balances `dispatch_get_main_queue()` with an `objc_release` the
+    /// guest never retained for, which Darwin ignores.
+    #[test]
+    fn releasing_the_main_queue_leaves_it_alive() {
+        let main = super::super::queue::main_queue();
+        for _ in 0..3 {
+            objc::arc::release(main as objc::object::Id);
+            // SAFETY: the main queue is never freed.
+            unsafe { release(main) };
+        }
+        // SAFETY: as above.
+        assert!(unsafe { typed(main, Kind::Queue) }.is_some());
+        assert_eq!(retain_count(main), usize::MAX);
     }
 
     /// A handle of the wrong kind must be refused rather than reinterpreted.

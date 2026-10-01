@@ -136,6 +136,14 @@ fn new(label: &str, concurrent: bool, main: bool) -> u64 {
     Box::into_raw(queue) as u64
 }
 
+/// A queue the process owns, which no release can free.
+fn global(label: &str, concurrent: bool, main: bool) -> u64 {
+    let handle = new(label, concurrent, main);
+    // SAFETY: just allocated by this module.
+    unsafe { object::make_global(handle) };
+    handle
+}
+
 /// A serial queue, for this module's own tests and callers.
 pub fn create_serial(label: &str) -> u64 {
     new(label, false, false)
@@ -165,7 +173,7 @@ fn on_main_thread() -> bool {
 /// symbol has to resolve to a real one.
 pub fn main_queue() -> u64 {
     static MAIN: OnceLock<u64> = OnceLock::new();
-    *MAIN.get_or_init(|| new("com.apple.main-thread", false, true))
+    *MAIN.get_or_init(|| global("com.apple.main-thread", false, true))
 }
 
 /// Run everything the main queue is holding.
@@ -460,11 +468,11 @@ fn global_queue(qos: i64) -> u64 {
     static GLOBALS: OnceLock<[u64; 5]> = OnceLock::new();
     let globals = GLOBALS.get_or_init(|| {
         [
-            new("com.apple.root.background-qos", true, false),
-            new("com.apple.root.utility-qos", true, false),
-            new("com.apple.root.default-qos", true, false),
-            new("com.apple.root.user-initiated-qos", true, false),
-            new("com.apple.root.user-interactive-qos", true, false),
+            global("com.apple.root.background-qos", true, false),
+            global("com.apple.root.utility-qos", true, false),
+            global("com.apple.root.default-qos", true, false),
+            global("com.apple.root.user-initiated-qos", true, false),
+            global("com.apple.root.user-interactive-qos", true, false),
         ]
     });
     // A guest passes either a `qos_class_t` or one of the older

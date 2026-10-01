@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 
 use crate::object::Id;
 
@@ -10,6 +10,33 @@ static COUNTS: LazyLock<Mutex<HashMap<usize, usize>>> =
 
 fn counts() -> MutexGuard<'static, HashMap<usize, usize>> {
     COUNTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How an `OS_object` counts references: `(retain, release, count)`.
+///
+/// A dispatch object keeps its count in its own header, where `dispatch_retain`
+/// reads it. Counting ARC's references here instead would split one object's
+/// count in two, and a release that finds nothing here frees the object - even
+/// the main queue, which must outlive the process.
+pub struct OsObjectRefcount {
+    pub retain: fn(Id),
+    pub release: fn(Id),
+    pub count: fn(Id) -> usize,
+}
+
+static OS_OBJECT_REFCOUNT: OnceLock<OsObjectRefcount> = OnceLock::new();
+
+/// Install the refcount `OS_object`s use. The first installation wins.
+pub fn set_os_object_refcount(refcount: OsObjectRefcount) {
+    let _ = OS_OBJECT_REFCOUNT.set(refcount);
+}
+
+/// The refcount `object` uses, if it is an `OS_object`.
+fn os_object_refcount(object: Id) -> Option<&'static OsObjectRefcount> {
+    let refcount = OS_OBJECT_REFCOUNT.get()?;
+    // SAFETY: a live object, whose first word is the `isa`.
+    let class = unsafe { crate::object::class_of(object) }?;
+    std::ptr::eq(class, crate::class::os_object_class()).then_some(refcount)
 }
 
 /// Add a reference. Returns `object`, as `objc_retain` does.
@@ -27,6 +54,10 @@ pub fn retain(object: Id) -> Id {
     // SAFETY: a live object, whose first word is the `isa`.
     if unsafe { crate::block::is_block(object) } {
         return crate::block::copy(object);
+    }
+    if let Some(refcount) = os_object_refcount(object) {
+        (refcount.retain)(object);
+        return object;
     }
     let mut map = counts();
     let extra = map.entry(object as usize).or_insert(0);
@@ -57,6 +88,9 @@ pub fn release(object: Id) {
     if unsafe { crate::block::is_block(object) } {
         return crate::block::release(object);
     }
+    if let Some(refcount) = os_object_refcount(object) {
+        return (refcount.release)(object);
+    }
     {
         let mut map = counts();
         if let Some(extra) = map.get_mut(&(object as usize)) {
@@ -78,6 +112,9 @@ pub fn retain_count(object: Id) -> usize {
     crate::debug::validate(object, "retainCount");
     if crate::class::is_known(object as *const crate::class::Class) {
         return usize::MAX;
+    }
+    if let Some(refcount) = os_object_refcount(object) {
+        return (refcount.count)(object);
     }
     1 + counts().get(&(object as usize)).copied().unwrap_or(0)
 }
