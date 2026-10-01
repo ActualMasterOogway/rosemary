@@ -52,6 +52,10 @@ pub fn pixel_format(metal: u64) -> vk::Format {
         33 => F::R8G8_UINT,
         34 => F::R8G8_SINT,
         40 => F::R5G6B5_UNORM_PACK16,
+        // FIXME (ACCURACY): Metal names packed formats from the low bits and
+        // Vulkan from the high bits (40 and 42 follow that), so A1BGR5Unorm
+        // (41) should be R5G5B5A1_UNORM_PACK16 and BGR5A1Unorm (43)
+        // A1R5G5B5_UNORM_PACK16. Unverified against hardware.
         41 => F::A1R5G5B5_UNORM_PACK16,
         42 => F::R4G4B4A4_UNORM_PACK16,
         43 => F::B5G5R5A1_UNORM_PACK16,

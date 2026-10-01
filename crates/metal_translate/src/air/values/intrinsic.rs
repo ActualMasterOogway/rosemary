@@ -201,6 +201,9 @@ pub(super) fn air_intrinsic(
         "atan" => unary(FloatUnaryOp::Atan),
         "floor" => unary(FloatUnaryOp::Floor),
         "ceil" => unary(FloatUnaryOp::Ceil),
+        // FIXME (ACCURACY): Metal's `round` rounds halfway cases away from
+        // zero; only `rint` rounds to even. Both lower to RoundEven, so
+        // `round(2.5)` is 2 here and 3 on Metal.
         "rint" | "round" => unary(FloatUnaryOp::Round),
         "trunc" => unary(FloatUnaryOp::Truncate),
         "fract" => unary(FloatUnaryOp::Fract),
@@ -476,6 +479,10 @@ pub(super) fn air_texture_intrinsic(
             // derivatives are the level.
             let lod = match (gradient.is_some(), rest) {
                 (true, []) => None,
+                // FIXME (ACCURACY): this flag selects level (true) or bias
+                // (false), not presence: `bias(b)` is `i1 false, float b`,
+                // and plain `sample` is a bias of zero. A nonzero bias is
+                // dropped here (Roblox samples with `bias(7)`).
                 (false, [flag, lod]) => optional(flag, lod)?,
                 _ => return Err(malformed()),
             };
