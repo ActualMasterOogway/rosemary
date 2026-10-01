@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Darwin's `struct dirent`, the `_DARWIN_FEATURE_64_BIT_INODE` layout.
 ///
@@ -45,16 +45,103 @@ const _: () = {
     assert!(libc::DT_DIR == 4 && libc::DT_REG == 8 && libc::DT_LNK == 10);
 };
 
-/// One published entry per open `DIR *`.
+/// What this crate keeps per open `DIR *`.
 ///
 /// Keyed by the handle rather than held inside it, because the handle is the
 /// host's own and has no room. Removed by [`closedir`]; a guest that leaks a
 /// handle leaks its entry with it, which is the same leak either way.
-static ENTRIES: Mutex<Option<HashMap<usize, Box<Dirent>>>> = Mutex::new(None);
+#[derive(Default)]
+struct Open {
+    /// The entry [`readdir`] published last.
+    entry: Option<Box<Dirent>>,
+    /// The mount table's changes to this directory, read on first use so a
+    /// handle from anywhere - `fdopendir` included - gets them.
+    listing: Option<Option<Arc<prefix::ns::Listing>>>,
+    /// How many of the listing's mount points have been read. They come after
+    /// the directory's own entries, so a real entry after them means the
+    /// caller rewound.
+    shown: usize,
+}
 
-fn entries<T>(with: impl FnOnce(&mut HashMap<usize, Box<Dirent>>) -> T) -> T {
+static ENTRIES: Mutex<Option<HashMap<usize, Open>>> = Mutex::new(None);
+
+fn entries<T>(with: impl FnOnce(&mut HashMap<usize, Open>) -> T) -> T {
     let mut guard = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
     with(guard.get_or_insert_with(HashMap::new))
+}
+
+/// The mount table's changes to the directory `dir` reads.
+///
+/// # Safety
+///
+/// `dir` is a handle `opendir` returned and has not been closed.
+unsafe fn listing(dir: *mut libc::DIR) -> Option<Arc<prefix::ns::Listing>> {
+    if let Some(known) = entries(|open| open.get(&(dir as usize)).and_then(|o| o.listing.clone())) {
+        return known;
+    }
+    // Outside the lock: this stats a directory per mount point.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: an open handle, and a writable buffer.
+    let found = match unsafe { libc::fstat(libc::dirfd(dir), &raw mut stat) } {
+        0 => prefix::ns::listing(stat.st_dev as u64, stat.st_ino as u64).map(Arc::new),
+        _ => None,
+    };
+    entries(|open| open.entry(dir as usize).or_default().listing = Some(found.clone()));
+    found
+}
+
+/// A mount point as a Darwin entry.
+fn shown(point: &prefix::ns::Shown) -> Dirent {
+    let name = point.name.as_bytes();
+    let mut out = Dirent {
+        ino: point.ino,
+        kind: point.kind,
+        ..Dirent::default()
+    };
+    let len = name.len().min(out.name.len() - 1);
+    for (to, from) in out.name.iter_mut().zip(&name[..len]) {
+        *to = *from as c_char;
+    }
+    out.namlen = len as u16;
+    out.reclen = (std::mem::offset_of!(Dirent, name) + len + 1).next_multiple_of(4) as u16;
+    out
+}
+
+/// The next entry a guest listing `dir` sees: the directory's own, less what
+/// the mount table hides or covers, then the mount points it shows.
+///
+/// # Safety
+///
+/// `dir` is a handle `opendir` returned and has not been closed.
+pub(crate) unsafe fn next_listed(dir: *mut libc::DIR) -> Result<Option<Dirent>, c_int> {
+    let Some(listing) = (unsafe { listing(dir) }) else {
+        return unsafe { next(dir) };
+    };
+    loop {
+        match unsafe { next(dir) }? {
+            Some(entry) => {
+                let name = unsafe { CStr::from_ptr(entry.name.as_ptr()) }.to_bytes();
+                if listing.hides(name) {
+                    continue;
+                }
+                entries(|open| {
+                    if let Some(open) = open.get_mut(&(dir as usize)) {
+                        open.shown = 0;
+                    }
+                });
+                return Ok(Some(entry));
+            }
+            None => {
+                let index = entries(|open| {
+                    let open = open.entry(dir as usize).or_default();
+                    let index = open.shown;
+                    open.shown = (index + 1).min(listing.shown().len());
+                    index
+                });
+                return Ok(listing.shown().get(index).map(shown));
+            }
+        }
+    }
 }
 
 /// A host entry as Darwin's.
@@ -123,13 +210,15 @@ pub unsafe extern "C" fn readdir(dir: *mut libc::DIR) -> *mut Dirent {
         crate::errno::set(libc::EBADF);
         return std::ptr::null_mut();
     }
-    let Ok(Some(entry)) = (unsafe { next(dir) }) else {
+    let Ok(Some(entry)) = (unsafe { next_listed(dir) }) else {
         return std::ptr::null_mut();
     };
     entries(|open| {
         let slot = open
             .entry(dir as usize)
-            .or_insert_with(|| Box::new(Dirent::default()));
+            .or_default()
+            .entry
+            .get_or_insert_with(|| Box::new(Dirent::default()));
         **slot = entry;
         (&raw mut **slot).cast()
     })
@@ -159,7 +248,7 @@ pub unsafe extern "C" fn readdir_r(
     if dir.is_null() || entry.is_null() {
         return crate::errno::from_host(libc::EINVAL);
     }
-    match unsafe { next(dir) } {
+    match unsafe { next_listed(dir) } {
         Ok(None) => 0,
         Ok(Some(read)) => {
             // SAFETY: the caller states both are writable.
@@ -206,15 +295,21 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
     }
     let host = prefix::ns::to_host(unsafe { CStr::from_ptr(path) });
     // SAFETY: a NUL-terminated path.
-    let dir = unsafe { libc::opendir(host.as_ptr()) };
-    if !dir.is_null() || crate::errno::get() != libc::ENOENT {
-        return dir;
+    let mut dir = unsafe { libc::opendir(host.as_ptr()) };
+    if dir.is_null()
+        && crate::errno::get() == libc::ENOENT
+        && let Some(found) = prefix::ns::fold(&host)
+    {
+        // SAFETY: a NUL-terminated path this crate just built.
+        dir = unsafe { libc::opendir(found.as_ptr()) };
     }
-    let Some(found) = prefix::ns::fold(&host) else {
-        return dir;
-    };
-    // SAFETY: a NUL-terminated path this crate just built.
-    unsafe { libc::opendir(found.as_ptr()) }
+    if !dir.is_null() {
+        // A handle closed behind this crate's back - by the host's own
+        // `closedir` - can come back at the same address, and must not inherit
+        // the old directory's listing.
+        entries(|open| open.remove(&(dir as usize)));
+    }
+    dir
 }
 
 /// `int scandir(const char *, struct dirent ***, int (*)(const struct dirent *),
@@ -249,7 +344,7 @@ pub unsafe extern "C" fn scandir(
     // SAFETY: `dir` is open, and each block is handed to the caller below.
     let failure = unsafe {
         loop {
-            match next(dir) {
+            match next_listed(dir) {
                 Ok(None) => break None,
                 Err(error) => break Some(error),
                 Ok(Some(entry)) => {

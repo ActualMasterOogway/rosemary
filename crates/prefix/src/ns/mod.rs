@@ -1,8 +1,10 @@
 mod case;
 mod guard;
+mod listing;
 pub mod mount;
 
 pub use guard::{may_write, may_write_at};
+pub use listing::{Listing, Shown, listing, listing_of};
 use static_init::dynamic;
 
 use std::borrow::Cow;

@@ -562,12 +562,10 @@ unsafe fn build(sp: *mut Fts, kind: Build) -> *mut Ftsent {
         let mut head: *mut Ftsent = null_mut();
         let mut tail: *mut Ftsent = null_mut();
         let mut nitems = 0;
-        loop {
-            let dp = libc::readdir(dir);
-            if dp.is_null() {
-                break;
-            }
-            let dname = (*dp).d_name.as_ptr();
+        // The guest's view of the directory, mount points included; an error
+        // ends the listing as the end of the directory does.
+        while let Ok(Some(entry)) = crate::dirent::next_listed(dir) {
+            let dname = entry.name.as_ptr();
             if !(*sp).isset(FTS_SEEDOT) && is_dot(dname) {
                 continue;
             }
@@ -607,7 +605,7 @@ unsafe fn build(sp: *mut Fts, kind: Build) -> *mut Ftsent {
             (*p).parent = (*sp).cur;
             (*p).pathlen = (len + namlen) as u16;
 
-            let d_type = (*dp).d_type;
+            let d_type = entry.kind;
             let stat_it = match dostat {
                 DoStat::Never => None,
                 DoStat::Always => Some(true),

@@ -488,6 +488,41 @@ unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
     unsafe { crate::dirent::opendir(path.as_ptr()) }
 }
 
+/// The next name in a host handle, as the guest lists the directory: with the
+/// prefix's mount points, which this crate's `readdir` adds.
+#[cfg(not(target_os = "macos"))]
+unsafe fn read_host(dir: *mut libc::DIR) -> Option<Vec<u8>> {
+    let entry = unsafe { crate::dirent::next_listed(dir) }.ok()??;
+    Some(
+        unsafe { CStr::from_ptr(entry.name.as_ptr()) }
+            .to_bytes()
+            .to_vec(),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn close_host(dir: *mut libc::DIR) {
+    unsafe { crate::dirent::closedir(dir) };
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn read_host(dir: *mut libc::DIR) -> Option<Vec<u8>> {
+    let entry = unsafe { libc::readdir(dir) };
+    if entry.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) }
+            .to_bytes()
+            .to_vec(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn close_host(dir: *mut libc::DIR) {
+    unsafe { libc::closedir(dir) };
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
     let host = prefix::ns::to_host(path);
@@ -631,13 +666,10 @@ impl Walk {
                 // cleared first.
                 crate::errno::set(0);
                 // SAFETY: a handle this walk opened and has not closed.
-                let entry = unsafe { libc::readdir(*dir) };
-                if entry.is_null() {
-                    return Ok(None);
+                match unsafe { read_host(*dir) } {
+                    Some(name) => name,
+                    None => return Ok(None),
                 }
-                unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) }
-                    .to_bytes()
-                    .to_vec()
             }
             // A guest handle with no hooks cannot be built: `hooks` is fixed
             // for the whole call.
@@ -652,7 +684,7 @@ impl Walk {
             (Handle::Guest(dir), Some(hooks)) => unsafe {
                 crate::call_as_darwin!((hooks.closedir)(dir))
             },
-            (Handle::Host(dir), _) => drop(unsafe { libc::closedir(dir) }),
+            (Handle::Host(dir), _) => unsafe { close_host(dir) },
             (Handle::Guest(_), None) => {}
         }
     }

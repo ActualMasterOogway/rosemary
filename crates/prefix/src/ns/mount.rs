@@ -7,6 +7,8 @@ pub struct Mount {
     /// for the root mount, which is exactly `/`.
     guest: String,
     host: PathBuf,
+    /// Whether a listing of the guest parent shows this mount.
+    listed: bool,
 }
 
 /// The mounts, ordered so that the first match is the longest one.
@@ -38,33 +40,55 @@ impl Table {
             Mount {
                 guest: "/".to_string(),
                 host: root.to_path_buf(),
+                listed: true,
             },
-            // The guest needs this host's real character devices: `/dev/null`,
-            // `/dev/urandom` and the rest are the kernel's, not files a rootfs
-            // could carry.
             Mount {
                 guest: "/dev".to_string(),
                 host: PathBuf::from("/dev"),
+                listed: true,
             },
             Mount {
                 guest: "/private/etc/resolv.conf".to_string(),
                 host: PathBuf::from("/etc/resolv.conf"),
+                listed: true,
             },
-            // The escape hatch, and the reason `to_guest` is total: every host
-            // path has a guest spelling under here, which is how a guest
-            // launched from outside the prefix can name its own bundle.
+            // Unlisted, so a program that walks `/Volumes` - a backup tool, a
+            // "clean up old files" pass, a recursive delete gone wrong - never
+            // wanders onto the host's whole filesystem.
             Mount {
                 guest: "/Volumes/Host".to_string(),
                 host: PathBuf::from("/"),
+                listed: false,
             },
         ];
         if let Some(host_home) = host_home {
             mounts.push(Mount {
                 guest: format!("/Users/{user}"),
                 host: host_home.to_path_buf(),
+                listed: true,
             });
         }
         Table::new(mounts)
+    }
+
+    /// A table of the root and exactly the mounts given, for tests that need
+    /// a mount target they made themselves.
+    #[cfg(test)]
+    pub(super) fn with<'a>(
+        root: &Path,
+        mounts: impl IntoIterator<Item = (&'a str, PathBuf, bool)>,
+    ) -> Table {
+        let root = Mount {
+            guest: "/".to_string(),
+            host: root.to_path_buf(),
+            listed: true,
+        };
+        let rest = mounts.into_iter().map(|(guest, host, listed)| Mount {
+            guest: guest.to_string(),
+            host,
+            listed,
+        });
+        Table::new(std::iter::once(root).chain(rest).collect())
     }
 
     fn new(mounts: Vec<Mount>) -> Table {
@@ -96,6 +120,27 @@ impl Table {
         ))
     }
 
+    /// Every mount point but the root, as the directory listing it sits in
+    /// sees it.
+    ///
+    /// The host directory behind a mount point is not inside the directory the
+    /// guest lists, so a listing has to be told to add it - or, for an
+    /// unlisted mount, to leave out whatever the prefix has at that name.
+    pub fn mount_points(&self) -> impl Iterator<Item = MountPoint<'_>> {
+        self.by_guest.iter().filter_map(|m| {
+            let (parent, name) = m.guest.rsplit_once('/')?;
+            (!name.is_empty()).then_some(MountPoint {
+                parent: match parent {
+                    "" => "/",
+                    parent => parent,
+                },
+                name,
+                host: &m.host,
+                listed: m.listed,
+            })
+        })
+    }
+
     /// The guest path that names `host`, or `None` if no mount reaches it.
     ///
     /// `None` is a refusal, not a fallback: a host path no mount reaches is one
@@ -112,6 +157,19 @@ impl Table {
         let rest = &normalised[trimmed(root).len()..];
         Some(join(Path::new(&mount.guest), rest))
     }
+}
+
+/// One mount point, split the way a listing of its parent needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountPoint<'a> {
+    /// The guest directory the mount point is an entry of.
+    pub parent: &'a str,
+    /// The entry's name in that directory.
+    pub name: &'a str,
+    /// What the entry is.
+    pub host: &'a Path,
+    /// Whether the entry is shown at all.
+    pub listed: bool,
 }
 
 /// `path` lexically normalised: absolute, no `.`, no repeated or trailing
@@ -314,6 +372,47 @@ mod tests {
         );
     }
 
+    fn point<'a>(table: &'a Table, guest: &str) -> Option<MountPoint<'a>> {
+        table
+            .mount_points()
+            .find(|p| format!("{}/{}", p.parent.trim_end_matches('/'), p.name) == guest)
+    }
+
+    #[test]
+    fn a_mount_point_is_an_entry_of_its_guest_parent() {
+        let table = table();
+        assert_eq!(
+            point(&table, "/dev"),
+            Some(MountPoint {
+                parent: "/",
+                name: "dev",
+                host: Path::new("/dev"),
+                listed: true,
+            })
+        );
+        assert_eq!(
+            point(&table, "/private/etc/resolv.conf").map(|p| (p.parent, p.name)),
+            Some(("/private/etc", "resolv.conf"))
+        );
+        // The root is the directory being listed, never an entry of one.
+        assert!(table.mount_points().all(|p| !p.name.is_empty()));
+    }
+
+    /// The escape hatch is reachable by name and nowhere else.
+    #[test]
+    fn the_host_volume_is_not_listed() {
+        let table = table();
+        let host = point(&table, "/Volumes/Host").expect("the host mount");
+        assert_eq!(
+            (host.parent, host.name, host.listed),
+            ("/Volumes", "Host", false)
+        );
+        assert_eq!(
+            table.to_host("/Volumes/Host/etc"),
+            Some(PathBuf::from("/etc"))
+        );
+    }
+
     #[test]
     fn a_host_home_mount_replaces_the_prefixs_own() {
         let table = Table::rooted(
@@ -324,6 +423,10 @@ mod tests {
         assert_eq!(
             table.to_host("/Users/user/Documents"),
             Some(PathBuf::from("/home/user/Documents"))
+        );
+        assert_eq!(
+            point(&table, "/Users/user").map(|p| (p.parent, p.name, p.listed)),
+            Some(("/Users", "user", true))
         );
         // …and another user's home is still the prefix's.
         assert_eq!(

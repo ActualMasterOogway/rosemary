@@ -382,9 +382,26 @@ unsafe extern "C" fn contents_of_directory(
     // Names, not paths, and without `.` and `..` - which is what Apple's
     // shallow enumeration gives and what a caller joining them back onto the
     // directory expects.
+    // The prefix's mount points are not in the host directory, so the guest's
+    // view of it is patched in: hidden ones left out, the rest shown.
+    let listing = prefix::ns::listing_of(&path);
     let mut names: Vec<String> = entries
-        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter_map(|e| {
+            let name = e.ok()?.file_name();
+            let hidden = listing
+                .as_ref()
+                .is_some_and(|l| l.hides(name.as_encoded_bytes()));
+            (!hidden).then(|| name.to_string_lossy().into_owned())
+        })
         .collect();
+    if let Some(listing) = &listing {
+        names.extend(
+            listing
+                .shown()
+                .iter()
+                .map(|point| point.name.to_string_lossy().into_owned()),
+        );
+    }
     names.sort();
     let objects: Vec<corefoundation::base::CFTypeRef> = names
         .iter()
