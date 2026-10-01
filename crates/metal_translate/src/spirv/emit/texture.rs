@@ -50,6 +50,7 @@ impl Emitter {
                 offset,
                 lod,
                 gradient,
+                bias,
                 gather,
             } => {
                 let result = instruction
@@ -70,8 +71,13 @@ impl Emitter {
                     .map_err(build_error)?;
                 let coordinate =
                     self.texture_coordinate(function, coordinate, array_index.as_ref(), values)?;
+                // Image operands follow their mask bits in order: Bias first.
                 let mut mask = ImageOperands::NONE;
                 let mut extra = Vec::new();
+                if let Some(bias) = bias {
+                    mask |= ImageOperands::BIAS;
+                    extra.push(SpirvOperand::IdRef(self.operand(bias, values)?));
+                }
                 if let Some(lod) = lod {
                     mask |= ImageOperands::LOD;
                     extra.push(SpirvOperand::IdRef(self.operand(lod, values)?));

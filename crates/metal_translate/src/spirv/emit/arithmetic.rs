@@ -338,6 +338,70 @@ impl Emitter {
                     }
                     .map_err(build_error)?;
                 }
+                FloatUnaryOp::Round => {
+                    // GLSL's Round leaves the halfway direction to the driver,
+                    // and Metal's round goes away from zero. x - trunc(x) is
+                    // exact, so stepping trunc(x) by sign(x) at |d| >= 0.5 is
+                    // too; the ordered compare is false for NaN and infinity
+                    // (d is NaN there), which keeps trunc(x).
+                    let result = instruction
+                        .result
+                        .ok_or_else(|| emission("round has no result"))?;
+                    let result_type = &function.values[result.0 as usize];
+                    let (scalar, lanes) = match result_type {
+                        Type::Vector { element, lanes } => (element.as_ref(), Some(*lanes)),
+                        scalar => (scalar, None),
+                    };
+                    let half = match scalar {
+                        Type::Float { bits: 16 } => 0x3800,
+                        Type::Float { bits: 32 } => u64::from(0.5f32.to_bits()),
+                        Type::Float { bits: 64 } => 0.5f64.to_bits(),
+                        _ => return Err(emission("round of a non-float value")),
+                    };
+                    let half = Operand::Float {
+                        ty: scalar.clone(),
+                        bits: half,
+                    };
+                    let (half, condition_type) = match lanes {
+                        Some(lanes) => (
+                            Operand::Composite {
+                                ty: result_type.clone(),
+                                elements: vec![half; usize::from(lanes)],
+                            },
+                            Type::Vector {
+                                element: Box::new(Type::Bool),
+                                lanes,
+                            },
+                        ),
+                        None => (half, Type::Bool),
+                    };
+                    let half = self.operand(&half, values)?;
+                    let ty = self.type_id(result_type)?;
+                    let condition_type = self.type_id(&condition_type)?;
+                    let x = self.operand(value, values)?;
+                    let glsl = self.glsl_std_450;
+                    let b = &mut self.builder;
+                    let ext = |b: &mut rspirv::dr::Builder, op: GlslStd450Op, args: &[u32]| {
+                        b.ext_inst(
+                            ty,
+                            None,
+                            glsl,
+                            op as u32,
+                            args.iter().map(|&id| SpirvOperand::IdRef(id)),
+                        )
+                        .map_err(build_error)
+                    };
+                    let truncated = ext(b, GlslStd450Op::Trunc, &[x])?;
+                    let fraction = b.f_sub(ty, None, x, truncated).map_err(build_error)?;
+                    let magnitude = ext(b, GlslStd450Op::FAbs, &[fraction])?;
+                    let sign = ext(b, GlslStd450Op::FSign, &[fraction])?;
+                    let away = b.f_add(ty, None, truncated, sign).map_err(build_error)?;
+                    let halfway = b
+                        .f_ord_greater_than_equal(condition_type, None, magnitude, half)
+                        .map_err(build_error)?;
+                    b.select(ty, result_id, halfway, away, truncated)
+                        .map_err(build_error)?;
+                }
                 _ => {
                     let operation = match op {
                         FloatUnaryOp::Absolute => GlslStd450Op::FAbs,
@@ -356,10 +420,11 @@ impl Emitter {
                         FloatUnaryOp::Atan => GlslStd450Op::Atan,
                         FloatUnaryOp::Floor => GlslStd450Op::Floor,
                         FloatUnaryOp::Ceil => GlslStd450Op::Ceil,
-                        FloatUnaryOp::Round => GlslStd450Op::RoundEven,
+                        FloatUnaryOp::RoundEven => GlslStd450Op::RoundEven,
                         FloatUnaryOp::Truncate => GlslStd450Op::Trunc,
                         FloatUnaryOp::Fract => GlslStd450Op::Fract,
                         FloatUnaryOp::Negate
+                        | FloatUnaryOp::Round
                         | FloatUnaryOp::DerivativeX
                         | FloatUnaryOp::DerivativeY
                         | FloatUnaryOp::DerivativeWidth => {

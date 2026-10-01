@@ -138,12 +138,14 @@ pub(crate) fn instruction_operands(kind: &InstructionKind) -> Vec<&Operand> {
             offset,
             lod,
             gradient,
+            bias,
             ..
         } => [texture, sampler, coordinate]
             .into_iter()
             .chain(array_index)
             .chain(offset)
             .chain(lod)
+            .chain(bias)
             .chain(gradient.as_deref().map(|(dx, _)| dx))
             .chain(gradient.as_deref().map(|(_, dy)| dy))
             .collect(),
@@ -242,12 +244,14 @@ pub(crate) fn instruction_operands_mut(kind: &mut InstructionKind) -> Vec<&mut O
             offset,
             lod,
             gradient,
+            bias,
             ..
         } => {
             let mut operands = vec![texture, sampler, coordinate];
             operands.extend(array_index);
             operands.extend(offset);
             operands.extend(lod);
+            operands.extend(bias);
             if let Some(gradient) = gradient {
                 operands.push(&mut gradient.0);
                 operands.push(&mut gradient.1);

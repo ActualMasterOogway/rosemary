@@ -201,10 +201,8 @@ pub(super) fn air_intrinsic(
         "atan" => unary(FloatUnaryOp::Atan),
         "floor" => unary(FloatUnaryOp::Floor),
         "ceil" => unary(FloatUnaryOp::Ceil),
-        // FIXME (ACCURACY): Metal's `round` rounds halfway cases away from
-        // zero; only `rint` rounds to even. Both lower to RoundEven, so
-        // `round(2.5)` is 2 here and 3 on Metal.
-        "rint" | "round" => unary(FloatUnaryOp::Round),
+        "round" => unary(FloatUnaryOp::Round),
+        "rint" => unary(FloatUnaryOp::RoundEven),
         "trunc" => unary(FloatUnaryOp::Truncate),
         "fract" => unary(FloatUnaryOp::Fract),
         "dfdx" => unary(FloatUnaryOp::DerivativeX),
@@ -405,9 +403,9 @@ pub(super) fn memory_order(operand: &Operand, name: &str) -> Result<MemoryOrder,
 ///
 /// The operation name carries the access and the texture shape, for instance
 /// `sample_texture_2d_array` or `read_texture_2d_ms`. Metal's optional
-/// sampling arguments are passed as a present/absent flag followed by the
-/// value; only a constant flag is accepted, because a runtime choice between
-/// implicit and explicit level of detail has no SPIR-V form.
+/// sampling arguments are passed as a flag followed by the value; only a
+/// constant flag is accepted, because a runtime choice between implicit and
+/// explicit level of detail has no SPIR-V form.
 ///
 /// A `_grad` suffix is Metal's `gradient2d(dPdx, dPdy)`: the derivatives take
 /// the place of the level-of-detail flag and value, and follow the array
@@ -472,18 +470,15 @@ pub(super) fn air_texture_intrinsic(
                     offset,
                     lod: None,
                     gradient: None,
+                    bias: None,
                     gather: Some(0),
                 }));
             }
             // A gradient sample carries no level-of-detail flag: the
             // derivatives are the level.
-            let lod = match (gradient.is_some(), rest) {
-                (true, []) => None,
-                // FIXME (ACCURACY): this flag selects level (true) or bias
-                // (false), not presence: `bias(b)` is `i1 false, float b`,
-                // and plain `sample` is a bias of zero. A nonzero bias is
-                // dropped here (Roblox samples with `bias(7)`).
-                (false, [flag, lod]) => optional(flag, lod)?,
+            let (lod, bias) = match (gradient.is_some(), rest) {
+                (true, []) => (None, None),
+                (false, [flag, value]) => level_or_bias(flag, value)?,
                 _ => return Err(malformed()),
             };
             Ok(Some(InstructionKind::TextureSample {
@@ -494,6 +489,7 @@ pub(super) fn air_texture_intrinsic(
                 offset,
                 lod,
                 gradient,
+                bias,
                 gather: None,
             }))
         }
@@ -561,6 +557,26 @@ pub(super) fn air_texture_intrinsic(
             }))
         }
         _ => Ok(None),
+    }
+}
+
+/// AIR passes `level(l)` as `i1 true, float l` and `bias(b)` as `i1 false,
+/// float b`; a plain `sample` is a bias of zero, which is left implicit so
+/// that it emits exactly the unbiased sample. Like `optional`, the flag must
+/// be a constant.
+pub(super) fn level_or_bias(
+    flag: &Operand,
+    value: &Operand,
+) -> Result<(Option<Operand>, Option<Operand>), TranslateError> {
+    match flag {
+        Operand::Bool(true) => Ok((Some(value.clone()), None)),
+        Operand::Bool(false) => match value {
+            Operand::Float { bits, .. } if f32::from_bits(*bits as u32) == 0.0 => Ok((None, None)),
+            bias => Ok((None, Some(bias.clone()))),
+        },
+        other => Err(semantic(format!(
+            "AIR texture level-of-detail selector is not a constant flag: {other:?}"
+        ))),
     }
 }
 

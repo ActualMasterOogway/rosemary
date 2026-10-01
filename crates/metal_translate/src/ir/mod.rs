@@ -546,7 +546,10 @@ pub enum FloatUnaryOp {
     Atan,
     Floor,
     Ceil,
+    /// Metal's `round`: to nearest, halfway cases away from zero.
     Round,
+    /// Metal's `rint`: to nearest, halfway cases to even.
+    RoundEven,
     Truncate,
     Fract,
     /// Screen-space derivatives, valid only in a fragment entry point.
@@ -719,6 +722,9 @@ pub enum InstructionKind {
         /// its siblings supply them. They name the level of detail the way an
         /// explicit `lod` does, and never appear alongside one.
         gradient: Option<Box<(Operand, Operand)>>,
+        /// Metal's `bias(b)`, added to the implicit level of detail. It never
+        /// appears alongside an explicit `lod` or `gradient`.
+        bias: Option<Operand>,
         /// `gather` selects one component of the four sampled texels.
         gather: Option<u32>,
     },

@@ -766,6 +766,7 @@ fn texture_is_well_typed(
             offset,
             lod,
             gradient,
+            bias,
             ..
         } => {
             let Some(Type::Texture(texture)) = operand_type(function, texture) else {
@@ -781,13 +782,17 @@ fn texture_is_well_typed(
                         && operand_type(function, dx) == operand_type(function, dy)
                 }
             };
+            // A bias adjusts the implicit level, so it excludes the other two.
+            let bias_agrees = bias.is_none() || (lod.is_none() && gradient.is_none());
             gradients_agree
+                && bias_agrees
                 && operand_type(function, sampler) == Some(Type::Sampler)
                 && texture.access == Access::Sample
                 && coordinate_shape(function, coordinate, &texture, Type::Float { bits: 32 })
                 && optional_is(function, array_index.as_ref(), &Type::u32())
                 && optional_integer_vector(function, offset.as_ref())
                 && optional_is(function, lod.as_ref(), &Type::Float { bits: 32 })
+                && optional_is(function, bias.as_ref(), &Type::Float { bits: 32 })
                 && result == Some(texel_vector(&texture))
         }
         InstructionKind::TextureRead {

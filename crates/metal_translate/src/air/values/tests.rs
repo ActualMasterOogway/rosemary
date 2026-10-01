@@ -68,6 +68,82 @@ fn a_modern_texture_write_accepts_its_trailing_qualifier() {
     );
 }
 
+/// `air.sample_texture_2d` as Roblox's pack spells it: the trailing flag picks
+/// `level` (true) or `bias` (false), and a plain `sample` is a bias of zero.
+fn sample_2d(flag: bool, value: f32) -> InstructionKind {
+    let zero_offset = Operand::Composite {
+        ty: Type::Vector {
+            element: Box::new(Type::Int {
+                bits: 32,
+                signed: true,
+            }),
+            lanes: 2,
+        },
+        elements: vec![
+            Operand::Integer {
+                ty: Type::Int {
+                    bits: 32,
+                    signed: true,
+                },
+                value: 0,
+            };
+            2
+        ],
+    };
+    air_intrinsic(
+        "air.sample_texture_2d.v4f32",
+        &[
+            Operand::Value(ValueId(0)),
+            Operand::Value(ValueId(1)),
+            Operand::Value(ValueId(2)),
+            Operand::Bool(true),
+            zero_offset,
+            Operand::Bool(flag),
+            Operand::f32(value),
+        ],
+    )
+    .expect("the sample is lowered")
+}
+
+#[test]
+fn a_false_level_flag_is_a_bias() {
+    let InstructionKind::TextureSample { lod, bias, .. } = sample_2d(false, 7.0) else {
+        panic!("a texture sample");
+    };
+    assert_eq!(lod, None);
+    assert_eq!(bias, Some(Operand::f32(7.0)));
+}
+
+#[test]
+fn a_plain_sample_carries_no_bias() {
+    let InstructionKind::TextureSample { lod, bias, .. } = sample_2d(false, 0.0) else {
+        panic!("a texture sample");
+    };
+    assert_eq!((lod, bias), (None, None));
+}
+
+#[test]
+fn a_true_level_flag_is_an_explicit_level() {
+    let InstructionKind::TextureSample { lod, bias, .. } = sample_2d(true, 0.0) else {
+        panic!("a texture sample");
+    };
+    assert_eq!(lod, Some(Operand::f32(0.0)));
+    assert_eq!(bias, None);
+}
+
+/// MSL's `round` goes away from zero at a half and `rint` to even; they are
+/// different operations, not two spellings of one.
+#[test]
+fn round_and_rint_differ_at_halfway() {
+    let value = Operand::f32(2.5);
+    let unary = |name| match air_intrinsic(name, std::slice::from_ref(&value)) {
+        Ok(InstructionKind::FloatUnary { op, .. }) => op,
+        other => panic!("{name} lowered to {other:?}"),
+    };
+    assert_eq!(unary("air.fast_round.f32"), FloatUnaryOp::Round);
+    assert_eq!(unary("air.fast_rint.f32"), FloatUnaryOp::RoundEven);
+}
+
 #[test]
 fn recognizes_spirv_cross_unsigned_find_msb_helper() {
     let value = Operand::u32(7);
