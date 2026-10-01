@@ -9,7 +9,7 @@ use objc::class::Class;
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::compositor::{Command, Event};
+use crate::compositor::{Command, Event, Monitor};
 use crate::engine::{self, Block, Engine, HostBlock};
 use crate::gtk::{self, Ptr};
 use crate::{clipboard, configuration, keys, send};
@@ -40,7 +40,7 @@ struct View {
     ui_delegate: Weak,
     /// The `WKNavigation` of the load in progress, retained.
     navigation: usize,
-    /// The size, scale and suspension last sent to the compositor.
+    /// The size, scale, suspension and display last sent to the compositor.
     configured: Option<Configured>,
     draws_background: bool,
     /// The modifier flags of the last key event, from which `-flagsChanged:`
@@ -50,12 +50,15 @@ struct View {
     cursor: Option<&'static str>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Configured {
     width: c_int,
     height: c_int,
     scale: f64,
     suspended: bool,
+    monitor: Option<Monitor>,
+    /// Whether its window's presenter draws dma-bufs.
+    dmabuf: bool,
 }
 
 /// A zeroing weak reference, boxed so that its slot keeps its address while
@@ -1216,10 +1219,12 @@ pub fn tick(engine: &Engine) {
                     height: (f64::from(frame.height) / density).round().max(1.0) as c_int,
                     scale: density,
                     suspended: !shown,
+                    monitor: monitor_of(frame.window),
+                    dmabuf: appkit::backing::shows_dmabufs(frame.window),
                 })
             }
             // Off every window: keep the size, and stop drawing.
-            None => with_view(id, |v| v.configured)
+            None => with_view(id, |v| v.configured.clone())
                 .flatten()
                 .map(|c| Configured {
                     suspended: true,
@@ -1227,7 +1232,13 @@ pub fn tick(engine: &Engine) {
                 }),
         };
         if let Some(configured) = configured
-            && with_view(id, |v| v.configured.replace(configured) != Some(configured)) == Some(true)
+            && with_view(id, |v| {
+                let changed = v.configured.as_ref() != Some(&configured);
+                if changed {
+                    v.configured = Some(configured.clone());
+                }
+                changed
+            }) == Some(true)
         {
             engine.compositor.send(Command::Configure {
                 surface,
@@ -1235,6 +1246,8 @@ pub fn tick(engine: &Engine) {
                 height: configured.height,
                 scale: configured.scale,
                 suspended: configured.suspended,
+                monitor: configured.monitor,
+                dmabuf: configured.dmabuf,
             });
         }
         if engine::tracing() {
@@ -1245,8 +1258,12 @@ pub fn tick(engine: &Engine) {
         }
         if let Some(picture) = engine.compositor.take_frame(surface) {
             if engine::tracing() {
+                let kind = match picture.picture {
+                    appkit::backing::Picture::Pixels(_) => "pixel",
+                    appkit::backing::Picture::Dmabuf(_) => "dma-buf",
+                };
                 eprintln!(
-                    "rosetta3: webkit: view {id}: new {}x{} frame",
+                    "rosetta3: webkit: view {id}: new {}x{} {kind} frame",
                     picture.width, picture.height
                 );
             }
@@ -1255,7 +1272,7 @@ pub fn tick(engine: &Engine) {
                 appkit::backing::Overlay {
                     width: picture.width,
                     height: picture.height,
-                    pixels: picture.pixels,
+                    picture: picture.picture,
                 },
             );
         }
@@ -1266,6 +1283,27 @@ pub fn tick(engine: &Engine) {
             Event::Selection { entries } => clipboard::copied(entries),
         }
     }
+}
+
+/// The display most of `window` is on, and the mode it shows: a page is
+/// drawn at that display's refresh rate, and follows the window to another.
+fn monitor_of(window: sdl3::Window) -> Option<Monitor> {
+    let display = sdl3::video::display_for_window(window)?;
+    let mode = sdl3::video::current_mode(display)?;
+    let density = f64::from(mode.pixel_density).max(1.0);
+    let refresh = match (mode.refresh_rate_numerator, mode.refresh_rate_denominator) {
+        (numerator, denominator) if numerator > 0 && denominator > 0 => {
+            (i64::from(numerator) * 1000 / i64::from(denominator)) as u32
+        }
+        _ if mode.refresh_rate > 0.0 => (f64::from(mode.refresh_rate) * 1000.0).round() as u32,
+        _ => return None,
+    };
+    Some(Monitor {
+        name: sdl3::video::display_name(display),
+        width: (f64::from(mode.w) * density).round() as i32,
+        height: (f64::from(mode.h) * density).round() as i32,
+        refresh,
+    })
 }
 
 /// The page under the pointer wants `name`'s cursor.

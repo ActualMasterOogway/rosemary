@@ -185,11 +185,105 @@ static NEEDS_DISPLAY: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// can run a nested event loop that pumps again. Zero marks a forgotten entry.
 static DRAWING: Mutex<Vec<Vec<usize>>> = Mutex::new(Vec::new());
 
-/// Presents a window's store, leaving `holes` to the layers named in them;
-/// `false` where it cannot, so that SDL's window surface is used instead.
-pub type Presenter = fn(sdl3::Window, &Store, &[Hole]) -> bool;
+/// Presents a window's store, leaving `holes` to the layers named in them,
+/// with `overlays` drawn over it; `false` where it cannot, so that SDL's
+/// window surface is used instead.
+pub type Presenter = fn(sdl3::Window, &Store, &[Hole], &[GpuOverlay]) -> bool;
 
 static PRESENTER: Mutex<Option<Presenter>> = Mutex::new(None);
+
+/// A picture on the GPU, shared as a Linux dma-buf: premultiplied, top row
+/// first.
+pub struct Dmabuf {
+    pub width: u32,
+    pub height: u32,
+    /// The DRM fourcc and format modifier.
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub planes: Vec<DmabufPlane>,
+}
+
+pub struct DmabufPlane {
+    pub fd: std::os::fd::OwnedFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+/// An overlay the presenter draws from a dma-buf, over `rect` of the store
+/// in window pixels, source-over.
+pub struct GpuOverlay {
+    pub picture: std::sync::Arc<Dmabuf>,
+    pub rect: Rect,
+}
+
+/// The GPU a presenter shows windows with, and what it can show from a
+/// dma-buf without a copy.
+#[derive(Clone, Debug)]
+pub struct Importer {
+    /// The GPU's DRM render node, as `st_rdev`.
+    pub device: u64,
+    /// DRM fourcc and modifier pairs it can sample.
+    pub formats: Vec<(u32, u64)>,
+}
+
+/// Asks the presenter for its [`Importer`].
+pub type ImporterQuery = fn() -> Option<Importer>;
+
+static IMPORTER: Mutex<Option<ImporterQuery>> = Mutex::new(None);
+
+/// Let the presenter say it can draw [`GpuOverlay`]s. `query` is asked
+/// only when someone wants to know, so a GPU is not opened for nothing.
+pub fn set_importer(query: ImporterQuery) {
+    *IMPORTER.lock().unwrap_or_else(|e| e.into_inner()) = Some(query);
+}
+
+/// The presenter's GPU, if it draws dma-bufs at all.
+pub fn importer() -> Option<Importer> {
+    let query = (*IMPORTER.lock().unwrap_or_else(|e| e.into_inner()))?;
+    query()
+}
+
+/// Windows whose last present went through the presenter, and so would draw
+/// a dma-buf overlay; and those whose presenter could not import one.
+static GPU_WINDOWS: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
+
+/// Whether an overlay on `sdl`'s window can be a dma-buf: the presenter
+/// showed its last frame and has not failed to import one there. Otherwise
+/// it has to be pixels, which every present can draw.
+pub fn shows_dmabufs(sdl: sdl3::Window) -> bool {
+    GPU_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|&(window, refused)| window == sdl as usize && !refused)
+}
+
+/// The presenter could not draw a dma-buf overlay on `sdl`'s window; from
+/// now on it is given pixels there.
+pub fn refuse_dmabufs(sdl: sdl3::Window) {
+    let mut windows = GPU_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    match windows
+        .iter_mut()
+        .find(|(window, _)| *window == sdl as usize)
+    {
+        Some(entry) => entry.1 = true,
+        None => windows.push((sdl as usize, true)),
+    }
+}
+
+fn presented_through_gpu(sdl: sdl3::Window, gpu: bool) {
+    let mut windows = GPU_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    let at = windows
+        .iter()
+        .position(|(window, _)| *window == sdl as usize);
+    match (at, gpu) {
+        (None, true) => windows.push((sdl as usize, false)),
+        (Some(at), false) if !windows[at].1 => {
+            windows.remove(at);
+        }
+        _ => {}
+    }
+}
 
 /// Let a GPU backend present stores, so that a window it also presents layers
 /// to has one owner of its surface.
@@ -531,6 +625,10 @@ pub fn forget_window(sdl: sdl3::Window) {
     if let Some(stores) = STORES.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         stores.remove(&(sdl as usize));
     }
+    GPU_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(window, _)| *window != sdl as usize);
 }
 
 /// Forget a view that is being deallocated, so no pump draws freed memory.
@@ -880,7 +978,9 @@ fn compose_window(window: Id) {
         // through a label's transparent pixels.
         let above: Vec<Rect> = placed[index + 1..]
             .iter()
-            .filter(|q| overlaid.contains(&(q.view as usize)) || opaque.contains(&(q.view as usize)))
+            .filter(|q| {
+                overlaid.contains(&(q.view as usize)) || opaque.contains(&(q.view as usize))
+            })
             .map(|q| q.clip.intersection(&p.clip))
             .filter(|rect| !rect.is_empty())
             .collect();
@@ -1141,7 +1241,7 @@ fn present_dirty() {
     {
         let window = window as sdl3::Window;
         store.dirty = false;
-        let composed = compose(window, store);
+        let (composed, gpu_overlays) = compose(window, store);
         let store = composed.as_ref().unwrap_or(store);
         dump(window, store);
         let holes = WINDOWS
@@ -1151,9 +1251,14 @@ fn present_dirty() {
             .and_then(|windows| windows.get(&(window as usize)))
             .map(|state| state.holes.clone())
             .unwrap_or_default();
-        if presenter.is_some_and(|present| present(window, store, &holes)) {
+        let presented =
+            presenter.is_some_and(|present| present(window, store, &holes, &gpu_overlays));
+        presented_through_gpu(window, presented);
+        if presented {
             continue;
         }
+        // The dma-buf overlays are left out of this frame; `shows_dmabufs`
+        // now says no, and their views send pixels from the next one.
         // The guest's own GL context owns this window's surface; see
         // [`crate::window::draws_with_opengl`]. There is nothing to fall back
         // to, so the store is left unshown rather than taking the context away.
@@ -1219,8 +1324,14 @@ fn make_opaque(pixels: &mut [u8], width: usize, height: usize, pitch: usize, fro
 pub struct Overlay {
     pub width: u32,
     pub height: u32,
+    pub picture: Picture,
+}
+
+pub enum Picture {
     /// Premultiplied B, G, R, A, top row first.
-    pub pixels: Vec<u8>,
+    Pixels(Vec<u8>),
+    /// Drawn by the presenter; see [`shows_dmabufs`].
+    Dmabuf(std::sync::Arc<Dmabuf>),
 }
 
 /// Keyed by the view's address, in the order the overlays were first set.
@@ -1283,11 +1394,13 @@ fn mark_window_of(view: Id) {
     );
 }
 
-/// The store with every visible overlay of `window` drawn over it, or `None`
-/// when there is nothing to draw and the store can be presented as it is.
-fn compose(window: sdl3::Window, store: &Store) -> Option<Store> {
+/// The store with every visible pixel overlay of `window` drawn over it, or
+/// `None` when there is nothing to draw and the store can be presented as it
+/// is; and the dma-buf overlays, which only the presenter can draw.
+fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverlay>) {
     let overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
     let mut composed: Option<Store> = None;
+    let mut gpu = Vec::new();
     for (view, overlay) in overlays.iter() {
         let view = *view as Id;
         // SAFETY: an overlay is removed before its view is deallocated.
@@ -1301,6 +1414,18 @@ fn compose(window: sdl3::Window, store: &Store) -> Option<Store> {
         if frame.window != window {
             continue;
         }
+        if let Picture::Dmabuf(picture) = &overlay.picture {
+            gpu.push(GpuOverlay {
+                picture: picture.clone(),
+                rect: Rect {
+                    x: i64::from(frame.x),
+                    y: i64::from(frame.y),
+                    width: i64::from(frame.width),
+                    height: i64::from(frame.height),
+                },
+            });
+            continue;
+        }
         let target = composed.get_or_insert_with(|| Store {
             width: store.width,
             height: store.height,
@@ -1309,7 +1434,7 @@ fn compose(window: sdl3::Window, store: &Store) -> Option<Store> {
         });
         blend_overlay(target, overlay, frame.x, frame.y, frame.width, frame.height);
     }
-    composed
+    (composed, gpu)
 }
 
 /// Draw `overlay` scaled into the rectangle at `left`, `top` of `store`,
@@ -1322,12 +1447,15 @@ fn blend_overlay(
     width: u32,
     height: u32,
 ) {
+    let Picture::Pixels(pixels) = &overlay.picture else {
+        return;
+    };
     let (source_width, source_height) = (overlay.width as usize, overlay.height as usize);
     if source_width == 0
         || source_height == 0
         || width == 0
         || height == 0
-        || overlay.pixels.len() < source_width * source_height * 4
+        || pixels.len() < source_width * source_height * 4
     {
         return;
     }
@@ -1347,7 +1475,7 @@ fn blend_overlay(
     for y in y0..y1 {
         let row = ((y as i64 - i64::from(top)) as usize * source_height / height as usize)
             .min(source_height - 1);
-        let from_row = &overlay.pixels[row * source_width * 4..(row + 1) * source_width * 4];
+        let from_row = &pixels[row * source_width * 4..(row + 1) * source_width * 4];
         let base = y * store.width as usize * 4;
         let to_row = &mut store.pixels[base + x0 * 4..base + x1 * 4];
         for (target, &column) in to_row.as_chunks_mut::<4>().0.iter_mut().zip(&columns) {
@@ -1815,7 +1943,7 @@ mod tests {
         let overlay = Overlay {
             width: 2,
             height: 1,
-            pixels: vec![1, 2, 3, 255, 0, 0, 0, 0],
+            picture: Picture::Pixels(vec![1, 2, 3, 255, 0, 0, 0, 0]),
         };
         blend_overlay(&mut store, &overlay, 0, 1, 4, 1);
         assert_eq!(&store.pixels[..16], &[9; 16]);
@@ -1856,7 +1984,7 @@ mod tests {
         let overlay = Overlay {
             width: 1,
             height: 1,
-            pixels: vec![7, 7, 7, 255],
+            picture: Picture::Pixels(vec![7, 7, 7, 255]),
         };
         blend_overlay(&mut store, &overlay, 1, -1, 4, 2);
         assert_eq!(

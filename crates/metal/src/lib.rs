@@ -10,6 +10,7 @@ mod gpu;
 mod heap;
 mod library;
 mod object;
+mod overlay;
 mod pipeline;
 mod present;
 mod resource;

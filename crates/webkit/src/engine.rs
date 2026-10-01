@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use objc::object::Id;
 
-use crate::compositor::Compositor;
+use crate::compositor::{Composition, Compositor};
 use crate::gtk::{self, Api, Ptr};
 
 pub struct Engine {
@@ -59,7 +59,12 @@ fn start() -> Result<Engine, String> {
         );
     }
     let api = gtk::api()?;
-    let compositor = Compositor::start(wake)?;
+    let mode = std::env::var("ROSETTA3_WEBKIT_GPU").unwrap_or_default();
+    let composition = match mode.as_str() {
+        "0" => Composition::Cpu,
+        _ => Composition::Gpu(appkit::backing::importer()),
+    };
+    let compositor = Compositor::start(wake, composition)?;
     // GTK would otherwise call `setlocale(LC_ALL, "")`, which changes how the
     // host's C library formats numbers under the guest's feet.
     // SAFETY: safe to call before anything else in GTK.
@@ -70,14 +75,19 @@ fn start() -> Result<Engine, String> {
     // is for that one call. The guest reads its own copy of the environment,
     // which this does not touch.
     let socket = compositor.socket.clone();
+    let mut variables = vec![
+        ("WAYLAND_DISPLAY", socket.as_os_str()),
+        ("GDK_BACKEND", std::ffi::OsStr::new("wayland")),
+    ];
+    // GTK draws with cairo unless asked: its GPU renderers take WebKit's
+    // pages as dma-bufs, and that costs a page a frame of latency - about 70
+    // frames a second where cairo keeps up with 110 on a 144 Hz display.
+    // Without a GPU compositor they could only run in software anyway.
+    if !compositor.gpu || mode != "gtk" {
+        variables.push(("GDK_DISABLE", std::ffi::OsStr::new("gl,vulkan")));
+    }
     let started = with_environment(
-        &[
-            ("WAYLAND_DISPLAY", socket.as_os_str()),
-            ("GDK_BACKEND", std::ffi::OsStr::new("wayland")),
-            // The compositor takes only shared memory, so GTK's GPU renderers
-            // could only run in software; cairo is the cheap way to get there.
-            ("GDK_DISABLE", std::ffi::OsStr::new("gl,vulkan")),
-        ],
+        &variables,
         // SAFETY: both are safe to call before anything else in GTK.
         || unsafe {
             (api.gdk_set_allowed_backends)(c"wayland".as_ptr());

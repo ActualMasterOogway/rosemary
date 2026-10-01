@@ -15,6 +15,10 @@
 
 mod composite;
 #[cfg(target_os = "linux")]
+mod gpu;
+#[cfg(target_os = "linux")]
+mod monitor;
+#[cfg(target_os = "linux")]
 mod state;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
@@ -26,27 +30,53 @@ use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use smithay::reexports::calloop::channel::Sender;
 
-/// A toplevel's latest picture: premultiplied B, G, R, A, top row first.
+/// A toplevel's latest picture, in pixels.
 pub struct Frame {
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u8>,
+    pub picture: appkit::backing::Picture,
+}
+
+/// Where windows are composed.
+pub enum Composition {
+    /// On the CPU, from shared memory only.
+    Cpu,
+    /// On the GPU the presenter samples dma-bufs on, or else any.
+    Gpu(Option<appkit::backing::Importer>),
 }
 
 /// A toplevel is named by its `wl_surface`'s protocol id, which GTK's side
 /// reads with `wl_proxy_get_id`: there is only one client.
 pub type SurfaceId = u32;
 
+/// The host display a window is on, which its output stands for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Monitor {
+    /// SDL's name for it, which is usually the connector's, as `DP-1`.
+    pub name: Option<String>,
+    /// The mode, in pixels.
+    pub width: i32,
+    pub height: i32,
+    /// In millihertz.
+    pub refresh: u32,
+}
+
 pub enum Command {
-    /// The size, in logical pixels, and scale the window is shown at; a
-    /// suspended window is not shown and gets no frame callbacks.
+    /// The size, in logical pixels, and scale the window is shown at, and
+    /// the display it is on; a suspended window is not shown and gets no
+    /// frame callbacks.
     Configure {
         surface: SurfaceId,
         width: i32,
         height: i32,
         scale: f64,
         suspended: bool,
+        monitor: Option<Monitor>,
+        /// Whether its pictures may be dma-bufs rather than pixels.
+        dmabuf: bool,
     },
+    /// The last frame of `surface` was taken, so it may draw the next.
+    Taken { surface: SurfaceId },
     /// The view is gone; drop anything held for its surface.
     Forget { surface: SurfaceId },
     /// The pointer is at `x`, `y` in the window's logical pixels.
@@ -93,18 +123,20 @@ pub struct Compositor {
     shared: Arc<Shared>,
     /// The socket GTK connects to, which is removed once it has.
     pub socket: PathBuf,
+    /// Whether windows are composed on a GPU, and GTK may render on it.
+    pub gpu: bool,
 }
 
 impl Compositor {
     #[cfg(not(target_os = "linux"))]
-    pub fn start(_wake: fn()) -> Result<Compositor, String> {
+    pub fn start(_wake: fn(), _composition: Composition) -> Result<Compositor, String> {
         Err("web views need WebKitGTK, which only a Linux host has".to_string())
     }
 
     /// Start the compositor, listening at a fresh socket. `wake` is called
     /// from its thread whenever a frame or event is ready.
     #[cfg(target_os = "linux")]
-    pub fn start(wake: fn()) -> Result<Compositor, String> {
+    pub fn start(wake: fn(), composition: Composition) -> Result<Compositor, String> {
         let shared = Arc::new(Shared {
             frames: Mutex::new(HashMap::new()),
             events: Mutex::new(Vec::new()),
@@ -117,15 +149,16 @@ impl Compositor {
         let thread_socket = socket.clone();
         std::thread::Builder::new()
             .name("rosetta3-webkit-compositor".to_string())
-            .spawn(move || state::run(thread_socket, thread_shared, sender))
+            .spawn(move || state::run(thread_socket, thread_shared, composition, sender))
             .map_err(|e| format!("could not start the compositor thread: {e}"))?;
-        let commands = receiver
+        let (commands, gpu) = receiver
             .recv()
             .map_err(|_| "the compositor thread exited while starting".to_string())??;
         Ok(Compositor {
             commands,
             shared,
             socket,
+            gpu,
         })
     }
 
@@ -140,7 +173,11 @@ impl Compositor {
 
     /// The newest picture of `surface` not yet taken.
     pub fn take_frame(&self, surface: SurfaceId) -> Option<Frame> {
-        lock(&self.shared.frames).remove(&surface)
+        let frame = lock(&self.shared.frames).remove(&surface);
+        if frame.is_some() {
+            self.send(Command::Taken { surface });
+        }
+        frame
     }
 
     pub fn take_events(&self) -> Vec<Event> {
@@ -152,11 +189,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Somewhere only this user can reach, named so two processes cannot collide.
+/// Somewhere only this user can reach, named so two compositors cannot
+/// collide, whether in two processes or in one.
 fn socket_path() -> PathBuf {
+    static STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let directory = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .unwrap_or_else(std::env::temp_dir);
-    directory.join(format!("rosetta3-webkit-{}", std::process::id()))
+    let serial = STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = match serial {
+        0 => format!("rosetta3-webkit-{}", std::process::id()),
+        _ => format!("rosetta3-webkit-{}-{serial}", std::process::id()),
+    };
+    directory.join(name)
 }

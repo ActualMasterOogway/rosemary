@@ -294,6 +294,11 @@ pub fn surface_api() -> Option<&'static ash::khr::surface::Instance> {
     STATE.get()?.as_ref().ok()?.surface_api.as_ref()
 }
 
+/// The instance every device is made from.
+pub(crate) fn instance() -> Option<&'static Instance> {
+    Some(&STATE.get()?.as_ref().ok()?.instance)
+}
+
 /// The raw `VkInstance`, for SDL to make a surface against.
 pub fn instance_handle() -> Option<u64> {
     use vk::Handle;

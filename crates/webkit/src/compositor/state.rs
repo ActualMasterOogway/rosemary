@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, on_commit_buffer_handler};
 use smithay::desktop::utils::under_from_surface_tree;
@@ -22,7 +23,9 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as Trigger, PostAction};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
+use smithay::reexports::wayland_server::backend::{
+    ClientData, ClientId, DisconnectReason, GlobalId,
+};
 use smithay::reexports::wayland_server::protocol::wl_shm::Format;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_seat};
@@ -32,10 +35,14 @@ use smithay::reexports::wayland_server::{
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
-    get_parent, send_surface_state, with_states, with_surface_tree_downward,
+    BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+    TraversalAction, add_blocker, add_pre_commit_hook, get_parent, send_surface_state, with_states,
+    with_surface_tree_downward,
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::dmabuf::{
+    DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier, get_dmabuf,
+};
 use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
 };
@@ -53,10 +60,15 @@ use smithay::wayland::shm::{ShmHandler, ShmState, with_buffer_contents};
 use smithay::wayland::viewporter::ViewporterState;
 
 use super::composite::{self, Canvas, Rect};
-use super::{Command, Event, Frame, Shared, SurfaceId, lock};
+use super::gpu::{Gpu, Pool};
+use super::{Command, Composition, Event, Frame, Monitor, Shared, SurfaceId, lock, monitor};
 
-/// How often frame callbacks are released: the pace GTK draws at.
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// How often a window on no known display has its frame callbacks released.
+const DEFAULT_REFRESH: u32 = 60_000;
+
+/// How long an output no window is on stays, so that a window moving back
+/// and forth between displays does not make GTK remake its monitors.
+const OUTPUT_GRACE: Duration = Duration::from_secs(5);
 
 /// How long a toplevel may go without a view claiming it before it is closed.
 const UNCLAIMED_GRACE: Duration = Duration::from_secs(3);
@@ -72,20 +84,49 @@ struct Configure {
     height: i32,
     scale: f64,
     suspended: bool,
+    /// Whether the window's pictures may be dma-bufs.
+    dmabuf: bool,
 }
 
 struct Window {
     toplevel: ToplevelSurface,
     configure: Option<Configure>,
+    /// The display the window is on, as its view last said.
+    monitor: Option<Monitor>,
+    /// Which of `State::outputs` it has entered; `None` is the default one.
+    output: Option<u64>,
+    /// How often its frame callbacks are released: its display's refresh.
+    interval: Duration,
+    /// When they were last released.
+    released: Instant,
+    /// Whether a release is already scheduled.
+    timer: bool,
+    /// The buffers it is composed into on the GPU.
+    pool: Pool,
     dirty: bool,
     created: Instant,
     closed: bool,
+}
+
+/// An output standing for one host display at one mode and scale. A display
+/// whose mode changes gets a new one, rather than the old one changing: a
+/// GTK monitor's refresh rate is read once, when WebKit starts pacing a page
+/// for it, and only moving to another monitor makes it read it again.
+struct Shown {
+    id: u64,
+    monitor: Monitor,
+    scale: f64,
+    output: Output,
+    global: GlobalId,
 }
 
 pub struct State {
     display: DisplayHandle,
     handle: LoopHandle<'static, State>,
     shared: Arc<Shared>,
+    /// Where windows are composed, when not on the CPU.
+    gpu: Option<Gpu>,
+    dmabuf: DmabufState,
     compositor: CompositorState,
     xdg: XdgShellState,
     shm: ShmState,
@@ -98,18 +139,23 @@ pub struct State {
     seat: Seat<State>,
     keyboard: KeyboardHandle<State>,
     pointer: PointerHandle<State>,
+    /// Where a window is until its view says which display it is on.
     output: Output,
+    outputs: Vec<Shown>,
+    next_output: u64,
+    /// The host's connectors, read again whenever a display is seen that no
+    /// output stands for yet.
+    connectors: Vec<monitor::Connector>,
     popups: PopupManager,
     windows: HashMap<SurfaceId, Window>,
     /// Configures that arrived before their toplevel did.
-    early: HashMap<SurfaceId, Configure>,
+    early: HashMap<SurfaceId, (Configure, Option<Monitor>)>,
     /// Popups holding a grab, innermost last.
     grabs: Vec<PopupSurface>,
     /// Buttons whose press dismissed a grab, so their release is not sent.
     swallowed: Vec<u32>,
     keyboard_window: Option<SurfaceId>,
     pointer_window: Option<SurfaceId>,
-    frame_timer: bool,
     start: Instant,
 }
 
@@ -127,16 +173,21 @@ fn id(surface: &WlSurface) -> SurfaceId {
     surface.id().protocol_id()
 }
 
-type Started = Result<Sender<Command>, String>;
+type Started = Result<(Sender<Command>, bool), String>;
 
-pub(super) fn run(socket: PathBuf, shared: Arc<Shared>, reply: mpsc::Sender<Started>) {
-    let started = start(socket, shared);
+pub(super) fn run(
+    socket: PathBuf,
+    shared: Arc<Shared>,
+    composition: Composition,
+    reply: mpsc::Sender<Started>,
+) {
+    let started = start(socket, shared, composition);
     match started {
         Err(why) => {
             let _ = reply.send(Err(why));
         }
         Ok((mut event_loop, mut state, sender)) => {
-            let _ = reply.send(Ok(sender));
+            let _ = reply.send(Ok((sender, state.gpu.is_some())));
             let _ = event_loop.run(None, &mut state, State::after_dispatch);
         }
     }
@@ -145,6 +196,7 @@ pub(super) fn run(socket: PathBuf, shared: Arc<Shared>, reply: mpsc::Sender<Star
 fn start(
     socket: PathBuf,
     shared: Arc<Shared>,
+    composition: Composition,
 ) -> Result<(EventLoop<'static, State>, State, Sender<Command>), String> {
     let event_loop: EventLoop<'static, State> =
         EventLoop::try_new().map_err(|e| format!("no event loop: {e}"))?;
@@ -153,7 +205,20 @@ fn start(
         .map_err(|e| format!("cannot listen at {}: {e}", socket.display()))?;
     let (sender, commands): (Sender<Command>, Channel<Command>) = channel::channel();
     let handle = event_loop.handle();
-    let state = State::new(display.handle(), handle.clone(), shared);
+    // Made on this thread, which its GL context is current on for good.
+    let gpu = match composition {
+        Composition::Cpu => None,
+        Composition::Gpu(importer) => match Gpu::new(importer.as_ref()) {
+            Ok(gpu) => Some(gpu),
+            Err(why) => {
+                eprintln!(
+                    "rosetta3: webkit: compositor: composing on the CPU, as the GPU cannot be used: {why}"
+                );
+                None
+            }
+        },
+    };
+    let state = State::new(display.handle(), handle.clone(), shared, gpu);
 
     handle
         .insert_source(
@@ -207,8 +272,21 @@ impl State {
         display: DisplayHandle,
         handle: LoopHandle<'static, State>,
         shared: Arc<Shared>,
+        mut gpu: Option<Gpu>,
     ) -> State {
         let compositor = CompositorState::new::<State>(&display);
+        let mut dmabuf = DmabufState::new();
+        if let Some(found) = gpu.as_ref() {
+            match found.feedback() {
+                Ok(feedback) => {
+                    dmabuf.create_global_with_default_feedback::<State>(&display, &feedback);
+                }
+                Err(why) => {
+                    eprintln!("rosetta3: webkit: compositor: composing on the CPU: {why}");
+                    gpu = None;
+                }
+            }
+        }
         let xdg = XdgShellState::new::<State>(&display);
         let shm = ShmState::new::<State>(&display, Vec::new());
         let mut seat_state = SeatState::new();
@@ -259,6 +337,8 @@ impl State {
             display,
             handle,
             shared,
+            gpu,
+            dmabuf,
             compositor,
             xdg,
             shm,
@@ -272,6 +352,9 @@ impl State {
             keyboard,
             pointer,
             output,
+            outputs: Vec::new(),
+            next_output: 0,
+            connectors: Vec::new(),
             popups: PopupManager::default(),
             windows: HashMap::new(),
             early: HashMap::new(),
@@ -279,7 +362,6 @@ impl State {
             swallowed: Vec::new(),
             keyboard_window: None,
             pointer_window: None,
-            frame_timer: false,
             start: Instant::now(),
         }
     }
@@ -302,8 +384,19 @@ impl State {
             let Some(entry) = self.windows.get_mut(&window) else {
                 continue;
             };
-            entry.dirty = false;
-            if let Some(frame) = compose(&entry.toplevel) {
+            let composed = match self.gpu.as_mut() {
+                Some(gpu) => {
+                    let (scale, dmabuf) = entry
+                        .configure
+                        .map_or((1.0, false), |c| (c.scale, c.dmabuf));
+                    gpu.compose(&entry.toplevel, scale, &mut entry.pool, !dmabuf)
+                }
+                None => compose(&entry.toplevel),
+            };
+            // Nothing drawn - no buffer yet, or none free - is tried again
+            // after the next thing that happens.
+            entry.dirty = composed.is_none();
+            if let Some(frame) = composed {
                 lock(&self.shared.frames).insert(window, frame);
                 published = true;
             }
@@ -338,25 +431,41 @@ impl State {
                 height,
                 scale,
                 suspended,
+                monitor,
+                dmabuf,
             } => {
                 let configure = Configure {
                     width: width.max(1),
                     height: height.max(1),
                     scale: scale.max(1.0),
                     suspended,
+                    dmabuf,
                 };
                 match self.windows.get_mut(&surface) {
-                    Some(window) if window.configure == Some(configure) => {}
                     Some(window) => {
-                        window.configure = Some(configure);
-                        self.configure(surface);
+                        let moved = window.monitor != monitor;
+                        window.monitor = monitor;
+                        let changed = window.configure != Some(configure);
+                        if changed {
+                            // Pictures of the other kind are wanted now, and
+                            // GTK may not draw again for a while.
+                            if window.configure.is_some_and(|c| c.dmabuf != dmabuf) {
+                                window.dirty = true;
+                            }
+                            window.configure = Some(configure);
+                            self.configure(surface);
+                        }
+                        if moved || changed {
+                            self.place(surface);
+                        }
                     }
                     None => {
-                        self.early.insert(surface, configure);
+                        self.early.insert(surface, (configure, monitor));
                     }
                 }
-                self.arm_frames();
+                self.arm_frames(surface);
             }
+            Command::Taken { surface } => self.arm_frames(surface),
             Command::Forget { surface } => {
                 self.early.remove(&surface);
                 if self.keyboard_window == Some(surface) {
@@ -608,51 +717,200 @@ impl State {
         }
     }
 
-    /// Release frame callbacks at the next interval, if none is pending.
-    fn arm_frames(&mut self) {
-        if self.frame_timer {
+    /// Release `window`'s frame callbacks one refresh after they were last
+    /// released, unless that is already scheduled.
+    fn arm_frames(&mut self, window: SurfaceId) {
+        let Some(entry) = self.windows.get_mut(&window) else {
+            return;
+        };
+        if entry.timer {
             return;
         }
-        self.frame_timer = true;
+        entry.timer = true;
+        // After a pause the deadline has passed, and the release is at once.
+        let deadline = (entry.released + entry.interval).max(Instant::now());
         let armed =
             self.handle
-                .insert_source(Timer::from_duration(FRAME_INTERVAL), |_, _, state| {
-                    state.frame_timer = false;
-                    if state.release_frames() {
-                        state.arm_frames();
+                .insert_source(Timer::from_deadline(deadline), move |_, _, state| {
+                    if let Some(entry) = state.windows.get_mut(&window) {
+                        entry.timer = false;
                     }
+                    state.release_frames(window);
                     TimeoutAction::Drop
                 });
-        if armed.is_err() {
-            self.frame_timer = false;
+        if armed.is_err()
+            && let Some(entry) = self.windows.get_mut(&window)
+        {
+            entry.timer = false;
         }
     }
 
-    /// Tell each shown window whose last frame has been taken that it can
-    /// draw again. Whether any window is still waiting.
-    fn release_frames(&mut self) -> bool {
+    /// Tell `window` it can draw again, if it is shown and its last picture
+    /// has been taken; taking it sends `Command::Taken`, which comes back
+    /// here.
+    fn release_frames(&mut self, window: SurfaceId) {
         let time = self.time();
-        let mut waiting = false;
-        let frames = lock(&self.shared.frames);
-        for (window, entry) in &self.windows {
-            let suspended = entry.configure.is_some_and(|c| c.suspended);
-            let untaken = frames.contains_key(window);
-            let root = entry.toplevel.wl_surface();
-            if suspended {
-                continue;
-            }
-            if untaken {
-                waiting |= has_callbacks(root);
-                continue;
-            }
-            send_frames(root, time);
-            for (popup, _) in PopupManager::popups_for_surface(root) {
-                send_frames(popup.wl_surface(), time);
+        let Some(entry) = self.windows.get_mut(&window) else {
+            return;
+        };
+        if entry.configure.is_some_and(|c| c.suspended)
+            || lock(&self.shared.frames).contains_key(&window)
+        {
+            return;
+        }
+        let root = entry.toplevel.wl_surface();
+        let popups: Vec<WlSurface> = PopupManager::popups_for_surface(root)
+            .map(|(popup, _)| popup.wl_surface().clone())
+            .collect();
+        if !has_callbacks(root) && !popups.iter().any(has_callbacks) {
+            return;
+        }
+        entry.released = Instant::now();
+        send_frames(root, time);
+        for popup in &popups {
+            send_frames(popup, time);
+        }
+        let _ = self.display.flush_clients();
+    }
+
+    /// Put `window` on the output for the display it is on, making one if
+    /// none stands for it yet, and let go of outputs no window is on.
+    fn place(&mut self, window: SurfaceId) {
+        let Some(entry) = self.windows.get(&window) else {
+            return;
+        };
+        let Some(monitor) = entry.monitor.clone() else {
+            return;
+        };
+        let scale = entry.configure.map_or(1.0, |c| c.scale);
+        let found = self
+            .outputs
+            .iter()
+            .find(|shown| shown.monitor == monitor && shown.scale == scale)
+            .map(|shown| shown.id);
+        let id = match found {
+            Some(id) => id,
+            None => self.add_output(monitor.clone(), scale),
+        };
+        let Some(entry) = self.windows.get_mut(&window) else {
+            return;
+        };
+        entry.interval = interval(monitor.refresh);
+        if entry.output == Some(id) {
+            return;
+        }
+        let old = entry.output.replace(id);
+        let root = entry.toplevel.wl_surface().clone();
+        let mut surfaces = vec![root.clone()];
+        surfaces.extend(
+            PopupManager::popups_for_surface(&root).map(|(popup, _)| popup.wl_surface().clone()),
+        );
+        let output_of = |id: Option<u64>| match id {
+            None => Some(self.output.clone()),
+            Some(id) => self
+                .outputs
+                .iter()
+                .find(|shown| shown.id == id)
+                .map(|shown| shown.output.clone()),
+        };
+        // Entered before the old one is left, so that GTK never sees the
+        // window on no monitor at all.
+        if let Some(new) = output_of(Some(id)) {
+            for surface in &surfaces {
+                new.enter(surface);
             }
         }
-        drop(frames);
-        let _ = self.display.flush_clients();
-        waiting
+        if let Some(old) = output_of(old) {
+            for surface in &surfaces {
+                old.leave(surface);
+            }
+        }
+        if crate::engine::tracing() {
+            eprintln!(
+                "rosetta3: webkit: compositor: window {window} is on {:?} at {} mHz",
+                monitor.name, monitor.refresh
+            );
+        }
+        self.retire_outputs();
+    }
+
+    fn add_output(&mut self, monitor: Monitor, scale: f64) -> u64 {
+        let seen = |connectors: &[monitor::Connector]| {
+            monitor
+                .name
+                .as_ref()
+                .is_some_and(|name| connectors.iter().any(|c| c.name == *name))
+        };
+        if !seen(&self.connectors) {
+            self.connectors = monitor::connectors();
+        }
+        let (width_mm, height_mm) =
+            monitor::physical_size(&self.connectors, &monitor).unwrap_or((0, 0));
+        let output = Output::new(
+            monitor
+                .name
+                .clone()
+                .unwrap_or_else(|| "rosetta3".to_string()),
+            PhysicalProperties {
+                size: (width_mm as i32, height_mm as i32).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Rosetta 3".to_string(),
+                model: "WebKit".to_string(),
+            },
+        );
+        let mode = Mode {
+            size: (monitor.width.max(1), monitor.height.max(1)).into(),
+            refresh: monitor.refresh as i32,
+        };
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(Scale::Fractional(scale)),
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+        let global = output.create_global::<State>(&self.display);
+        let id = self.next_output;
+        self.next_output += 1;
+        if crate::engine::tracing() {
+            eprintln!(
+                "rosetta3: webkit: compositor: output {id} for {:?}: {}x{} at {} mHz, {width_mm}x{height_mm} mm",
+                monitor.name, monitor.width, monitor.height, monitor.refresh
+            );
+        }
+        self.outputs.push(Shown {
+            id,
+            monitor,
+            scale,
+            output,
+            global,
+        });
+        id
+    }
+
+    /// Withdraw the outputs no window is on, and destroy them a while later,
+    /// once GTK has had time to stop using them.
+    fn retire_outputs(&mut self) {
+        let unused: Vec<u64> = self
+            .outputs
+            .iter()
+            .map(|shown| shown.id)
+            .filter(|id| !self.windows.values().any(|w| w.output == Some(*id)))
+            .collect();
+        for id in unused {
+            let Some(at) = self.outputs.iter().position(|shown| shown.id == id) else {
+                continue;
+            };
+            let shown = self.outputs.remove(at);
+            self.display.disable_global::<State>(shown.global.clone());
+            let _ = self.handle.insert_source(
+                Timer::from_duration(OUTPUT_GRACE),
+                move |_, _, state| {
+                    state.display.remove_global::<State>(shown.global.clone());
+                    TimeoutAction::Drop
+                },
+            );
+        }
     }
 
     /// Read the selection GTK just set, in `types`, off this thread.
@@ -714,7 +972,7 @@ impl State {
 }
 
 /// A toplevel surface's window geometry, or its size when it sets none.
-fn geometry(surface: &WlSurface) -> Rectangle<i32, Logical> {
+pub(super) fn geometry(surface: &WlSurface) -> Rectangle<i32, Logical> {
     with_states(surface, |states| {
         let geometry = states
             .cached_state
@@ -730,6 +988,11 @@ fn geometry(surface: &WlSurface) -> Rectangle<i32, Logical> {
             Rectangle::from_size(size)
         })
     })
+}
+
+/// One refresh at `millihertz`.
+fn interval(millihertz: u32) -> Duration {
+    Duration::from_nanos(1_000_000_000_000 / u64::from(millihertz.clamp(1_000, 1_000_000)))
 }
 
 fn set_scale(surface: &WlSurface, scale: f64) {
@@ -813,7 +1076,7 @@ fn compose(toplevel: &ToplevelSurface) -> Option<Frame> {
     Some(Frame {
         width: width as u32,
         height: height as u32,
-        pixels: canvas.pixels,
+        picture: appkit::backing::Picture::Pixels(canvas.pixels),
     })
 }
 
@@ -912,6 +1175,39 @@ impl CompositorHandler for State {
             .compositor
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // A dma-buf is drawn from only once the GPU has finished writing it,
+        // for drivers that do not wait on their own.
+        add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
+            let dmabuf = with_states(surface, |states| {
+                let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                match attributes.pending().buffer.as_ref() {
+                    Some(BufferAssignment::NewBuffer(buffer)) => get_dmabuf(buffer).cloned().ok(),
+                    _ => None,
+                }
+            });
+            let Some(dmabuf) = dmabuf else {
+                return;
+            };
+            let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) else {
+                return;
+            };
+            let Some(client) = surface.client() else {
+                return;
+            };
+            let waiting = state.handle.insert_source(source, move |_, _, state| {
+                let display = state.display.clone();
+                state
+                    .client_compositor_state(&client)
+                    .blocker_cleared(state, &display);
+                Ok(())
+            });
+            if waiting.is_ok() {
+                add_blocker(surface, blocker);
+            }
+        });
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         self.popups.commit(surface);
@@ -931,8 +1227,8 @@ impl CompositorHandler for State {
             && let Some(entry) = self.windows.get_mut(&window)
         {
             entry.dirty = true;
+            self.arm_frames(window);
         }
-        self.arm_frames();
     }
 }
 
@@ -944,16 +1240,24 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = id(surface.wl_surface());
         self.output.enter(surface.wl_surface());
+        let (configure, monitor) = self.early.remove(&window).unzip();
         self.windows.insert(
             window,
             Window {
                 toplevel: surface,
-                configure: self.early.remove(&window),
+                configure,
+                monitor: monitor.flatten(),
+                output: None,
+                interval: interval(DEFAULT_REFRESH),
+                released: Instant::now(),
+                timer: false,
+                pool: Pool::default(),
                 dirty: false,
                 created: Instant::now(),
                 closed: false,
             },
         );
+        self.place(window);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -965,6 +1269,7 @@ impl XdgShellHandler for State {
         {
             self.windows.remove(&window);
             lock(&self.shared.frames).remove(&window);
+            self.retire_outputs();
         }
     }
 
@@ -1154,6 +1459,26 @@ impl BufferHandler for State {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        match self.gpu.as_mut().is_some_and(|gpu| gpu.import(&dmabuf)) {
+            true => {
+                let _ = notifier.successful::<State>();
+            }
+            false => notifier.failed(),
+        }
+    }
+}
+
 impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
         &self.shm
@@ -1178,6 +1503,7 @@ impl FractionalScaleHandler for State {
 smithay::delegate_compositor!(State);
 smithay::delegate_xdg_shell!(State);
 smithay::delegate_shm!(State);
+smithay::delegate_dmabuf!(State);
 smithay::delegate_seat!(State);
 smithay::delegate_data_device!(State);
 smithay::delegate_output!(State);

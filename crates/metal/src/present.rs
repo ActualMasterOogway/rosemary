@@ -694,6 +694,7 @@ fn send_size(receiver: Id, selector: &str) -> (f64, f64) {
 pub(crate) fn install() {
     appkit::bootstrap();
     appkit::backing::set_presenter(present_store);
+    appkit::backing::set_importer(crate::overlay::importer);
     appkit::window::add_destroy_hook(forget_window);
     object::register::<Drawable>(c"R3CAMetalDrawable");
     let drawable = objc::class::lookup(c"R3CAMetalDrawable").expect("just registered");
@@ -722,6 +723,20 @@ struct StoreImage {
     gpu: &'static Gpu,
     image: GpuImage,
     staging: gpu::GpuBuffer,
+    /// The store with dma-buf overlays blended over it, made the first time
+    /// the window has any.
+    blended: Option<GpuImage>,
+}
+
+impl StoreImage {
+    /// Every presentation that could name one of its images has finished.
+    fn destroy(self) {
+        self.gpu.destroy_buffer(self.staging);
+        self.gpu.destroy_image(self.image);
+        if let Some(blended) = self.blended {
+            self.gpu.destroy_image(blended);
+        }
+    }
 }
 
 // SAFETY: Vulkan handles and a permanent mapping, used under `STORE_IMAGES`.
@@ -763,6 +778,7 @@ pub(crate) fn present_store(
     window: sdl3::Window,
     store: &appkit::backing::Store,
     holes: &[appkit::backing::Hole],
+    overlays: &[appkit::backing::GpuOverlay],
 ) -> bool {
     if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
         return false;
@@ -820,11 +836,12 @@ pub(crate) fn present_store(
                 gpu,
                 image,
                 staging,
+                blended: None,
             },
         ));
     }
-    let entry = &images
-        .iter()
+    let entry = &mut images
+        .iter_mut()
         .find(|(key, _)| *key == window as usize)
         .expect("made above")
         .1;
@@ -866,6 +883,10 @@ pub(crate) fn present_store(
         gpu::trace(format!("window store upload failed: {reason}"));
         return false;
     }
+    let shown = match overlays.is_empty() {
+        true => &entry.image,
+        false => blend_overlays(window, entry, overlays),
+    };
     let frame = appkit::view::Frame {
         window,
         x: 0,
@@ -879,14 +900,13 @@ pub(crate) fn present_store(
         .iter()
         .map(|hole| (hole.layer, crate::swapchain::Region::from(hole.rect)))
         .collect();
-    let presented =
-        match crate::swapchain::present(gpu, window as usize, &frame, &entry.image, &holes) {
-            Ok(presented) => presented,
-            Err(reason) => {
-                gpu::trace(format!("window store presentation failed: {reason}"));
-                false
-            }
-        };
+    let presented = match crate::swapchain::present(gpu, window as usize, &frame, shown, &holes) {
+        Ok(presented) => presented,
+        Err(reason) => {
+            gpu::trace(format!("window store presentation failed: {reason}"));
+            false
+        }
+    };
     drop(images);
     let expired: Vec<StoreImage> = {
         let mut retired = RETIRED.lock().expect("retired images");
@@ -900,13 +920,49 @@ pub(crate) fn present_store(
         expired.into_iter().map(|(image, _)| image).collect()
     };
     for old in expired {
-        old.gpu.destroy_buffer(old.staging);
-        old.gpu.destroy_image(old.image);
+        old.destroy();
     }
     if presented {
         gpu::milestone("window store");
     }
     presented
+}
+
+/// The store with `overlays` blended over it, or the store alone where they
+/// cannot be; the window is then given pixel overlays from the next frame.
+fn blend_overlays<'a>(
+    window: sdl3::Window,
+    entry: &'a mut StoreImage,
+    overlays: &[appkit::backing::GpuOverlay],
+) -> &'a GpuImage {
+    let (width, height) = (entry.image.width, entry.image.height);
+    if entry.blended.is_none() {
+        match entry
+            .gpu
+            .create_image(&crate::overlay::target_description(width, height))
+        {
+            Ok(image) => entry.blended = Some(image),
+            Err(reason) => {
+                gpu::trace(format!("no image to blend overlays into: {reason}"));
+                appkit::backing::refuse_dmabufs(window);
+                return &entry.image;
+            }
+        }
+    }
+    let blended = entry.blended.as_ref().expect("made above");
+    match crate::overlay::blend(entry.gpu, &entry.image, blended, overlays) {
+        Ok(refused) => {
+            if !refused.is_empty() {
+                appkit::backing::refuse_dmabufs(window);
+            }
+            blended
+        }
+        Err(reason) => {
+            gpu::trace(format!("blending overlays failed: {reason}"));
+            appkit::backing::refuse_dmabufs(window);
+            &entry.image
+        }
+    }
 }
 
 #[cfg(test)]

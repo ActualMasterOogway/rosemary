@@ -211,6 +211,9 @@ struct Api {
     SDL_GetDisplayUsableBounds: Option<unsafe extern "C" fn(u32, *mut Rect) -> bool>,
     SDL_GetDisplayContentScale: Option<unsafe extern "C" fn(u32) -> f32>,
     SDL_GetDesktopDisplayMode: Option<unsafe extern "C" fn(u32) -> *const DisplayMode>,
+    SDL_GetCurrentDisplayMode: Option<unsafe extern "C" fn(u32) -> *const DisplayMode>,
+    SDL_GetDisplayForWindow: Option<unsafe extern "C" fn(Window) -> u32>,
+    SDL_GetDisplayName: Option<unsafe extern "C" fn(u32) -> *const c_char>,
     SDL_GetFullscreenDisplayModes:
         Option<unsafe extern "C" fn(u32, *mut c_int) -> *mut *mut DisplayMode>,
 
@@ -432,6 +435,9 @@ fn api() -> Option<&'static Api> {
             SDL_GetDisplayUsableBounds,
             SDL_GetDisplayContentScale,
             SDL_GetDesktopDisplayMode,
+            SDL_GetCurrentDisplayMode,
+            SDL_GetDisplayForWindow,
+            SDL_GetDisplayName,
             SDL_GetFullscreenDisplayModes,
             SDL_PollEvent,
             SDL_WaitEventTimeout,
@@ -2691,6 +2697,38 @@ pub mod video {
         let mode = unsafe { f(display) };
         // SAFETY: SDL's own mode record, valid until the display changes.
         (!mode.is_null()).then(|| unsafe { *mode })
+    }
+
+    /// The mode `display` is showing now, copied out of SDL's record: the
+    /// desktop mode unless a window made it fullscreen at another.
+    pub fn current_mode(display: u32) -> Option<DisplayMode> {
+        let f = api()?.SDL_GetCurrentDisplayMode?;
+        // SAFETY: a display id.
+        let mode = unsafe { f(display) };
+        // SAFETY: SDL's own mode record, valid until the display changes.
+        (!mode.is_null()).then(|| unsafe { *mode })
+    }
+
+    /// The display most of `window` is on, or `None` when SDL cannot say.
+    pub fn display_for_window(window: Window) -> Option<u32> {
+        let f = api()?.SDL_GetDisplayForWindow?;
+        // SAFETY: a window this crate created.
+        let display = unsafe { f(window) };
+        (display != 0).then_some(display)
+    }
+
+    /// The name SDL gives `display`: on Wayland and X11, usually the host's
+    /// name for the connector, such as `DP-1`.
+    pub fn display_name(display: u32) -> Option<String> {
+        let f = api()?.SDL_GetDisplayName?;
+        // SAFETY: a display id.
+        let name = unsafe { f(display) };
+        // SAFETY: SDL's own NUL-terminated string, copied at once.
+        (!name.is_null()).then(|| {
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     /// Every fullscreen mode SDL lists for `display`, largest first.

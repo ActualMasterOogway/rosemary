@@ -135,6 +135,19 @@ pub struct Gpu {
     /// which cannot resolve a multisampled depth or stencil attachment at
     /// all, and a pass which asks for one is reported and left unresolved.
     pub(crate) depth_stencil_resolve: Option<DepthStencilResolve>,
+    /// Sampling Linux dma-bufs, where the device can import them. `None`
+    /// is a device whose windows are only ever given pixels.
+    pub(crate) dmabuf: Option<DmabufImport>,
+}
+
+/// What importing a dma-buf as an image takes.
+pub(crate) struct DmabufImport {
+    pub memory_fd: ash::khr::external_memory_fd::Device,
+    /// Whether ownership comes from `VK_QUEUE_FAMILY_FOREIGN_EXT`, rather
+    /// than the less specific `VK_QUEUE_FAMILY_EXTERNAL`.
+    pub foreign: bool,
+    /// The device's DRM render node, as `st_rdev`, where it says.
+    pub render_node: Option<u64>,
 }
 
 struct Immediate {
@@ -307,6 +320,17 @@ fn create_device(
     // across the call, and every enabled bit came from the adapter query.
     unsafe { instance.create_device(physical, &create_info, None) }
         .map_err(|error| format!("vkCreateDevice failed with {error:?}"))
+}
+
+/// A DRM node's device number, as `stat` gives it; only Linux has them.
+fn render_node(major: i64, minor: i64) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    return Some(libc::makedev(major as u32, minor as u32));
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (major, minor);
+        None
+    }
 }
 
 /// Which spelling of mirror-clamp sampling a device offers: the Vulkan 1.2
@@ -532,6 +556,38 @@ impl Gpu {
             // nothing, and is the same as one without the feature at all.
             .filter(|support| !(support.depth_modes | support.stencil_modes).is_empty());
 
+        // Importing a dma-buf needs its memory by descriptor and its layout
+        // by modifier; the modifier extension builds on image format lists,
+        // which Vulkan 1.2 has in core.
+        let dmabuf = has(ash::khr::external_memory_fd::NAME)
+            && has(ash::ext::external_memory_dma_buf::NAME)
+            && has(ash::ext::image_drm_format_modifier::NAME)
+            && (target.vulkan_version >= (1, 2) || has(ash::khr::image_format_list::NAME));
+        let foreign = dmabuf && has(ash::ext::queue_family_foreign::NAME);
+        if dmabuf {
+            enabled.push(ash::khr::external_memory_fd::NAME.as_ptr());
+            enabled.push(ash::ext::external_memory_dma_buf::NAME.as_ptr());
+            enabled.push(ash::ext::image_drm_format_modifier::NAME.as_ptr());
+            if target.vulkan_version < (1, 2) {
+                enabled.push(ash::khr::image_format_list::NAME.as_ptr());
+            }
+            if foreign {
+                enabled.push(ash::ext::queue_family_foreign::NAME.as_ptr());
+            }
+        }
+        let render_node = has(ash::ext::physical_device_drm::NAME)
+            .then(|| {
+                let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+                let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut drm);
+                // SAFETY: the extension is advertised and both structures
+                // live across the query.
+                unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+                (drm.has_render == vk::TRUE)
+                    .then(|| render_node(drm.render_major, drm.render_minor))
+                    .flatten()
+            })
+            .flatten();
+
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -562,6 +618,11 @@ impl Gpu {
             support,
         });
         let swapchain_api = presents.then(|| ash::khr::swapchain::Device::new(instance, &device));
+        let dmabuf = dmabuf.then(|| DmabufImport {
+            memory_fd: ash::khr::external_memory_fd::Device::new(instance, &device),
+            foreign,
+            render_node,
+        });
         let push_descriptor_api =
             pushes.then(|| ash::khr::push_descriptor::Device::new(instance, &device));
         let max_push_descriptors = if pushes {
@@ -614,6 +675,7 @@ impl Gpu {
             swapchain_api,
             swapchain_maintenance1,
             depth_stencil_resolve,
+            dmabuf,
         })
     }
 }
