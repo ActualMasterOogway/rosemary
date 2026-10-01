@@ -86,7 +86,9 @@ pub(crate) fn changed(receiver: Id) {
 fn store(receiver: Id, value: Id, slot: impl FnOnce(&mut Look) -> &mut usize) {
     let retained = objc::arc::retain(value) as usize;
     let mut old = 0;
-    update(receiver, |look| old = std::mem::replace(slot(look), retained));
+    update(receiver, |look| {
+        old = std::mem::replace(slot(look), retained)
+    });
     objc::arc::release(old as Id);
 }
 
@@ -175,7 +177,12 @@ unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     }
     if look.bordered {
         let edge = chrome::Color::rgba(0, 0, 0, 0.25);
-        canvas.stroke_rounded_rect(chrome::Rect::new(0.5, 0.5, w - 1.0, h - 1.0), 0.0, 1.0, edge);
+        canvas.stroke_rounded_rect(
+            chrome::Rect::new(0.5, 0.5, w - 1.0, h - 1.0),
+            0.0,
+            1.0,
+            edge,
+        );
     }
     let text = crate::text::field_text(receiver);
     if let Some((font, size)) = font_of(&look)

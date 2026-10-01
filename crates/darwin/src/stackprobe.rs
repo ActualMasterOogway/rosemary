@@ -36,14 +36,12 @@ unsafe extern "C" fn chkstk() {
         "cmp w9, #4096",
         "mov x10, sp",
         "b.lo 3f",
-
         "2:",
         "sub x10, x10, #4096",
         "ldr xzr, [x10]",
         "sub w9, w9, #4096",
         "cmp w9, #4096",
         "b.hi 2b",
-
         "3:",
         "sub x10, x10, x9",
         "ldr xzr, [x10]",

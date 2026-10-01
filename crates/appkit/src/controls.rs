@@ -144,12 +144,12 @@ fn fitting_size(v: Id, depth: usize) -> NSSize {
         .collect();
     let gaps = stack.spacing * sizes.len().saturating_sub(1) as f64;
     let insets = stack.insets;
-    let (along, across) = sizes.iter().fold((gaps, 0.0f64), |(along, across), s| {
-        match vertical {
+    let (along, across) = sizes
+        .iter()
+        .fold((gaps, 0.0f64), |(along, across), s| match vertical {
             true => (along + s.height, across.max(s.width)),
             false => (along + s.width, across.max(s.height)),
-        }
-    });
+        });
     match vertical {
         true => NSSize {
             width: across + insets.left + insets.right,
@@ -517,8 +517,18 @@ unsafe extern "C" fn box_box_type(receiver: Id, _sel: Sel) -> usize {
 /// `-setContentViewMargins:`. Only read back: a box here has no content view
 /// of its own to inset, and what a program puts in it places itself.
 unsafe extern "C" fn box_set_content_view_margins(receiver: Id, _sel: Sel, margins: NSSize) {
-    write(boxes(), receiver, slot::MARGIN_WIDTH, margins.width.to_bits() as usize);
-    write(boxes(), receiver, slot::MARGIN_HEIGHT, margins.height.to_bits() as usize);
+    write(
+        boxes(),
+        receiver,
+        slot::MARGIN_WIDTH,
+        margins.width.to_bits() as usize,
+    );
+    write(
+        boxes(),
+        receiver,
+        slot::MARGIN_HEIGHT,
+        margins.height.to_bits() as usize,
+    );
 }
 
 unsafe extern "C" fn box_content_view_margins(receiver: Id, _sel: Sel) -> NSSize {
@@ -683,7 +693,12 @@ unsafe extern "C" fn button_alternate_image(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn button_set_bordered(receiver: Id, _sel: Sel, value: u8) {
-    write(buttons(), receiver, slot::NOT_BORDERED, usize::from(value == 0));
+    write(
+        buttons(),
+        receiver,
+        slot::NOT_BORDERED,
+        usize::from(value == 0),
+    );
 }
 
 unsafe extern "C" fn button_is_bordered(receiver: Id, _sel: Sel) -> u8 {
@@ -691,7 +706,12 @@ unsafe extern "C" fn button_is_bordered(receiver: Id, _sel: Sel) -> u8 {
 }
 
 unsafe extern "C" fn button_set_transparent(receiver: Id, _sel: Sel, value: u8) {
-    write(buttons(), receiver, slot::BUTTON_TRANSPARENT, usize::from(value != 0));
+    write(
+        buttons(),
+        receiver,
+        slot::BUTTON_TRANSPARENT,
+        usize::from(value != 0),
+    );
     crate::backing::needs_display(receiver);
 }
 

@@ -1876,7 +1876,10 @@ mod tests {
         assert_eq!(crate::layer::delegate_of(layer), view);
         assert_eq!(crate::layer::bounds_of(layer).size.width, 10.0);
         send::<u8, ()>(view, "setWantsLayer:", 0);
-        assert!(send::<(), Id>(view, "layer", ()).is_null(), "AppKit's layer goes");
+        assert!(
+            send::<(), Id>(view, "layer", ()).is_null(),
+            "AppKit's layer goes"
+        );
         objc::arc::pool_pop(pool);
     }
 

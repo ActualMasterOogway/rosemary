@@ -1589,9 +1589,7 @@ mod tests {
         /// Every path the walk asks about exists and is a regular file.
         pub unsafe extern "C" fn stat(_path: *const c_char, out: *mut GuestStat) -> c_int {
             // SAFETY: the walk's own structure.
-            unsafe {
-                (*out).mode = libc::S_IFREG as _
-            };
+            unsafe { (*out).mode = libc::S_IFREG as _ };
             0
         }
 
