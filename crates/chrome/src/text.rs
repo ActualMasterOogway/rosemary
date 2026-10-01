@@ -54,23 +54,38 @@ impl Font {
     /// The interface font at `weight` (400 regular, 700 bold), or `None` on a
     /// host with no usable fonts at all.
     pub fn system(weight: u16) -> Option<Arc<Font>> {
-        static CACHE: OnceLock<Mutex<HashMap<u16, Option<Arc<Font>>>>> = OnceLock::new();
+        Font::cached(weight, false)
+    }
+
+    /// The desktop's monospace font at `weight`, for commands and paths, or
+    /// `None` when the host has none.
+    pub fn monospace(weight: u16) -> Option<Arc<Font>> {
+        Font::cached(weight, true)
+    }
+
+    fn cached(weight: u16, monospace: bool) -> Option<Arc<Font>> {
+        type Cache = HashMap<(u16, bool), Option<Arc<Font>>>;
+        static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
         cache
-            .entry(weight)
-            .or_insert_with(|| Font::load(weight).map(Arc::new))
+            .entry((weight, monospace))
+            .or_insert_with(|| Font::load(weight, monospace).map(Arc::new))
             .clone()
     }
 
-    fn load(weight: u16) -> Option<Font> {
-        let primary = UI_FAMILIES
-            .iter()
-            .find_map(|family| exact_family(family, weight))
-            .or_else(|| {
-                let family = fonts::default_family(false)?;
-                fonts::resolve(&family, weight, false)
-            })?;
+    fn load(weight: u16, monospace: bool) -> Option<Font> {
+        let default = || {
+            let family = fonts::default_family(monospace)?;
+            fonts::resolve(&family, weight, false)
+        };
+        let primary = match monospace {
+            true => default()?,
+            false => UI_FAMILIES
+                .iter()
+                .find_map(|family| exact_family(family, weight))
+                .or_else(default)?,
+        };
         let mut infos = vec![primary];
         for family in FALLBACK_FAMILIES {
             if let Some(face) = exact_family(family, weight)

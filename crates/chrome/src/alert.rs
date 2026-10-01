@@ -5,6 +5,7 @@ use crate::checkbox::{Checkbox, CheckboxLayout};
 use crate::geometry::{Point, Rect};
 use crate::menu::State;
 use crate::paint::{Canvas, Image};
+use crate::rich::{Align, RichLayout, RichText};
 use crate::text::Font;
 use crate::theme::Theme;
 use crate::view::View;
@@ -13,6 +14,9 @@ use crate::view::View;
 pub struct Alert {
     pub message: String,
     pub informative: String,
+    /// Styled informative text with links, in place of `informative`. Only
+    /// Rosetta 3's own alerts set it; a program's text is always plain.
+    pub rich_informative: Option<RichText>,
     /// The first is the default, answered by Return.
     pub buttons: Vec<String>,
     pub icon: Option<Image>,
@@ -37,6 +41,9 @@ pub enum Part {
     Button(usize),
     Checkbox,
     Accessory(usize),
+    /// A link in the rich informative text, by its index in
+    /// [`RichLayout::links`].
+    Link(usize),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -52,6 +59,8 @@ pub struct AlertLayout {
     pub bounds: Rect,
     pub icon: Option<Rect>,
     pub lines: Vec<Line>,
+    /// The rich informative text, when the alert has some.
+    pub rich: Option<RichLayout>,
     /// One per button, in the order they were given.
     pub buttons: Vec<Rect>,
     pub checkbox: Option<CheckboxLayout>,
@@ -74,6 +83,27 @@ const TITLE_PADDING: f32 = 12.0;
 /// Beyond this the rest of the text is cut, so an alert still fits on the
 /// screen with its buttons.
 const MAX_LINES: usize = 40;
+
+impl AlertLayout {
+    /// Where the link `index` of [`Part::Link`] goes.
+    pub fn link_url(&self, index: usize) -> Option<&str> {
+        Some(self.rich.as_ref()?.links.get(index)?.url.as_str())
+    }
+
+    /// Everything in the alert that takes a click.
+    pub fn controls(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.buttons
+            .iter()
+            .copied()
+            .chain(self.checkbox.as_ref().map(|c| c.bounds))
+            .chain(self.accessories.iter().map(|c| c.bounds))
+            .chain(
+                self.rich
+                    .iter()
+                    .flat_map(|r| r.links.iter().map(|l| l.rect)),
+            )
+    }
+}
 
 impl Alert {
     /// The button Escape answers: the one titled Cancel, as in `NSAlert`.
@@ -158,12 +188,31 @@ impl View for Alert {
             let size = theme.alert_message_size;
             text(Font::system(700), &self.message, size, true, &mut y);
         }
-        if !self.informative.is_empty() {
-            if !self.message.is_empty() {
-                y += BEFORE_INFORMATIVE;
+        let mut rich = None;
+        match &self.rich_informative {
+            Some(body) if !body.is_empty() => {
+                if !self.message.is_empty() {
+                    y += BEFORE_INFORMATIVE;
+                }
+                let layout = body.layout(
+                    Point::new(x + SIDE, y),
+                    text_width,
+                    theme.alert_informative_size,
+                    Align::Center,
+                    MAX_LINES,
+                );
+                y = layout.bounds.bottom();
+                rich = Some(layout);
             }
-            let size = theme.alert_informative_size;
-            text(Font::system(400), &self.informative, size, false, &mut y);
+            Some(_) => {}
+            None if !self.informative.is_empty() => {
+                if !self.message.is_empty() {
+                    y += BEFORE_INFORMATIVE;
+                }
+                let size = theme.alert_informative_size;
+                text(Font::system(400), &self.informative, size, false, &mut y);
+            }
+            None => {}
         }
         let checkbox = self.checkbox.as_ref().map(|title| {
             y += BEFORE_CHECKBOX;
@@ -239,6 +288,7 @@ impl View for Alert {
             bounds: Rect::new(x, bounds.y, width, (bottom + BOTTOM - bounds.y).ceil()),
             icon,
             lines,
+            rich,
             buttons,
             checkbox,
             accessories,
@@ -267,6 +317,15 @@ impl View for Alert {
             if let Some(font) = Font::system(weight) {
                 canvas.draw_text(&line.text, &font, size, line.origin, theme.alert_text);
             }
+        }
+        if let (Some(body), Some(rich)) = (&self.rich_informative, &layout.rich) {
+            body.paint(
+                canvas,
+                rich,
+                theme.alert_informative_size,
+                theme.alert_text,
+                theme.link,
+            );
         }
         if let (Some(title), Some(placement)) = (&self.checkbox, &layout.checkbox) {
             Checkbox {
@@ -326,6 +385,9 @@ impl View for Alert {
     }
 
     fn hit(&self, layout: &AlertLayout, point: Point) -> Option<Part> {
+        if let Some(index) = layout.rich.as_ref().and_then(|rich| rich.link_at(point)) {
+            return Some(Part::Link(index));
+        }
         if layout
             .checkbox
             .as_ref()
@@ -477,6 +539,35 @@ mod tests {
             alert.checkbox.as_deref().unwrap()
         );
         assert!(checkbox.bounds.right() < layout.bounds.right());
+    }
+
+    #[test]
+    fn plain_alerts_have_no_rich_text_or_links() {
+        let alert = alert(&["OK"]);
+        let layout = laid_out(&alert);
+        assert!(layout.rich.is_none());
+        assert!(layout.lines.iter().any(|line| !line.bold));
+        assert_eq!(layout.controls().count(), 1);
+    }
+
+    #[test]
+    fn rich_informative_text_replaces_the_plain_and_its_links_are_hit() {
+        if Font::system(400).is_none() {
+            return;
+        }
+        let url = "https://example.com/base.zip";
+        let alert = Alert {
+            rich_informative: Some(RichText::new().plain("From ").link(url, url)),
+            ..alert(&["Download", "Not Now"])
+        };
+        let layout = laid_out(&alert);
+        assert!(layout.lines.iter().all(|line| line.bold));
+        let rich = layout.rich.as_ref().unwrap();
+        let link = rich.links[0].rect;
+        assert!(link.bottom() < layout.buttons[0].y);
+        assert_eq!(alert.hit(&layout, link.center()), Some(Part::Link(0)));
+        assert_eq!(layout.link_url(0), Some(url));
+        assert!(layout.controls().any(|rect| rect == link));
     }
 
     #[test]

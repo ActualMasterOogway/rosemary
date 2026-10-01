@@ -10,6 +10,7 @@ pub mod fonts;
 pub mod geometry;
 pub mod menu;
 pub mod paint;
+pub mod rich;
 pub mod text;
 pub mod theme;
 pub mod titlebar;
@@ -17,6 +18,7 @@ pub mod view;
 
 pub use geometry::{Point, Rect, Size};
 pub use paint::{Canvas, Color, Image, Path};
+pub use rich::RichText;
 pub use text::Font;
 pub use theme::Theme;
 pub use view::View;
