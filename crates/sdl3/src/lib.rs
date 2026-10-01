@@ -14,6 +14,22 @@ pub mod init {
     pub const GAMEPAD: u32 = 0x0000_2000;
 }
 
+/// Open a URL with the desktop's registered handler.
+pub fn open_url(url: &str) -> bool {
+    let Ok(url) = CString::new(url) else {
+        return false;
+    };
+    let Some(handle) = library() else {
+        return false;
+    };
+    let Some(open) =
+        (unsafe { entry::<unsafe extern "C" fn(*const c_char) -> bool>(handle, "SDL_OpenURL") })
+    else {
+        return false;
+    };
+    unsafe { open(url.as_ptr()) }
+}
+
 pub type AudioStream = *mut c_void;
 
 /// `SDL_AudioStreamCallback`: `(userdata, stream, additional, total)`.

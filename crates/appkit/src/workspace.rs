@@ -68,6 +68,34 @@ unsafe extern "C" fn application_url_for_url(_receiver: Id, _sel: Sel, _url: Id)
     std::ptr::null_mut()
 }
 
+/// `-[NSWorkspace openURL:]`: hand a URL to the host's registered handler.
+unsafe extern "C" fn open_url(_receiver: Id, _sel: Sel, url: Id) -> u8 {
+    let Some(url) = (unsafe { corefoundation::url::as_url(url as *const std::ffi::c_void) }) else {
+        return 0;
+    };
+    let Some(target) = open_target(url) else {
+        return 0;
+    };
+    u8::from(sdl3::open_url(&target))
+}
+
+fn open_target(url: &corefoundation::url::Contents) -> Option<String> {
+    if url.scheme().is_empty() {
+        return None;
+    }
+    let Some(path) = url.file_path() else {
+        return Some(url.text.clone());
+    };
+    let host = prefix::ns::host_path(&path);
+    let file_url =
+        corefoundation::url::new_file_url(&host.to_string_lossy(), url.text.ends_with('/'));
+    let text = unsafe { corefoundation::url::as_url(file_url) }?
+        .text
+        .clone();
+    unsafe { corefoundation::api::CFRelease(file_url) };
+    Some(text)
+}
+
 /// `-[NSWorkspace notificationCenter]`.
 ///
 /// Workspace notifications share Foundation's process-wide center in this
@@ -319,6 +347,7 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
+        "openURL:" => open_url, c"c24@0:8@16";
         "notificationCenter" => notification_center, c"@16@0:8";
         "frontmostApplication" => frontmost_application, c"@16@0:8";
         "runningApplications" => workspace_running_applications, c"@16@0:8";
@@ -346,6 +375,47 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_url_rejects_nil_and_text_without_a_scheme() {
+        crate::bootstrap();
+        let result = unsafe {
+            open_url(
+                std::ptr::null_mut(),
+                objc::sel::get("openURL:"),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, 0);
+
+        let url = corefoundation::url::new("not a URL");
+        let contents = unsafe { corefoundation::url::as_url(url) }.unwrap();
+        assert!(open_target(contents).is_none());
+        unsafe { corefoundation::api::CFRelease(url) };
+    }
+
+    #[test]
+    fn open_url_passes_web_urls_and_maps_file_urls() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSWorkspace").unwrap();
+        assert!(class.method(objc::sel::get("openURL:")).is_some());
+
+        let web = corefoundation::url::new("https://example.com/a?b=c");
+        let contents = unsafe { corefoundation::url::as_url(web) }.unwrap();
+        assert_eq!(
+            open_target(contents),
+            Some("https://example.com/a?b=c".to_string())
+        );
+        unsafe { corefoundation::api::CFRelease(web) };
+
+        let file = corefoundation::url::new_file_url("/tmp/a file.txt", false);
+        let contents = unsafe { corefoundation::url::as_url(file) }.unwrap();
+        assert_eq!(
+            open_target(contents),
+            Some("file:///tmp/a%20file.txt".to_string())
+        );
+        unsafe { corefoundation::api::CFRelease(file) };
+    }
 
     #[test]
     fn shared_workspace_is_one_process_lifetime_object() {
