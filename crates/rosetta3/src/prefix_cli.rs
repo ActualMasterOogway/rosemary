@@ -4,6 +4,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use appkit::dialog::RichText;
 use prefix::Prefix;
 use prefix::cache::Cache;
 use prefix::format::spec::Policy;
@@ -68,16 +69,32 @@ fn asker(gui: bool) -> impl FnMut(&Request) -> Answer {
     }
 }
 
-fn question(request: &Request) -> String {
-    let size = request
-        .bytes
+fn download_size(bytes: Option<u64>) -> String {
+    bytes
         .map(|b| format!("{:.1} MB", b as f64 / 1e6))
-        .unwrap_or_else(|| "an unknown amount".into());
+        .unwrap_or_else(|| "an unknown amount".into())
+}
+
+/// `source` added to `text`: a link when it is a web address, which the
+/// dialog can open.
+fn with_source(text: RichText, source: Option<&str>) -> RichText {
+    match source {
+        Some(url) if url.starts_with("https://") || url.starts_with("http://") => {
+            text.link(url, url)
+        }
+        Some(other) => text.code(other),
+        None => text.plain("(no source)"),
+    }
+}
+
+const VERIFIED_AND_CACHED: &str = "It is checked against hashes built into Rosetta 3 before \
+    anything uses it, and kept in a cache so it never has to be downloaded again.";
+
+fn question(request: &Request) -> String {
+    let size = download_size(request.bytes);
     format!(
         "This prefix needs a Darwin base system:\n  {}\n\n\
-         This will download {size} from\n  {}\n\n\
-         It is checked against hashes built into Rosetta 3 before anything uses it, \
-         and kept in a cache so it never has to be downloaded again.",
+         This will download {size} from\n  {}\n\n{VERIFIED_AND_CACHED}",
         request.spec.describe(),
         request.sources.first().copied().unwrap_or("(no source)"),
     )
@@ -87,14 +104,23 @@ fn ask_with_dialog(request: &Request) -> Option<Answer> {
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return None;
     }
+    let informative = RichText::new()
+        .plain("This prefix needs a Darwin base system:\n")
+        .bold(request.spec.describe())
+        .plain(format!(
+            "\n\nThis will download {} from\n",
+            download_size(request.bytes)
+        ));
+    let informative = with_source(informative, request.sources.first().copied())
+        .plain(format!(
+            "\n\n{VERIFIED_AND_CACHED}\n\nTo use a MiniDarwin bundle you already have \
+             instead, choose Not Now and run\n"
+        ))
+        .code("rosetta3 prefix create --bundle FILE");
     let request = appkit::dialog::Request {
         title: "Rosetta 3".to_string(),
         message: "Download the Darwin base system?".to_string(),
-        informative: format!(
-            "{}\n\nTo use a MiniDarwin bundle you already have instead, choose Not Now and \
-             run\nrosetta3 prefix create --bundle FILE",
-            question(request)
-        ),
+        rich_informative: Some(informative),
         buttons: vec!["Download".to_string(), "Not Now".to_string()],
         cancel: Some(1),
         application_icon: false,
@@ -261,26 +287,22 @@ fn update_needed(state: &State, pinned_manifest: Option<&str>) -> bool {
 }
 
 fn ask_update(from: &str, spec: &prefix::format::Spec) -> Option<(bool, bool)> {
-    let size = spec
-        .artifact
-        .size
-        .map(|bytes| format!("{:.1} MB", bytes as f64 / 1e6))
-        .unwrap_or_else(|| "an unknown amount".into());
-    let source = spec
-        .artifact
-        .sources
-        .first()
-        .map(String::as_str)
-        .unwrap_or("(no source)");
+    let size = download_size(spec.artifact.size);
+    let source = spec.artifact.sources.first().map(String::as_str);
     let summary = format!(
-        "This prefix has {from}. This build ships with {}. Updating may download {size} from\n{source}",
-        spec.describe()
+        "This prefix has {from}. This build ships with {}. Updating may download {size} from\n{}",
+        spec.describe(),
+        source.unwrap_or("(no source)")
     );
     if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let informative = RichText::new()
+            .plain(format!("This prefix has {from}. This build ships with "))
+            .bold(spec.describe())
+            .plain(format!(". Updating may download {size} from\n"));
         let request = appkit::dialog::Request {
             title: "Rosetta 3".into(),
             message: "Update the MiniDarwin base system?".into(),
-            informative: summary.clone(),
+            rich_informative: Some(with_source(informative, source)),
             buttons: vec!["Update".into(), "Not Now".into()],
             cancel: Some(1),
             checkbox: Some("Don't remind me about updates again".into()),
