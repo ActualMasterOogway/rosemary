@@ -35,13 +35,13 @@ pub struct Stat {
 impl DarwinTranslation<libc::stat> for Stat {
     fn to_host(&self) -> libc::stat {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        stat.st_dev = self.dev as u64;
+        stat.st_dev = self.dev as _;
         stat.st_mode = self.mode.into();
         stat.st_nlink = self.nlink.into();
         stat.st_ino = self.ino;
         stat.st_uid = self.uid;
         stat.st_gid = self.gid;
-        stat.st_rdev = self.rdev as u64;
+        stat.st_rdev = self.rdev as _;
         stat.st_atime = self.atime.sec;
         stat.st_atime_nsec = self.atime.nsec;
         stat.st_mtime = self.mtime.sec;

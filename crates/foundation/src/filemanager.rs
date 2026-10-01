@@ -504,17 +504,19 @@ unsafe extern "C" fn attributes_of_file_system(
     if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
         return std::ptr::null_mut();
     }
+    // macOS uses 32-bit counters; widen before computing byte sizes.
+    let frsize = stat.f_frsize as u64;
     let entries = [
         (
             "NSFileSystemSize",
-            stat.f_blocks.saturating_mul(stat.f_frsize),
+            (stat.f_blocks as u64).saturating_mul(frsize),
         ),
         (
             "NSFileSystemFreeSize",
-            stat.f_bavail.saturating_mul(stat.f_frsize),
+            (stat.f_bavail as u64).saturating_mul(frsize),
         ),
-        ("NSFileSystemNodes", stat.f_files),
-        ("NSFileSystemFreeNodes", stat.f_favail),
+        ("NSFileSystemNodes", stat.f_files as u64),
+        ("NSFileSystemFreeNodes", stat.f_favail as u64),
     ];
     let pairs: Vec<(CFTypeRef, CFTypeRef)> = entries
         .iter()
@@ -743,6 +745,18 @@ mod tests {
             )
         };
         assert!(!attributes.is_null());
+        let host_path = std::ffi::CString::new(root.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: a valid path and writable statvfs output.
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::statvfs(host_path.as_ptr(), &mut stat) }, 0);
+        let expected_size =
+            (u128::from(stat.f_blocks) * u128::from(stat.f_frsize)).min(i64::MAX as u128) as i64;
+        // SAFETY: the returned dictionary holds an NSNumber at this key.
+        let size = unsafe { attribute(attributes, "NSFileSystemSize") };
+        let size = unsafe { corefoundation::collections::number(size as CFTypeRef) }
+            .expect("filesystem size number")
+            .as_i64();
+        assert_eq!(size, expected_size);
         // SAFETY: the returned dictionary holds an NSNumber at this key.
         let free = unsafe { attribute(attributes, "NSFileSystemFreeSize") };
         let free = unsafe { corefoundation::collections::number(free as CFTypeRef) }
