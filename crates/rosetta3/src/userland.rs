@@ -30,6 +30,7 @@ const LIBRARIES: &[&str] = &[
     "libxo.0.dylib",
     "libremovefile.dylib",
     "libxml2.dylib",
+    "libxml2.2.dylib",
     "libxml2.2.9.13.dylib",
     "libbz2.dylib",
     "libbz2.1.0.dylib",
