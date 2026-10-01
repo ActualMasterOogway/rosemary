@@ -404,13 +404,27 @@ impl Emitter {
                 second,
                 weight,
             } => {
-                self.emit_ext_inst(
-                    function,
-                    instruction,
-                    values,
-                    GlslStd450Op::FMix,
-                    [first, second, weight],
-                )?;
+                // Metal's mix is exact at its ends: a weight of 1 gives y
+                // whatever x is. GLSL's FMix leaves the form to the driver, and
+                // NVIDIA's x + (y - x) * a rounds y away when x is huge -
+                // Roblox's fog trick mixes a FogColor in the millions at a = 1.
+                // (x - x * a) + y * a is exact at both ends; NoContraction
+                // keeps the driver from refactoring it back.
+                let result = instruction
+                    .result
+                    .ok_or_else(|| emission("mix has no result"))?;
+                let ty = self.type_id(&function.values[result.0 as usize])?;
+                let x = self.operand(first, values)?;
+                let y = self.operand(second, values)?;
+                let a = self.operand(weight, values)?;
+                let b = &mut self.builder;
+                let x_a = b.f_mul(ty, None, x, a).map_err(build_error)?;
+                let x_rest = b.f_sub(ty, None, x, x_a).map_err(build_error)?;
+                let y_a = b.f_mul(ty, None, y, a).map_err(build_error)?;
+                let mixed = b.f_add(ty, result_id, x_rest, y_a).map_err(build_error)?;
+                for id in [x_a, x_rest, y_a, mixed] {
+                    b.decorate(id, Decoration::NoContraction, []);
+                }
             }
             _ => unreachable!("not an arithmetic instruction"),
         }

@@ -1788,3 +1788,52 @@ fn a_signed_vertex_attribute_is_declared_signed() {
     assert_eq!(bitcast.operands[0].unwrap_id_ref(), load.result_id.unwrap());
     assert!(!is_signed_int32(&parsed, bitcast.result_type.unwrap()));
 }
+
+/// Metal's `mix` returns `y` exactly at a weight of one, however large `x`
+/// is. GLSL's `FMix` leaves the form to the driver, and NVIDIA's rounds `y`
+/// away against a large `x`: Roblox's fog trick mixes a fog colour in the
+/// millions at weight one and lost every dark colour to it. The lowering must
+/// be an endpoint-exact form the driver may not refactor.
+#[test]
+fn mix_is_exact_at_its_endpoints() {
+    let module = buffer_kernel(
+        vec![Type::Float { bits: 32 }],
+        vec![Instruction {
+            result: Some(ValueId(1)),
+            kind: InstructionKind::FloatMix {
+                first: Operand::f32(3_844_675.0),
+                second: Operand::f32(0.02),
+                weight: Operand::f32(1.0),
+            },
+        }],
+    );
+    module.verify().unwrap();
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    assert!(
+        body_instructions(&parsed, Op::ExtInst).is_empty(),
+        "mix is not left to GLSL.std.450 FMix"
+    );
+    let arithmetic: Vec<u32> = [Op::FMul, Op::FSub, Op::FAdd]
+        .into_iter()
+        .flat_map(|op| body_instructions(&parsed, op))
+        .filter_map(|instruction| instruction.result_id)
+        .collect();
+    assert_eq!(arithmetic.len(), 4, "x * a, x - x * a, y * a and their sum");
+    for id in arithmetic {
+        assert!(
+            parsed.annotations.iter().any(|annotation| {
+                annotation.class.opcode == Op::Decorate
+                    && annotation.operands.first() == Some(&rspirv::dr::Operand::IdRef(id))
+                    && annotation.operands.get(1)
+                        == Some(&rspirv::dr::Operand::Decoration(
+                            rspirv::spirv::Decoration::NoContraction,
+                        ))
+            }),
+            "%{id} carries NoContraction"
+        );
+    }
+}
