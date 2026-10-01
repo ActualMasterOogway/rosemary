@@ -1125,9 +1125,214 @@ unsafe extern "C" fn string_bounding_rect(
     }
 }
 
+/// The attributes text is drawn with, read from an attributes dictionary.
+struct TextStyle {
+    font: std::sync::Arc<chrome::Font>,
+    size: f32,
+    color: chrome::Color,
+    alignment: isize,
+}
+
+impl TextStyle {
+    /// AppKit's defaults for what `attributes` (null for none) does not say:
+    /// Helvetica 12 - here the system face - in black, left aligned.
+    fn of(attributes: Id) -> Option<TextStyle> {
+        let attributes = attributes as corefoundation::base::CFTypeRef;
+        let font = crate::coretext::get(attributes, "NSFont");
+        let (font, size) = crate::coretext::face_of(font)
+            .and_then(|(face, size)| {
+                let size = if size > 0.0 { size } else { 12.0 };
+                Some((
+                    std::sync::Arc::new(chrome::Font::from_faces(vec![face])?),
+                    size,
+                ))
+            })
+            .or_else(|| Some((chrome::Font::system(400)?, 12.0)))?;
+        let color = crate::coretext::get(attributes, "NSColor");
+        let color = match color.is_null() {
+            true => chrome::Color::rgba(0, 0, 0, 1.0),
+            false => {
+                // SAFETY: an `NSColor`, which is what the key holds.
+                let (r, g, b, a) = unsafe { crate::color::components(color as Id) };
+                chrome::Color {
+                    r: r as f32,
+                    g: g as f32,
+                    b: b as f32,
+                    a: a as f32,
+                }
+            }
+        };
+        let paragraph = crate::coretext::get(attributes, "NSParagraphStyle");
+        let alignment = crate::paragraph::alignment(paragraph as Id).unwrap_or(0);
+        Some(TextStyle {
+            font,
+            size: size as f32,
+            color,
+            alignment,
+        })
+    }
+
+    fn line_height(&self) -> f32 {
+        let (ascent, descent) = self.font.metrics(self.size);
+        (ascent + descent).ceil()
+    }
+
+    /// `text` as one line per paragraph, its size in points.
+    fn measure(&self, text: &str) -> NSSize {
+        let width = text
+            .split('\n')
+            .map(|line| self.font.measure(line, self.size))
+            .fold(0.0f32, f32::max);
+        NSSize {
+            width: f64::from(width.ceil()),
+            height: f64::from(self.line_height() * text.split('\n').count() as f32),
+        }
+    }
+
+    /// Draw `text` into `rect` of the focused view, from its top, wrapping at
+    /// its width when `wrap`.
+    fn draw(&self, text: &str, rect: NSRect, wrap: bool) {
+        let density = crate::backing::focus_density();
+        let width = (rect.size.width * density).ceil() as usize;
+        let height = (rect.size.height * density).ceil() as usize;
+        if width == 0 || height == 0 || text.is_empty() {
+            return;
+        }
+        let mut pixels = vec![0u8; width * height * 4];
+        let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
+        let w = rect.size.width as f32;
+        let lines: Vec<String> = match wrap {
+            true => self.font.wrap(text, self.size, w),
+            false => text.split('\n').map(str::to_string).collect(),
+        };
+        let (ascent, _) = self.font.metrics(self.size);
+        for (i, line) in lines.iter().enumerate() {
+            let advance = self.font.measure(line, self.size);
+            // `NSTextAlignment` on macOS: right is 1 and centre 2.
+            let x = match self.alignment {
+                1 => w - advance,
+                2 => (w - advance) / 2.0,
+                _ => 0.0,
+            };
+            let baseline = ascent.round() + i as f32 * self.line_height();
+            canvas.draw_text(
+                line,
+                &self.font,
+                self.size,
+                chrome::Point::new(x, baseline),
+                self.color,
+            );
+        }
+        crate::backing::draw_image(
+            &pixels,
+            width,
+            height,
+            rect.size,
+            rect,
+            NSRect {
+                origin: NSPoint::default(),
+                size: rect.size,
+            },
+            // Source-over.
+            2,
+            1.0,
+            true,
+        );
+    }
+}
+
+/// # Safety
+///
+/// `string` is an `NSString`.
+unsafe fn text_of(string: Id) -> String {
+    String::from_utf8_lossy(&unsafe { foundation::string::bytes(string) }).into_owned()
+}
+
+/// `-sizeWithAttributes:`.
+unsafe extern "C" fn string_size_with_attributes(
+    receiver: Id,
+    _sel: Sel,
+    attributes: Id,
+) -> NSSize {
+    let Some(style) = TextStyle::of(attributes) else {
+        return NSSize::default();
+    };
+    // SAFETY: the receiver is an NSString.
+    style.measure(&unsafe { text_of(receiver) })
+}
+
+unsafe extern "C" fn string_draw_in_rect(receiver: Id, _sel: Sel, rect: NSRect, attributes: Id) {
+    if let Some(style) = TextStyle::of(attributes) {
+        // SAFETY: the receiver is an NSString.
+        style.draw(&unsafe { text_of(receiver) }, rect, true);
+    }
+}
+
+unsafe extern "C" fn string_draw_at_point(receiver: Id, _sel: Sel, point: NSPoint, attributes: Id) {
+    let Some(style) = TextStyle::of(attributes) else {
+        return;
+    };
+    // SAFETY: the receiver is an NSString.
+    let text = unsafe { text_of(receiver) };
+    let size = style.measure(&text);
+    style.draw(
+        &text,
+        NSRect {
+            origin: point,
+            size,
+        },
+        false,
+    );
+}
+
+unsafe extern "C" fn attributed_size(receiver: Id, _sel: Sel) -> NSSize {
+    // SAFETY: an attributed string.
+    let Some((text, attributes)) = (unsafe { foundation::attributed_string::parts(receiver) })
+    else {
+        return NSSize::default();
+    };
+    TextStyle::of(attributes).map_or(NSSize::default(), |style| style.measure(&text))
+}
+
+unsafe extern "C" fn attributed_draw_in_rect(receiver: Id, _sel: Sel, rect: NSRect) {
+    // SAFETY: an attributed string.
+    if let Some((text, attributes)) = unsafe { foundation::attributed_string::parts(receiver) }
+        && let Some(style) = TextStyle::of(attributes)
+    {
+        style.draw(&text, rect, true);
+    }
+}
+
+unsafe extern "C" fn attributed_draw_at_point(receiver: Id, _sel: Sel, point: NSPoint) {
+    // SAFETY: an attributed string.
+    if let Some((text, attributes)) = unsafe { foundation::attributed_string::parts(receiver) }
+        && let Some(style) = TextStyle::of(attributes)
+    {
+        let size = style.measure(&text);
+        style.draw(
+            &text,
+            NSRect {
+                origin: point,
+                size,
+            },
+            false,
+        );
+    }
+}
+
 pub(crate) fn install() {
     let string_class = objc::class::lookup(c"NSString").expect("Foundation registered NSString");
     methods!(string_class, {
+        "sizeWithAttributes:" => string_size_with_attributes, c"{CGSize=dd}24@0:8@16";
+        "drawInRect:withAttributes:" => string_draw_in_rect, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "drawAtPoint:withAttributes:" => string_draw_at_point, c"v40@0:8{CGPoint=dd}16@32";
+    });
+    // Foundation keeps the text and attributes; drawing them is AppKit's.
+    let attributed = objc::class::lookup(c"NSAttributedString").expect("Foundation registered it");
+    methods!(attributed, {
+        "size" => attributed_size, c"{CGSize=dd}16@0:8";
+        "drawInRect:" => attributed_draw_in_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "drawAtPoint:" => attributed_draw_at_point, c"v32@0:8{CGPoint=dd}16";
         "boundingRectWithSize:options:attributes:" => string_bounding_rect,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGSize=dd}16Q32@40";
     });

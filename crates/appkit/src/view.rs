@@ -1623,6 +1623,12 @@ unsafe extern "C" fn set_needs_display(receiver: Id, _sel: Sel, flag: u8) {
     }
 }
 
+/// `-setNeedsDisplay` with no argument: not in AppKit's headers, but programs
+/// written against `UIView` habits send it and a Mac's AppKit answers it.
+unsafe extern "C" fn mark_needs_display(receiver: Id, _sel: Sel) {
+    crate::backing::needs_display(receiver);
+}
+
 unsafe extern "C" fn set_needs_display_in_rect(receiver: Id, _sel: Sel, _rect: NSRect) {
     crate::backing::needs_display(receiver);
 }
@@ -1735,6 +1741,7 @@ pub(crate) fn install() {
         "displayIfNeeded" => display, c"v16@0:8";
         "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setNeedsDisplay:" => set_needs_display, c"v20@0:8c16";
+        "setNeedsDisplay" => mark_needs_display, c"v16@0:8";
         "setHidden:" => set_hidden, c"v20@0:8c16";
         "setAlphaValue:" => set_alpha_value, c"v24@0:8d16";
         "alphaValue" => alpha_value, c"d16@0:8";

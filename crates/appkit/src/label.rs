@@ -24,6 +24,11 @@ struct Look {
     draws_background: bool,
     bordered: bool,
     alignment: isize,
+    /// `NSLineBreakMode`; only the two wrapping modes draw more than a line.
+    line_break: isize,
+    /// `-maximumNumberOfLines`, 0 for as many as fit.
+    max_lines: isize,
+    single_line: bool,
 }
 
 impl Default for Look {
@@ -35,7 +40,16 @@ impl Default for Look {
             draws_background: false,
             bordered: false,
             alignment: NATURAL,
+            line_break: TRUNCATE_TAIL,
+            max_lines: 0,
+            single_line: false,
         }
+    }
+}
+
+impl Look {
+    fn wraps(&self) -> bool {
+        !self.single_line && self.max_lines != 1 && matches!(self.line_break, WORD_WRAP | CHAR_WRAP)
     }
 }
 
@@ -43,6 +57,11 @@ impl Default for Look {
 const RIGHT: isize = 1;
 const CENTER: isize = 2;
 const NATURAL: isize = 4;
+
+/// `NSLineBreakMode`.
+const WORD_WRAP: isize = 0;
+const CHAR_WRAP: isize = 1;
+const TRUNCATE_TAIL: isize = 4;
 
 /// The room `NSTextFieldCell` leaves either side of its text.
 const PADDING: f64 = 2.0;
@@ -190,16 +209,49 @@ unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     {
         let size = size as f32;
         let room = (w - 2.0 * PADDING as f32).max(0.0);
-        let line = font.truncate(&text, size, room);
-        let advance = font.measure(&line, size);
-        let x = match look.alignment {
+        let color = color_of(look.text_color, chrome::Color::rgba(0, 0, 0, 0.85));
+        let x_for = |advance: f32| match look.alignment {
             RIGHT => w - PADDING as f32 - advance,
             CENTER => (w - advance) / 2.0,
             _ => PADDING as f32,
         };
-        let baseline = font.centered_baseline(size, 0.0, h);
-        let color = color_of(look.text_color, chrome::Color::rgba(0, 0, 0, 0.85));
-        canvas.draw_text(&line, &font, size, chrome::Point::new(x, baseline), color);
+        match look.wraps() {
+            // A wrapping field sets its lines from the top, as a Mac's does.
+            true => {
+                let (ascent, descent) = font.metrics(size);
+                let mut lines = match look.line_break {
+                    CHAR_WRAP => char_wrap(&font, &text, size, room),
+                    _ => font.wrap(&text, size, room),
+                };
+                if look.max_lines > 0 {
+                    lines.truncate(look.max_lines as usize);
+                }
+                let leading = (ascent + descent).ceil();
+                for (i, line) in lines.iter().enumerate() {
+                    let baseline = ascent.round() + i as f32 * leading;
+                    let advance = font.measure(line, size);
+                    canvas.draw_text(
+                        line,
+                        &font,
+                        size,
+                        chrome::Point::new(x_for(advance), baseline),
+                        color,
+                    );
+                }
+            }
+            false => {
+                let line = font.truncate(&text, size, room);
+                let advance = font.measure(&line, size);
+                let baseline = font.centered_baseline(size, 0.0, h);
+                canvas.draw_text(
+                    &line,
+                    &font,
+                    size,
+                    chrome::Point::new(x_for(advance), baseline),
+                    color,
+                );
+            }
+        }
     }
     crate::backing::draw_image(
         &pixels,
@@ -216,6 +268,49 @@ unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
         1.0,
         true,
     );
+}
+
+/// `text` broken into lines no wider than `width` at any character, which is
+/// `NSLineBreakByCharWrapping`. Each `\n` starts a line.
+fn char_wrap(font: &chrome::Font, text: &str, size: f32, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for c in paragraph.chars() {
+            line.push(c);
+            if line.chars().nth(1).is_some() && font.measure(&line, size) > width {
+                line.pop();
+                lines.push(std::mem::take(&mut line));
+                line.push(c);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+unsafe extern "C" fn set_line_break_mode(receiver: Id, _sel: Sel, mode: isize) {
+    update(receiver, |look| look.line_break = mode);
+}
+
+unsafe extern "C" fn line_break_mode(receiver: Id, _sel: Sel) -> isize {
+    look(receiver).line_break
+}
+
+unsafe extern "C" fn set_maximum_number_of_lines(receiver: Id, _sel: Sel, lines: isize) {
+    update(receiver, |look| look.max_lines = lines);
+}
+
+unsafe extern "C" fn maximum_number_of_lines(receiver: Id, _sel: Sel) -> isize {
+    look(receiver).max_lines
+}
+
+unsafe extern "C" fn set_uses_single_line_mode(receiver: Id, _sel: Sel, single: u8) {
+    update(receiver, |look| look.single_line = single != 0);
+}
+
+unsafe extern "C" fn uses_single_line_mode(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(look(receiver).single_line)
 }
 
 unsafe extern "C" fn set_font(receiver: Id, _sel: Sel, font: Id) {
@@ -281,6 +376,12 @@ pub(crate) fn install() {
         "isBordered" => is_bordered, c"c16@0:8";
         "setAlignment:" => set_alignment, c"v24@0:8q16";
         "alignment" => alignment, c"q16@0:8";
+        "setLineBreakMode:" => set_line_break_mode, c"v24@0:8q16";
+        "lineBreakMode" => line_break_mode, c"q16@0:8";
+        "setMaximumNumberOfLines:" => set_maximum_number_of_lines, c"v24@0:8q16";
+        "maximumNumberOfLines" => maximum_number_of_lines, c"q16@0:8";
+        "setUsesSingleLineMode:" => set_uses_single_line_mode, c"v20@0:8c16";
+        "usesSingleLineMode" => uses_single_line_mode, c"c16@0:8";
         "intrinsicContentSize" => intrinsic_content_size, c"{CGSize=dd}16@0:8";
         "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });

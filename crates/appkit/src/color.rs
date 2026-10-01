@@ -413,6 +413,18 @@ unsafe extern "C" fn cg_color(receiver: Id, _sel: Sel) -> *const c_void {
 // FIXME (ACCURACY): WRONG?
 thread_local! {
     static FILL: Cell<[f64; 4]> = const { Cell::new([0.0, 0.0, 0.0, 1.0]) };
+    static STROKE: Cell<[f64; 4]> = const { Cell::new([0.0, 0.0, 0.0, 1.0]) };
+}
+
+/// The current fill and stroke colours, as straight RGBA.
+pub(crate) fn current() -> ([f64; 4], [f64; 4]) {
+    (FILL.with(Cell::get), STROKE.with(Cell::get))
+}
+
+/// Put back colours [`current`] answered, as restoring a graphics state does.
+pub(crate) fn restore(fill: [f64; 4], stroke: [f64; 4]) {
+    FILL.with(|cell| cell.set(fill));
+    STROKE.with(|cell| cell.set(stroke));
 }
 
 unsafe extern "C" fn set_fill(receiver: Id, _sel: Sel) {
@@ -420,8 +432,23 @@ unsafe extern "C" fn set_fill(receiver: Id, _sel: Sel) {
     FILL.with(|fill| fill.set([red, green, blue, alpha]));
 }
 
+unsafe extern "C" fn set_stroke(receiver: Id, _sel: Sel) {
+    let (red, green, blue, alpha) = unsafe { components(receiver) };
+    STROKE.with(|stroke| stroke.set([red, green, blue, alpha]));
+}
+
+unsafe extern "C" fn set_both(receiver: Id, sel: Sel) {
+    unsafe {
+        set_fill(receiver, sel);
+        set_stroke(receiver, sel);
+    }
+}
+
 #[allow(non_snake_case)]
 pub extern "C" fn NSRectFill(rect: NSRect) {
+    if crate::bezier::fill_rect_through_state(rect, FILL.with(Cell::get)) {
+        return;
+    }
     let [red, green, blue, alpha] = FILL.with(Cell::get);
     let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha.clamp(0.0, 1.0) * 255.0) as u8;
     let pixel = [
@@ -470,8 +497,8 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "setFill" => set_fill, c"v16@0:8";
-        // Both the fill and the stroke; nothing here strokes.
-        "set" => set_fill, c"v16@0:8";
+        "setStroke" => set_stroke, c"v16@0:8";
+        "set" => set_both, c"v16@0:8";
         "CGColor" => cg_color, c"^{CGColor=}16@0:8";
         "redComponent" => component, c"d16@0:8";
         "greenComponent" => component, c"d16@0:8";

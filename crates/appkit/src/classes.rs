@@ -48,8 +48,9 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSSearchField", Some("NSTextField"), 0),
     ("NSLayoutConstraint", None, crate::layout::INSTANCE_SIZE),
     ("NSAnimationContext", None, 0),
-    ("NSAffineTransform", None, 0),
-    ("NSParagraphStyle", None, 0),
+    ("NSAffineTransform", None, crate::transform::INSTANCE_SIZE),
+    ("NSBezierPath", None, crate::bezier::INSTANCE_SIZE),
+    ("NSParagraphStyle", None, crate::paragraph::INSTANCE_SIZE),
     ("NSMutableParagraphStyle", Some("NSParagraphStyle"), 0),
     (
         "NSOpenGLView",

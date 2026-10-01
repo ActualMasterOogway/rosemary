@@ -469,6 +469,9 @@ mod slot {
     pub const NOT_BORDERED: usize = 7;
     pub const BUTTON_TRANSPARENT: usize = 8;
     pub const HIGHLIGHTED: usize = 9;
+    /// Any control's, in the button table. Inverted: a fresh control is
+    /// enabled.
+    pub const DISABLED: usize = 10;
     pub const BUTTON_OBJECTS: [usize; 3] = [IMAGE, TITLE, ALTERNATE_IMAGE];
 
     pub const VIEW_IMAGE: usize = 0;
@@ -481,7 +484,7 @@ mod slot {
     pub const KNOB_PROPORTION: usize = 1;
 }
 
-const ROW: usize = 10;
+const ROW: usize = 11;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -985,6 +988,39 @@ unsafe extern "C" fn button_action(receiver: Id, _sel: Sel) -> Sel {
     read(buttons(), receiver, slot::ACTION) as Sel
 }
 
+unsafe extern "C" fn control_set_enabled(receiver: Id, _sel: Sel, enabled: u8) {
+    write(
+        buttons(),
+        receiver,
+        slot::DISABLED,
+        usize::from(enabled == 0),
+    );
+}
+
+unsafe extern "C" fn control_is_enabled(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(read(buttons(), receiver, slot::DISABLED) == 0)
+}
+
+/// `-sendAction:to:`, through the application as a click is.
+unsafe extern "C" fn control_send_action(receiver: Id, _sel: Sel, action: Sel, target: Id) -> u8 {
+    let app = crate::application::shared();
+    if action.is_null() || app.is_null() {
+        return 0;
+    }
+    // SAFETY: `-sendAction:to:from:` is `BOOL (id, SEL, SEL, id, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Sel, Id, Id) -> u8 =
+            std::mem::transmute(objc::msg::entry());
+        f(
+            app,
+            objc::sel::get("sendAction:to:from:"),
+            action,
+            target,
+            receiver,
+        )
+    }
+}
+
 /// A fresh, autoreleased view of the receiving class with a zero frame.
 fn new_view(class: Id) -> Option<Id> {
     // SAFETY: the receiver of a class method is a class.
@@ -1267,6 +1303,19 @@ pub(crate) fn install() {
         "stopAnimation:" => indicator_stop_animation, c"v24@0:8@16";
         "setDoubleValue:" => indicator_set_double_value, c"v24@0:8d16";
         "doubleValue" => indicator_double_value, c"d16@0:8";
+    });
+
+    // Every control has a target and an action; a subclass a program writes
+    // itself, drawing and tracking on its own, relies on these alone.
+    let class = objc::class::lookup(c"NSControl").expect("declared before its methods");
+    methods!(class, {
+        "setTarget:" => button_set_target, c"v24@0:8@16";
+        "target" => button_target, c"@16@0:8";
+        "setAction:" => button_set_action, c"v24@0:8:16";
+        "action" => button_action, c":16@0:8";
+        "setEnabled:" => control_set_enabled, c"v20@0:8c16";
+        "isEnabled" => control_is_enabled, c"c16@0:8";
+        "sendAction:to:" => control_send_action, c"c32@0:8:16@24";
     });
 
     let class = objc::class::lookup(c"NSButton").expect("declared before its methods");

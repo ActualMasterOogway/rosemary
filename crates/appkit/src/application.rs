@@ -96,7 +96,28 @@ unsafe extern "C" fn shared_application(class: Id, _sel: Sel) -> Id {
     SHARED.store(app as usize, std::sync::atomic::Ordering::Release);
     // SAFETY: the cell is this crate's own, and the guest reads it as `NSApp`.
     unsafe { *(crate::ns_app_cell() as *mut u64) = app as usize as u64 };
+    register_application_fonts();
     app
+}
+
+/// The fonts `ATSApplicationFontsPath` names, which a Mac makes available to
+/// the application before its main nib is loaded: a file or a directory of
+/// them, relative to the bundle's resources.
+fn register_application_fonts() {
+    let Some(bundle) = foundation::bundle::main() else {
+        return;
+    };
+    let Some(relative) = bundle.info_string("ATSApplicationFontsPath") else {
+        return;
+    };
+    let path = bundle.resources.join(relative.trim_start_matches('/'));
+    let files: Vec<std::path::PathBuf> = match std::fs::read_dir(&path) {
+        Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
+        Err(_) => vec![path],
+    };
+    for file in files.iter().filter(|f| f.is_file()) {
+        crate::fonts::register_file(&file.to_string_lossy());
+    }
 }
 
 unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {

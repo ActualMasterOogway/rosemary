@@ -64,6 +64,8 @@ pub struct Window {
     titlebar_transparent: usize,
     /// `-setTitleVisibility:`, `NSWindowTitleHidden` being 1.
     title_visibility: isize,
+    /// `-windowController`, not retained: the controller owns the window.
+    window_controller: Id,
 }
 
 pub const INSTANCE_SIZE: usize = size_of::<Window>();
@@ -1141,6 +1143,14 @@ unsafe extern "C" fn set_content_view(receiver: Id, _sel: Sel, view: Id) {
     unsafe { crate::view::update_tracking_areas(view) };
 }
 
+unsafe extern "C" fn window_controller(receiver: Id, _sel: Sel) -> Id {
+    window_of(receiver).window_controller
+}
+
+unsafe extern "C" fn set_window_controller(receiver: Id, _sel: Sel, value: Id) {
+    window_of(receiver).window_controller = value;
+}
+
 unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
     window_of(receiver).delegate
 }
@@ -2174,6 +2184,8 @@ pub(crate) fn install() {
         "contentView" => content_view, c"@16@0:8";
         "setContentView:" => set_content_view, c"v24@0:8@16";
         "delegate" => delegate, c"@16@0:8";
+        "windowController" => window_controller, c"@16@0:8";
+        "setWindowController:" => set_window_controller, c"v24@0:8@16";
         "setDelegate:" => set_delegate, c"v24@0:8@16";
         "title" => title, c"@16@0:8";
         "setTitle:" => set_title, c"v24@0:8@16";

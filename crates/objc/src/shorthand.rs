@@ -158,6 +158,23 @@ pub unsafe extern "C" fn objc_setProperty_nonatomic_copy(
     unsafe { store_property(receiver, offset, copy_of(value)) }
 }
 
+/// The getter and setter of a struct-typed property. Not atomic, for the
+/// reason the object accessors above are not; `has_strong` only matters to a
+/// garbage collector.
+pub unsafe extern "C" fn objc_copyStruct(
+    dest: *mut c_void,
+    src: *const c_void,
+    size: isize,
+    _atomic: bool,
+    _has_strong: bool,
+) {
+    if size <= 0 {
+        return;
+    }
+    // SAFETY: the compiler passes an ivar and a local of `size` bytes each.
+    unsafe { std::ptr::copy(src as *const u8, dest as *mut u8, size as usize) };
+}
+
 /// # Safety
 ///
 /// `offset` must be an ivar offset of `receiver`'s own class.

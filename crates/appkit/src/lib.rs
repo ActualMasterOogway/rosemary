@@ -16,6 +16,7 @@ mod animation;
 pub mod appearance;
 pub mod application;
 pub mod backing;
+mod bezier;
 pub mod button;
 pub mod cgcontext;
 pub mod cgevent;
@@ -63,6 +64,7 @@ mod transform;
 pub mod uchr;
 pub mod view;
 pub mod window;
+mod window_controller;
 pub mod workspace;
 
 pub fn bootstrap() {
@@ -88,6 +90,7 @@ pub fn bootstrap() {
         menu::install();
         screen::install();
         window::install();
+        window_controller::install();
         view::install();
         layout::install();
         controls::install();
@@ -95,6 +98,7 @@ pub fn bootstrap() {
         transform::install();
         paragraph::install();
         backing::install();
+        bezier::install();
         layer::install();
         coreanimation::install();
         text::install();

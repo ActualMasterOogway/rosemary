@@ -49,6 +49,24 @@ pub const KEYS: &[(&str, &str)] = &[
     ),
     ("_kCFURLVolumeIdentifierKey", VOLUME_IDENTIFIER),
     ("_NSURLVolumeIdentifierKey", VOLUME_IDENTIFIER),
+    ("_kCFURLPathKey", PATH),
+    ("_NSURLPathKey", PATH),
+    ("_kCFURLIsVolumeKey", IS_VOLUME),
+    ("_NSURLIsVolumeKey", IS_VOLUME),
+    ("_kCFURLVolumeNameKey", VOLUME_NAME),
+    ("_NSURLVolumeNameKey", VOLUME_NAME),
+    // Dates are `CFDate`s, which Foundation's `NSDate` stands in for, so
+    // Foundation answers these two; see `foundation::url`.
+    (
+        "_kCFURLContentModificationDateKey",
+        CONTENT_MODIFICATION_DATE,
+    ),
+    (
+        "_NSURLContentModificationDateKey",
+        CONTENT_MODIFICATION_DATE,
+    ),
+    ("_kCFURLAddedToDirectoryDateKey", ADDED_TO_DIRECTORY_DATE),
+    ("_NSURLAddedToDirectoryDateKey", ADDED_TO_DIRECTORY_DATE),
 ];
 
 const NAME: &str = "NSURLNameKey";
@@ -64,6 +82,29 @@ const VOLUME_URL: &str = "NSURLVolumeURLKey";
 const VOLUME_TOTAL_CAPACITY: &str = "NSURLVolumeTotalCapacityKey";
 const VOLUME_AVAILABLE_CAPACITY: &str = "NSURLVolumeAvailableCapacityKey";
 const VOLUME_IDENTIFIER: &str = "NSURLVolumeIdentifierKey";
+const PATH: &str = "_NSURLPathKey";
+const IS_VOLUME: &str = "NSURLIsVolumeKey";
+const VOLUME_NAME: &str = "NSURLVolumeNameKey";
+pub const CONTENT_MODIFICATION_DATE: &str = "NSURLContentModificationDateKey";
+pub const ADDED_TO_DIRECTORY_DATE: &str = "NSURLAddedToDirectoryDateKey";
+
+/// What a Mac calls its boot volume, and so what the guest's `/` is called.
+const ROOT_VOLUME_NAME: &str = "Macintosh HD";
+
+/// The guest path of the volume `guest` is on, by a Mac's layout rather than
+/// this host's mounts: `/Volumes/<name>` is a volume and everything else is on
+/// `/`. A prefix's root is a directory here, not a mount, so `st_dev` would
+/// answer about the host instead.
+fn guest_volume(guest: &str) -> &str {
+    let Some(rest) = guest.strip_prefix("/Volumes/") else {
+        return "/";
+    };
+    let name = rest.split('/').next().unwrap_or("");
+    match name.is_empty() {
+        true => "/",
+        false => &guest[.."/Volumes/".len() + name.len()],
+    }
+}
 
 /// The extensions that make a *directory* a package - a bundle the user sees as
 /// one file rather than as a folder.
@@ -162,7 +203,9 @@ fn capacity(path: &std::path::Path) -> Option<(u64, u64)> {
 /// answer - which is not the same as a false answer. See the module note.
 ///
 /// The returned object is owned by the caller.
-fn property(path: &std::path::Path, key: &str) -> Option<CFTypeRef> {
+pub fn property(guest: &str, key: &str) -> Option<CFTypeRef> {
+    let host = prefix::ns::host_path(guest);
+    let path = host.as_path();
     let number = |value: u64| {
         crate::collections::new_number(crate::collections::Number::Integer(value as i64))
     };
@@ -192,6 +235,21 @@ fn property(path: &std::path::Path, key: &str) -> Option<CFTypeRef> {
         // The volume's device number, which is exactly what the key is for:
         // telling whether two URLs are on the same volume.
         VOLUME_IDENTIFIER => number(device_of(path)?),
+        PATH => crate::string::from_bytes(guest.as_bytes(), false),
+        IS_VOLUME => {
+            let trimmed = match guest.trim_end_matches('/') {
+                "" => "/",
+                other => other,
+            };
+            crate::collections::boolean(guest_volume(trimmed) == trimmed)
+        }
+        VOLUME_NAME => {
+            let name = match guest_volume(guest) {
+                "/" => ROOT_VOLUME_NAME,
+                volume => volume.rsplit('/').next().unwrap_or(ROOT_VOLUME_NAME),
+            };
+            crate::string::from_bytes(name.as_bytes(), false)
+        }
         _ => return None,
     })
 }
@@ -201,12 +259,10 @@ fn property(path: &std::path::Path, key: &str) -> Option<CFTypeRef> {
 /// # Safety
 ///
 /// `url` must be null or an object this runtime allocated.
-unsafe fn path_of(url: CFTypeRef) -> Option<std::path::PathBuf> {
-    let path = unsafe { crate::url::as_url(url) }?.file_path()?;
-    // The guest named it, so every question below is put at this host's
-    // spelling. The last component is the same either way, which is what the
-    // name properties answer with.
-    Some(prefix::ns::host_path(&path))
+unsafe fn path_of(url: CFTypeRef) -> Option<String> {
+    // The guest's spelling: [`property`] puts filesystem questions to the
+    // host's, and answers the path and volume ones with this.
+    unsafe { crate::url::as_url(url) }?.file_path()
 }
 
 /// The text of a `CFStringRef`.

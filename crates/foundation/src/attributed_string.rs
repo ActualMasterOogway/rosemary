@@ -8,41 +8,82 @@ fn class() -> &'static objc::class::Class {
     objc::class::lookup(c"NSAttributedString").expect("NSAttributedString is registered")
 }
 
-unsafe extern "C" fn init_with_string(receiver: Id, _sel: Sel, value: Id) -> Id {
-    // SAFETY: `value` is null or an NSString supplied by the caller.
-    let text = String::from_utf8_lossy(&unsafe { crate::string::bytes(value) }).into_owned();
-    // SAFETY: this class is registered with `String` boxed storage.
-    unsafe { crate::boxed::fill(receiver, text) };
-    receiver
+/// The text, and one attributes dictionary for all of it: the attributes a
+/// string was made with. Per-range attributes are not kept.
+#[derive(Default)]
+struct Contents {
+    text: String,
+    /// Retained, or null.
+    attributes: usize,
+}
+
+impl Contents {
+    fn new(text: String, attributes: Id) -> Contents {
+        Contents {
+            text,
+            attributes: objc::arc::retain(attributes) as usize,
+        }
+    }
+}
+
+impl Clone for Contents {
+    fn clone(&self) -> Contents {
+        Contents::new(self.text.clone(), self.attributes as Id)
+    }
+}
+
+impl Drop for Contents {
+    fn drop(&mut self) {
+        objc::arc::release(self.attributes as Id);
+    }
+}
+
+/// # Safety
+///
+/// `object` is null or an object this runtime allocated.
+unsafe fn contents<'a>(object: Id) -> Option<&'a mut Contents> {
+    unsafe { crate::boxed::contents::<Contents>(object, class()) }
+}
+
+/// The text of an attributed string and the attributes it was made with
+/// (null for none), for AppKit, which draws it.
+///
+/// # Safety
+///
+/// `object` is null or an object this runtime allocated.
+pub unsafe fn parts(object: Id) -> Option<(String, Id)> {
+    unsafe { contents(object) }.map(|c| (c.text.clone(), c.attributes as Id))
+}
+
+unsafe extern "C" fn init_with_string(receiver: Id, sel: Sel, value: Id) -> Id {
+    unsafe { init_with_string_attributes(receiver, sel, value, std::ptr::null_mut()) }
 }
 
 /// `-[NSAttributedString initWithString:attributes:]`.
-///
-/// The immutable facade currently stores text only. Accepting the attribute
-/// dictionary still preserves the string for callers that measure it.
 unsafe extern "C" fn init_with_string_attributes(
     receiver: Id,
-    sel: Sel,
+    _sel: Sel,
     value: Id,
-    _attributes: Id,
+    attributes: Id,
 ) -> Id {
-    // SAFETY: identical text argument and receiver contract to
-    // `-initWithString:`.
-    unsafe { init_with_string(receiver, sel, value) }
+    // SAFETY: `value` is null or an NSString supplied by the caller.
+    let text = String::from_utf8_lossy(&unsafe { crate::string::bytes(value) }).into_owned();
+    // SAFETY: this class is registered with `Contents` boxed storage.
+    unsafe { crate::boxed::fill(receiver, Contents::new(text, attributes)) };
+    receiver
 }
 
 unsafe extern "C" fn attributed_string_with_string(_receiver: Id, _sel: Sel, value: Id) -> Id {
     // SAFETY: `value` is null or an NSString supplied by the caller.
     let text = String::from_utf8_lossy(&unsafe { crate::string::bytes(value) }).into_owned();
-    let object = crate::boxed::make(class(), text);
+    let object = crate::boxed::make(class(), Contents::new(text, std::ptr::null_mut()));
     // SAFETY: a fresh object owned by this method.
     unsafe { corefoundation::api::CFAutorelease(object as corefoundation::base::CFTypeRef) as Id }
 }
 
 unsafe extern "C" fn string(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: an instance of the class registered below.
-    let text = unsafe { crate::boxed::contents::<String>(receiver, class()) }
-        .map_or("", |text| text.as_str());
+    let text = unsafe { contents(receiver) }.map_or("", |c| c.text.as_str());
     objc::arc::autorelease(crate::string::from_str(text))
 }
 
@@ -54,8 +95,7 @@ unsafe extern "C" fn string(receiver: Id, _sel: Sel) -> Id {
 /// metrics.
 unsafe extern "C" fn size(receiver: Id, _sel: Sel) -> NSSize {
     // SAFETY: an instance of the class registered below.
-    let count = unsafe { crate::boxed::contents::<String>(receiver, class()) }
-        .map_or(0, |text| text.chars().count());
+    let count = unsafe { contents(receiver) }.map_or(0, |c| c.text.chars().count());
     NSSize {
         width: count as f64 * 8.0,
         height: if count == 0 { 0.0 } else { 16.0 },
@@ -78,33 +118,38 @@ unsafe extern "C" fn add_attribute(
 }
 
 unsafe extern "C" fn set_attributed_string(receiver: Id, _sel: Sel, value: Id) {
-    // SAFETY: both objects use this module's boxed String storage.
-    let text = unsafe { crate::boxed::contents::<String>(value, class()) }
-        .cloned()
-        .unwrap_or_default();
-    if let Some(contents) = unsafe { crate::boxed::contents::<String>(receiver, class()) } {
-        *contents = text;
+    // SAFETY: both objects use this module's boxed storage.
+    let replacement = unsafe { contents(value) }.cloned().unwrap_or_default();
+    if let Some(contents) = unsafe { contents(receiver) } {
+        *contents = replacement;
     }
 }
 
 unsafe extern "C" fn append_attributed_string(receiver: Id, _sel: Sel, value: Id) {
-    // SAFETY: both objects use this module's boxed String storage.
-    let text = unsafe { crate::boxed::contents::<String>(value, class()) }
-        .cloned()
-        .unwrap_or_default();
-    if let Some(contents) = unsafe { crate::boxed::contents::<String>(receiver, class()) } {
-        contents.push_str(&text);
+    // SAFETY: both objects use this module's boxed storage.
+    let Some(appended) = unsafe { contents(value) }.cloned() else {
+        return;
+    };
+    if let Some(contents) = unsafe { contents(receiver) } {
+        contents.text.push_str(&appended.text);
+        // An empty string takes on what is appended to it.
+        if contents.attributes == 0 {
+            *contents = Contents::new(contents.text.clone(), appended.attributes as Id);
+        }
     }
 }
 
 pub(crate) fn make(text: &str) -> Id {
-    let object = crate::boxed::make(class(), text.to_owned());
+    let object = crate::boxed::make(
+        class(),
+        Contents::new(text.to_owned(), std::ptr::null_mut()),
+    );
     // SAFETY: a fresh object owned by this function.
     unsafe { corefoundation::api::CFAutorelease(object as corefoundation::base::CFTypeRef) as Id }
 }
 
 pub(crate) fn install() {
-    let class = crate::boxed::register::<String>(c"NSAttributedString", None);
+    let class = crate::boxed::register::<Contents>(c"NSAttributedString", None);
     methods!(class, {
         "initWithString:" => init_with_string, c"@24@0:8@16";
         "initWithString:attributes:" => init_with_string_attributes, c"@32@0:8@16@24";
@@ -115,7 +160,7 @@ pub(crate) fn install() {
     class_methods!(class, {
         "attributedStringWithString:" => attributed_string_with_string, c"@24@0:8@16";
     });
-    let mutable = crate::boxed::register::<String>(c"NSMutableAttributedString", Some(class));
+    let mutable = crate::boxed::register::<Contents>(c"NSMutableAttributedString", Some(class));
     methods!(mutable, {
         "addAttribute:value:range:" => add_attribute, c"v48@0:8@16@24{_NSRange=QQ}32";
         "setAttributedString:" => set_attributed_string, c"v24@0:8@16";

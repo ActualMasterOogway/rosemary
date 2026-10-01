@@ -7,7 +7,7 @@
 )]
 
 pub mod appleevent;
-mod attributed_string;
+pub mod attributed_string;
 mod block;
 pub mod boxed;
 pub mod bundle;
@@ -326,6 +326,8 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSArgumentDomain", "NSArgumentDomain"),
     ("_NSFilePosixPermissions", "NSFilePosixPermissions"),
     ("_NSFileSystemFreeSize", "NSFileSystemFreeSize"),
+    ("_NSFileSystemSize", "NSFileSystemSize"),
+    ("_NSFileSystemNumber", "NSFileSystemNumber"),
     ("_NSPOSIXErrorDomain", "NSPOSIXErrorDomain"),
     ("_NSUnderlyingErrorKey", "NSUnderlyingError"),
     ("_NSURLErrorDomain", "NSURLErrorDomain"),

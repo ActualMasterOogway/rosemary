@@ -364,27 +364,15 @@ unsafe extern "C" fn url_for_directory(
     directory_url(&path)
 }
 
-unsafe extern "C" fn contents_of_directory(
-    _receiver: Id,
-    _sel: Sel,
-    path: Id,
-    error: *mut Id,
-) -> Id {
-    // SAFETY: null or writable.
-    unsafe { no_error(error) };
-    // SAFETY: an `NSString`, or nil.
-    let Some(path) = (unsafe { path_of(path) }) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(entries) = std::fs::read_dir(&path) else {
-        return std::ptr::null_mut();
-    };
+/// The names in the host directory `path`, sorted, as the guest sees them.
+fn directory_names(path: &std::path::Path) -> Option<Vec<String>> {
+    let entries = std::fs::read_dir(path).ok()?;
     // Names, not paths, and without `.` and `..` - which is what Apple's
     // shallow enumeration gives and what a caller joining them back onto the
     // directory expects.
     // The prefix's mount points are not in the host directory, so the guest's
     // view of it is patched in: hidden ones left out, the rest shown.
-    let listing = prefix::ns::listing_of(&path);
+    let listing = prefix::ns::listing_of(path);
     let mut names: Vec<String> = entries
         .filter_map(|e| {
             let name = e.ok()?.file_name();
@@ -403,6 +391,77 @@ unsafe extern "C" fn contents_of_directory(
         );
     }
     names.sort();
+    Some(names)
+}
+
+/// `-contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:`
+///
+/// The property keys are a prefetching hint, and `-getResourceValue:...`
+/// answers them as cheaply afterwards. Of the options only skipping hidden
+/// files changes what is listed; the others are about descending, which this
+/// shallow listing never does.
+///
+/// # Safety
+///
+/// `url` is null or an `NSURL`, and `error` null or writable.
+unsafe extern "C" fn contents_of_directory_at_url(
+    _receiver: Id,
+    _sel: Sel,
+    url: Id,
+    _keys: Id,
+    options: u64,
+    error: *mut Id,
+) -> Id {
+    const SKIPS_HIDDEN_FILES: u64 = 1 << 2;
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: null or an `NSURL`.
+    let Some(directory) =
+        (unsafe { corefoundation::url::as_url(url as CFTypeRef) }).and_then(|u| u.file_path())
+    else {
+        return std::ptr::null_mut();
+    };
+    let host = prefix::ns::host_path(&directory);
+    let Some(names) = directory_names(&host) else {
+        return std::ptr::null_mut();
+    };
+    let base = directory.trim_end_matches('/');
+    let objects: Vec<CFTypeRef> = names
+        .iter()
+        .filter(|name| options & SKIPS_HIDDEN_FILES == 0 || !name.starts_with('.'))
+        .map(|name| {
+            // Through the namespace again: a mount point listed here is not
+            // in the host directory.
+            let child = format!("{base}/{name}");
+            let is_directory = prefix::ns::host_path(&child).is_dir();
+            corefoundation::url::new_file_url(&child, is_directory)
+        })
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for object in objects {
+        // SAFETY: a URL this function made and the array has retained.
+        unsafe { corefoundation::api::CFRelease(object) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+unsafe extern "C" fn contents_of_directory(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: an `NSString`, or nil.
+    let Some(names) = (unsafe { path_of(path) }).and_then(|path| directory_names(&path)) else {
+        return std::ptr::null_mut();
+    };
     let objects: Vec<corefoundation::base::CFTypeRef> = names
         .iter()
         .map(|n| corefoundation::string::from_bytes(n.as_bytes(), false))
@@ -534,6 +593,13 @@ unsafe extern "C" fn attributes_of_file_system(
         ),
         ("NSFileSystemNodes", stat.f_files as u64),
         ("NSFileSystemFreeNodes", stat.f_favail as u64),
+        // The device number, which is what Apple puts here: a caller compares
+        // two of them to tell whether paths share a filesystem.
+        (
+            "NSFileSystemNumber",
+            std::fs::metadata(path.to_str().unwrap_or_default())
+                .map_or(0, |m| std::os::unix::fs::MetadataExt::dev(&m)),
+        ),
     ];
     let pairs: Vec<(CFTypeRef, CFTypeRef)> = entries
         .iter()
@@ -694,6 +760,8 @@ pub(crate) fn install() {
         "copyItemAtPath:toPath:error:" => copy_item, c"B40@0:8@16@24^@32";
         "moveItemAtPath:toPath:error:" => move_item, c"B40@0:8@16@24^@32";
         "contentsOfDirectoryAtPath:error:" => contents_of_directory, c"@32@0:8@16^@24";
+        "contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:"
+            => contents_of_directory_at_url, c"@48@0:8@16@24Q32^@40";
         "attributesOfItemAtPath:error:" => attributes_of_item, c"@32@0:8@16^@24";
         "attributesOfFileSystemForPath:error:" => attributes_of_file_system, c"@32@0:8@16^@24";
         "isWritableFileAtPath:" => is_writable, c"B24@0:8@16";

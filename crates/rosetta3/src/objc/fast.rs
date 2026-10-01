@@ -75,6 +75,7 @@ static NEVER_DISPATCHES: &[&str] = &[
     "ivar_getOffset",
     "objc_allocateClassPair",
     "objc_autoreleasePoolPush",
+    "objc_copyStruct",
     "objc_copyWeak",
     "objc_destroyWeak",
     "objc_getClass",

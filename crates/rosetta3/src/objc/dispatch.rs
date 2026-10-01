@@ -189,6 +189,10 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // a guest may legally weakly reference a class, and a class is the one
     // pointer that means something different on each side.
     rt!("objc_copyClassNamesForImage", P, P, P),
+    // `void objc_copyStruct(void *dest, const void *src, ptrdiff_t size,
+    // BOOL atomic, BOOL hasStrong)` - a synthesized accessor of a struct-typed
+    // `atomic` property.
+    rt!("objc_copyStruct", V, P, P, I64, U8, U8),
     rt!("objc_copyWeak", V, P, P),
     rt!("objc_destroyWeak", V, P),
     // The hook the compiler emits inside every `for (x in collection)` loop, to

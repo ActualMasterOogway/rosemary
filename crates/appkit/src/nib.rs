@@ -418,6 +418,14 @@ impl Builder<'_> {
         }
     }
 
+    fn initialize_with_init(&self, uid: Uid) -> bool {
+        match self.archive.field(uid, "NSInitializeWithInit") {
+            Some(foundation::plist::Value::Bool(value)) => *value,
+            Some(other) => other.as_i64().is_some_and(|value| value != 0),
+            None => false,
+        }
+    }
+
     fn custom_class_name(&self, uid: Uid) -> Option<String> {
         let name = self.archive.field_uid(uid, "NSClassName")?;
         Some(self.archive.string(name)?.to_string())
@@ -438,6 +446,13 @@ impl Builder<'_> {
             // its text rather than an object to build.
             None => foundation::string::from_str(self.archive.string(uid)?),
             Some("NSCustomObject") => {
+                let name = self.custom_class_name(uid)?;
+                self.build(&name)
+            }
+            // A swapper of a plain object - an "Object" given a custom class in
+            // Interface Builder - archives nothing but the class, and AppKit
+            // makes it with `-init`. It is not a view and has no frame.
+            Some("NSClassSwapper") if self.initialize_with_init(uid) => {
                 let name = self.custom_class_name(uid)?;
                 self.build(&name)
             }

@@ -1006,6 +1006,34 @@ unsafe extern "C" fn all_values(receiver: Id, _sel: Sel) -> Id {
     }
 }
 
+/// `-copy` and `-mutableCopy` of an array: a new array of the same objects.
+/// Always a new one, even for an immutable receiver, because a receiver that
+/// is really an `NSMutableArray` must not change under the copy.
+fn copy_array(receiver: Id, mutable: bool) -> Id {
+    // SAFETY: the receiver is an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let values = array.values.clone();
+    collections::new_array(&values, Policy::from_type_callbacks(), mutable) as Id
+}
+
+unsafe extern "C" fn array_copy(receiver: Id, _sel: Sel) -> Id {
+    copy_array(receiver, false)
+}
+
+unsafe extern "C" fn array_mutable_copy(receiver: Id, _sel: Sel) -> Id {
+    copy_array(receiver, true)
+}
+
+unsafe extern "C" fn array_copy_with_zone(receiver: Id, _sel: Sel, _zone: *const ()) -> Id {
+    copy_array(receiver, false)
+}
+
+unsafe extern "C" fn array_mutable_copy_with_zone(receiver: Id, _sel: Sel, _zone: *const ()) -> Id {
+    copy_array(receiver, true)
+}
+
 unsafe extern "C" fn dictionary_copy(receiver: Id, _sel: Sel) -> Id {
     copy_dictionary(receiver, false)
 }
@@ -1755,6 +1783,10 @@ pub(crate) fn install() {
         "description" => array_description, c"@16@0:8";
         "objectEnumerator" => object_enumerator, c"@16@0:8";
         "reverseObjectEnumerator" => reverse_object_enumerator, c"@16@0:8";
+        "copy" => array_copy, c"@16@0:8";
+        "copyWithZone:" => array_copy_with_zone, c"@24@0:8^v16";
+        "mutableCopy" => array_mutable_copy, c"@16@0:8";
+        "mutableCopyWithZone:" => array_mutable_copy_with_zone, c"@24@0:8^v16";
     });
     class_methods!(array, {
         "array" => array_fn, c"@16@0:8";

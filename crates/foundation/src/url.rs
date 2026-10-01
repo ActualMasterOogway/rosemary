@@ -339,30 +339,35 @@ unsafe extern "C" fn last_path_component(receiver: Id, _sel: Sel) -> Id {
 /// reads a size of zero for a file it just wrote would conclude the write
 /// failed.
 fn resource_value(path: &str, key: &str) -> Option<corefoundation::base::CFTypeRef> {
+    use corefoundation::urlresource::{ADDED_TO_DIRECTORY_DATE, CONTENT_MODIFICATION_DATE};
     let number = |value: i64| {
         corefoundation::collections::new_number(corefoundation::collections::Number::Integer(value))
     };
-    // `path` stays the guest's spelling - `NSURLPathKey` and the name below
-    // answer with it - and only the question put to the filesystem is
-    // translated.
-    let metadata = std::fs::symlink_metadata(prefix::ns::host_path(path));
-    Some(match key {
-        "NSURLNameKey" | "NSURLLocalizedNameKey" => {
-            let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-            corefoundation::string::from_bytes(name.as_bytes(), false)
-        }
-        "NSURLPathKey" => corefoundation::string::from_bytes(path.as_bytes(), false),
-        "NSURLIsDirectoryKey" => number(i64::from(metadata.ok()?.is_dir())),
-        "NSURLIsRegularFileKey" => number(i64::from(metadata.ok()?.is_file())),
-        "NSURLIsSymbolicLinkKey" => number(i64::from(metadata.ok()?.file_type().is_symlink())),
-        "NSURLFileSizeKey" => number(metadata.ok()?.len() as i64),
+    let modified = || {
+        let time = std::fs::symlink_metadata(prefix::ns::host_path(path))
+            .ok()?
+            .modified()
+            .ok()?;
+        let seconds = match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(forward) => forward.as_secs_f64(),
+            Err(back) => -back.duration().as_secs_f64(),
+        };
+        Some(objc::arc::retain(crate::timer::date_since_1970(seconds))
+            as corefoundation::base::CFTypeRef)
+    };
+    match key {
+        CONTENT_MODIFICATION_DATE => modified(),
+        // No Linux filesystem records when an entry arrived in its directory;
+        // the modification date is the nearest thing it does record, and a
+        // Finder sorting by "date added" needs some date for every entry.
+        ADDED_TO_DIRECTORY_DATE => modified(),
         // There is no backup daemon here, so nothing is ever excluded from one.
         // Answered rather than omitted because a caller reads it back to
         // confirm the exclusion it just asked for, and a missing key reads as a
         // failure it would then report.
-        "NSURLIsExcludedFromBackupKey" => number(0),
-        _ => return None,
-    })
+        "NSURLIsExcludedFromBackupKey" => Some(number(0)),
+        _ => corefoundation::urlresource::property(path, key),
+    }
 }
 
 /// `-resourceValuesForKeys:error:`

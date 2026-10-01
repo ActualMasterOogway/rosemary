@@ -130,6 +130,7 @@ exports::exports! {
         "objc_setProperty_nonatomic" => shorthand::objc_setProperty_nonatomic,
         "objc_setProperty_atomic_copy" => shorthand::objc_setProperty_atomic_copy,
         "objc_setProperty_nonatomic_copy" => shorthand::objc_setProperty_nonatomic_copy,
+        "objc_copyStruct" => shorthand::objc_copyStruct,
         "objc_retainBlock" => shorthand::objc_retainBlock,
         "objc_enumerationMutation" => shorthand::objc_enumerationMutation,
         "objc_terminate" => shorthand::objc_terminate,

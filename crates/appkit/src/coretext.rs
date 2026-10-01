@@ -83,7 +83,7 @@ fn release(object: CFTypeRef) {
     }
 }
 
-fn get(dictionary: CFTypeRef, name: &'static str) -> CFTypeRef {
+pub(crate) fn get(dictionary: CFTypeRef, name: &'static str) -> CFTypeRef {
     // SAFETY: null, or a dictionary a guest received from this runtime.
     match unsafe { collections::dictionary(dictionary) } {
         Some(_) => unsafe { corefoundation::api::CFDictionaryGetValue(dictionary, key(name)) },

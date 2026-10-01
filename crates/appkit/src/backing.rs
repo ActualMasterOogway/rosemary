@@ -394,6 +394,112 @@ fn current_focus() -> Option<Focus> {
     FOCUS.with(|stack| stack.borrow().last().copied())
 }
 
+/// What vector drawing needs to know about the focused view: where its pixels
+/// are, and which focus it is.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Device {
+    /// The view (or offscreen key) and how deep in the focus stack it is,
+    /// which together tell one `-drawRect:` from the next.
+    pub key: usize,
+    pub depth: usize,
+    pub width: u32,
+    pub height: u32,
+    pub density: f64,
+    pub flipped: bool,
+}
+
+impl Device {
+    /// A point in the view's coordinates, in pixels from its top left.
+    pub fn to_pixels(self, x: f64, y: f64) -> [f64; 2] {
+        let y = match self.flipped {
+            true => y * self.density,
+            false => f64::from(self.height) - y * self.density,
+        };
+        [x * self.density, y]
+    }
+}
+
+pub(crate) fn focused_device() -> Option<Device> {
+    FOCUS.with(|stack| {
+        let stack = stack.borrow();
+        let focus = stack.last()?;
+        Some(Device {
+            key: focus.view as usize,
+            depth: stack.len(),
+            width: focus.width.max(1.0) as u32,
+            height: focus.height.max(1.0) as u32,
+            density: focus.density,
+            flipped: focus.flipped,
+        })
+    })
+}
+
+/// Blend straight-alpha `color` over the focused view through `coverage`, a
+/// `width`-wide mask of the view's pixels whose top-left is `(left, top)`.
+pub(crate) fn paint_coverage(left: i64, top: i64, width: usize, coverage: &[f32], color: [f64; 4]) {
+    let Some(focus) = current_focus() else {
+        return;
+    };
+    if width == 0 || coverage.is_empty() {
+        return;
+    }
+    let (store_width, store_height) = (focus.width.max(1.0) as u32, focus.height.max(1.0) as u32);
+    let [red, green, blue, alpha] = color.map(|c| c.clamp(0.0, 1.0));
+    let drawn = {
+        let stores = match focus.offscreen {
+            true => &OFFSCREEN,
+            false => &VIEW_STORES,
+        };
+        let mut stores = stores.lock().unwrap_or_else(|e| e.into_inner());
+        let store = stores
+            .get_or_insert_with(HashMap::new)
+            .entry(focus.view as usize)
+            .or_insert_with(|| Store::new(store_width, store_height));
+        store.resize(store_width, store_height);
+        let rows = coverage.len() / width;
+        let x0 = left.max(0);
+        let y0 = top.max(0);
+        let x1 = (left + width as i64).min(i64::from(store.width));
+        let y1 = (top + rows as i64).min(i64::from(store.height));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for y in y0..y1 {
+            let mask = &coverage[(y - top) as usize * width..][..width];
+            let base = y as usize * store.width as usize * 4;
+            for x in x0..x1 {
+                let a = f64::from(mask[(x - left) as usize].clamp(0.0, 1.0)) * alpha;
+                if a <= 0.0 {
+                    continue;
+                }
+                let pixel = &mut store.pixels[base + x as usize * 4..][..4];
+                for (channel, source) in [blue, green, red, 1.0].into_iter().enumerate() {
+                    let over = source * a + f64::from(pixel[channel]) / 255.0 * (1.0 - a);
+                    pixel[channel] = (over * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        store.dirty = true;
+        Rect {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        }
+    };
+    if focus.offscreen {
+        return;
+    }
+    damage(
+        focus.window,
+        Rect {
+            x: drawn.x + focus.x as i64,
+            y: drawn.y + focus.y as i64,
+            ..drawn
+        },
+    );
+}
+
 /// Pixels per point of what is being drawn into, 1 with nothing focused.
 pub(crate) fn focus_density() -> f64 {
     current_focus().map_or(1.0, |focus| focus.density)
@@ -438,6 +544,7 @@ pub(crate) fn draw_image(
     let Some(focus) = current_focus() else {
         return;
     };
+    let destination = crate::bezier::transform_rect(destination);
     let (width, height) = (focus.width.max(1.0) as u32, focus.height.max(1.0) as u32);
     let drawn = {
         let stores = match focus.offscreen {
@@ -1660,17 +1767,14 @@ pub(crate) fn install() {
     });
 
     let context = objc::class::lookup(c"NSGraphicsContext").expect("declared");
+    // Saving and restoring the graphics state is `crate::bezier`'s.
     class_methods!(context, {
         "currentContext" => current_context, c"@16@0:8";
-        "saveGraphicsState" => ignored, c"v16@0:8";
-        "restoreGraphicsState" => ignored, c"v16@0:8";
     });
     methods!(context, {
         "isFlipped" => context_is_flipped, c"c16@0:8";
         "CGContext" => nil, c"^v16@0:8";
         "graphicsPort" => nil, c"^v16@0:8";
-        "saveGraphicsState" => ignored, c"v16@0:8";
-        "restoreGraphicsState" => ignored, c"v16@0:8";
         "flushGraphics" => ignored, c"v16@0:8";
         "compositingOperation" => zero, c"q16@0:8";
         "setCompositingOperation:" => ignored_integer, c"v24@0:8q16";
