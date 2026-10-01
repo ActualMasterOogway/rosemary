@@ -33,6 +33,8 @@ const LIBRARIES: &[&str] = &[
     "libxml2.2.9.13.dylib",
     "libbz2.dylib",
     "libbz2.1.0.dylib",
+    "libsbuf.dylib",
+    "libsbuf.60.dylib",
 ];
 
 /// Whether `install_name` is one of the libraries this module takes from the base.
