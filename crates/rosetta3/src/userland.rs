@@ -36,6 +36,8 @@ const LIBRARIES: &[&str] = &[
     "libbz2.1.0.dylib",
     "libsbuf.dylib",
     "libsbuf.60.dylib",
+    "libicuuc.dylib",
+    "libicuuc.76.dylib",
 ];
 
 /// Whether `install_name` is one of the libraries this module takes from the base.
