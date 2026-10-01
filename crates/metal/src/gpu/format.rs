@@ -51,14 +51,12 @@ pub fn pixel_format(metal: u64) -> vk::Format {
         32 => F::R8G8_SNORM,
         33 => F::R8G8_UINT,
         34 => F::R8G8_SINT,
+        // Metal names a packed format's components from the low bit and
+        // Vulkan from the high bit, so these read reversed.
         40 => F::R5G6B5_UNORM_PACK16,
-        // FIXME (ACCURACY): Metal names packed formats from the low bits and
-        // Vulkan from the high bits (40 and 42 follow that), so A1BGR5Unorm
-        // (41) should be R5G5B5A1_UNORM_PACK16 and BGR5A1Unorm (43)
-        // A1R5G5B5_UNORM_PACK16. Unverified against hardware.
-        41 => F::A1R5G5B5_UNORM_PACK16,
+        41 => F::R5G5B5A1_UNORM_PACK16,
         42 => F::R4G4B4A4_UNORM_PACK16,
-        43 => F::B5G5R5A1_UNORM_PACK16,
+        43 => F::A1R5G5B5_UNORM_PACK16,
         53 => F::R32_UINT,
         54 => F::R32_SINT,
         55 => F::R32_SFLOAT,
@@ -139,7 +137,7 @@ pub fn texel_size(format: vk::Format) -> u32 {
         | F::R5G6B5_UNORM_PACK16
         | F::A1R5G5B5_UNORM_PACK16
         | F::R4G4B4A4_UNORM_PACK16
-        | F::B5G5R5A1_UNORM_PACK16
+        | F::R5G5B5A1_UNORM_PACK16
         | F::D16_UNORM => 2,
         F::R8G8B8A8_UNORM
         | F::R8G8B8A8_SRGB
@@ -232,6 +230,16 @@ mod tests {
         assert_eq!(pixel_format(50), vk::Format::UNDEFINED);
         assert_eq!(pixel_format(260), vk::Format::D32_SFLOAT_S8_UINT);
         assert_eq!(pixel_format(9999), vk::Format::UNDEFINED);
+    }
+
+    #[test]
+    fn packed_16bit_formats_keep_their_bit_layout() {
+        // Metal lists components from bit 0 and Vulkan from bit 15, so the
+        // alpha bit of A1BGR5 is Vulkan's trailing A1 and BGR5A1's leading one.
+        assert_eq!(pixel_format(40), vk::Format::R5G6B5_UNORM_PACK16);
+        assert_eq!(pixel_format(41), vk::Format::R5G5B5A1_UNORM_PACK16);
+        assert_eq!(pixel_format(42), vk::Format::R4G4B4A4_UNORM_PACK16);
+        assert_eq!(pixel_format(43), vk::Format::A1R5G5B5_UNORM_PACK16);
     }
 
     #[test]
