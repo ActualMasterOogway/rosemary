@@ -29,6 +29,7 @@ fn run(
     policy: ImportPolicy,
     forced: Option<Engine>,
 ) -> ExitCode {
+    darwin::spawn::set_emulated(forced == Some(Engine::Emulated));
     let mut argv = vec![OsString::from(guest)];
     argv.extend(args);
     rosemary::stats::start();

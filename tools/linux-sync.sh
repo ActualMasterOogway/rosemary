@@ -18,7 +18,7 @@
 #   glibc instead of musl, so musl is no longer covered by this loop.
 #
 # The toolchain is rustup's, not Debian's: trixie ships rustc 1.85 and this tree
-# needs `#[unsafe(naked)]`, which is 1.88.
+# needs stable C variadics, which require 1.99.
 #
 # The container keeps its own `CARGO_TARGET_DIR`, so a Linux build never touches
 # the macOS `target/`.
@@ -31,7 +31,7 @@
 #         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
 #         libglu1-mesa libvulkan1 mesa-vulkan-drivers libxkbcommon-dev'
 #     container exec rosemary-debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
-#         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal'
+#         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
 #
 # `libcurl4-openssl-dev` and `zlib1g-dev` are for `shims::curl` and `shims::zlib`,

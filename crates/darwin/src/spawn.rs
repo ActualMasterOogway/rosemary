@@ -1,12 +1,10 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::signal::signal_to_host;
 
-// The two directory file actions, which FreeBSD's libc exports but the `libc`
-// crate declares only for Linux.
-#[cfg(target_os = "freebsd")]
+// All supported hosts export these; `libc` omits declarations on some of them.
 unsafe extern "C" {
     fn posix_spawn_file_actions_addchdir_np(
         actions: *mut libc::posix_spawn_file_actions_t,
@@ -18,9 +16,6 @@ unsafe extern "C" {
         fd: c_int,
     ) -> c_int;
 }
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "freebsd")))]
-use libc::{posix_spawn_file_actions_addchdir_np, posix_spawn_file_actions_addfchdir_np};
 
 /// Darwin's `POSIX_SPAWN_*`. The first four agree with Linux; the last three do not,
 /// and two of them *collide* with a different Linux flag of the same value - Darwin's
@@ -47,7 +42,14 @@ mod flag {
     pub const CLOEXEC_DEFAULT: u32 = 0x4000;
 }
 
+// Darwin can apply spawn actions atomically while replacing the caller.
+#[cfg(target_os = "macos")]
+const HOST_SETEXEC: libc::c_short = libc::POSIX_SPAWN_SETEXEC as libc::c_short;
+#[cfg(not(target_os = "macos"))]
+const HOST_SETEXEC: libc::c_short = 0;
+
 /// One entry of a `posix_spawn_file_actions_t`, in the order it was added.
+/// Paths are translated to the host namespace when the action is recorded.
 enum Action {
     Open {
         fd: c_int,
@@ -137,10 +139,6 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
     0
 }
 
-/// Whether `path` names a Mach-O - thin or fat, either byte order.
-///
-/// Read from the file rather than inferred from the name: the whole point is to tell a
-/// Mach-O helper from the host's own `/bin/sh`, and only the magic says which is which.
 /// The environment for a rewritten exec: the guest's, with this runtime's own
 /// corrections undone.
 ///
@@ -157,24 +155,10 @@ unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
     unsafe { crate::env::host_spelling(envp) }
 }
 
-// On macOS the guest and host share Darwin's environment and path namespace.
-// Keep the helper available for the common implementation below, although this
-// module does not publish its spawn replacements on that host.
+// On macOS the guest and host share the environment.
 #[cfg(target_os = "macos")]
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
-    if envp.is_null() {
-        return Vec::new();
-    }
-    let mut entries = Vec::new();
-    let mut entry = envp;
-    // SAFETY: `envp` is the null-terminated vector required by the caller.
-    while !unsafe { *entry }.is_null() {
-        // SAFETY: each vector element is a valid NUL-terminated string.
-        entries.push(unsafe { CStr::from_ptr(*entry) }.to_owned());
-        // SAFETY: advance within the null-terminated vector.
-        entry = unsafe { entry.add(1) };
-    }
-    entries
+    unsafe { argv_of(envp) }
 }
 
 /// The host path an exec of the guest's `given` opens.
@@ -194,6 +178,7 @@ fn exec_path(given: &CStr) -> CString {
     prefix::ns::fold(&host).unwrap_or_else(|| host.into_owned())
 }
 
+/// Recognise thin and fat Mach-O images by their magic, in either byte order.
 fn is_mach_o(path: &CStr) -> bool {
     let Ok(text) = path.to_str() else {
         return false;
@@ -217,9 +202,7 @@ fn is_mach_o(path: &CStr) -> bool {
 
 /// This runtime's own executable, which is what a Mach-O spawn is re-pointed at.
 fn runtime_path() -> Option<CString> {
-    let exe = std::fs::read_link("/proc/self/exe")
-        .ok()
-        .or_else(|| std::env::current_exe().ok())?;
+    let exe = std::env::current_exe().ok()?;
     CString::new(exe.into_os_string().into_encoded_bytes()).ok()
 }
 
@@ -246,35 +229,44 @@ unsafe fn argv_of(argv: *const *const c_char) -> Vec<CString> {
     }
 }
 
-/// The command a spawn of `path` should really run.
+/// Whether the driver explicitly requested emulation for this process.
+static EMULATED: AtomicBool = AtomicBool::new(false);
+
+/// Preserve an explicit `--emulated` choice in child Rosemary launches.
 ///
-/// `None` leaves the call alone, which is the answer for everything that is not a
-/// Mach-O. Otherwise the runtime's own path, and an argv with `run <path>` in front of
-/// the guest's arguments.
-///
-/// The guest's `argv[0]` is dropped rather than preserved: this runtime derives the
-/// guest's `argv[0]` from the image it is told to run, so passing the original through
-/// as well would put it in front of the program's real first argument.
+/// Set by the driver before loading guest code. Automatic backend selection
+/// remains automatic for children, which may have different Mach-O slices.
+pub fn set_emulated(emulated: bool) {
+    EMULATED.store(emulated, Ordering::Relaxed);
+}
+
+/// The runtime's arguments for a child, without the guest's `argv[0]`.
+fn runtime_argv(runtime: &CStr, path: &CStr, argv: &[CString], emulated: bool) -> Vec<CString> {
+    let mut rewritten = vec![runtime.to_owned(), c"run".to_owned()];
+    if emulated {
+        rewritten.push(c"--emulated".to_owned());
+    }
+    rewritten.push(path.to_owned());
+    rewritten.extend(argv.iter().skip(1).cloned());
+    rewritten
+}
+
+/// Re-execute this runtime for a Mach-O, using the guest spelling of its path.
 fn rewrite(path: &CStr, on_disk: &CStr, argv: &[CString]) -> Option<(CString, Vec<CString>)> {
     if !is_mach_o(on_disk) {
         return None;
     }
     let runtime = runtime_path()?;
-    // The *guest* spelling goes to the child: it is another copy of this
-    // runtime, with the same prefix, and it translates the path for itself.
-    let mut rewritten = vec![runtime.clone(), c"run".to_owned(), path.to_owned()];
-    rewritten.extend(argv.iter().skip(1).cloned());
+    let rewritten = runtime_argv(&runtime, path, argv, EMULATED.load(Ordering::Relaxed));
     Some((runtime, rewritten))
 }
 
 /// Darwin's `_PATH_BSHELL`, which `execvp` hands a script with no `#!` line.
 const BSHELL: &CStr = c"/bin/sh";
 
-#[cfg(not(target_os = "macos"))]
 static SYSTEM_SIGNALS: Mutex<()> = Mutex::new(());
 
 /// Save the caller's signal state while `system` waits for its shell.
-#[cfg(not(target_os = "macos"))]
 struct SystemSignals {
     _lock: MutexGuard<'static, ()>,
     mask: libc::sigset_t,
@@ -282,7 +274,6 @@ struct SystemSignals {
     quit: libc::sigaction,
 }
 
-#[cfg(not(target_os = "macos"))]
 impl SystemSignals {
     fn new() -> Result<Self, c_int> {
         let lock = SYSTEM_SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
@@ -327,7 +318,7 @@ impl SystemSignals {
     }
 
     fn child_attr(&self) -> Result<HostAttr, c_int> {
-        let mut attr = HostAttr::new().ok_or(libc::ENOMEM)?;
+        let mut attr = HostAttr::new()?;
         // The child gets the original mask and the original ignored dispositions.
         // Signals temporarily ignored only by this call return to their defaults.
         let mut defaults = host_sigset(0);
@@ -356,7 +347,6 @@ impl SystemSignals {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 impl Drop for SystemSignals {
     fn drop(&mut self) {
         // SAFETY: these are the dispositions and thread mask saved by `new`.
@@ -493,6 +483,58 @@ pub unsafe extern "C" fn execve(
     unsafe { libc::execve(plan.program.as_ptr(), argv, envp) }
 }
 
+/// Gather C string pointers through the terminating null argument.
+///
+/// # Safety
+///
+/// `first` and every argument through the null are C string pointers.
+unsafe fn variadic_argv(
+    first: *const c_char,
+    args: &mut std::ffi::VaList<'_>,
+) -> Vec<*const c_char> {
+    let mut argv = vec![first];
+    let mut argument = first;
+    while !argument.is_null() {
+        // SAFETY: the caller supplies pointers through a terminating null.
+        argument = unsafe { args.next_arg::<*const c_char>() };
+        argv.push(argument);
+    }
+    argv
+}
+
+/// `int execl(const char *path, const char *arg, ..., NULL)`.
+///
+/// # Safety
+///
+/// `path` and arguments are C strings, followed by a null pointer.
+pub unsafe extern "C" fn execl(path: *const c_char, first: *const c_char, mut args: ...) -> c_int {
+    let argv = unsafe { variadic_argv(first, &mut args) };
+    // SAFETY: the vector holds the caller's strings and terminating null.
+    unsafe { execv(path, argv.as_ptr()) }
+}
+
+/// `int execlp(const char *file, const char *arg, ..., NULL)`.
+///
+/// # Safety
+///
+/// As [`execl`].
+pub unsafe extern "C" fn execlp(file: *const c_char, first: *const c_char, mut args: ...) -> c_int {
+    let argv = unsafe { variadic_argv(first, &mut args) };
+    unsafe { execvp(file, argv.as_ptr()) }
+}
+
+/// `int execle(const char *path, const char *arg, ..., NULL, char *const envp[])`.
+///
+/// # Safety
+///
+/// As [`execl`], with a null-terminated environment vector after the null argument.
+pub unsafe extern "C" fn execle(path: *const c_char, first: *const c_char, mut args: ...) -> c_int {
+    let argv = unsafe { variadic_argv(first, &mut args) };
+    // SAFETY: `execle` places its environment after the terminating null.
+    let envp = unsafe { args.next_arg::<*const *const c_char>() };
+    unsafe { execve(path, argv.as_ptr(), envp) }
+}
+
 /// `pid_t vfork(void)`, as `fork`, which POSIX allows.
 ///
 /// A `vfork` child borrows the parent's memory and stack until it execs. Here
@@ -610,9 +652,8 @@ fn environ() -> *const *const c_char {
 
 #[cfg(target_os = "macos")]
 fn environ() -> *const *const c_char {
-    // This helper is not exported on macOS; keep its signature valid for the
-    // shared implementation without depending on the non-macOS guest block.
-    std::ptr::null()
+    // SAFETY: Darwin publishes the live environment through this slot.
+    unsafe { *libc::_NSGetEnviron() as *const *const c_char }
 }
 
 impl FileActions {
@@ -620,7 +661,7 @@ impl FileActions {
     ///
     /// Returned by value with its own destructor, because a host
     /// `posix_spawn_file_actions_t` owns heap the caller has to give back.
-    fn to_host(&self) -> Option<HostActions> {
+    fn to_host(&self) -> Result<HostActions, c_int> {
         let mut host = HostActions::new()?;
         for action in &self.actions {
             // SAFETY: `host.0` is initialised, and every path outlives the call.
@@ -633,16 +674,12 @@ impl FileActions {
                         mode,
                     } => {
                         // The guest's `O_*` are Darwin's, which are not the host's.
-                        let Ok(oflag) = crate::fcntl::flags_to_host(*oflag) else {
-                            return None;
-                        };
-                        // A guest path the child opens: translated here, as
-                        // nothing in the child will.
-                        let host_path = prefix::ns::to_host(path);
+                        let oflag =
+                            crate::fcntl::flags_to_host(*oflag).map_err(|_| libc::EINVAL)?;
                         libc::posix_spawn_file_actions_addopen(
                             &mut host.0,
                             *fd,
-                            host_path.as_ptr(),
+                            path.as_ptr(),
                             oflag,
                             *mode,
                         )
@@ -651,27 +688,22 @@ impl FileActions {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *from, *to)
                     }
                     Action::Close(fd) => libc::posix_spawn_file_actions_addclose(&mut host.0, *fd),
-                    #[cfg(not(target_os = "macos"))]
                     Action::Chdir(path) => {
-                        let host_path = prefix::ns::to_host(path);
-                        posix_spawn_file_actions_addchdir_np(&mut host.0, host_path.as_ptr())
+                        posix_spawn_file_actions_addchdir_np(&mut host.0, path.as_ptr())
                     }
-                    #[cfg(not(target_os = "macos"))]
                     Action::Fchdir(fd) => posix_spawn_file_actions_addfchdir_np(&mut host.0, *fd),
                     // A descriptor duplicated onto itself survives the exec with its
                     // close-on-exec bit cleared, which is what "inherit" asks for.
                     Action::Inherit(fd) => {
                         libc::posix_spawn_file_actions_adddup2(&mut host.0, *fd, *fd)
                     }
-                    #[cfg(target_os = "macos")]
-                    _ => unimplemented!(),
                 }
             };
             if rc != 0 {
-                return None;
+                return Err(rc);
             }
         }
-        Some(host)
+        Ok(host)
     }
 }
 
@@ -679,13 +711,13 @@ impl FileActions {
 struct HostActions(libc::posix_spawn_file_actions_t);
 
 impl HostActions {
-    fn new() -> Option<HostActions> {
+    fn new() -> Result<HostActions, c_int> {
         // SAFETY: `posix_spawn_file_actions_init` fills the object it is given.
         let mut raw = unsafe { std::mem::zeroed::<libc::posix_spawn_file_actions_t>() };
         // SAFETY: a live local of the right type.
         match unsafe { libc::posix_spawn_file_actions_init(&mut raw) } {
-            0 => Some(HostActions(raw)),
-            _ => None,
+            0 => Ok(HostActions(raw)),
+            error => Err(error),
         }
     }
 }
@@ -701,13 +733,13 @@ impl Drop for HostActions {
 struct HostAttr(libc::posix_spawnattr_t);
 
 impl HostAttr {
-    fn new() -> Option<HostAttr> {
+    fn new() -> Result<HostAttr, c_int> {
         // SAFETY: `posix_spawnattr_init` fills the object it is given.
         let mut raw = unsafe { std::mem::zeroed::<libc::posix_spawnattr_t>() };
         // SAFETY: a live local of the right type.
         match unsafe { libc::posix_spawnattr_init(&mut raw) } {
-            0 => Some(HostAttr(raw)),
-            _ => None,
+            0 => Ok(HostAttr(raw)),
+            error => Err(error),
         }
     }
 }
@@ -739,46 +771,51 @@ fn host_sigset(darwin: u32) -> libc::sigset_t {
 }
 
 impl Attributes {
-    fn to_host(&self) -> Option<HostAttr> {
+    fn to_host(&self) -> Result<HostAttr, c_int> {
         let mut host = HostAttr::new()?;
-        // Only the four flags that mean the same thing on both are forwarded. The
-        // rest are handled here or dropped - see [`flag`] for why forwarding the word
-        // would ask for something else entirely.
+        // Other Darwin flags collide with different host flags; see [`flag`].
         let mut host_flags: libc::c_short = 0;
-        for (darwin, linux) in [
+        for (darwin, host_flag) in [
             (flag::RESETIDS, libc::POSIX_SPAWN_RESETIDS),
             (flag::SETPGROUP, libc::POSIX_SPAWN_SETPGROUP),
             (flag::SETSIGDEF, libc::POSIX_SPAWN_SETSIGDEF),
             (flag::SETSIGMASK, libc::POSIX_SPAWN_SETSIGMASK),
         ] {
             if self.flags & darwin != 0 {
-                host_flags |= linux as libc::c_short;
+                host_flags |= host_flag as libc::c_short;
             }
+        }
+        if self.flags & flag::SETEXEC != 0 {
+            host_flags |= HOST_SETEXEC;
         }
         // SAFETY: `host.0` is initialised and every argument is a live local.
         unsafe {
-            if libc::posix_spawnattr_setflags(&mut host.0, host_flags) != 0 {
-                return None;
+            let rc = libc::posix_spawnattr_setflags(&mut host.0, host_flags);
+            if rc != 0 {
+                return Err(rc);
             }
-            if self.flags & flag::SETPGROUP != 0
-                && libc::posix_spawnattr_setpgroup(&mut host.0, self.pgroup) != 0
-            {
-                return None;
+            if self.flags & flag::SETPGROUP != 0 {
+                let rc = libc::posix_spawnattr_setpgroup(&mut host.0, self.pgroup);
+                if rc != 0 {
+                    return Err(rc);
+                }
             }
             if self.flags & flag::SETSIGMASK != 0 {
                 let set = host_sigset(self.sigmask);
-                if libc::posix_spawnattr_setsigmask(&mut host.0, &set) != 0 {
-                    return None;
+                let rc = libc::posix_spawnattr_setsigmask(&mut host.0, &set);
+                if rc != 0 {
+                    return Err(rc);
                 }
             }
             if self.flags & flag::SETSIGDEF != 0 {
                 let set = host_sigset(self.sigdefault);
-                if libc::posix_spawnattr_setsigdefault(&mut host.0, &set) != 0 {
-                    return None;
+                let rc = libc::posix_spawnattr_setsigdefault(&mut host.0, &set);
+                if rc != 0 {
+                    return Err(rc);
                 }
             }
         }
-        Some(host)
+        Ok(host)
     }
 }
 
@@ -808,42 +845,59 @@ pub unsafe extern "C" fn posix_spawn(
         )
     };
 
-    // `POSIX_SPAWN_SETEXEC` asks for this process to be replaced rather than a child
-    // made, which is an `execve` however the guest spelled it.
-    if attributes
-        .as_ref()
-        .is_some_and(|a| a.flags & flag::SETEXEC != 0)
+    // Use the host's SETEXEC when available so it applies the actions too.
+    // Other hosts replace the caller through the same exec rewrite.
+    if HOST_SETEXEC == 0
+        && attributes
+            .as_ref()
+            .is_some_and(|a| a.flags & flag::SETEXEC != 0)
     {
         unsafe { execve(path, argv, envp) };
-        return crate::errno::get();
+        return crate::errno::from_host(crate::errno::get());
     }
 
     let host_actions = match actions {
         Some(actions) => match actions.to_host() {
-            Some(host) => Some(host),
-            None => return libc::ENOMEM,
+            Ok(host) => Some(host),
+            Err(error) => return crate::errno::from_host(error),
         },
         None => None,
     };
     let host_attr = match attributes {
         Some(attributes) => match attributes.to_host() {
-            Some(host) => Some(host),
-            None => return libc::ENOMEM,
+            Ok(host) => Some(host),
+            Err(error) => return crate::errno::from_host(error),
         },
         None => None,
     };
-    let actions_ptr = host_actions
-        .as_ref()
-        .map(|a| &a.0 as *const _)
-        .unwrap_or(std::ptr::null());
-    let attr_ptr = host_attr
-        .as_ref()
-        .map(|a| &a.0 as *const _)
-        .unwrap_or(std::ptr::null());
+    // SAFETY: the caller's strings and the translated objects outlive the call.
+    crate::errno::from_host(unsafe {
+        spawn_host(
+            pid,
+            given,
+            &arguments,
+            envp,
+            host_actions.as_ref(),
+            host_attr.as_ref(),
+        )
+    })
+}
 
-    let plan = launch(given, &arguments);
-    let raw = plan.argv.as_deref().map(as_argv);
-    let argv = raw.as_ref().map_or(argv, |raw| raw.as_ptr());
+/// Launch through the same rewrite for guest spawn, framework tasks and `system`.
+///
+/// # Safety
+///
+/// `pid` is writable and `envp` is a null-terminated environment vector or null.
+unsafe fn spawn_host(
+    pid: *mut libc::pid_t,
+    path: &CStr,
+    arguments: &[CString],
+    envp: *const *const c_char,
+    actions: Option<&HostActions>,
+    attributes: Option<&HostAttr>,
+) -> c_int {
+    let plan = launch(path, arguments);
+    let argv = as_argv(plan.argv.as_deref().unwrap_or(arguments));
     let environment = match plan.runtime {
         // SAFETY: the caller's obligation for `envp`.
         true => Some(unsafe { runtime_environ(envp) }),
@@ -851,15 +905,14 @@ pub unsafe extern "C" fn posix_spawn(
     };
     let environment = environment.as_deref().map(as_argv);
     let envp = environment.as_ref().map_or(envp, |e| e.as_ptr());
-    // SAFETY: the objects are this module's translations, and every string
-    // and array outlives the call.
+    // SAFETY: all objects, strings and arrays outlive the call.
     unsafe {
         libc::posix_spawn(
             pid,
             plan.program.as_ptr(),
-            actions_ptr,
-            attr_ptr,
-            argv as *const *mut c_char,
+            actions.map_or(std::ptr::null(), |a| &a.0),
+            attributes.map_or(std::ptr::null(), |a| &a.0),
+            argv.as_ptr() as *const *mut c_char,
             envp as *const *mut c_char,
         )
     }
@@ -889,7 +942,7 @@ pub unsafe extern "C" fn posix_spawnp(
     };
     // SAFETY: `found` outlives the call, and the caller's guarantee for the rest.
     let rc = unsafe { posix_spawn(pid, found.as_ptr(), file_actions, attrp, argv, envp) };
-    if rc != libc::ENOEXEC {
+    if rc != crate::errno::from_host(libc::ENOEXEC) {
         return rc;
     }
     // A file the kernel will not execute is a script for `/bin/sh`, as
@@ -917,7 +970,6 @@ pub unsafe extern "C" fn posix_spawnp(
 /// # Safety
 ///
 /// `command` is null or a NUL-terminated string.
-#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
     use std::os::unix::ffi::OsStrExt;
 
@@ -950,29 +1002,9 @@ pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
         c"-c".to_owned(),
         unsafe { CStr::from_ptr(command) }.to_owned(),
     ];
-    let plan = launch(BSHELL, &args);
-    let raw = plan.argv.as_deref().map(as_argv);
-    let guest_argv = as_argv(&args);
-    let argv = raw.as_ref().unwrap_or(&guest_argv);
-    let environment = match plan.runtime {
-        true => Some(unsafe { runtime_environ(environ()) }),
-        false => None,
-    };
-    let environment = environment.as_deref().map(as_argv);
-    let guest_env = environ();
-    let envp = environment.as_ref().map_or(guest_env, |e| e.as_ptr());
     let mut pid = 0;
     // SAFETY: all strings, arrays, and the host attribute outlive this call.
-    let rc = unsafe {
-        libc::posix_spawn(
-            &mut pid,
-            plan.program.as_ptr(),
-            std::ptr::null(),
-            &attr.0,
-            argv.as_ptr() as *const *mut c_char,
-            envp as *const *mut c_char,
-        )
-    };
+    let rc = unsafe { spawn_host(&mut pid, BSHELL, &args, environ(), None, Some(&attr)) };
     if rc != 0 {
         drop(signals);
         if rc == libc::EAGAIN || rc == libc::ENOMEM {
@@ -981,17 +1013,9 @@ pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
         }
         return 127 << 8;
     }
-    let mut status = 0;
-    let result = loop {
-        // SAFETY: `pid` belongs to this call and `status` is writable.
-        let waited = unsafe { crate::wait::waitpid(pid, &mut status, 0) };
-        if waited == pid {
-            break status;
-        }
-        if waited == -1 && crate::errno::get() == libc::EINTR {
-            continue;
-        }
-        break -1;
+    let result = match wait_child(pid, true) {
+        Ok(Some(status)) => status,
+        _ => -1,
     };
     let error = crate::errno::get();
     drop(signals);
@@ -1178,6 +1202,45 @@ pub unsafe extern "C" fn attr_setsigdefault(at: *mut c_void, set: *const u32) ->
     }
 }
 
+/// # Safety
+///
+/// `at` holds this module's attribute object and `out` is a writable pid_t.
+pub unsafe extern "C" fn attr_getpgroup(at: *mut c_void, out: *mut libc::pid_t) -> c_int {
+    match unsafe { object::<Attributes>(at) } {
+        Some(attributes) if !out.is_null() => {
+            unsafe { *out = attributes.pgroup };
+            0
+        }
+        _ => libc::EINVAL,
+    }
+}
+
+/// # Safety
+///
+/// `at` holds this module's attribute object and `out` is a writable Darwin sigset_t.
+pub unsafe extern "C" fn attr_getsigmask(at: *mut c_void, out: *mut u32) -> c_int {
+    match unsafe { object::<Attributes>(at) } {
+        Some(attributes) if !out.is_null() => {
+            unsafe { *out = attributes.sigmask };
+            0
+        }
+        _ => libc::EINVAL,
+    }
+}
+
+/// # Safety
+///
+/// `at` holds this module's attribute object and `out` is a writable Darwin sigset_t.
+pub unsafe extern "C" fn attr_getsigdefault(at: *mut c_void, out: *mut u32) -> c_int {
+    match unsafe { object::<Attributes>(at) } {
+        Some(attributes) if !out.is_null() => {
+            unsafe { *out = attributes.sigdefault };
+            0
+        }
+        _ => libc::EINVAL,
+    }
+}
+
 /// `int posix_spawnattr_setbinpref_np(posix_spawnattr_t *, size_t, cpu_type_t *,
 /// size_t *)`.
 ///
@@ -1214,81 +1277,29 @@ pub fn spawn_child(
     cwd: Option<&CStr>,
     stdio: [Option<c_int>; 3],
 ) -> Result<libc::pid_t, c_int> {
-    let argv = as_argv(argv);
-    let envp = envp.map(as_argv);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut actions = FileActions::default();
-        for (to, from) in stdio.iter().enumerate() {
-            if let Some(from) = *from {
-                actions.actions.push(Action::Dup2 {
-                    from,
-                    to: to as c_int,
-                });
-            }
-        }
-        if let Some(cwd) = cwd {
-            actions.actions.push(Action::Chdir(cwd.to_owned()));
-        }
-        // `posix_spawn` reads its file actions through a guest's `void *`.
-        let mut slot = &mut actions as *mut FileActions as u64;
-        let envp = envp.as_ref().map_or(environ(), |e| e.as_ptr());
-        let mut pid = 0;
-        // SAFETY: every string, array and the actions outlive the call.
-        let rc = unsafe {
-            posix_spawn(
-                &mut pid,
-                path.as_ptr(),
-                &mut slot as *mut u64 as *mut c_void,
-                std::ptr::null_mut(),
-                argv.as_ptr(),
-                envp,
-            )
-        };
-        match rc {
-            0 => Ok(pid),
-            error => Err(error),
+    let mut actions = FileActions::default();
+    for (to, from) in stdio.iter().enumerate() {
+        if let Some(from) = *from {
+            actions.actions.push(Action::Dup2 {
+                from,
+                to: to as c_int,
+            });
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        unsafe extern "C" {
-            static environ: *const *const c_char;
-            fn posix_spawn_file_actions_addchdir_np(
-                actions: *mut libc::posix_spawn_file_actions_t,
-                path: *const c_char,
-            ) -> c_int;
-        }
-        let mut actions = HostActions::new().ok_or(libc::ENOMEM)?;
-        // SAFETY: `actions.0` is initialised, and every path outlives the call.
-        unsafe {
-            for (to, from) in stdio.iter().enumerate() {
-                if let Some(from) = *from {
-                    libc::posix_spawn_file_actions_adddup2(&mut actions.0, from, to as c_int);
-                }
-            }
-            if let Some(cwd) = cwd {
-                posix_spawn_file_actions_addchdir_np(&mut actions.0, cwd.as_ptr());
-            }
-        }
-        // SAFETY: the host's own block, read once.
-        let envp = envp.as_ref().map_or(unsafe { environ }, |e| e.as_ptr());
-        let mut pid = 0;
-        // SAFETY: every string, array and the actions outlive the call.
-        let rc = unsafe {
-            libc::posix_spawn(
-                &mut pid,
-                path.as_ptr(),
-                &actions.0,
-                std::ptr::null(),
-                argv.as_ptr() as *const *mut c_char,
-                envp as *const *mut c_char,
-            )
-        };
-        match rc {
-            0 => Ok(pid),
-            error => Err(error),
-        }
+    if let Some(cwd) = cwd {
+        actions
+            .actions
+            .push(Action::Chdir(prefix::ns::to_host(cwd).into_owned()));
+    }
+    let actions = actions.to_host()?;
+    let envp = envp.map(as_argv);
+    let envp = envp.as_ref().map_or(environ(), |e| e.as_ptr());
+    let mut pid = 0;
+    // SAFETY: every string, array and the actions outlive the call.
+    let rc = unsafe { spawn_host(&mut pid, path, argv, envp, Some(&actions), None) };
+    match rc {
+        0 => Ok(pid),
+        error => Err(error),
     }
 }
 
@@ -1314,12 +1325,11 @@ pub fn wait_child(pid: libc::pid_t, block: bool) -> Result<Option<c_int>, c_int>
     }
 }
 
-#[cfg(target_os = "macos")]
-exports::exports! {}
-
-#[cfg(not(target_os = "macos"))]
 exports::exports! {
     functions {
+        "execl" => execl,
+        "execlp" => execlp,
+        "execle" => execle,
         "execv" => execv,
         "vfork" => vfork,
         "execve" => execve,
@@ -1339,6 +1349,9 @@ exports::exports! {
         "posix_spawnattr_destroy" => attr_destroy,
         "posix_spawnattr_setflags" => attr_setflags,
         "posix_spawnattr_getflags" => attr_getflags,
+        "posix_spawnattr_getsigdefault" => attr_getsigdefault,
+        "posix_spawnattr_getsigmask" => attr_getsigmask,
+        "posix_spawnattr_getpgroup" => attr_getpgroup,
         "posix_spawnattr_setpgroup" => attr_setpgroup,
         "posix_spawnattr_setsigmask" => attr_setsigmask,
         "posix_spawnattr_setsigdefault" => attr_setsigdefault,
@@ -1392,6 +1405,50 @@ mod tests {
         assert_eq!(rewritten.len(), 4, "the guest's argv[0] is not passed on");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_emulation_is_a_runtime_option_before_the_guest_path() {
+        let argv = [
+            c"guest-name".to_owned(),
+            c"--native".to_owned(),
+            c"argument".to_owned(),
+        ];
+        assert_eq!(
+            runtime_argv(c"rosemary", c"/guest/helper", &argv, true),
+            [
+                c"rosemary",
+                c"run",
+                c"--emulated",
+                c"/guest/helper",
+                c"--native",
+                c"argument"
+            ]
+            .map(CStr::to_owned)
+        );
+        assert_eq!(
+            runtime_argv(c"rosemary", c"/guest/helper", &argv, false),
+            [
+                c"rosemary",
+                c"run",
+                c"/guest/helper",
+                c"--native",
+                c"argument"
+            ]
+            .map(CStr::to_owned)
+        );
+    }
+
+    #[test]
+    fn invalid_file_actions_report_the_hosts_error() {
+        let actions = FileActions {
+            actions: vec![Action::Dup2 { from: -1, to: 1 }],
+        };
+        assert!(matches!(actions.to_host(), Err(libc::EBADF)));
+        assert_eq!(
+            spawn_child(c"/missing", &[], None, None, [None, Some(-1), None]),
+            Err(libc::EBADF)
+        );
     }
 
     fn scratch(test: &str) -> std::path::PathBuf {

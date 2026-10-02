@@ -2758,6 +2758,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // takes the same six arguments.
     sig!("posix_spawnp", I32, P, P, P, P, P, P),
     sig!("posix_spawn_file_actions_addchdir_np", I32, P, P),
+    sig!("posix_spawn_file_actions_addfchdir_np", I32, P, I32),
     // `int posix_spawn_file_actions_addinherit_np(posix_spawn_file_actions_t *,
     // int)` - "keep this descriptor open across the spawn", which is how a game
     // hands its crash handler the pipe it will report on.
@@ -2769,6 +2770,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("posix_spawn_file_actions_init", I32, P),
     sig!("posix_spawnattr_destroy", I32, P),
     sig!("posix_spawnattr_init", I32, P),
+    sig!("posix_spawnattr_getflags", I32, P, P),
+    sig!("posix_spawnattr_getpgroup", I32, P, P),
+    sig!("posix_spawnattr_getsigmask", I32, P, P),
+    sig!("posix_spawnattr_getsigdefault", I32, P, P),
+    sig!("posix_spawnattr_setpgroup", I32, P, I32),
     sig!("posix_spawnattr_setbinpref_np", I32, P, U64, P, P),
     // `short flags`, which SysV passes in the low half of a register and
     // AAPCS64 reads back out of one: narrower than the slot on both sides.
