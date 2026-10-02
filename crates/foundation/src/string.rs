@@ -363,7 +363,7 @@ unsafe fn read_file(path: &str, ns: usize, error: *mut Id) -> Id {
 /// A lone `%` is therefore something upstream did not render. It is passed
 /// through as itself - a visible oddity in the output - and said once, rather
 /// than dropped.
-fn unescape_rendered(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn unescape_rendered(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut rest = bytes.iter().copied().peekable();
     while let Some(b) = rest.next() {

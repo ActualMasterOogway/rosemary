@@ -562,6 +562,22 @@ pub fn new_mutable() -> CFTypeRef {
     object
 }
 
+/// Build an empty mutable string using a subclass with additional storage.
+///
+/// # Safety
+///
+/// `class` must inherit this module's string class and preserve the `CFString`
+/// prefix. Its deallocator must call [`release_storage`] before freeing it.
+pub unsafe fn new_mutable_in(class: &'static Class) -> CFTypeRef {
+    let object: *mut CFString = unsafe { crate::base::allocate(class) };
+    if !object.is_null() {
+        // SAFETY: the caller guarantees the CFString prefix.
+        unsafe { (*object).flags = MUTABLE };
+        unsafe { set_utf16(object.cast(), &[]) };
+    }
+    object.cast()
+}
+
 /// Whether `string` may be changed.
 ///
 /// # Safety
