@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 /// Set in the re-executed process, so it never re-executes again.
+#[cfg(target_os = "macos")]
 const GUARD: &str = "ROSEMARY_BUNDLED";
 
 /// Resolve a bundle to its executable without resolving the bundle's symlinks.
@@ -62,6 +63,7 @@ pub fn enclosing(exe: &Path) -> Option<PathBuf> {
 
 /// Build a mirror of the guest's bundle around this executable and return the path to
 /// run instead of the current one.
+#[cfg(target_os = "macos")]
 pub fn remirror(guest: &Path) -> Option<PathBuf> {
     if std::env::var_os(GUARD).is_some() {
         return None;
@@ -101,6 +103,7 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
 }
 
 /// Replace this process with `exe`, keeping the arguments.
+#[cfg(target_os = "macos")]
 pub fn reexec(exe: &Path) -> std::io::Error {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -124,6 +127,7 @@ pub fn reexec(exe: &Path) -> std::io::Error {
 }
 
 /// Where mirrors live: this user's cache, never inside the application.
+#[cfg(target_os = "macos")]
 fn cache_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join("Library/Caches/rosemary/bundles"))
@@ -131,6 +135,7 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// A directory name that changes when either the application or this binary
 /// does, so a rebuilt `rosemary` never runs from a stale copy of itself.
+#[cfg(target_os = "macos")]
 fn key(app: &Path, host: &Path) -> Option<String> {
     let stamp = |p: &Path| -> Option<u128> {
         let m = std::fs::metadata(p).ok()?;
@@ -150,6 +155,7 @@ fn key(app: &Path, host: &Path) -> Option<String> {
 /// Symlink every entry of `from` into `to`, skipping `except`.
 ///
 /// Best-effort throughout.
+#[cfg(target_os = "macos")]
 fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     let app_name = app.file_name()?;
     let Some(parent) = app.parent() else {
@@ -169,6 +175,7 @@ fn link_ancestors(app: &Path, root: &Path) -> Option<PathBuf> {
     Some(mirror_parent.join(app_name))
 }
 
+#[cfg(target_os = "macos")]
 fn link_children(from: &Path, to: &Path, except: &[&str]) {
     let Ok(entries) = std::fs::read_dir(from) else {
         return;
@@ -187,6 +194,7 @@ fn link_children(from: &Path, to: &Path, except: &[&str]) {
 }
 
 /// Copy `from` to `to` unless `to` is already at least as new.
+#[cfg(target_os = "macos")]
 fn copy_if_newer(from: &Path, to: &Path) -> Option<()> {
     let src = std::fs::metadata(from).ok()?.modified().ok()?;
     let fresh = std::fs::metadata(to)

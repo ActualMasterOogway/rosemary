@@ -19,6 +19,8 @@ pub mod abi;
 pub mod atomic128;
 pub mod audit;
 pub mod bridge;
+/// Resolve guest `.app` bundles and their executables on any host.
+pub mod bundle;
 pub mod cache;
 pub mod cxxlib;
 pub mod dispatch;
@@ -77,13 +79,11 @@ pub mod opengl;
 /// Subsystems that exist because macOS does.
 ///
 /// [`gui`] is the debug overlay drawn through Metal and AppKit, [`profile`] a
-/// sampler built on Mach thread suspension, [`bundle`] the `.app` layout the
-/// host's `NSBundle` expects, and [`compat`] a `NSUserDefaults` registration.
+/// sampler built on Mach thread suspension, and [`compat`] a `NSUserDefaults`
+/// registration.
 /// None of them has a meaning on a host with none of those, and none is stubbed:
 /// a guest that imports into one is refused by name at the import. See
 /// [`darwin::divergent`].
-#[cfg(target_os = "macos")]
-pub mod bundle;
 #[cfg(target_os = "macos")]
 pub mod compat;
 #[cfg(target_os = "macos")]
