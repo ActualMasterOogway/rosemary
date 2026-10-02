@@ -161,26 +161,28 @@ mod tests {
 
     #[test]
     fn timingsafe_bcmp_reports_equality_and_difference() {
+        let mut implementations: Vec<
+            unsafe extern "C" fn(*const c_void, *const c_void, usize) -> i32,
+        > = vec![timingsafe_bcmp];
+        if crate::libc_backend::using_builtin() {
+            let addr = crate::symbol("_timingsafe_bcmp").expect("timingsafe_bcmp is exported");
+            // SAFETY: the exported function has this prototype. Function addresses
+            // can differ across codegen units, so check its behavior instead.
+            implementations.push(unsafe { std::mem::transmute(addr as usize as *const ()) });
+        }
         let left = b"abcdef";
         let same = b"abcdef";
         let first = b"zbcdef";
         let last = b"abcdez";
-        for (right, expected) in [(same, 0), (first, 1), (last, 1)] {
-            // SAFETY: both arrays contain six readable bytes.
-            let result =
-                unsafe { timingsafe_bcmp(left.as_ptr().cast(), right.as_ptr().cast(), left.len()) };
-            assert_eq!(result, expected);
-        }
-        // SAFETY: a zero-length comparison reads neither pointer.
-        assert_eq!(
-            unsafe { timingsafe_bcmp(std::ptr::null(), std::ptr::null(), 0) },
-            0
-        );
-        if crate::libc_backend::using_builtin() {
-            assert_eq!(
-                crate::symbol("_timingsafe_bcmp"),
-                Some(timingsafe_bcmp as *const () as usize as u64)
-            );
+        for compare in implementations {
+            for (right, expected) in [(same, 0), (first, 1), (last, 1)] {
+                // SAFETY: both arrays contain six readable bytes.
+                let result =
+                    unsafe { compare(left.as_ptr().cast(), right.as_ptr().cast(), left.len()) };
+                assert_eq!(result, expected);
+            }
+            // SAFETY: a zero-length comparison reads neither pointer.
+            assert_eq!(unsafe { compare(std::ptr::null(), std::ptr::null(), 0) }, 0);
         }
     }
 
