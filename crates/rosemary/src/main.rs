@@ -156,7 +156,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let Some(first) = args.next() else {
         eprintln!(
-            "usage: rosemary run [--native|--emulated] [--objc-debug] <mach-o path> [args...]"
+            "usage: rosemary run [--native|--emulated] [--objc-debug] <mach-o or .app path> [args...]"
         );
         eprintln!(
             "       rosemary prefix <create|info|verify|repair|reset-system|update|cache> ..."
@@ -192,7 +192,7 @@ fn main() -> ExitCode {
         let Some(path) = path else {
             eprintln!(
                 "usage: rosemary run [--slow] [--native|--emulated] [--objc-debug] \
-                 <mach-o path> [args...]"
+                 <mach-o or .app path> [args...]"
             );
             return ExitCode::FAILURE;
         };
@@ -226,17 +226,28 @@ fn main() -> ExitCode {
         // The argument may be a host path or one the guest spells; everything
         // below opens files, so it is resolved to this host's spelling first.
         let path = program_path(&path);
-        rosemary::shims::runtime::set_executable_path(std::path::Path::new(&path));
-        rosemary::frameworks::set_main_bundle(std::path::Path::new(&path));
+        let executable = match rosemary::bundle::executable(std::path::Path::new(&path)) {
+            Ok(executable) => executable,
+            Err(e) => {
+                eprintln!("rosemary: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(path) = executable.to_str() else {
+            eprintln!("rosemary: the bundle executable's path is not valid UTF-8");
+            return ExitCode::FAILURE;
+        };
+        rosemary::shims::runtime::set_executable_path(std::path::Path::new(path));
+        rosemary::frameworks::set_main_bundle(std::path::Path::new(path));
         // The same path as the guest spells it, for `argv[0]`.
-        let guest = guest_spelling(&path);
+        let guest = guest_spelling(path);
         // A Mac's `~/Library` subtree, which this host has not got and a guest
         // does not create for itself.
         #[cfg(not(target_os = "macos"))]
         foundation::paths::ensure_standard_directories();
         #[cfg(target_os = "macos")]
         if !rosemary::frameworks::using_builtin()
-            && let Some(mirror) = rosemary::bundle::remirror(std::path::Path::new(&path))
+            && let Some(mirror) = rosemary::bundle::remirror(std::path::Path::new(path))
         {
             eprintln!("rosemary: re-executing from {}", mirror.display());
             let e = rosemary::bundle::reexec(&mirror);
@@ -244,7 +255,7 @@ fn main() -> ExitCode {
             // strictly better than not running.
             eprintln!("rosemary: could not re-execute from the bundle mirror: {e}");
         }
-        return run(&path, &guest, args.collect(), policy, engine);
+        return run(path, &guest, args.collect(), policy, engine);
     }
     let Some(path) = first.to_str().map(str::to_owned) else {
         eprintln!("rosemary: the program's path is not valid UTF-8");

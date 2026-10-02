@@ -5,6 +5,86 @@ use std::path::Path;
 use common::{run_guest, run_guest_with};
 
 #[test]
+fn runs_an_app_bundle_with_arguments_and_resources() {
+    let Some(fixture) = common::build_x86_64(
+        "app-launch",
+        r#"
+#include <mach-o/dyld.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    char executable[4096], resource[4096], message[64];
+    uint32_t size = sizeof executable;
+    if (_NSGetExecutablePath(executable, &size) || strcmp(executable, argv[0])) return 10;
+    snprintf(resource, sizeof resource, "%s", executable);
+    char *slash = strrchr(resource, '/');
+    if (!slash) return 11;
+    strcpy(slash, "/../Resources/message.txt");
+    FILE *file = fopen(resource, "r");
+    if (!file || !fgets(message, sizeof message, file)) return 12;
+    fclose(file);
+    printf("executable=%s\nresource=%s", executable, message);
+    if (argc != 2) return 13;
+    printf("argument=%s\n", argv[1]);
+    return 7;
+}
+"#,
+        &[],
+    ) else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("app-launch");
+    let _ = std::fs::remove_dir_all(&dir);
+    let app = dir.join("Different Name.app");
+    std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+    std::fs::copy(fixture, app.join("Contents/MacOS/Runner")).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleExecutable</key><string>Runner</string></dict></plist>",
+    )
+    .unwrap();
+    std::fs::write(app.join("Contents/Resources/message.txt"), "bundle data\n").unwrap();
+    std::os::unix::fs::symlink(&app, dir.join("Linked.app")).unwrap();
+    for (flags, identity) in [
+        (&[][..], true),
+        (&["--emulated"][..], true),
+        (&["--emulated"][..], false),
+    ] {
+        let mut command = common::driver_command();
+        if identity {
+            command.env("ROSEMARY_PREFIX", "off");
+        }
+        let path = if identity {
+            "Linked.app/".to_string()
+        } else {
+            format!("/Volumes/Host{}/Linked.app", dir.display())
+        };
+        let output = command
+            .current_dir(&dir)
+            .arg("run")
+            .args(flags)
+            .args([&path, "hello world"])
+            .env("ROSEMARY_OBJC", "builtin")
+            .env("ROSEMARY_LIBC", "builtin")
+            .env("ROSEMARY_BUNDLED", "1")
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(7), "stdout: {out} stderr: {err}");
+        assert!(out.contains("/Linked.app/Contents/MacOS/Runner\n"), "{out}");
+        assert!(
+            out.contains("resource=bundle data\nargument=hello world\n"),
+            "{out}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 #[cfg(target_os = "macos")]
 fn objc_debug_rejects_the_native_objc_runtime_before_loading_the_guest() {
     let output = common::driver_command()

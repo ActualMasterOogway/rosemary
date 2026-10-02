@@ -3,6 +3,45 @@ use std::path::{Path, PathBuf};
 /// Set in the re-executed process, so it never re-executes again.
 const GUARD: &str = "ROSEMARY_BUNDLED";
 
+/// Resolve a bundle to its executable without resolving the bundle's symlinks.
+/// Loose executable paths pass through unchanged.
+pub fn executable(path: &Path) -> std::io::Result<PathBuf> {
+    if !path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    let plist_path = path.join("Contents/Info.plist");
+    let bytes = std::fs::read(&plist_path)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", plist_path.display())))?;
+    let info = foundation::plist::parse(&bytes)
+        .map_err(|e| invalid(format!("{}: {e}", plist_path.display())))?;
+    if info.as_dictionary().is_none() {
+        return Err(invalid("Info.plist must contain a dictionary".to_string()));
+    }
+    // Match CFBundle's fallback for an absent or empty executable name.
+    let name = ["CFBundleExecutable", "NSExecutable"]
+        .iter()
+        .find_map(|key| info.get(key)?.as_str().filter(|name| !name.is_empty()))
+        .map(std::ffi::OsStr::new)
+        .or_else(|| path.file_stem())
+        .ok_or_else(|| invalid("the bundle has no executable name".to_string()))?;
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(invalid(
+            "the bundle executable name must be a filename".to_string(),
+        ));
+    }
+    let exe = path.join("Contents/MacOS").join(name);
+    let metadata = std::fs::metadata(&exe)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", exe.display())))?;
+    if !metadata.is_file() {
+        return Err(invalid(format!("{} is not a file", exe.display())));
+    }
+    Ok(exe)
+}
+
 /// The bundle a path is the main executable of: `<X>.app` for
 /// `<X>.app/Contents/MacOS/<exe>`.
 pub fn enclosing(exe: &Path) -> Option<PathBuf> {
@@ -163,6 +202,84 @@ fn copy_if_newer(from: &Path, to: &Path) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_bundle_executables_from_xml_and_binary_plists() {
+        let dir = std::env::temp_dir().join(format!("rosemary-resolve-{}", std::process::id()));
+        let app = dir.join("Different Name.app");
+        let macos = app.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("Runner");
+        std::fs::write(&exe, b"").unwrap();
+        let plist = app.join("Contents/Info.plist");
+        let binary: &[u8] = &[
+            98, 112, 108, 105, 115, 116, 48, 48, 209, 1, 2, 95, 16, 18, 67, 70, 66, 117, 110, 100,
+            108, 101, 69, 120, 101, 99, 117, 116, 97, 98, 108, 101, 86, 82, 117, 110, 110, 101,
+            114, 8, 11, 32, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 39,
+        ];
+        for info in [
+            &b"<plist><dict><key>CFBundleExecutable</key><string>Runner</string></dict></plist>"[..],
+            binary,
+        ] {
+            std::fs::write(&plist, info).unwrap();
+            assert_eq!(executable(&app).unwrap(), exe);
+            assert_eq!(executable(&exe).unwrap(), exe);
+            let link = dir.join("Linked.app");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&app, &link).unwrap();
+            assert_eq!(
+                executable(&link).unwrap(),
+                link.join("Contents/MacOS/Runner")
+            );
+        }
+        std::fs::write(macos.join("Different Name"), b"").unwrap();
+        for info in [
+            "<dict></dict>",
+            "<dict><key>CFBundleExecutable</key><string></string></dict>",
+        ] {
+            std::fs::write(&plist, format!("<plist>{info}</plist>")).unwrap();
+            assert_eq!(executable(&app).unwrap(), macos.join("Different Name"));
+        }
+        std::fs::write(
+            &plist,
+            "<plist><dict><key>NSExecutable</key><string>Runner</string></dict></plist>",
+        )
+        .unwrap();
+        assert_eq!(executable(&app).unwrap(), exe);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_bundles_report_the_problem() {
+        let app = std::env::temp_dir().join(format!("rosemary-invalid-{}.app", std::process::id()));
+        std::fs::create_dir_all(app.join("Contents/MacOS/Directory")).unwrap();
+        let plist = app.join("Contents/Info.plist");
+        assert!(
+            executable(&app)
+                .unwrap_err()
+                .to_string()
+                .contains("Info.plist")
+        );
+        for info in ["garbage", "<plist><array></array></plist>"] {
+            std::fs::write(&plist, info).unwrap();
+            assert_eq!(
+                executable(&app).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+        for (name, message) in [
+            ("Missing", "Missing"),
+            ("Directory", "not a file"),
+            ("../outside", "must be a filename"),
+            ("/bin/sh", "must be a filename"),
+        ] {
+            std::fs::write(&plist, format!("<plist><dict><key>CFBundleExecutable</key><string>{name}</string></dict></plist>")).unwrap();
+            let error = executable(&app).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
+        std::fs::remove_dir_all(app).unwrap();
+    }
 
     #[test]
     fn a_bundle_is_recognised_by_shape_and_not_by_name() {

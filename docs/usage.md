@@ -1,5 +1,21 @@
 # Rosemary CLI Reference
 
+## Running applications
+
+Pass an app bundle or a Mach-O executable to `run`:
+
+```sh
+rosemary run /some/app.app
+rosemary run --emulated "/some/My App.app" [args...]
+rosemary run /some/app.app/Contents/MacOS/App [args...]
+```
+
+For a bundle, Rosemary reads `Contents/Info.plist` (XML or binary) and runs
+the executable named by `CFBundleExecutable` in `Contents/MacOS`. An empty
+or missing name falls back to `NSExecutable`, then the bundle's name without
+`.app`. Arguments go to that executable, and the usual backend selection and
+bundle resource lookup apply. Invalid bundles report an error.
+
 ## Environment variables
 
 
@@ -7,6 +23,7 @@
 | --- | ------- | ----------- |
 | `ROSEMARY_OBJC` | `native` (macOS), `builtin` (other) | Set the Objective-C runtime implementation to use. On Linux, there is only `builtin`. On macOS, `native` uses the real Objective-C, and `builtin` uses the compatibility implementation which can only talk to cross platform reimplementations. `native` yields better compatibility and performance, so use it if you can. It is only recommended you use `builtin` if you are differentially testing, or working upon the compatibility layer from a real macOS system. Make sure that if you're on macOS you also set `ROSEMARY_BUNDLED=1`. |
 | `ROSEMARY_BUNDLED` | `0` | (macOS only) - determines if Rosemary should re-execute from a virtual repackage of the application. Makes the real Objective-C runtime recognize plist registrations, unnecessary with `builtin` (and possibly problematic). |
+| `ROSEMARY_LIBC` | `native` (macOS), `builtin` (other) | Select the libc shim implementation for guest imports. On macOS, `builtin` enables the `clock`, `glob`, `pthread`, `resolv`, `stackprobe` (x86-64), and `string` shims for differential testing; the existing guest-aware `sysctl` overrides remain active in both modes. This setting is independent of `ROSEMARY_OBJC`. `native` is available only on macOS. |
 | `ROSEMARY_DEAD_FLAGS` | `0` | Enable Microlift's dead flag elimination pass. Improves performance in some applications, but not by a wide enough margin. **May have semantic accuracy bugs, use with extreme caution**. |
 | `ROSEMARY_CALL_RETURN` | `0` | Enable Microlift native call return support. Can improve performance in some applications - disabled by default as measurements were inconclusive and it is additional, complex code surface. |
 | `ROSEMARY_STRICT_IMPORTS` | `0` | Refuse to run a program that has unbound imports, rather than announcing them on stderr and running anyway. Unbound imports are always announced; this only decides whether they are fatal. |
