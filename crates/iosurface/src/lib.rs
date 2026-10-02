@@ -361,7 +361,7 @@ pub unsafe extern "C" fn IOSurfaceUnlock(surface: CFTypeRef, options: u32, seed:
     };
     let held = state
         .locks
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n > 0).then(|| n - 1)
         });
     if held.is_err() {
@@ -432,7 +432,7 @@ pub unsafe extern "C" fn IOSurfaceDecrementUseCount(surface: CFTypeRef) {
     if let Some(state) = state(surface) {
         let _ = state
             .use_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n > 0).then(|| n - 1)
             });
     }
