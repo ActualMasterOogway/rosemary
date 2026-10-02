@@ -38,7 +38,7 @@ Rosemary currently has two execution backends:
 
 ## Building
 
-Rosemary uses the Rust 2024 edition and currently requires Rust 1.96 or newer.
+Rosemary uses the Rust 2024 edition and currently requires Rust 1.99 or newer.
 The Microlift and Microlift Wasmtime repositories are Git dependencies, so the
 build environment must be able to fetch them.
 
