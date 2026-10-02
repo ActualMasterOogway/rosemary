@@ -23,7 +23,7 @@
           };
           inherit (pkgs) lib;
 
-          toolchain = pkgs.rust-bin.stable."1.98.0".default.override {
+          toolchain = pkgs.rust-bin.stable.latest.default.override {
             extensions = [ "rust-src" "rust-analyzer" ];
             targets = lib.optional pkgs.stdenv.hostPlatform.isDarwin "x86_64-apple-darwin";
           };
