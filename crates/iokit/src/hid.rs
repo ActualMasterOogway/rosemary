@@ -1,6 +1,9 @@
+use crate::manager::ValueCallback;
+use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use corefoundation::base::{CFIndex, CFTypeID};
 
@@ -83,11 +86,60 @@ const AXIS_USAGES: &[u32] = &[
     usage::RZ,
 ];
 
+static DEVICES: Mutex<BTreeMap<sdl3::JoystickId, Arc<Device>>> = Mutex::new(BTreeMap::new());
+
+struct Transport {
+    joystick: usize,
+    gamepad: usize,
+    raw: usize,
+}
+impl Transport {
+    fn close_with(
+        &mut self,
+        close_raw: impl FnOnce(usize),
+        close_gamepad: impl FnOnce(usize),
+        close_joystick: impl FnOnce(usize),
+    ) {
+        let raw = std::mem::take(&mut self.raw);
+        let gamepad = std::mem::take(&mut self.gamepad);
+        let joystick = std::mem::take(&mut self.joystick);
+        if raw != 0 {
+            close_raw(raw);
+        }
+        if gamepad != 0 {
+            close_gamepad(gamepad);
+        }
+        if joystick != 0 {
+            close_joystick(joystick);
+        }
+    }
+}
+impl Drop for Transport {
+    fn drop(&mut self) {
+        self.close_with(
+            |raw| unsafe {
+                sdl3::close_hid(raw as sdl3::HidDevice);
+            },
+            |gamepad| unsafe {
+                sdl3::close_gamepad(gamepad as sdl3::Gamepad);
+            },
+            |joystick| unsafe {
+                sdl3::close(joystick as sdl3::Joystick);
+            },
+        );
+    }
+}
+
 pub struct Device {
     pub id: sdl3::JoystickId,
-    pub joystick: sdl3::Joystick,
-    gamepad: usize,
-    raw: Mutex<usize>,
+    transport: Mutex<Transport>,
+    raw_descriptor: Option<Vec<u8>>,
+    numbered_reports: bool,
+    pub(crate) schedules: crate::schedule::Schedules,
+    enabled: AtomicBool,
+    polling: AtomicBool,
+    removed_notified: AtomicBool,
+    values: Mutex<(Option<ValueCallback>, usize)>,
     pub name: String,
     pub vendor: u16,
     pub product: u16,
@@ -106,15 +158,48 @@ pub struct Device {
     last_report: Mutex<Vec<u8>>,
 }
 
-// SAFETY: `joystick` is an SDL handle used only from the thread that opened it -
-// which is the run loop's, since that is where the device list is serviced. The
-// rest is plain data behind a lock.
+// SAFETY: transport operations are serialized, SDL joystick operations permit
+// any thread, and element handles point into immutable, process-lived data.
 unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
 impl Device {
     /// Open `id` and describe it as a tree of elements.
-    pub fn open(id: sdl3::JoystickId) -> Option<std::sync::Arc<Device>> {
+    pub fn open(id: sdl3::JoystickId) -> Option<Arc<Device>> {
+        sdl3::init_controllers().ok()?;
+        let mut devices = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(device) = devices.get(&id) {
+            return device.is_connected().then(|| Arc::clone(device));
+        }
+        let device = Self::open_new(id)?;
+        devices.insert(id, Arc::clone(&device));
+        Some(device)
+    }
+
+    pub fn discover() -> Vec<Arc<Device>> {
+        if sdl3::init_controllers().is_err() {
+            return Vec::new();
+        }
+        sdl3::update_joysticks();
+        let attached = sdl3::joysticks();
+        for id in &attached {
+            let _ = Self::open(*id);
+        }
+        let devices: Vec<_> = DEVICES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for device in &devices {
+            if !attached.contains(&device.id) {
+                device.disconnect();
+            }
+        }
+        devices.into_iter().filter(|d| d.is_connected()).collect()
+    }
+
+    fn open_new(id: sdl3::JoystickId) -> Option<Arc<Device>> {
         let joystick = sdl3::open(id)?;
         // SAFETY: a joystick just opened and not yet closed.
         let (name, physical_vendor, physical_product, physical_version) = unsafe {
@@ -132,32 +217,42 @@ impl Device {
                 sdl3::hats(joystick),
             )
         };
-        let gamepad = (physical_vendor == sdl3::usb_vendor::MICROSOFT)
-            .then(|| sdl3::open_gamepad(id))
-            .flatten()
-            .map_or(0, |gamepad| gamepad as usize);
-        let (vendor, product, version, elements) =
-            if physical_vendor == sdl3::usb_vendor::MICROSOFT && gamepad != 0 {
-                // macOS publishes Microsoft pads to legacy IOKit clients as an
-                // Xbox 360-shaped synthetic HID device. Its stable semantic
-                // layout is what old games have in their mapping databases.
-                (
-                    sdl3::usb_vendor::MICROSOFT,
-                    sdl3::usb_product::XBOX_360_CONTROLLER,
-                    0,
-                    describe_gamepad(buttons),
-                )
-            } else {
-                (
-                    physical_vendor,
-                    physical_product,
-                    physical_version,
-                    describe(axes, buttons, hats),
-                )
-            };
-        // SAFETY: the joystick is open. Not every SDL joystick has a raw HID
-        // path; those devices use the synthetic report representation below.
-        let raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |device| device as usize);
+        let gamepad = sdl3::open_gamepad(id).map_or(0, |g| g as usize);
+        let mut raw = unsafe { sdl3::open_hid(joystick) }.map_or(0, |d| d as usize);
+        let mut raw_descriptor = if raw != 0 {
+            sdl3::hid_report_descriptor(raw as sdl3::HidDevice).filter(|d| !d.is_empty())
+        } else {
+            None
+        };
+        let compatibility = gamepad != 0
+            && (physical_vendor == sdl3::usb_vendor::MICROSOFT || raw_descriptor.is_none());
+        if raw != 0 && (compatibility || raw_descriptor.is_none()) {
+            unsafe {
+                sdl3::close_hid(raw as sdl3::HidDevice);
+            }
+            raw = 0;
+            raw_descriptor = None;
+        }
+        let numbered_reports = raw_descriptor.as_deref().is_some_and(has_report_ids);
+        let (vendor, product, version, mut elements) = if compatibility {
+            // Legacy macOS games recognize this identity and semantic layout.
+            (
+                sdl3::usb_vendor::MICROSOFT,
+                sdl3::usb_product::XBOX_360_CONTROLLER,
+                0,
+                describe_gamepad(buttons),
+            )
+        } else {
+            (
+                physical_vendor,
+                physical_product,
+                physical_version,
+                describe(axes, buttons, hats),
+            )
+        };
+        if gamepad == 0 {
+            elements[0].usage = usage::JOYSTICK;
+        }
         crate::trace_hid(format_args!(
             "device id={id} name={name:?} SDL={physical_vendor:04x}:{physical_product:04x}:{physical_version:04x} \
              published={published_vendor:04x}:{published_product:04x}:{published_version:04x} \
@@ -172,9 +267,18 @@ impl Device {
         let last = Mutex::new(vec![i64::MIN; elements.len()]);
         let device = std::sync::Arc::new(Device {
             id,
-            joystick,
-            gamepad,
-            raw: Mutex::new(raw),
+            transport: Mutex::new(Transport {
+                joystick: joystick as usize,
+                gamepad,
+                raw,
+            }),
+            raw_descriptor,
+            numbered_reports,
+            schedules: Default::default(),
+            enabled: AtomicBool::new(true),
+            polling: AtomicBool::new(false),
+            removed_notified: AtomicBool::new(false),
+            values: Mutex::new((None, 0)),
             name,
             vendor,
             product,
@@ -233,6 +337,9 @@ impl Device {
     }
 
     pub fn notify_removed(&self) {
+        if self.removed_notified.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let (callback, context) = *self.removal.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(callback) = callback {
             // SAFETY: the registration supplies an IOHIDCallback and its
@@ -300,7 +407,7 @@ impl Device {
     }
 
     pub fn max_input_report_size(&self) -> usize {
-        if *self.raw.lock().unwrap_or_else(|e| e.into_inner()) != 0 {
+        if self.raw_descriptor.is_some() {
             // SDL recommends 4096 bytes for raw HID descriptors. The same
             // bound is ample for an interrupt input report and is what HIDAPI
             // uses for its reusable callback buffer.
@@ -326,75 +433,68 @@ impl Device {
 
     /// A HID descriptor for the bytes produced by [`Device::input_report`].
     pub fn report_descriptor(&self) -> Vec<u8> {
-        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
-        if *raw != 0
-            && let Some(descriptor) = sdl3::hid_report_descriptor(*raw as sdl3::HidDevice)
-        {
-            return descriptor;
-        }
-        drop(raw);
-        descriptor(
-            self.elements
-                .iter()
-                .filter(|e| matches!(e.source, Source::Axis(_) | Source::GamepadAxis(_, _)))
-                .count(),
-            self.elements
-                .iter()
-                .filter(|e| matches!(e.source, Source::Hat(_)))
-                .count(),
-            self.elements
-                .iter()
-                .filter(|e| matches!(e.source, Source::Button(_) | Source::GamepadButton(_)))
-                .count(),
-        )
+        self.raw_descriptor
+            .clone()
+            .unwrap_or_else(|| descriptor(&self.elements))
     }
 
-    pub fn notify_report(&self) {
+    fn notify_report(&self, inherited: bool, active: &impl Fn() -> bool) {
         let registered = *self.report.lock().unwrap_or_else(|e| e.into_inner());
         let Some(callback) = registered.callback else {
             return;
         };
-        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
-        if *raw != 0 {
+        let raw = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        if raw.raw != 0 {
             if registered.length == 0 || registered.buffer == 0 {
                 return;
             }
-            let buffer = unsafe {
-                std::slice::from_raw_parts_mut(registered.buffer as *mut u8, registered.length)
-            };
             drop(raw);
-            // SDL's non-blocking read still returns only one queued report.
-            // Switch controllers keep sending reports while idle, so taking
-            // one per 60 Hz run-loop turn lets old input pile up for seconds.
-            // Deliver the pending batch now, capped so a noisy device cannot
-            // monopolize the guest's run loop.
-            for _ in 0..64 {
-                let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(length) = sdl3::hid_read(*raw as sdl3::HidDevice, buffer) else {
-                    break;
-                };
-                drop(raw);
-                if length == 0 {
-                    break;
-                }
-                let report_id = buffer.first().copied().unwrap_or(0) as u32;
-                crate::trace_hid(format_args!(
-                    "input report id={} raw length={length} report_id={report_id}",
-                    self.id
-                ));
-                // SAFETY: the registration supplies this callback and buffer.
-                unsafe {
-                    callback(
-                        registered.context as *mut c_void,
-                        0,
-                        std::ptr::from_ref(self).cast_mut().cast(),
-                        0,
-                        report_id,
-                        registered.buffer as *mut u8,
-                        length as CFIndex,
-                    );
-                }
-            }
+            drain_raw_reports(
+                registered.length,
+                self.numbered_reports,
+                |buffer| {
+                    if !active()
+                        || !self.enabled.load(Ordering::Acquire)
+                        || !self.is_connected()
+                        || (!inherited && !self.schedules.current())
+                    {
+                        return None;
+                    }
+                    let current = *self.report.lock().unwrap_or_else(|e| e.into_inner());
+                    if current.buffer != registered.buffer
+                        || current.length != registered.length
+                        || current.callback.map(|c| c as usize) != Some(callback as usize)
+                        || current.context != registered.context
+                    {
+                        return None;
+                    }
+                    let raw = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+                    if raw.raw == 0 {
+                        return None;
+                    }
+                    sdl3::hid_read(raw.raw as sdl3::HidDevice, buffer)
+                },
+                |report_id, bytes| {
+                    // The guest may unregister or close from its callback. Keep no
+                    // borrowed guest buffer or transport lock across that call.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            registered.buffer as *mut u8,
+                            bytes.len(),
+                        );
+                        callback(
+                            registered.context as *mut c_void,
+                            0,
+                            std::ptr::from_ref(self).cast_mut().cast(),
+                            0,
+                            report_id,
+                            registered.buffer as *mut u8,
+                            bytes.len() as CFIndex,
+                        );
+                    }
+                },
+            );
             return;
         }
         drop(raw);
@@ -437,8 +537,8 @@ impl Device {
     }
 
     pub fn raw_get_report(&self, feature: bool, report_id: u8, capacity: usize) -> Option<Vec<u8>> {
-        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
-        if *raw == 0 {
+        let raw = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        if raw.raw == 0 {
             return None;
         }
         let mut bytes = vec![0; capacity];
@@ -446,35 +546,129 @@ impl Device {
             return Some(bytes);
         }
         bytes[0] = report_id;
-        let length = sdl3::hid_get_report(*raw as sdl3::HidDevice, feature, &mut bytes)?;
+        let length = sdl3::hid_get_report(raw.raw as sdl3::HidDevice, feature, &mut bytes)?;
         bytes.truncate(length.min(bytes.len()));
         Some(bytes)
     }
 
     pub fn raw_set_report(&self, feature: bool, bytes: &[u8]) -> Option<bool> {
-        let raw = self.raw.lock().unwrap_or_else(|e| e.into_inner());
-        (*raw != 0).then(|| sdl3::hid_write(*raw as sdl3::HidDevice, feature, bytes))
+        let raw = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        (raw.raw != 0).then(|| sdl3::hid_write(raw.raw as sdl3::HidDevice, feature, bytes))
     }
 
     pub fn has_raw_reports(&self) -> bool {
-        *self.raw.lock().unwrap_or_else(|e| e.into_inner()) != 0
+        self.transport.lock().unwrap_or_else(|e| e.into_inner()).raw != 0
     }
 
     /// What an element reads right now.
     pub fn value(&self, element: &Element) -> i64 {
+        let transport = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        if transport.joystick == 0 {
+            return 0;
+        }
+        let joystick = transport.joystick as sdl3::Joystick;
+        let gamepad = transport.gamepad as sdl3::Gamepad;
         match element.source {
-            // SAFETY: a joystick this device opened and has not closed.
-            Source::Axis(i) => unsafe { sdl3::axis(self.joystick, i) as i64 },
-            Source::Button(i) => unsafe { sdl3::button(self.joystick, i) as i64 },
+            Source::Axis(i) => unsafe { sdl3::axis(joystick, i) as i64 },
+            Source::Button(i) => unsafe { sdl3::button(joystick, i) as i64 },
             Source::GamepadAxis(i, invert) => unsafe {
-                let value = sdl3::gamepad_axis(self.gamepad as sdl3::Gamepad, i) as i64;
-                if invert { -value } else { value }
+                let value = sdl3::gamepad_axis(gamepad, i);
+                if invert {
+                    value.saturating_neg() as i64
+                } else {
+                    value as i64
+                }
             },
-            Source::GamepadButton(i) => unsafe {
-                sdl3::gamepad_button(self.gamepad as sdl3::Gamepad, i) as i64
-            },
-            Source::Hat(i) => hat_to_direction(unsafe { sdl3::hat(self.joystick, i) }),
+            Source::GamepadButton(i) => unsafe { sdl3::gamepad_button(gamepad, i) as i64 },
+            Source::Hat(i) => hat_to_direction(unsafe { sdl3::hat(joystick, i) }),
             Source::Collection => 0,
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        let t = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        t.joystick != 0 && unsafe { sdl3::joystick_connected(t.joystick as sdl3::Joystick) }
+    }
+
+    fn disconnect(&self) {
+        let old = std::mem::replace(
+            &mut *self.transport.lock().unwrap_or_else(|e| e.into_inner()),
+            Transport {
+                joystick: 0,
+                gamepad: 0,
+                raw: 0,
+            },
+        );
+        drop(old);
+    }
+
+    pub fn open_input(&self) -> bool {
+        if !self.is_connected() {
+            return false;
+        }
+        self.enabled.store(true, Ordering::Release);
+        true
+    }
+
+    pub fn close_input(&self) {
+        self.enabled.store(false, Ordering::Release);
+        self.schedules.clear();
+    }
+
+    pub fn send_effect(&self, bytes: &[u8]) -> bool {
+        let t = self.transport.lock().unwrap_or_else(|e| e.into_inner());
+        t.joystick != 0 && unsafe { sdl3::send_effect(t.joystick as sdl3::Joystick, bytes) }
+    }
+
+    pub fn set_values(&self, callback: Option<ValueCallback>, context: usize) {
+        *self.values.lock().unwrap_or_else(|e| e.into_inner()) = (callback, context);
+        self.last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fill(i64::MIN);
+    }
+
+    pub(crate) fn poll(&self, inherited: bool, active: impl Fn() -> bool) {
+        if (inherited && self.schedules.any())
+            || (!inherited && !self.schedules.current())
+            || !self.enabled.load(Ordering::Acquire)
+            || self.polling.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        struct Guard<'a>(&'a AtomicBool);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _guard = Guard(&self.polling);
+        Self::discover();
+        if !self.is_connected() {
+            self.notify_removed();
+            return;
+        }
+        self.notify_report(inherited, &active);
+        for (cookie, integer) in self.changed() {
+            if !active()
+                || !self.enabled.load(Ordering::Acquire)
+                || (!inherited && !self.schedules.current())
+            {
+                break;
+            }
+            let (callback, context) = *self.values.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(callback) = callback {
+                let value = crate::value::new(self, cookie, integer);
+                unsafe {
+                    callback(
+                        context as *mut c_void,
+                        0,
+                        std::ptr::from_ref(self).cast_mut().cast(),
+                        value,
+                    );
+                }
+                crate::value::release(value);
+            }
         }
     }
 
@@ -504,47 +698,96 @@ impl Device {
     }
 }
 
-fn descriptor(axes: usize, hats: usize, buttons: usize) -> Vec<u8> {
-    let mut out = vec![0x05, 0x01, 0x09, 0x05, 0xa1, 0x01];
-    if axes != 0 {
-        for usage in AXIS_USAGES.iter().copied().take(axes) {
-            out.extend_from_slice(&[0x09, usage as u8]);
+fn drain_raw_reports(
+    capacity: usize,
+    numbered: bool,
+    mut read: impl FnMut(&mut [u8]) -> Option<usize>,
+    mut deliver: impl FnMut(u32, &[u8]),
+) {
+    let mut buffer = vec![0; capacity];
+    // Drain queued input while bounding the work of noisy devices.
+    for _ in 0..64 {
+        let Some(length) = read(&mut buffer) else {
+            break;
+        };
+        if length == 0 || length > capacity {
+            break;
         }
-        out.extend_from_slice(&[
-            0x16, 0x00, 0x80, 0x26, 0xff, 0x7f, 0x75, 0x10, 0x95, axes as u8, 0x81, 0x02,
-        ]);
+        let report_id = if numbered { buffer[0] as u32 } else { 0 };
+        deliver(report_id, &buffer[..length]);
     }
-    if hats != 0 {
+}
+
+fn descriptor(elements: &[Element]) -> Vec<u8> {
+    let mut out = vec![0x05, 0x01, 0x09, elements[0].usage as u8, 0xa1, 0x01];
+    for element in elements.iter().filter(|e| {
+        matches!(
+            e.source,
+            Source::Axis(_) | Source::GamepadAxis(_, _) | Source::Hat(_)
+        )
+    }) {
+        // Each item resets its globals, including unsigned triggers and hats.
+        out.extend_from_slice(&[0x05, element.page as u8, 0x09, element.usage as u8, 0x16]);
+        out.extend_from_slice(&(element.logical_min as i16).to_le_bytes());
+        out.push(0x26);
+        out.extend_from_slice(&(element.logical_max as i16).to_le_bytes());
         out.extend_from_slice(&[
-            0x09, 0x39, 0x15, 0x00, 0x25, 0x07, 0x75, 0x08, 0x95, hats as u8, 0x81, 0x42,
-        ]);
-    }
-    if buttons != 0 {
-        out.extend_from_slice(&[
-            0x05,
-            0x09,
-            0x19,
-            0x01,
-            0x29,
-            buttons as u8,
-            0x15,
-            0x00,
-            0x25,
-            0x01,
             0x75,
-            0x01,
+            if matches!(element.source, Source::Hat(_)) {
+                8
+            } else {
+                16
+            },
             0x95,
-            buttons as u8,
+            1,
             0x81,
-            0x02,
+            if matches!(element.source, Source::Hat(_)) {
+                0x42
+            } else {
+                0x02
+            },
         ]);
-        let padding = (8 - buttons % 8) % 8;
-        if padding != 0 {
-            out.extend_from_slice(&[0x75, 0x01, 0x95, padding as u8, 0x81, 0x03]);
-        }
+    }
+    let buttons: Vec<_> = elements
+        .iter()
+        .filter(|e| matches!(e.source, Source::Button(_) | Source::GamepadButton(_)))
+        .collect();
+    for element in &buttons {
+        out.extend_from_slice(&[0x05, 0x09, 0x0a]);
+        out.extend_from_slice(&(element.usage as u16).to_le_bytes());
+        out.extend_from_slice(&[0x15, 0, 0x25, 1, 0x75, 1, 0x95, 1, 0x81, 2]);
+    }
+    let padding = (8 - buttons.len() % 8) % 8;
+    if padding != 0 {
+        out.extend_from_slice(&[0x75, 1, 0x95, padding as u8, 0x81, 3]);
     }
     out.push(0xc0);
     out
+}
+
+fn has_report_ids(descriptor: &[u8]) -> bool {
+    let mut offset = 0;
+    while let Some(&prefix) = descriptor.get(offset) {
+        if prefix == 0xfe {
+            let Some(&length) = descriptor.get(offset + 1) else {
+                break;
+            };
+            offset += 3 + length as usize;
+        } else {
+            let size = match prefix & 3 {
+                3 => 4,
+                n => n as usize,
+            };
+            if descriptor.get(offset + 1..offset + 1 + size).is_none() {
+                break;
+            }
+            if prefix & 0xfc == 0x84 {
+                return true;
+            }
+            offset += 1 + size;
+        }
+    }
+    false
 }
 
 fn hat_to_direction(bits: u8) -> i64 {
@@ -623,7 +866,11 @@ pub fn describe(axes: i32, buttons: i32, hats: i32) -> Vec<Element> {
 
 /// Apple's synthetic Xbox HID layout, backed by SDL's semantic gamepad API.
 fn describe_gamepad(reported_buttons: i32) -> Vec<Element> {
-    let mut out = describe(sdl3::gamepad_axis::COUNT, reported_buttons.max(15), 0);
+    let mut out = describe(
+        sdl3::gamepad_axis::COUNT,
+        reported_buttons.clamp(15, sdl3::gamepad_button::COUNT),
+        0,
+    );
     let axes = [
         (sdl3::gamepad_axis::LEFT_X, false),
         (sdl3::gamepad_axis::LEFT_Y, false),
@@ -679,6 +926,119 @@ fn describe_gamepad(reported_buttons: i32) -> Vec<Element> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_reports_follow_descriptor_numbering_and_stop_on_read_failure() {
+        assert!(!has_report_ids(&[0x05, 1, 0x09, 5, 0x81, 2]));
+        assert!(has_report_ids(&[0x05, 1, 0x85, 7, 0x81, 2]));
+        assert!(!has_report_ids(&[0xfe, 2, 0, 0x85, 7]));
+        assert!(!has_report_ids(&[0x85]));
+        for numbered in [false, true] {
+            let mut reads = 0;
+            let mut received = Vec::new();
+            drain_raw_reports(
+                8,
+                numbered,
+                |buffer| {
+                    reads += 1;
+                    if reads > 2 {
+                        return None;
+                    }
+                    buffer[..3].copy_from_slice(&[7, reads, 42]);
+                    Some(3)
+                },
+                |id, bytes| received.push((id, bytes.to_vec())),
+            );
+            assert_eq!(
+                received,
+                vec![
+                    (if numbered { 7 } else { 0 }, vec![7, 1, 42]),
+                    (if numbered { 7 } else { 0 }, vec![7, 2, 42])
+                ]
+            );
+        }
+        let mut count = 0;
+        drain_raw_reports(1, false, |_| Some(1), |_, _| count += 1);
+        assert_eq!(count, 64);
+        drain_raw_reports(1, false, |_| Some(2), |_, _| panic!("invalid read length"));
+        drain_raw_reports(1, false, |_| Some(0), |_, _| panic!("no report available"));
+    }
+
+    #[test]
+    fn transport_closes_each_owned_handle_once() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut t = Transport {
+            raw: 1,
+            gamepad: 2,
+            joystick: 3,
+        };
+        t.close_with(
+            |h| calls.borrow_mut().push(h),
+            |h| calls.borrow_mut().push(h),
+            |h| calls.borrow_mut().push(h),
+        );
+        t.close_with(
+            |_| panic!("closed twice"),
+            |_| panic!("closed twice"),
+            |_| panic!("closed twice"),
+        );
+        assert_eq!(*calls.borrow(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn synthetic_descriptor_preserves_ranges_usages_and_bit_counts() {
+        let elements = describe_gamepad(15);
+        let bytes = descriptor(&elements);
+        // Decode the short items a HID reader uses to assign fields and ranges.
+        let mut offset = 0;
+        let (mut page, mut usage, mut min, mut max, mut size, mut count) = (0, 0, 0i32, 0i32, 0, 0);
+        let mut inputs = Vec::new();
+        while offset < bytes.len() {
+            let prefix = bytes[offset];
+            let n = match prefix & 3 {
+                3 => 4,
+                n => n as usize,
+            };
+            let mut raw = [0; 4];
+            raw[..n].copy_from_slice(&bytes[offset + 1..offset + 1 + n]);
+            let value = u32::from_le_bytes(raw);
+            match prefix & 0xfc {
+                0x04 => page = value,
+                0x08 => usage = value,
+                0x14 => {
+                    min = if n == 2 {
+                        value as i16 as i32
+                    } else {
+                        value as i8 as i32
+                    }
+                }
+                0x24 => {
+                    max = if min < 0 {
+                        value as i16 as i32
+                    } else {
+                        value as i32
+                    }
+                }
+                0x74 => size = value,
+                0x94 => count = value,
+                0x80 => inputs.push((page, usage, min, max, size * count, value)),
+                _ => {}
+            }
+            offset += 1 + n;
+        }
+        assert_eq!(
+            inputs[2],
+            (page::GENERIC_DESKTOP, usage::Z, 0, 32767, 16, 2)
+        );
+        assert_eq!(
+            inputs[3].2, -32768,
+            "trigger globals must not leak into sticks"
+        );
+        assert_eq!(inputs.iter().map(|i| i.4).sum::<u32>(), 14 * 8);
+        let extra = descriptor(&describe(8, 300, 2));
+        assert!(!extra.is_empty());
+        assert!(!has_report_ids(&extra));
+    }
 
     /// The shape a guest walks: a root collection, then axes on the
     /// generic-desktop page, then a hat, then buttons numbered from one.

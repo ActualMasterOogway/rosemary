@@ -33,6 +33,7 @@ enum Source {
     Button(i32),
     DpadX,
     DpadY,
+    DirectionButton(DirectionKind, bool, bool),
 }
 
 #[repr(C)]
@@ -42,6 +43,7 @@ struct Input {
     source: Source,
     last: f32,
     handler: usize,
+    pressed_handler: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +54,7 @@ enum DirectionKind {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Direction {
     isa: *const Class,
     controller: *mut Controller,
@@ -68,8 +71,11 @@ struct Direction {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ExtendedGamepad {
     isa: *const Class,
+    controller: *mut Controller,
+    handler: usize,
     button_a: Id,
     button_b: Id,
     button_x: Id,
@@ -111,7 +117,7 @@ fn trace_controller(message: impl std::fmt::Display) {
 
 fn sdl_ready() -> bool {
     static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *READY.get_or_init(|| match sdl3::init(sdl3::init::GAMEPAD) {
+    *READY.get_or_init(|| match sdl3::init_controllers() {
         Ok(()) => true,
         Err(reason) => {
             eprintln!("rosemary: GameController: {reason}");
@@ -173,6 +179,7 @@ fn make_input(controller: *mut Controller, class: &'static Class, source: Source
         (*input).source = source;
         (*input).last = read_source(controller, source);
         (*input).handler = 0;
+        (*input).pressed_handler = 0;
     }
     input as Id
 }
@@ -222,10 +229,26 @@ fn make_direction(controller: *mut Controller, kind: DirectionKind) -> Id {
             ),
         ),
         _ => (
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            make_input(
+                controller,
+                button_class(),
+                Source::DirectionButton(kind, false, true),
+            ),
+            make_input(
+                controller,
+                button_class(),
+                Source::DirectionButton(kind, false, false),
+            ),
+            make_input(
+                controller,
+                button_class(),
+                Source::DirectionButton(kind, true, false),
+            ),
+            make_input(
+                controller,
+                button_class(),
+                Source::DirectionButton(kind, true, true),
+            ),
         ),
     };
     let (x, y) = read_direction(controller, kind);
@@ -255,6 +278,8 @@ fn make_extended(controller: *mut Controller, class: &'static Class) -> Id {
     let button = |index| make_input(controller, button_class(), Source::Button(index));
     // SAFETY: a fresh instance.
     unsafe {
+        (*profile).controller = controller;
+        (*profile).handler = 0;
         (*profile).button_a = button(sdl3::gamepad_button::SOUTH);
         (*profile).button_b = button(sdl3::gamepad_button::EAST);
         (*profile).button_x = button(sdl3::gamepad_button::WEST);
@@ -384,12 +409,17 @@ fn make_controller(id: sdl3::JoystickId, gamepad: sdl3::Gamepad) -> Id {
         (*controller).product_category =
             foundation::string::from_str(if is_xbox { "Xbox One" } else { &name });
         (*controller).motion = std::ptr::null_mut();
-        (*controller).light = (properties.mono_led || properties.rgb_led || properties.player_led)
-            .then(|| capability(c"GCDeviceLight"))
-            .unwrap_or(std::ptr::null_mut());
-        (*controller).haptics = (properties.rumble || properties.trigger_rumble)
-            .then(|| capability(c"GCDeviceHaptics"))
-            .unwrap_or(std::ptr::null_mut());
+        (*controller).light = if properties.mono_led || properties.rgb_led || properties.player_led
+        {
+            capability(c"GCDeviceLight")
+        } else {
+            std::ptr::null_mut()
+        };
+        (*controller).haptics = if properties.rumble || properties.trigger_rumble {
+            capability(c"GCDeviceHaptics")
+        } else {
+            std::ptr::null_mut()
+        };
         (*controller).battery = std::ptr::null_mut();
         (*controller).paused_handler = 0;
         (*controller).paused_last =
@@ -427,6 +457,15 @@ fn read_source(controller: *mut Controller, source: Source) -> f32 {
             Source::DpadX => {
                 sdl3::gamepad_button(gamepad, sdl3::gamepad_button::DPAD_RIGHT) as u8 as f32
                     - sdl3::gamepad_button(gamepad, sdl3::gamepad_button::DPAD_LEFT) as u8 as f32
+            }
+            Source::DirectionButton(kind, x_axis, positive) => {
+                let (x, y) = read_direction(controller, kind);
+                let value = if x_axis { x } else { y };
+                if positive {
+                    value.max(0.0)
+                } else {
+                    (-value).max(0.0)
+                }
             }
             Source::DpadY => {
                 sdl3::gamepad_button(gamepad, sdl3::gamepad_button::DPAD_UP) as u8 as f32
@@ -499,6 +538,10 @@ unsafe extern "C" fn supports_hid_device(
     }
     // SAFETY: the type registration above identifies one of IOKit's Device
     // handles, which lives for the lifetime of the process.
+    if !sdl_ready() {
+        return false;
+    }
+    sdl3::update_joysticks();
     let id = unsafe { (*(device as *const iokit::hid::Device)).id };
     let supported = sdl3::gamepads().contains(&id);
     trace_controller(format_args!(
@@ -585,6 +628,7 @@ unsafe extern "C" fn set_paused_handler(receiver: Id, _sel: Sel, block: Id) {
 }
 
 unsafe extern "C" fn input_value(receiver: Id, _sel: Sel) -> f32 {
+    sdl3::update_joysticks();
     // SAFETY: an axis or button input, both with `Input` layout.
     let input = unsafe { &*(receiver as *const Input) };
     read_source(input.controller, input.source)
@@ -600,7 +644,7 @@ unsafe extern "C" fn input_is_analog(receiver: Id, _sel: Sel) -> bool {
     // buttons do not, even though GCControllerButtonInput inherits the axis API.
     matches!(
         unsafe { (*(receiver as *const Input)).source },
-        Source::Axis(..) | Source::Trigger(_) | Source::DpadX | Source::DpadY
+        Source::Axis(..) | Source::Trigger(_) | Source::DirectionButton(..)
     )
 }
 
@@ -667,44 +711,68 @@ unsafe extern "C" fn extended_element(receiver: Id, sel: Sel) -> Id {
     }
 }
 
-fn call_input(input: Id) {
-    // SAFETY: an input in a live profile.
-    let input_ref = unsafe { &mut *(input as *mut Input) };
-    let value = read_source(input_ref.controller, input_ref.source);
-    if value == input_ref.last {
-        return;
+fn pressed(value: f32) -> bool {
+    value > 0.0
+}
+
+fn call_input(input: Id) -> bool {
+    if input.is_null() {
+        return false;
     }
-    trace_controller(format_args!(
-        "input changed source={:?} {} -> {}",
-        input_ref.source, input_ref.last, value
-    ));
-    input_ref.last = value;
-    let block = objc::block::copy(input_ref.handler as Id);
-    // SAFETY: `setValueChangedHandler:` declares this block prototype.
+    let (source, controller, old) = unsafe {
+        let i = &*(input as *const Input);
+        (i.source, i.controller, i.last)
+    };
+    let value = read_source(controller, source);
+    if value == old {
+        return false;
+    }
+    unsafe {
+        (*(input as *mut Input)).last = value;
+    }
+    let block = objc::block::copy(unsafe { (*(input as *const Input)).handler as Id });
     unsafe {
         if let Some(invoke) = block_invoke(block) {
-            let f: unsafe extern "C" fn(Id, Id, f32, u8) = std::mem::transmute(invoke);
-            f(block, input, value, (value > 0.0) as u8);
+            if matches!(source, Source::Axis(..) | Source::DpadX | Source::DpadY) {
+                let f: unsafe extern "C" fn(Id, Id, f32) = std::mem::transmute(invoke);
+                f(block, input, value);
+            } else {
+                let f: unsafe extern "C" fn(Id, Id, f32, u8) = std::mem::transmute(invoke);
+                f(block, input, value, pressed(value) as u8);
+            }
         }
     }
     objc::block::release(block);
+    if pressed(value) != pressed(old) {
+        let block = objc::block::copy(unsafe { (*(input as *const Input)).pressed_handler as Id });
+        unsafe {
+            if let Some(invoke) = block_invoke(block) {
+                let f: unsafe extern "C" fn(Id, Id, f32, u8) = std::mem::transmute(invoke);
+                f(block, input, value, pressed(value) as u8);
+            }
+        }
+        objc::block::release(block);
+    }
+    true
 }
 
-fn call_direction(direction: Id) {
-    // SAFETY: a direction in a live profile.
-    let direction_ref = unsafe { &mut *(direction as *mut Direction) };
-    let (x, y) = read_direction(direction_ref.controller, direction_ref.kind);
-    if x == direction_ref.last_x && y == direction_ref.last_y {
-        return;
+fn call_direction(direction: Id) -> bool {
+    if direction.is_null() {
+        return false;
     }
-    trace_controller(format_args!(
-        "direction changed kind={:?} ({}, {}) -> ({x}, {y})",
-        direction_ref.kind, direction_ref.last_x, direction_ref.last_y
-    ));
-    direction_ref.last_x = x;
-    direction_ref.last_y = y;
-    let block = objc::block::copy(direction_ref.handler as Id);
-    // SAFETY: `setValueChangedHandler:` declares this block prototype.
+    let d = unsafe { *(direction as *const Direction) };
+    let (x, y) = read_direction(d.controller, d.kind);
+    if x == d.last_x && y == d.last_y {
+        return false;
+    }
+    unsafe {
+        (*(direction as *mut Direction)).last_x = x;
+        (*(direction as *mut Direction)).last_y = y;
+    }
+    for input in [d.x_axis, d.y_axis, d.up, d.down, d.left, d.right] {
+        call_input(input);
+    }
+    let block = objc::block::copy(unsafe { (*(direction as *const Direction)).handler as Id });
     unsafe {
         if let Some(invoke) = block_invoke(block) {
             let f: unsafe extern "C" fn(Id, Id, f32, f32) = std::mem::transmute(invoke);
@@ -712,17 +780,26 @@ fn call_direction(direction: Id) {
         }
     }
     objc::block::release(block);
+    true
+}
+
+fn call_profile(profile: Id, element: Id) {
+    let block = objc::block::copy(unsafe { (*(profile as *const ExtendedGamepad)).handler as Id });
+    unsafe {
+        if let Some(invoke) = block_invoke(block) {
+            let f: unsafe extern "C" fn(Id, Id, Id) = std::mem::transmute(invoke);
+            f(block, profile, element);
+        }
+    }
+    objc::block::release(block);
 }
 
 fn poll_controller(controller: Id) {
-    // SAFETY: one of the active controller objects.
-    let controller_ref = unsafe { &mut *(controller as *mut Controller) };
-    let profile = controller_ref.extended as *mut ExtendedGamepad;
-    if profile.is_null() {
+    let profile_id = unsafe { (*(controller as *const Controller)).extended };
+    if profile_id.is_null() {
         return;
     }
-    // SAFETY: the controller owns this profile.
-    let profile = unsafe { &*profile };
+    let profile = unsafe { *(profile_id as *const ExtendedGamepad) };
     for input in [
         profile.button_a,
         profile.button_b,
@@ -737,23 +814,28 @@ fn poll_controller(controller: Id) {
         profile.button_menu,
         profile.button_options,
     ] {
-        call_input(input);
+        if call_input(input) {
+            call_profile(profile_id, input);
+        }
     }
-    // SAFETY: `profile.dpad` is a direction pad.
-    let dpad = unsafe { &*(profile.dpad as *const Direction) };
-    for input in [dpad.up, dpad.down, dpad.left, dpad.right] {
-        call_input(input);
+    for direction in [
+        profile.dpad,
+        profile.left_thumbstick,
+        profile.right_thumbstick,
+    ] {
+        if call_direction(direction) {
+            call_profile(profile_id, direction);
+        }
     }
-    call_direction(profile.dpad);
-    call_direction(profile.left_thumbstick);
-    call_direction(profile.right_thumbstick);
-
     let now = gamepad(controller as *mut Controller)
-        // SAFETY: the controller owns this open handle.
         .is_some_and(|g| unsafe { sdl3::gamepad_button(g, sdl3::gamepad_button::START) });
-    if now && controller_ref.paused_last == 0 {
-        let block = objc::block::copy(controller_ref.paused_handler as Id);
-        // SAFETY: `controllerPausedHandler` is `void (^)(GCController *)`.
+    let old = unsafe { (*(controller as *const Controller)).paused_last };
+    unsafe {
+        (*(controller as *mut Controller)).paused_last = now as u8;
+    }
+    if now && old == 0 {
+        let block =
+            objc::block::copy(unsafe { (*(controller as *const Controller)).paused_handler as Id });
         unsafe {
             if let Some(invoke) = block_invoke(block) {
                 let f: unsafe extern "C" fn(Id, Id) = std::mem::transmute(invoke);
@@ -762,14 +844,44 @@ fn poll_controller(controller: Id) {
         }
         objc::block::release(block);
     }
-    controller_ref.paused_last = now as u8;
+}
+
+unsafe extern "C" fn get_input_handler(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Input)).handler as Id }
+}
+unsafe extern "C" fn get_pressed_handler(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Input)).pressed_handler as Id }
+}
+unsafe extern "C" fn set_pressed_handler(receiver: Id, _sel: Sel, block: Id) {
+    replace_block(
+        unsafe { &mut (*(receiver as *mut Input)).pressed_handler },
+        block,
+    );
+}
+unsafe extern "C" fn get_direction_handler(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Direction)).handler as Id }
+}
+unsafe extern "C" fn get_profile_handler(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const ExtendedGamepad)).handler as Id }
+}
+unsafe extern "C" fn set_profile_handler(receiver: Id, _sel: Sel, block: Id) {
+    replace_block(
+        unsafe { &mut (*(receiver as *mut ExtendedGamepad)).handler },
+        block,
+    );
+}
+unsafe extern "C" fn get_paused_handler(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Controller)).paused_handler as Id }
+}
+unsafe extern "C" fn profile_controller(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const ExtendedGamepad)).controller as Id }
 }
 
 fn sync_devices(post_notifications: bool) {
     if !sdl_ready() {
         return;
     }
-    sdl3::pump();
+    sdl3::update_joysticks();
     let attached = sdl3::gamepads();
     let mut connected = Vec::new();
     let mut disconnected = Vec::new();
@@ -825,6 +937,18 @@ fn sync_devices(post_notifications: bool) {
 
 /// Refresh attachment and input state. Called by AppKit's event pump.
 pub fn pump() {
+    static POLLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
+    if POLLING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            POLLING.store(false, Ordering::Release);
+        }
+    }
+    let _guard = Guard;
     bootstrap();
     sync_devices(true);
     let controllers: Vec<usize> = CONTROLLERS
@@ -926,6 +1050,39 @@ pub fn bootstrap() {
         ] {
             controller.replace_method(objc::sel::get(name), imp, types);
         }
+        controller.replace_method(
+            objc::sel::get("controllerPausedHandler"),
+            get_paused_handler as *const c_void,
+            c"@?16@0:8",
+        );
+        for (class, get) in [
+            (axis, get_input_handler as *const c_void),
+            (button, get_input_handler as *const c_void),
+            (direction, get_direction_handler as *const c_void),
+            (extended, get_profile_handler as *const c_void),
+        ] {
+            class.replace_method(objc::sel::get("valueChangedHandler"), get, c"@?16@0:8");
+        }
+        button.replace_method(
+            objc::sel::get("pressedChangedHandler"),
+            get_pressed_handler as *const c_void,
+            c"@?16@0:8",
+        );
+        button.replace_method(
+            objc::sel::get("setPressedChangedHandler:"),
+            set_pressed_handler as *const c_void,
+            c"v24@0:8@?16",
+        );
+        extended.replace_method(
+            objc::sel::get("setValueChangedHandler:"),
+            set_profile_handler as *const c_void,
+            c"v24@0:8@?16",
+        );
+        extended.replace_method(
+            objc::sel::get("controller"),
+            profile_controller as *const c_void,
+            c"@16@0:8",
+        );
         for name in ["motion", "light", "haptics", "battery"] {
             controller.replace_method(
                 objc::sel::get(name),
@@ -1129,6 +1286,77 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct CallbackEvents {
+        axes: Vec<(usize, f32)>,
+        buttons: Vec<(usize, f32, u8)>,
+        pressed: Vec<(usize, u8)>,
+        directions: Vec<(usize, f32, f32)>,
+        profiles: Vec<usize>,
+    }
+    #[repr(C)]
+    struct TestDescriptor {
+        reserved: usize,
+        size: usize,
+    }
+    #[repr(C)]
+    struct TestBlock {
+        isa: usize,
+        flags: i32,
+        reserved: i32,
+        invoke: usize,
+        descriptor: *const TestDescriptor,
+        context: *const Mutex<CallbackEvents>,
+    }
+    unsafe fn callback_events<'a>(block: Id) -> &'a Mutex<CallbackEvents> {
+        unsafe { &*(*(block as *const TestBlock)).context }
+    }
+    unsafe extern "C" fn axis_changed(block: Id, axis: Id, value: f32) {
+        unsafe { callback_events(block) }
+            .lock()
+            .unwrap()
+            .axes
+            .push((axis as usize, value));
+        // Replacing this block and reentering the pump must not free an
+        // executing block or deliver duplicate notifications.
+        unsafe {
+            set_input_handler(
+                axis,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::null_mut(),
+            );
+        }
+        pump();
+    }
+    unsafe extern "C" fn button_changed(block: Id, button: Id, value: f32, pressed: u8) {
+        unsafe { callback_events(block) }
+            .lock()
+            .unwrap()
+            .buttons
+            .push((button as usize, value, pressed));
+    }
+    unsafe extern "C" fn pressed_changed(block: Id, button: Id, _value: f32, pressed: u8) {
+        unsafe { callback_events(block) }
+            .lock()
+            .unwrap()
+            .pressed
+            .push((button as usize, pressed));
+    }
+    unsafe extern "C" fn direction_changed(block: Id, direction: Id, x: f32, y: f32) {
+        unsafe { callback_events(block) }
+            .lock()
+            .unwrap()
+            .directions
+            .push((direction as usize, x, y));
+    }
+    unsafe extern "C" fn profile_changed(block: Id, _profile: Id, element: Id) {
+        unsafe { callback_events(block) }
+            .lock()
+            .unwrap()
+            .profiles
+            .push(element as usize);
+    }
+
     #[test]
     fn a_virtual_sdl_gamepad_populates_the_extended_profile() {
         if !sdl3::available() || !sdl3::virtual_joystick::available() {
@@ -1150,9 +1378,8 @@ mod tests {
             set_led: Some(set_led),
             ..Default::default()
         };
-        let Some(id) = sdl3::virtual_joystick::attach(&desc) else {
-            return;
-        };
+        assert!(sdl_ready());
+        let id = sdl3::virtual_joystick::attach(&desc).expect("virtual gamepad attachment");
         let hid = iokit::hid::Device::open(id).expect("the virtual HID device opens");
         bootstrap();
         // SAFETY: `hid` is a live IOHIDDeviceRef for this call.
@@ -1193,7 +1420,7 @@ mod tests {
         sdl3::pump();
         // SAFETY: `object` is the live controller just found.
         let profile =
-            unsafe { &*((*(object as *mut Controller)).extended as *const ExtendedGamepad) };
+            unsafe { *((*(object as *mut Controller)).extended as *const ExtendedGamepad) };
         // SAFETY: `object` is the controller allocated above.
         let controller = unsafe { &*(object as *const Controller) };
         // SAFETY: the extended profile is a live Objective-C object.
@@ -1214,9 +1441,134 @@ mod tests {
             let (x, y) = read_direction(stick.controller, stick.kind);
             assert!((x - 0.5).abs() < 0.001);
             assert!((y - 0.5).abs() < 0.001);
+        }
+        pump();
+        let profile_id = controller.extended;
+        let direction = unsafe { *(profile.left_thumbstick as *const Direction) };
+        let events = Mutex::new(CallbackEvents::default());
+        let descriptor = TestDescriptor {
+            reserved: 0,
+            size: size_of::<TestBlock>(),
+        };
+        let isa = objc::block::data_symbols()
+            .iter()
+            .find(|(name, _)| name.ends_with("_NSConcreteStackBlock"))
+            .unwrap()
+            .1 as usize;
+        let block = |invoke| TestBlock {
+            isa,
+            flags: 0,
+            reserved: 0,
+            invoke,
+            descriptor: &descriptor,
+            context: &events,
+        };
+        let axis_block = block(axis_changed as *const c_void as usize);
+        let button_block = block(button_changed as *const c_void as usize);
+        let pressed_block = block(pressed_changed as *const c_void as usize);
+        let direction_block = block(direction_changed as *const c_void as usize);
+        let profile_block = block(profile_changed as *const c_void as usize);
+        unsafe {
+            set_input_handler(
+                direction.x_axis,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::from_ref(&axis_block).cast_mut().cast(),
+            );
+            set_input_handler(
+                profile.button_a,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::from_ref(&button_block).cast_mut().cast(),
+            );
+            set_pressed_handler(
+                profile.button_a,
+                objc::sel::get("setPressedChangedHandler:"),
+                std::ptr::from_ref(&pressed_block).cast_mut().cast(),
+            );
+            set_direction_handler(
+                profile.left_thumbstick,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::from_ref(&direction_block).cast_mut().cast(),
+            );
+            set_profile_handler(
+                profile_id,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::from_ref(&profile_block).cast_mut().cast(),
+            );
+            assert!(
+                !get_profile_handler(profile_id, objc::sel::get("valueChangedHandler")).is_null()
+            );
+            sdl3::virtual_joystick::set_axis(joystick, sdl3::gamepad_axis::LEFT_X, i16::MIN);
+            sdl3::virtual_joystick::set_axis(joystick, sdl3::gamepad_axis::LEFT_Y, 0);
+            sdl3::virtual_joystick::set_button(joystick, sdl3::gamepad_button::SOUTH, false);
+        }
+        pump();
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.axes, [(direction.x_axis as usize, -1.0)]);
+            assert_eq!(events.buttons, [(profile.button_a as usize, 0.0, 0)]);
+            assert_eq!(events.pressed, [(profile.button_a as usize, 0)]);
+            assert_eq!(
+                events.directions,
+                [(profile.left_thumbstick as usize, -1.0, 0.0)]
+            );
+            assert_eq!(
+                events.profiles,
+                [profile.button_a as usize, profile.left_thumbstick as usize],
+                "profiles report containing elements once"
+            );
+        }
+        unsafe {
+            assert_eq!(input_value(direction.left, objc::sel::get("value")), 1.0);
+            assert_eq!(input_value(direction.right, objc::sel::get("value")), 0.0);
+            assert!(
+                get_input_handler(direction.x_axis, objc::sel::get("valueChangedHandler"))
+                    .is_null()
+            );
+        }
+        pump();
+        assert_eq!(
+            events.lock().unwrap().profiles.len(),
+            2,
+            "unchanged values produce no callbacks"
+        );
+        unsafe {
+            sdl3::virtual_joystick::set_button(joystick, sdl3::gamepad_button::SOUTH, true);
+        }
+        pump();
+        assert_eq!(
+            events.lock().unwrap().pressed,
+            [
+                (profile.button_a as usize, 0),
+                (profile.button_a as usize, 1)
+            ]
+        );
+        unsafe {
+            set_input_handler(
+                profile.button_a,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::null_mut(),
+            );
+            set_pressed_handler(
+                profile.button_a,
+                objc::sel::get("setPressedChangedHandler:"),
+                std::ptr::null_mut(),
+            );
+            set_direction_handler(
+                profile.left_thumbstick,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::null_mut(),
+            );
+            set_profile_handler(
+                profile_id,
+                objc::sel::get("setValueChangedHandler:"),
+                std::ptr::null_mut(),
+            );
             sdl3::close(joystick);
         }
-        sdl3::virtual_joystick::detach(id);
+        assert!(sdl3::virtual_joystick::detach(id));
         sync_devices(false);
+        unsafe {
+            assert_eq!(input_value(profile.button_a, objc::sel::get("value")), 0.0);
+        }
     }
 }

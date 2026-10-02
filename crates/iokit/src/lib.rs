@@ -5,6 +5,7 @@ pub mod hid;
 pub mod manager;
 pub mod power;
 pub mod registry;
+mod schedule;
 pub mod value;
 
 /// Emit HID discovery diagnostics when `ROSEMARY_TRACE_HID` is set.
@@ -41,6 +42,9 @@ exports::exports! {
         "IOHIDDeviceClose" => api::IOHIDDeviceClose,
         "IOHIDDeviceGetTypeID" => api::IOHIDDeviceGetTypeID,
         "IOHIDDeviceGetValue" => api::IOHIDDeviceGetValue,
+        "IOHIDElementGetDevice" => api::IOHIDElementGetDevice,
+        "IOHIDElementGetParent" => api::IOHIDElementGetParent,
+        "IOHIDElementHasNullState" => api::IOHIDElementHasNullState,
         "IOHIDElementGetCookie" => api::IOHIDElementGetCookie,
         "IOHIDElementGetUsagePage" => api::IOHIDElementGetUsagePage,
         "IOHIDElementGetUsage" => api::IOHIDElementGetUsage,

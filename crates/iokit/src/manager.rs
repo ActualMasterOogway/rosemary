@@ -56,222 +56,196 @@ impl<T> Default for Registered<T> {
     }
 }
 
-/// An `IOHIDManagerRef`.
+/// An `IOHIDManagerRef` with independent matching and delivery history.
 pub struct Manager {
     criteria: Mutex<Vec<Criterion>>,
     devices: Mutex<BTreeMap<sdl3::JoystickId, Arc<Device>>>,
-    /// Removed devices remain alive because opaque CFRetain/CFRelease is a
-    /// no-op and guest code may release its device after the removal callback.
-    retired: Mutex<Vec<Arc<Device>>>,
+    last: Mutex<BTreeMap<sdl3::JoystickId, Vec<i64>>>,
     matched: Mutex<Registered<DeviceCallback>>,
     removed: Mutex<Registered<DeviceCallback>>,
     values: Mutex<Registered<ValueCallback>>,
-    open: Mutex<bool>,
+    open: std::sync::atomic::AtomicBool,
+    polling: std::sync::atomic::AtomicBool,
+    pub(crate) schedules: crate::schedule::Schedules,
 }
-
-// SAFETY: every field is behind a lock, and the contexts are opaque numbers this
-// crate hands back rather than dereferences.
-unsafe impl Send for Manager {}
-unsafe impl Sync for Manager {}
 
 impl Manager {
     pub fn new() -> Manager {
         Manager {
             criteria: Mutex::new(Vec::new()),
             devices: Mutex::new(BTreeMap::new()),
-            retired: Mutex::new(Vec::new()),
+            last: Mutex::new(BTreeMap::new()),
             matched: Mutex::new(Registered::default()),
             removed: Mutex::new(Registered::default()),
             values: Mutex::new(Registered::default()),
-            open: Mutex::new(false),
+            open: std::sync::atomic::AtomicBool::new(false),
+            polling: std::sync::atomic::AtomicBool::new(false),
+            schedules: Default::default(),
         }
     }
 
     pub fn set_criteria(&self, criteria: Vec<Criterion>) {
-        crate::trace_hid(format_args!("manager matching criteria={criteria:?}"));
         *self.criteria.lock().unwrap_or_else(|e| e.into_inner()) = criteria;
     }
-
     pub fn set_matched(&self, callback: Option<DeviceCallback>, context: usize) {
         *self.matched.lock().unwrap_or_else(|e| e.into_inner()) = Registered { callback, context };
     }
-
     pub fn set_removed(&self, callback: Option<DeviceCallback>, context: usize) {
         *self.removed.lock().unwrap_or_else(|e| e.into_inner()) = Registered { callback, context };
     }
-
     pub fn set_values(&self, callback: Option<ValueCallback>, context: usize) {
-        crate::trace_hid(format_args!(
-            "IOHIDManagerRegisterInputValueCallback installed={}",
-            callback.is_some()
-        ));
         *self.values.lock().unwrap_or_else(|e| e.into_inner()) = Registered { callback, context };
+        self.last.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
-
     pub fn open(&self) -> bool {
-        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        if *open {
-            return true;
-        }
-        if sdl3::init(sdl3::init::JOYSTICK).is_err() {
+        if sdl3::init_controllers().is_err() {
             return false;
         }
-        *open = true;
+        self.open.store(true, std::sync::atomic::Ordering::Release);
         true
     }
-
     pub fn close(&self) {
-        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.open.store(false, std::sync::atomic::Ordering::Release);
+        self.schedules.clear();
+        self.devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.last.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
-
-    /// Whether `device` matches any criterion, or all of them if there are none.
     fn accepts(&self, device: &Device) -> bool {
         let criteria = self.criteria.lock().unwrap_or_else(|e| e.into_inner());
-        if criteria.is_empty() {
-            return true;
-        }
         let root = &device.elements[0];
-        criteria.iter().any(|c| {
-            c.matches(
-                root.page,
-                root.usage,
-                device.vendor as u32,
-                device.product as u32,
-            )
-        })
+        criteria.is_empty()
+            || criteria.iter().any(|c| {
+                c.matches(
+                    root.page,
+                    root.usage,
+                    device.vendor as u32,
+                    device.product as u32,
+                )
+            })
     }
-
-    pub fn device(&self, id: sdl3::JoystickId) -> Option<Arc<Device>> {
-        self.devices
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
-            .cloned()
-    }
-
     pub fn devices(&self) -> Vec<Arc<Device>> {
-        self.devices
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|device| self.accepts(device))
-            .cloned()
+        if !self.open.load(std::sync::atomic::Ordering::Acquire) {
+            return Vec::new();
+        }
+        Device::discover()
+            .into_iter()
+            .filter(|d| self.accepts(d))
             .collect()
     }
-
-    /// One turn: notice what appeared and went, and report what moved.
-    ///
-    /// Called from a run loop source, which is where a guest expects its
-    /// callbacks. Every lock is released before a callback runs - a callback is
-    /// entitled to ask the manager a question, and holding a lock across one is
-    /// a deadlock the first time it does.
+    fn delivering(&self) -> bool {
+        self.open.load(std::sync::atomic::Ordering::Acquire) && self.schedules.current()
+    }
     pub fn poll(&self) {
-        if !*self.open.lock().unwrap_or_else(|e| e.into_inner()) {
+        use std::sync::atomic::Ordering;
+        if !self.delivering() || self.polling.swap(true, Ordering::AcqRel) {
             return;
         }
-        sdl3::pump();
-
-        let attached = sdl3::joysticks();
-        let mut appeared = Vec::new();
-        let mut vanished = Vec::new();
-        {
-            let mut devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
-            for id in &attached {
-                if devices.contains_key(id) {
-                    continue;
-                }
-                let Some(device) = Device::open(*id) else {
-                    continue;
-                };
-                if !self.accepts(&device) {
-                    continue;
-                }
-                devices.insert(*id, Arc::clone(&device));
-                crate::trace_hid(format_args!(
-                    "manager accepted id={} as {:04x}:{:04x}",
-                    device.id, device.vendor, device.product
-                ));
-                appeared.push(device);
-            }
-            let gone: Vec<sdl3::JoystickId> = devices
-                .keys()
-                .copied()
-                .filter(|id| !attached.contains(id))
-                .collect();
-            for id in gone {
-                if let Some(device) = devices.remove(&id) {
-                    vanished.push(device);
-                }
+        struct Guard<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
             }
         }
-
+        let _guard = Guard(&self.polling);
+        let devices = self.devices();
+        let (appeared, vanished) = {
+            let mut previous = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+            let appeared = devices
+                .iter()
+                .filter(|d| !previous.contains_key(&d.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let vanished = previous
+                .values()
+                .filter(|d| !devices.iter().any(|n| n.id == d.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            *previous = devices.iter().map(|d| (d.id, Arc::clone(d))).collect();
+            (appeared, vanished)
+        };
         for device in appeared {
-            let registered = *self.matched.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(callback) = registered.callback {
-                // SAFETY: the callback is a `void (*)(void *, IOReturn, void *,
-                // IOHIDDeviceRef)` the guest registered - a trampoline, by the
-                // time it reaches here - and the device pointer is the one every
-                // other call in this crate takes.
+            if !self.delivering() {
+                return;
+            }
+            let r = *self.matched.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(callback) = r.callback {
                 unsafe {
                     callback(
-                        registered.context as *mut c_void,
+                        r.context as *mut c_void,
                         0,
-                        std::ptr::null_mut(),
-                        Arc::as_ptr(&device) as CFTypeRef,
-                    )
-                };
+                        std::ptr::from_ref(self).cast_mut().cast(),
+                        Arc::as_ptr(&device).cast(),
+                    );
+                }
             }
         }
         for device in vanished {
-            device.notify_removed();
-            let registered = *self.removed.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(callback) = registered.callback {
-                unsafe {
-                    callback(
-                        registered.context as *mut c_void,
-                        0,
-                        std::ptr::null_mut(),
-                        Arc::as_ptr(&device) as CFTypeRef,
-                    )
-                };
+            if !self.delivering() {
+                return;
             }
-            self.retired
+            if !device.is_connected() {
+                device.poll(true, || self.delivering());
+            }
+            self.last
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(device);
-        }
-
-        // And what moved, one callback per element per change
-        let devices: Vec<Arc<Device>> = self
-            .devices
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .collect();
-        let registered = *self.values.lock().unwrap_or_else(|e| e.into_inner());
-        for device in devices {
-            device.notify_report();
-            let Some(callback) = registered.callback else {
-                continue;
-            };
-            for (cookie, value) in device.changed() {
-                crate::trace_hid(format_args!(
-                    "input value id={} cookie={cookie} value={value}",
-                    device.id
-                ));
-                let boxed = crate::value::new(&device, cookie, value);
-                // SAFETY: the callback is the guest's, and `boxed` is an
-                // `IOHIDValueRef` this crate made and keeps alive for the call.
+                .remove(&device.id);
+            let r = *self.removed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(callback) = r.callback {
                 unsafe {
                     callback(
-                        registered.context as *mut c_void,
+                        r.context as *mut c_void,
                         0,
-                        Arc::as_ptr(&device) as *mut c_void,
-                        boxed,
-                    )
-                };
-                crate::value::release(boxed);
+                        std::ptr::from_ref(self).cast_mut().cast(),
+                        Arc::as_ptr(&device).cast(),
+                    );
+                }
+            }
+        }
+        for device in devices {
+            if !self.delivering() {
+                return;
+            }
+            device.poll(true, || self.delivering());
+            let changes = {
+                let mut history = self.last.lock().unwrap_or_else(|e| e.into_inner());
+                let last = history
+                    .entry(device.id)
+                    .or_insert_with(|| vec![i64::MIN; device.elements.len()]);
+                let mut changes = Vec::new();
+                for element in &device.elements {
+                    if element.source == crate::hid::Source::Collection {
+                        continue;
+                    }
+                    let value = device.value(element);
+                    let old = &mut last[element.cookie as usize];
+                    if *old != value {
+                        *old = value;
+                        changes.push((element.cookie, value));
+                    }
+                }
+                changes
+            };
+            for (cookie, integer) in changes {
+                if !self.delivering() || !self.accepts(&device) {
+                    return;
+                }
+                let r = *self.values.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(callback) = r.callback {
+                    let value = crate::value::new(&device, cookie, integer);
+                    unsafe {
+                        callback(
+                            r.context as *mut c_void,
+                            0,
+                            std::ptr::from_ref(self).cast_mut().cast(),
+                            value,
+                        );
+                    }
+                    crate::value::release(value);
+                }
             }
         }
     }

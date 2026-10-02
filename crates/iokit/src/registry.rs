@@ -12,13 +12,13 @@ use corefoundation::collections;
 type IOReturn = i32;
 type KernReturn = i32;
 /// `io_object_t`, `io_iterator_t`, `io_service_t`, `io_registry_entry_t`: all
-/// `mach_port_t`, and all `0` here.
+/// `mach_port_t`, represented by SDL instance ids or synthetic iterator handles.
 type IoObject = u32;
 
 const SUCCESS: IOReturn = 0;
 /// `kIOReturnNoDevice`. The honest failure for a lookup in an empty registry,
 /// and distinct from `kIOReturnError` so a caller that tells them apart can.
-const NO_DEVICE: IOReturn = -536_870_212;
+const NO_DEVICE: IOReturn = 0xe000_02c0u32 as i32;
 
 /// Iterator handles are kept separate from the positive SDL instance ids used
 /// as synthetic `io_service_t`s.
@@ -45,31 +45,35 @@ pub fn data_symbols() -> Vec<(String, u64)> {
 /// The dictionary really does carry `IOProviderClass`, because a caller is
 /// entitled to add keys to it and to read back what it asked for.
 pub unsafe extern "C" fn IOServiceMatching(name: *const c_char) -> CFTypeRef {
-    let key = corefoundation::string::from_bytes(b"IOProviderClass", false);
     // SAFETY: the caller's obligation; a null name gives an empty dictionary,
-    // which is a match on everything and still matches nothing here.
+    // which matches every discoverable HID device.
     let value = match unsafe { corefoundation::string::cstr_bytes(name) } {
         Some(bytes) => corefoundation::string::from_bytes(bytes, false),
         None => return empty_dictionary(),
     };
-    collections::new_dictionary(
-        &[(key, value)],
-        Policy::from_key_callbacks(),
-        Policy::from_type_callbacks(),
-        true,
-    )
+    let key = corefoundation::string::from_bytes(b"IOProviderClass", false);
+    matching_dictionary(key, value)
 }
 
 /// `CFMutableDictionaryRef IORegistryEntryIDMatching(uint64_t entryID)`.
 pub unsafe extern "C" fn IORegistryEntryIDMatching(entry: u64) -> CFTypeRef {
     let key = corefoundation::string::from_bytes(b"IORegistryEntryID", false);
     let value = collections::new_number(collections::Number::Integer(entry as i64));
-    collections::new_dictionary(
+    matching_dictionary(key, value)
+}
+
+fn matching_dictionary(key: CFTypeRef, value: CFTypeRef) -> CFTypeRef {
+    let dictionary = collections::new_dictionary(
         &[(key, value)],
         Policy::from_key_callbacks(),
         Policy::from_type_callbacks(),
         true,
-    )
+    );
+    unsafe {
+        corefoundation::api::CFRelease(key);
+        corefoundation::api::CFRelease(value);
+    }
+    dictionary
 }
 
 fn empty_dictionary() -> CFTypeRef {
@@ -95,18 +99,67 @@ unsafe fn consume(matching: CFTypeRef) {
     }
 }
 
+unsafe fn matching_services(matching: CFTypeRef) -> Vec<u32> {
+    if matching.is_null() {
+        return crate::api::services();
+    }
+    let get = |name: &[u8]| {
+        let key = corefoundation::string::from_bytes(name, false);
+        let value = unsafe { corefoundation::api::CFDictionaryGetValue(matching, key) };
+        unsafe { corefoundation::api::CFRelease(key) };
+        value
+    };
+    let provider = get(b"IOProviderClass");
+    if let Some(provider) = unsafe { corefoundation::string::as_string(provider) }
+        && ![b"IOHIDDevice".as_slice(), b"IOHIDDevice2".as_slice()]
+            .contains(&provider.utf8().as_slice())
+    {
+        return Vec::new();
+    }
+    crate::hid::Device::discover()
+        .into_iter()
+        .filter(|device| {
+            for (key, actual) in [
+                (b"IORegistryEntryID".as_slice(), device.id as i64),
+                (b"VendorID".as_slice(), device.vendor as i64),
+                (b"ProductID".as_slice(), device.product as i64),
+                (
+                    b"DeviceUsagePage".as_slice(),
+                    device.elements[0].page as i64,
+                ),
+                (b"DeviceUsage".as_slice(), device.elements[0].usage as i64),
+            ] {
+                if let Some(value) = unsafe { collections::number(get(key)) }
+                    && value.as_i64() != actual
+                {
+                    return false;
+                }
+            }
+            for key in [b"IONameMatch".as_slice(), b"BSD Name".as_slice()] {
+                if let Some(value) = unsafe { corefoundation::string::as_string(get(key)) }
+                    && value.utf8() != device.name.as_bytes()
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|d| d.id)
+        .collect()
+}
+
 /// `kern_return_t IOServiceGetMatchingServices(port, matching, io_iterator_t *)`.
 pub unsafe extern "C" fn IOServiceGetMatchingServices(
     _port: u32,
     matching: CFTypeRef,
     existing: *mut IoObject,
 ) -> KernReturn {
-    let services = crate::api::services();
+    let services = unsafe { matching_services(matching) };
     // SAFETY: the reference the caller handed over.
     unsafe { consume(matching) };
     if !existing.is_null() {
         let iterator = NEXT_ITERATOR.fetch_add(1, Ordering::Relaxed);
-        if !services.is_empty() {
+        {
             ITERATORS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -117,26 +170,21 @@ pub unsafe extern "C" fn IOServiceGetMatchingServices(
             services.len()
         ));
         // SAFETY: an out parameter the caller sized.
-        unsafe { existing.write((!services.is_empty()).then_some(iterator).unwrap_or(0)) };
+        unsafe { existing.write(iterator) };
     }
     SUCCESS
 }
 
 /// Resolve the synthetic service id in an `IORegistryEntryIDMatching`
-/// dictionary. Other matching dictionaries still match nothing.
+/// dictionary, including HID class, identity, usage, and registry-id filters.
 pub unsafe extern "C" fn IOServiceGetMatchingService(_port: u32, matching: CFTypeRef) -> IoObject {
-    let key = corefoundation::string::from_bytes(b"IORegistryEntryID", false);
-    // SAFETY: the caller's matching dictionary.
-    let value = unsafe { corefoundation::api::CFDictionaryGetValue(matching, key) };
-    // SAFETY: a value from that dictionary, if present.
-    let entry = unsafe { collections::number(value) }
-        .and_then(|number| IoObject::try_from(number.as_i64()).ok())
+    let entry = unsafe { matching_services(matching) }
+        .first()
+        .copied()
         .unwrap_or(0);
-    // SAFETY: the lookup does not retain its temporary key.
-    unsafe { corefoundation::api::CFRelease(key) };
-    // SAFETY: the reference the caller handed over.
-    unsafe { consume(matching) };
-    crate::trace_hid(format_args!("IOServiceGetMatchingService -> {entry}"));
+    unsafe {
+        consume(matching);
+    }
     entry
 }
 
@@ -460,14 +508,9 @@ unsafe fn matching_on(key: &[u8], name: *const c_char) -> CFTypeRef {
     let Some(bytes) = (unsafe { corefoundation::string::cstr_bytes(name) }) else {
         return empty_dictionary();
     };
-    collections::new_dictionary(
-        &[(
-            corefoundation::string::from_bytes(key, false),
-            corefoundation::string::from_bytes(bytes, false),
-        )],
-        Policy::from_key_callbacks(),
-        Policy::from_type_callbacks(),
-        true,
+    matching_dictionary(
+        corefoundation::string::from_bytes(key, false),
+        corefoundation::string::from_bytes(bytes, false),
     )
 }
 
@@ -503,9 +546,11 @@ pub unsafe extern "C" fn IORegistryEntryCreateIterator(
 }
 
 /// `boolean_t IOObjectConformsTo(io_object_t, const io_name_t className)`:
-/// no object here is an instance of any IOKit class.
-pub unsafe extern "C" fn IOObjectConformsTo(_object: IoObject, _class: *const c_char) -> u32 {
-    0
+/// reports HID classes for live controller services.
+pub unsafe extern "C" fn IOObjectConformsTo(object: IoObject, class: *const c_char) -> u32 {
+    let class = unsafe { corefoundation::string::cstr_bytes(class) };
+    (class.is_some_and(|c| c == b"IOHIDDevice" || c == b"IOHIDDevice2")
+        && crate::api::device_for_service(object).is_some()) as u32
 }
 
 /// `kIOReturnUnsupported`.

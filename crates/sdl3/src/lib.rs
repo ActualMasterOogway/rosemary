@@ -117,6 +117,7 @@ struct Api {
     SDL_SetAppMetadataProperty: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
     SDL_GetError: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_PumpEvents: Option<unsafe extern "C" fn()>,
+    SDL_UpdateJoysticks: Option<unsafe extern "C" fn()>,
     SDL_QuitSubSystem: Option<unsafe extern "C" fn(u32)>,
 
     SDL_GetJoysticks: Option<unsafe extern "C" fn(*mut c_int) -> *mut JoystickId>,
@@ -127,6 +128,8 @@ struct Api {
     SDL_GetJoystickVendor: Option<unsafe extern "C" fn(Joystick) -> u16>,
     SDL_GetJoystickProduct: Option<unsafe extern "C" fn(Joystick) -> u16>,
     SDL_GetJoystickProductVersion: Option<unsafe extern "C" fn(Joystick) -> u16>,
+    SDL_GetJoystickProperties: Option<unsafe extern "C" fn(Joystick) -> PropertiesId>,
+    SDL_JoystickConnected: Option<unsafe extern "C" fn(Joystick) -> bool>,
     SDL_GetNumJoystickAxes: Option<unsafe extern "C" fn(Joystick) -> c_int>,
     SDL_GetNumJoystickButtons: Option<unsafe extern "C" fn(Joystick) -> c_int>,
     SDL_GetNumJoystickHats: Option<unsafe extern "C" fn(Joystick) -> c_int>,
@@ -136,6 +139,7 @@ struct Api {
     SDL_SendJoystickEffect: Option<unsafe extern "C" fn(Joystick, *const c_void, c_int) -> bool>,
     SDL_RumbleJoystick: Option<unsafe extern "C" fn(Joystick, u16, u16, u32) -> bool>,
     SDL_hid_open_path: Option<unsafe extern "C" fn(*const c_char) -> HidDevice>,
+    SDL_hid_close: Option<unsafe extern "C" fn(HidDevice)>,
     SDL_hid_get_input_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
     SDL_hid_get_feature_report: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
     SDL_hid_get_report_descriptor: Option<unsafe extern "C" fn(HidDevice, *mut u8, usize) -> c_int>,
@@ -356,6 +360,7 @@ fn api() -> Option<&'static Api> {
             SDL_SetAppMetadataProperty,
             SDL_GetError,
             SDL_PumpEvents,
+            SDL_UpdateJoysticks,
             SDL_QuitSubSystem,
             SDL_GetJoysticks,
             SDL_OpenJoystick,
@@ -365,6 +370,8 @@ fn api() -> Option<&'static Api> {
             SDL_GetJoystickVendor,
             SDL_GetJoystickProduct,
             SDL_GetJoystickProductVersion,
+            SDL_GetJoystickProperties,
+            SDL_JoystickConnected,
             SDL_GetNumJoystickAxes,
             SDL_GetNumJoystickButtons,
             SDL_GetNumJoystickHats,
@@ -374,6 +381,7 @@ fn api() -> Option<&'static Api> {
             SDL_SendJoystickEffect,
             SDL_RumbleJoystick,
             SDL_hid_open_path,
+            SDL_hid_close,
             SDL_hid_get_input_report,
             SDL_hid_get_feature_report,
             SDL_hid_get_report_descriptor,
@@ -644,6 +652,20 @@ pub fn pump() {
     }
 }
 
+/// Initialize both joystick enumeration and semantic gamepad mappings once.
+pub fn init_controllers() -> Result<(), String> {
+    static READY: OnceLock<Result<(), String>> = OnceLock::new();
+    READY.get_or_init(|| init(init::GAMEPAD)).clone()
+}
+
+/// Refresh decoded input without servicing the video event queue.
+/// SDL permits this operation from any thread.
+pub fn update_joysticks() {
+    if let Some(update) = api().and_then(|a| a.SDL_UpdateJoysticks) {
+        unsafe { update() };
+    }
+}
+
 /// The joystick instance ids attached right now.
 pub fn joysticks() -> Vec<JoystickId> {
     let Some(api) = api() else {
@@ -713,12 +735,25 @@ pub unsafe fn name(joystick: Joystick) -> String {
 /// As [`close`].
 pub unsafe fn open_hid(joystick: Joystick) -> Option<HidDevice> {
     let api = api()?;
+    // A handle is useful only if its descriptor and interrupt input can be read
+    // and its lifetime can be ended.
+    api.SDL_hid_close?;
+    api.SDL_hid_read_timeout?;
+    api.SDL_hid_get_report_descriptor?;
     let path = unsafe { api.SDL_GetJoystickPath?(joystick) };
     if path.is_null() {
         return None;
     }
     let device = unsafe { api.SDL_hid_open_path?(path) };
     (!device.is_null()).then_some(device)
+}
+
+/// # Safety
+/// `device` must be an open HID handle that is not used again after this call.
+pub unsafe fn close_hid(device: HidDevice) {
+    if let Some(close) = api().and_then(|a| a.SDL_hid_close) {
+        unsafe { close(device) };
+    }
 }
 
 pub fn hid_report_descriptor(device: HidDevice) -> Option<Vec<u8>> {
@@ -1000,6 +1035,26 @@ pub struct GamepadProperties {
     pub trigger_rumble: bool,
 }
 
+/// # Safety
+/// `joystick` must be an open joystick handle.
+pub unsafe fn joystick_has_rumble(joystick: Joystick) -> bool {
+    let Some(api) = api() else { return false };
+    let (Some(properties), Some(get)) = (api.SDL_GetJoystickProperties, api.SDL_GetBooleanProperty)
+    else {
+        return false;
+    };
+    let properties = unsafe { properties(joystick) };
+    properties != 0 && unsafe { get(properties, c"SDL.joystick.cap.rumble".as_ptr(), false) }
+}
+
+/// # Safety
+/// `joystick` must be an open joystick handle.
+pub unsafe fn joystick_connected(joystick: Joystick) -> bool {
+    api()
+        .and_then(|a| a.SDL_JoystickConnected)
+        .is_some_and(|f| unsafe { f(joystick) })
+}
+
 /// Read the properties associated with an opened gamepad.
 ///
 /// # Safety
@@ -1108,6 +1163,53 @@ pub mod clipboard {
 
 pub mod virtual_joystick {
     use super::*;
+
+    /// Replace the semantic mapping of a virtual device for regression tests.
+    pub fn set_mapping(id: JoystickId, mapping: &str) -> bool {
+        #[repr(C)]
+        struct Guid {
+            bytes: [u8; 16],
+        }
+        let Some(handle) = library() else {
+            return false;
+        };
+        let Some(guid) = (unsafe {
+            entry::<unsafe extern "C" fn(JoystickId) -> Guid>(handle, "SDL_GetJoystickGUIDForID")
+        }) else {
+            return false;
+        };
+        let Some(add) = (unsafe {
+            entry::<unsafe extern "C" fn(*const c_char) -> c_int>(handle, "SDL_AddGamepadMapping")
+        }) else {
+            return false;
+        };
+        let guid = unsafe { guid(id) }
+            .bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let Ok(mapping) = CString::new(format!("{guid},rosemary mapped pad,{mapping}")) else {
+            return false;
+        };
+        unsafe { add(mapping.as_ptr()) >= 0 }
+    }
+
+    /// # Safety
+    /// `joystick` must be an open virtual joystick handle.
+    pub unsafe fn set_hat(joystick: Joystick, hat: c_int, value: u8) -> bool {
+        let Some(handle) = library() else {
+            return false;
+        };
+        let Some(set) = (unsafe {
+            entry::<unsafe extern "C" fn(Joystick, c_int, u8) -> bool>(
+                handle,
+                "SDL_SetJoystickVirtualHat",
+            )
+        }) else {
+            return false;
+        };
+        unsafe { set(joystick, hat, value) }
+    }
 
     #[repr(C)]
     #[derive(Default, Clone, Copy)]

@@ -19,24 +19,12 @@ static MANAGERS: Mutex<Vec<Arc<Manager>>> = Mutex::new(Vec::new());
 
 /// The SDL instance ids which currently back an `IOHIDDeviceRef`.
 pub(crate) fn services() -> Vec<u32> {
-    let mut services = MANAGERS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .flat_map(|manager| manager.devices().into_iter().map(|device| device.id))
-        .collect::<Vec<_>>();
-    services.sort_unstable();
-    services.dedup();
-    services
+    Device::discover().into_iter().map(|d| d.id).collect()
 }
 
-/// Find a device by the SDL instance id used as its IORegistry service id.
+/// Find a live device independently of manager scheduling or matching.
 pub(crate) fn device_for_service(service: u32) -> Option<Arc<Device>> {
-    MANAGERS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find_map(|manager| manager.device(service))
+    Device::discover().into_iter().find(|d| d.id == service)
 }
 
 /// # Safety
@@ -69,15 +57,7 @@ pub unsafe extern "C" fn IOHIDManagerCreate(_allocator: CFTypeRef, _options: u32
 
 /// Reopen a device from the IORegistry service id HIDAPI saved in its path.
 pub unsafe extern "C" fn IOHIDDeviceCreate(_allocator: CFTypeRef, service: u32) -> CFTypeRef {
-    for manager in MANAGERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        if let Some(device) = manager.device(service) {
-            crate::trace_hid(format_args!(
-                "IOHIDDeviceCreate service={service} -> device"
-            ));
-            return Arc::as_ptr(&device) as CFTypeRef;
-        }
-    }
-    std::ptr::null()
+    device_for_service(service).map_or(std::ptr::null(), |d| Arc::as_ptr(&d).cast())
 }
 
 pub unsafe extern "C" fn IOHIDManagerOpen(manager: CFTypeRef, _options: u32) -> IOReturn {
@@ -201,9 +181,8 @@ pub unsafe extern "C" fn IOHIDDeviceRegisterInputValueCallback(
     callback: Option<ValueCallback>,
     context: *mut c_void,
 ) {
-    let _ = device;
-    for m in MANAGERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        m.set_values(callback, context as usize);
+    if let Some(device) = unsafe { self::device(device) } {
+        device.set_values(callback, context as usize);
     }
 }
 
@@ -223,76 +202,31 @@ pub unsafe extern "C" fn IOHIDManagerScheduleWithRunLoop(
     crate::trace_hid(format_args!(
         "IOHIDManagerScheduleWithRunLoop manager={manager:p}"
     ));
-    schedule(m as *const Manager as usize, run_loop, mode);
+    m.schedules.add(
+        m as *const Manager as usize,
+        |owner| {
+            unsafe { &*(owner as *const Manager) }.poll();
+        },
+        run_loop,
+        mode,
+    );
 }
 
 pub unsafe extern "C" fn IOHIDManagerUnscheduleFromRunLoop(
-    _manager: CFTypeRef,
-    _run_loop: CFTypeRef,
-    _mode: CFTypeRef,
+    manager: CFTypeRef,
+    run_loop: CFTypeRef,
+    mode: CFTypeRef,
 ) {
-    // no-op: The source stays and finds no manager to poll once the
-    // manager is closed, which is the same observable behaviour and avoids a
-    // registry of sources keyed on a pair.
-}
-
-fn schedule(manager: usize, run_loop: CFTypeRef, mode: CFTypeRef) {
-    unsafe extern "C" fn poll_one(info: *mut c_void) {
-        // SAFETY: `info` is a `&Manager`'s address, and managers are never freed.
-        if let Some(m) = unsafe { (info as *const Manager).as_ref() } {
-            m.poll();
-        }
-    }
-    unsafe extern "C" fn wake(_timer: CFTypeRef, info: *mut c_void) {
-        if let Some(m) = unsafe { (info as *const Manager).as_ref() } {
-            m.poll();
-        }
-    }
-
-    let context = cf::CFRunLoopSourceContext {
-        version: 0,
-        info: manager as *mut c_void,
-        retain: std::ptr::null(),
-        release: std::ptr::null(),
-        copy_description: std::ptr::null(),
-        equal: std::ptr::null(),
-        hash: std::ptr::null(),
-        schedule: std::ptr::null(),
-        cancel: std::ptr::null(),
-        perform: Some(poll_one),
-    };
-    let mut timer_context = cf::CFRunLoopTimerContext {
-        version: 0,
-        info: manager as *mut c_void,
-        retain: std::ptr::null(),
-        release: std::ptr::null(),
-        copy_description: std::ptr::null(),
-    };
-    // SAFETY: both contexts are this function's own and outlive the calls, which
-    // copy what they need.
-    unsafe {
-        let source = cf::CFRunLoopSourceCreate(std::ptr::null(), 0, &context);
-        cf::CFRunLoopAddSource(run_loop, source, mode);
-        cf::CFRunLoopSourceSignal(source);
-
-        let timer = cf::CFRunLoopTimerCreate(
-            std::ptr::null(),
-            cf::CFAbsoluteTimeGetCurrent(),
-            1.0 / 60.0,
-            0,
-            0,
-            Some(wake),
-            &mut timer_context,
-        );
-        cf::CFRunLoopAddTimer(run_loop, timer, mode);
+    if let Some(manager) = unsafe { self::manager(manager) } {
+        manager.schedules.remove(run_loop, mode);
     }
 }
 
 /// `IOHIDDeviceGetProperty`, which is where a guest's GUID comes from.
 ///
 /// The runner builds the GUID `SGamepadMapping::FindFromGUID` matches on out of
-/// the vendor, product and version keys - so these are answered from SDL's own
-/// USB identifiers rather than from anything SDL derived. Feeding it
+/// the vendor, product and version keys, including the Xbox compatibility
+/// identity used for mapped controllers. Feeding it
 /// `SDL_GetJoystickGUID` would be the wrong direction: that string is *made
 /// from* these numbers.
 pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRef) -> CFTypeRef {
@@ -372,12 +306,10 @@ pub unsafe extern "C" fn IOHIDDeviceGetProperty(device: CFTypeRef, key: CFTypeRe
 
 /// `IOHIDDeviceCopyMatchingElements`, which a guest walks to build its mapping.
 ///
-/// The matching dictionary is ignored: every guest in this tree passes null,
-/// which means "all of them", and a filter nobody exercises is a filter nobody
-/// has checked.
+/// Null matching returns all elements; dictionaries select the fields they name.
 pub unsafe extern "C" fn IOHIDDeviceCopyMatchingElements(
     device: CFTypeRef,
-    _matching: CFTypeRef,
+    matching: CFTypeRef,
     _options: u32,
 ) -> CFTypeRef {
     let Some(d) = (unsafe { self::device(device) }) else {
@@ -386,6 +318,7 @@ pub unsafe extern "C" fn IOHIDDeviceCopyMatchingElements(
     let handles: Vec<CFTypeRef> = d
         .elements
         .iter()
+        .filter(|e| unsafe { element_matches(e, matching) })
         .map(|e| d.handle(e.cookie) as CFTypeRef)
         .collect();
     crate::trace_hid(format_args!(
@@ -399,13 +332,45 @@ pub unsafe extern "C" fn IOHIDDeviceCopyMatchingElements(
     collections::new_array(&handles, corefoundation::callbacks::Policy::NONE, false)
 }
 
-pub unsafe extern "C" fn IOHIDDeviceOpen(_device: CFTypeRef, _options: u32) -> IOReturn {
-    // The device was opened when it was matched; there is nothing left to do.
-    SUCCESS
+pub unsafe extern "C" fn IOHIDDeviceOpen(device: CFTypeRef, _options: u32) -> IOReturn {
+    if unsafe { self::device(device) }.is_some_and(Device::open_input) {
+        SUCCESS
+    } else {
+        ERROR
+    }
 }
 
-pub unsafe extern "C" fn IOHIDDeviceClose(_device: CFTypeRef, _options: u32) -> IOReturn {
-    SUCCESS
+pub unsafe extern "C" fn IOHIDDeviceClose(device: CFTypeRef, _options: u32) -> IOReturn {
+    if let Some(device) = unsafe { self::device(device) } {
+        device.close_input();
+        SUCCESS
+    } else {
+        ERROR
+    }
+}
+
+unsafe fn element_matches(element: &crate::hid::Element, matching: CFTypeRef) -> bool {
+    if matching.is_null() {
+        return true;
+    }
+    for (key, actual) in [
+        (b"UsagePage".as_slice(), element.page),
+        (b"Usage".as_slice(), element.usage),
+        (b"Type".as_slice(), element.kind),
+        (b"ElementCookie".as_slice(), element.cookie),
+    ] {
+        let key = corefoundation::string::from_bytes(key, false);
+        let found = unsafe { cf::CFDictionaryGetValue(matching, key) };
+        unsafe {
+            cf::CFRelease(key);
+        }
+        if let Some(value) = unsafe { collections::number(found) }
+            && value.as_i64() != actual as i64
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Poll one element from a device.
@@ -431,6 +396,10 @@ pub unsafe extern "C" fn IOHIDDeviceGetValue(
     let Some(element) = device.element(cookie) else {
         return ERROR;
     };
+    if !device.is_connected() {
+        return ERROR;
+    }
+    sdl3::update_joysticks();
     let integer = device.value(element);
     crate::trace_hid(format_args!(
         "IOHIDDeviceGetValue id={} cookie={cookie} value={integer}",
@@ -474,6 +443,28 @@ element_field!(/// The lowest value this element reports.
     IOHIDElementGetLogicalMin, CFIndex, |e: &crate::hid::Element| e.logical_min as CFIndex, 0);
 element_field!(/// The highest.
     IOHIDElementGetLogicalMax, CFIndex, |e: &crate::hid::Element| e.logical_max as CFIndex, 0);
+
+pub unsafe extern "C" fn IOHIDElementGetDevice(element: *const c_void) -> CFTypeRef {
+    unsafe { value::element(element) }.map_or(std::ptr::null(), |(device, _)| {
+        std::ptr::from_ref(device).cast()
+    })
+}
+
+pub unsafe extern "C" fn IOHIDElementGetParent(element: *const c_void) -> CFTypeRef {
+    unsafe { value::element(element) }.map_or(std::ptr::null(), |(device, cookie)| {
+        if cookie == 0 {
+            std::ptr::null()
+        } else {
+            device.handle(0)
+        }
+    })
+}
+
+pub unsafe extern "C" fn IOHIDElementHasNullState(element: *const c_void) -> bool {
+    unsafe { value::element(element) }
+        .and_then(|(d, c)| d.element(c))
+        .is_some_and(|e| matches!(e.source, crate::hid::Source::Hat(_)))
+}
 
 /// `IOHIDElementGetChildren`: everything under a collection.
 ///
@@ -569,9 +560,7 @@ pub unsafe extern "C" fn IOHIDManagerCopyDevices(manager: CFTypeRef) -> CFTypeRe
     let Some(manager) = (unsafe { self::manager(manager) }) else {
         return std::ptr::null();
     };
-    // Populate synchronously: Some apps HIDAPI copies immediately after
-    // scheduling, before its run loop source has had a chance to perform.
-    manager.poll();
+    // Discovery does not depend on the run loop having serviced callbacks.
     let devices = manager.devices();
     if devices.is_empty() {
         return std::ptr::null();
@@ -597,30 +586,32 @@ pub unsafe extern "C" fn IOHIDDeviceGetService(device: CFTypeRef) -> u32 {
     service
 }
 
-/// `IOHIDDeviceScheduleWithRunLoop` / `IOHIDDeviceUnscheduleFromRunLoop`.
-///
-/// Accepted and ignored. Scheduling is what makes callbacks arrive on a run
-/// loop, and this crate's arrive from SDL's own polling instead - so there is
-/// nothing to attach, and refusing would stop a program that only wanted its
-/// callbacks to work.
 pub unsafe extern "C" fn IOHIDDeviceScheduleWithRunLoop(
     device: CFTypeRef,
-    _run_loop: CFTypeRef,
-    _mode: CFTypeRef,
+    run_loop: CFTypeRef,
+    mode: CFTypeRef,
 ) {
     if let Some(device) = unsafe { self::device(device) } {
-        crate::trace_hid(format_args!(
-            "IOHIDDeviceScheduleWithRunLoop id={}",
-            device.id
-        ));
+        device.schedules.add(
+            device as *const Device as usize,
+            |owner| {
+                let device = unsafe { &*(owner as *const Device) };
+                device.poll(false, || device.schedules.current());
+            },
+            run_loop,
+            mode,
+        );
     }
 }
 
 pub unsafe extern "C" fn IOHIDDeviceUnscheduleFromRunLoop(
-    _device: CFTypeRef,
-    _run_loop: CFTypeRef,
-    _mode: CFTypeRef,
+    device: CFTypeRef,
+    run_loop: CFTypeRef,
+    mode: CFTypeRef,
 ) {
+    if let Some(device) = unsafe { self::device(device) } {
+        device.schedules.remove(run_loop, mode);
+    }
 }
 
 /// `IOHIDDeviceRegisterRemovalCallback(device, callback, context)`.
@@ -686,6 +677,10 @@ pub unsafe extern "C" fn IOHIDDeviceGetReport(
     if report_type != 0 || report_id != 0 {
         return ERROR;
     }
+    if !device.is_connected() {
+        return ERROR;
+    }
+    sdl3::update_joysticks();
     let bytes = device.input_report();
     let copied = bytes.len().min(capacity as usize);
     // SAFETY: the caller promises `capacity` writable bytes.
@@ -734,7 +729,7 @@ pub unsafe extern "C" fn IOHIDDeviceSetReport(
         return ERROR;
     }
     // SAFETY: the device is open and the bytes belong to this call.
-    match unsafe { sdl3::send_effect(device.joystick, bytes) } {
+    match device.send_effect(bytes) {
         true => SUCCESS,
         false => ERROR,
     }
