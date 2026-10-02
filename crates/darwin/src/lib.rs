@@ -420,6 +420,7 @@ static MAC_BUILTIN_MODULES: &[exports::Module] = &[
     string::MODULE,
     stat::MODULE,
     stackprobe::MODULE,
+    atomics::MODULE,
 ];
 
 fn extra_modules() -> &'static [exports::Module] {
