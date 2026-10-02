@@ -1269,6 +1269,14 @@ unsafe extern "C" fn display_window(receiver: Id, _sel: Sel) {
 }
 
 unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: Id) {
+    order_front(receiver, true);
+}
+
+unsafe extern "C" fn order_front_regardless(receiver: Id, _sel: Sel) {
+    order_front(receiver, false);
+}
+
+fn order_front(receiver: Id, make_key: bool) {
     let window = window_of(receiver);
     if window.sdl.is_null() {
         return;
@@ -1315,7 +1323,7 @@ unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: 
         sdl3::video::window_position(sdl),
         sdl3::video::window_size(sdl),
     );
-    if want != Presentation::Tooltip {
+    if make_key && want != Presentation::Tooltip {
         KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
     }
     let window = window_of(receiver);
@@ -2242,6 +2250,7 @@ pub(crate) fn install() {
         "makeKeyWindow" => ignored, c"v16@0:8";
         "makeMainWindow" => ignored, c"v16@0:8";
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
+        "orderFrontRegardless" => order_front_regardless, c"v16@0:8";
         "orderOut:" => order_out, c"v24@0:8@16";
         "close" => close, c"v16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
