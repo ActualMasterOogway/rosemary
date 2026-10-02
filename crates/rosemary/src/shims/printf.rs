@@ -8,7 +8,7 @@ use super::{bad_pointer, set_int_return};
 const INT_REGS: usize = 6;
 /// Bytes of `va_list` register save area holding the six integer registers.
 const GP_SAVE_END: u32 = 48;
-/// …and the end of the eight 16-byte vector slots that follow them.
+/// ...and the end of the eight 16-byte vector slots that follow them.
 const FP_SAVE_END: u32 = GP_SAVE_END + 8 * 16;
 /// SysV AMD64 vector argument registers, in order.
 const FP_REGS: usize = 8;
@@ -211,7 +211,7 @@ pub struct VaList {
     pub addr: u64,
     /// Bytes of the integer half of the save area already consumed.
     pub gp_offset: u32,
-    /// …and of the vector half, which begins at [`GP_SAVE_END`].
+    /// ...and of the vector half, which begins at [`GP_SAVE_END`].
     pub fp_offset: u32,
     /// The next argument that did not fit in a register.
     pub overflow: u64,

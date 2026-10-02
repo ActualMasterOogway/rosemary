@@ -117,7 +117,7 @@ fn context_draw_image(
     Ok(())
 }
 
-/// The eight `CGFloat CGRectGet…(CGRect)` accessors, which are one shim.
+/// The eight `CGFloat CGRectGet...(CGRect)` accessors, which are one shim.
 fn rect_accessor(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let host = host_or_refuse(symbol)?;
     let rect = rect_argument(symbol, ctx, mem, 0)?;

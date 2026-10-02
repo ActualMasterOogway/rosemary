@@ -428,7 +428,7 @@ mod tests {
             point(&table, "/Users/user").map(|p| (p.parent, p.name, p.listed)),
             Some(("/Users", "user", true))
         );
-        // …and another user's home is still the prefix's.
+        // ...and another user's home is still the prefix's.
         assert_eq!(
             table.to_host("/Users/someone/Documents"),
             Some(PathBuf::from(

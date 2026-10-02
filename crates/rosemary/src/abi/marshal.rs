@@ -678,7 +678,7 @@ const MAX_INDIRECT: usize = 256;
 enum Where {
     /// Index into `rdi, rsi, rdx, rcx, r8, r9`.
     Int(usize),
-    /// Index into `xmm0`…`xmm7`, of which only the low eight bytes are read.
+    /// Index into `xmm0`...`xmm7`, of which only the low eight bytes are read.
     Sse(usize),
     /// Byte offset from `rsp`, which at an import exit is the pre-`CALL` value.
     Stack(u64),

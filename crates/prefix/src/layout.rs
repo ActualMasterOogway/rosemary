@@ -174,7 +174,7 @@ fn state_file() -> String {
     .join("\n")
 }
 
-/// `$XDG_DATA_HOME/rosemary/prefixes/default`, or `$HOME/.local/share/…`.
+/// `$XDG_DATA_HOME/rosemary/prefixes/default`, or `$HOME/.local/share/...`.
 pub fn default_directory(
     xdg_data_home: Option<OsString>,
     home: Option<OsString>,

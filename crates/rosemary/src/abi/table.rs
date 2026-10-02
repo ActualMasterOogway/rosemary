@@ -2204,7 +2204,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     //
     // Unreal Engine 3's OpenGL RHI predates these being core, so it resolves
     // the *extension* names - same functions, different symbols, and a table
-    // that has only `glDrawArraysInstanced` does not answer `…InstancedARB`.
+    // that has only `glDrawArraysInstanced` does not answer `...InstancedARB`.
     sig!("glDrawArraysInstancedARB", V, U32, I32, I32, I32),
     sig!("glDrawElementsInstancedARB", V, U32, I32, U32, P, I32),
     sig!("glVertexAttribDivisorARB", V, U32, U32),

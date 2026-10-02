@@ -55,7 +55,7 @@ pub fn point_in_window(x: f64, y: f64, height: f64) -> NSPoint {
 }
 
 /// A rectangle with a non-negative width and height, which is what every
-/// `CGRectGet…` accessor answers about.
+/// `CGRectGet...` accessor answers about.
 ///
 /// CoreGraphics allows a negative extent and standardizes before measuring, so
 /// `CGRectGetMinX` of a rectangle that runs leftwards is its *right* edge.
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn NSInsetRect(rect: NSRect, dx: CGFloat, dy: CGFloat) -> 
     }
 }
 
-/// The eight `CGFloat CGRectGet…(CGRect)` accessors.
+/// The eight `CGFloat CGRectGet...(CGRect)` accessors.
 ///
 /// Inline functions in the header on a Mac *and* exported symbols, and a guest
 /// compiled against one SDK imports what another inlined - so these are real

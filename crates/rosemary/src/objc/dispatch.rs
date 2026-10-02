@@ -472,7 +472,7 @@ struct ObjectList {
     variadic: &'static str,
     /// The counted selector to send instead.
     counted: &'static str,
-    /// Whether the list reads `object, key, object, key, …` rather than plain
+    /// Whether the list reads `object, key, object, key, ...` rather than plain
     /// objects - and so becomes *two* arrays rather than one.
     pairs: bool,
 }
@@ -1528,7 +1528,7 @@ fn send_object_list(
     let receiver = host_receiver as *mut std::ffi::c_void;
     let result = match list.pairs {
         false => {
-            // SAFETY: `imp` implements `…WithObjects:count:`, whose prototype
+            // SAFETY: `imp` implements `...WithObjects:count:`, whose prototype
             // is exactly this - an object array and its length. `items` is
             // alive across the call and holds `items.len()` objects.
             let f: extern "C" fn(
@@ -1540,7 +1540,7 @@ fn send_object_list(
             f(receiver, counted, items.as_ptr(), items.len())
         }
         true => {
-            // The list is `object, key, object, key, …`; an odd one is a guest
+            // The list is `object, key, object, key, ...`; an odd one is a guest
             // bug, and Foundation's answer to it is a raise this cannot catch.
             if items.len() % 2 != 0 {
                 return refuse(format!(
@@ -1550,7 +1550,7 @@ fn send_object_list(
             }
             let (objects, keys): (Vec<_>, Vec<_>) =
                 items.chunks_exact(2).map(|p| (p[0], p[1])).unzip();
-            // SAFETY: as above, for `…Objects:forKeys:count:`. Both vectors
+            // SAFETY: as above, for `...Objects:forKeys:count:`. Both vectors
             // hold `objects.len()` objects and are alive across the call.
             let f: extern "C" fn(
                 *mut std::ffi::c_void,

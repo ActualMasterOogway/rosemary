@@ -285,7 +285,7 @@ fn announce_exception_ports(symbol: &str, mask: u32) {
     }
 }
 
-/// The `…_get_exception_ports` half of the family: `task`, `host`.
+/// The `..._get_exception_ports` half of the family: `task`, `host`.
 fn get_exception_ports(
     symbol: &str,
     ctx: &mut RegisterContext,
@@ -298,7 +298,7 @@ fn get_exception_ports(
     Ok(())
 }
 
-/// The `…_swap_exception_ports` half: `task`, `host`, `thread`.
+/// The `..._swap_exception_ports` half: `task`, `host`, `thread`.
 ///
 /// **Ten parameters**, which puts `masksCnt` - the seventh - past SysV AMD64's six
 /// integer registers and onto the caller's stack.

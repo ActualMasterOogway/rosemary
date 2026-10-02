@@ -72,8 +72,6 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
     let guest = std::fs::canonicalize(guest).ok()?;
     let app = enclosing(&guest)?;
     let host = std::env::current_exe().ok()?;
-    // The mirror reproduces the **shape** of the original tree, not just the
-    // `.app`: two levels of ancestor, each with its siblings linked in.
     let root = cache_dir()?.join(key(&app, &host)?);
     let mirror = link_ancestors(&app, &root)?;
     let exe_name = guest.file_name()?;
@@ -82,18 +80,12 @@ pub fn remirror(guest: &Path) -> Option<PathBuf> {
     let macos = contents.join("MacOS");
     std::fs::create_dir_all(&macos).ok()?;
 
-    // `Info.plist` is a real file; see the module note on why it cannot be a
-    // symlink.
     let plist = app.join("Contents/Info.plist");
     copy_if_newer(&plist, &contents.join("Info.plist"))?;
     link_children(&app.join("Contents"), &contents, &["Info.plist", "MacOS"]);
-    // …including the guest's own `MacOS` directory, minus the executable
-    // itself, so a bundled dylib the guest `dlopen`s by bundle path is found.
     link_children(&app.join("Contents/MacOS"), &macos, &[]);
 
     let dest = macos.join(exe_name);
-    // Only remove a link we made; a stale *copy* is replaced by the rename
-    // below, which is the whole point of writing to a temporary name.
     let _ = std::fs::remove_file(&dest);
     let staging = macos.join(format!(".{}.staging", exe_name.to_string_lossy()));
     std::fs::copy(&host, &staging).ok()?;

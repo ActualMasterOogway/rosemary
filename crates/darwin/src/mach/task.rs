@@ -77,9 +77,9 @@ pub extern "C" fn task_set_special_port(_task: Name, _which: i32, _port: Name) -
     KERN_NOT_RECEIVER
 }
 
-/// What a `…_set_exception_ports` call asked for.
+/// What a `..._set_exception_ports` call asked for.
 ///
-/// Kept so that the matching `…_get_exception_ports` answers with what the
+/// Kept so that the matching `..._get_exception_ports` answers with what the
 /// caller registered rather than with nothing: a crash reporter that installs a
 /// handler, reads the ports back, and finds none concludes its installation
 /// failed.
@@ -121,7 +121,7 @@ fn announce(symbol: &str) {
     }
 }
 
-/// Fill in the five out-parameter arrays a `…_get_exception_ports` takes.
+/// Fill in the five out-parameter arrays a `..._get_exception_ports` takes.
 ///
 /// # Safety
 ///
