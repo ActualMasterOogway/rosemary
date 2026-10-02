@@ -18,7 +18,7 @@ fn bundled() -> Option<&'static Bitmap> {
         let bitmap = crate::raster::decode(&bytes);
         if bitmap.is_none() {
             eprintln!(
-                "rosetta3: appkit: {}: no decoder for this icon - see appkit::raster",
+                "rosemary: appkit: {}: no decoder for this icon - see appkit::raster",
                 path.display()
             );
         }

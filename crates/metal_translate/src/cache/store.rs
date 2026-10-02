@@ -41,17 +41,17 @@ pub(super) fn base_directory_from(
         return (!disabled).then(|| PathBuf::from(directory));
     }
     if let Some(cache) = xdg_cache_home.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(cache).join("rosetta3/metal-shaders"));
+        return Some(PathBuf::from(cache).join("rosemary/metal-shaders"));
     }
     let home = home.filter(|value| !value.is_empty())?;
-    Some(PathBuf::from(home).join(".cache/rosetta3/metal-shaders"))
+    Some(PathBuf::from(home).join(".cache/rosemary/metal-shaders"))
 }
 
 /// Remove the entries of every other build of this crate.
 ///
 /// A cache keyed by crate content would otherwise keep one pack per build, and
 /// a session which rebuilds the translator a dozen times leaves a dozen packs
-/// behind. Set `ROSETTA3_SHADER_CACHE_KEEP` while bisecting, where two builds
+/// behind. Set `ROSEMARY_SHADER_CACHE_KEEP` while bisecting, where two builds
 /// are run in turn and each would otherwise discard the other's work.
 pub(super) fn prune(base: &Path, version: &str) {
     let Ok(entries) = std::fs::read_dir(base) else {

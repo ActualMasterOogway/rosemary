@@ -49,12 +49,12 @@ pub(crate) struct Target {
 fn directory() -> Option<&'static std::path::Path> {
     #[dynamic]
     static DIRECTORY: Option<std::path::PathBuf> =
-        std::env::var_os("ROSETTA3_PASS_OUT").map(std::path::PathBuf::from);
+        std::env::var_os("ROSEMARY_PASS_OUT").map(std::path::PathBuf::from);
 
     DIRECTORY.as_deref()
 }
 
-/// Whether `ROSETTA3_PASS_OUT` is set at all.
+/// Whether `ROSEMARY_PASS_OUT` is set at all.
 pub(crate) fn enabled() -> bool {
     directory().is_some()
 }
@@ -74,7 +74,7 @@ pub(crate) fn claim() -> Option<u64> {
             return None;
         }
         let _ = std::fs::remove_file(&trigger);
-        *remaining = std::env::var("ROSETTA3_PASS_OUT_COUNT")
+        *remaining = std::env::var("ROSEMARY_PASS_OUT_COUNT")
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
             .unwrap_or(64);

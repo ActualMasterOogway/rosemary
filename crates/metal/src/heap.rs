@@ -8,13 +8,13 @@ use static_init::dynamic;
 /// reserve a hundred megabytes for it.
 const BLOCK: u64 = 64 << 20;
 
-/// TEMPORARY: `ROSETTA3_METAL_NOSUBALLOC=1` gives every allocation a block of
+/// TEMPORARY: `ROSEMARY_METAL_NOSUBALLOC=1` gives every allocation a block of
 /// its own, so a fault caused by two buffers sharing memory can be told from
 /// every other kind.
 #[inline(always)]
 fn dedicate_everything() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_METAL_NOSUBALLOC").is_some();
+    static ON: bool = std::env::var_os("ROSEMARY_METAL_NOSUBALLOC").is_some();
 
     *ON
 }

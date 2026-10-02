@@ -610,7 +610,7 @@ fn holding_window() -> sdl3::Window {
     static WINDOW: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *WINDOW.get_or_init(|| {
         let flags = sdl3::video::flags::OPENGL | sdl3::video::flags::HIDDEN;
-        sdl3::video::create_window(c"rosetta3 offscreen GL", 1, 1, flags)
+        sdl3::video::create_window(c"rosemary offscreen GL", 1, 1, flags)
             .map_or(0, |window| window as usize)
     }) as sdl3::Window
 }
@@ -686,10 +686,10 @@ thread_local! {
     static LINGERING: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
-/// `ROSETTA3_GL_DEBUG`, read once: it is asked on every make-current.
+/// `ROSEMARY_GL_DEBUG`, read once: it is asked on every make-current.
 fn gl_debug() -> bool {
     static DEBUG: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("ROSETTA3_GL_DEBUG").is_some());
+        std::sync::LazyLock::new(|| std::env::var_os("ROSEMARY_GL_DEBUG").is_some());
     *DEBUG
 }
 
@@ -719,7 +719,7 @@ fn warn_about_the_fallback() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         eprintln!(
-            "rosetta3: appkit: a thread asked for a GL context another thread has held since \
+            "rosemary: appkit: a thread asked for a GL context another thread has held since \
              before it reached its event loop, so this one draws through a context sharing its \
              objects instead - vertex arrays, framebuffers and queries the other thread made are \
              not visible through it"
@@ -860,7 +860,7 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
 
     if gl_debug() {
         eprintln!(
-            "rosetta3: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, owner={:?}",
+            "rosemary: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, owner={:?}",
             state.owner
         );
     }
@@ -898,7 +898,7 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
     }
 }
 
-/// `ROSETTA3_GL_DEBUG`: report every message the GL driver has about the calls
+/// `ROSEMARY_GL_DEBUG`: report every message the GL driver has about the calls
 /// the guest makes.
 ///
 /// A guest checks `glGetError` where it thinks an error is likely, which is
@@ -906,7 +906,7 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
 /// next call it bothered to check, naming a function that did nothing wrong.
 /// `KHR_debug` says which call, and often why, in the driver's own words.
 fn install_debug_output() {
-    if std::env::var_os("ROSETTA3_GL_DEBUG").is_none() {
+    if std::env::var_os("ROSEMARY_GL_DEBUG").is_none() {
         return;
     }
     const DEBUG_OUTPUT: u32 = 0x92E0;
@@ -935,14 +935,14 @@ fn install_debug_output() {
                 .into_owned()
             },
         };
-        eprintln!("rosetta3: gl: [{severity:#x}/{id}] {}", text.trim_end());
+        eprintln!("rosemary: gl: [{severity:#x}/{id}] {}", text.trim_end());
     }
 
     let (Some(callback), Some(enable)) = (
         sdl3::video::gl_proc_address(c"glDebugMessageCallback"),
         sdl3::video::gl_proc_address(c"glEnable"),
     ) else {
-        eprintln!("rosetta3: gl: this driver has no KHR_debug, so ROSETTA3_GL_DEBUG says nothing");
+        eprintln!("rosemary: gl: this driver has no KHR_debug, so ROSEMARY_GL_DEBUG says nothing");
         return;
     };
     // SAFETY: `void glEnable(GLenum)`.
@@ -1433,7 +1433,7 @@ unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
 fn swap_interval() -> Option<i32> {
     #[dynamic]
     static SWAP_INTERVAL: Option<i32> = {
-        if let Ok(no_vsync) = std::env::var("ROSETTA3_SWAP_INTERVAL") {
+        if let Ok(no_vsync) = std::env::var("ROSEMARY_SWAP_INTERVAL") {
             no_vsync.parse().ok()
         } else {
             None

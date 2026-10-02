@@ -53,8 +53,8 @@ const ATTRIBUTE_GLOBALS: &[(&str, &str)] = &[
 
 /// Where a resolved font's face lives. Private to this runtime, so a guest
 /// copying attributes between descriptors carries them along unexamined.
-const PATH_KEY: &str = "R3FontFilePath";
-const INDEX_KEY: &str = "R3FontFileIndex";
+const PATH_KEY: &str = "RosemaryFontFilePath";
+const INDEX_KEY: &str = "RosemaryFontFileIndex";
 
 /// A size CoreText uses for a font created with none.
 const DEFAULT_SIZE: f64 = 12.0;
@@ -997,7 +997,7 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeR
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
-    let directory = std::env::temp_dir().join("rosetta3-fonts");
+    let directory = std::env::temp_dir().join("rosemary-fonts");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(format!("{:016x}.ttf", hasher.finish()));
     if !path.exists() && std::fs::write(&path, bytes.as_slice()).is_err() {

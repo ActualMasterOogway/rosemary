@@ -103,7 +103,7 @@ pub(super) unsafe extern "C" fn set_stencil_value(receiver: Id, sel: Sel, value:
 }
 
 pub(crate) fn new_depth_stencil_state(state: DepthStencilState) -> Id {
-    object::make(c"R3MTLDepthStencilState", state)
+    object::make(c"RosemaryMTLDepthStencilState", state)
 }
 
 #[cfg(test)]

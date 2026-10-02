@@ -20,8 +20,8 @@ fn namespace() -> Option<&'static Path> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let base = match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(runtime) => PathBuf::from(runtime).join("rosetta3"),
-            None => PathBuf::from(format!("/tmp/rosetta3-{}", unsafe { libc::getuid() })),
+            Some(runtime) => PathBuf::from(runtime).join("rosemary"),
+            None => PathBuf::from(format!("/tmp/rosemary-{}", unsafe { libc::getuid() })),
         };
         let dir = base.join("bootstrap");
         std::fs::create_dir_all(&dir).ok()?;
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_service_that_checked_in_can_be_looked_up_and_sent_to() {
-        let service = unique("com.rosetta3.test.checkin");
+        let service = unique("com.rosemary.test.checkin");
         let mut server = MACH_PORT_NULL;
         // SAFETY: a NUL-terminated name and a live local for the out-parameter.
         let rc = unsafe { bootstrap_check_in(BOOTSTRAP, service.as_ptr(), &mut server) };
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_name_nothing_registered_is_unknown_rather_than_a_port_to_nowhere() {
-        let service = unique("com.rosetta3.test.absent");
+        let service = unique("com.rosemary.test.absent");
         let mut port = MACH_PORT_NULL;
         // SAFETY: a NUL-terminated name and a live local for the out-parameter.
         let rc = unsafe { bootstrap_look_up(BOOTSTRAP, service.as_ptr(), &mut port) };
@@ -292,7 +292,7 @@ mod tests {
     /// the name over rather than be told it is in use forever.
     #[test]
     fn a_registration_whose_port_is_gone_is_taken_over_rather_than_honoured() {
-        let service = unique("com.rosetta3.test.stale");
+        let service = unique("com.rosemary.test.stale");
         let mut first = MACH_PORT_NULL;
         // SAFETY: a NUL-terminated name and a live local for the out-parameter.
         unsafe { bootstrap_check_in(BOOTSTRAP, service.as_ptr(), &mut first) };

@@ -197,7 +197,7 @@ pub unsafe extern "C" fn SecTrustCreateWithCertificates(
         // SAFETY: as above.
         if !matches!(unsafe { payload(policy) }, Some(Payload::BasicX509)) {
             eprintln!(
-                "rosetta3: security: SecTrustCreateWithCertificates: only the basic X.509 policy is supported"
+                "rosemary: security: SecTrustCreateWithCertificates: only the basic X.509 policy is supported"
             );
             return PARAM;
         }
@@ -383,7 +383,7 @@ mod tests {
         assert!(buffer.iter().any(|&b| b != 0));
     }
 
-    /// A self-signed P-256 certificate, `CN=rosetta3 test`, valid for a century
+    /// A self-signed P-256 certificate, `CN=rosemary test`, valid for a century
     /// from its making so the test does not expire.
     fn self_signed() -> Vec<u8> {
         include_bytes!("testdata/self_signed.der").to_vec()

@@ -31,7 +31,7 @@ use object::{Kind, Record};
 /// and because the registry that keys on it compares it atomically.
 ///
 /// Not comparable across hosts and not meaningful to a guest. A guest asking for its
-/// own Mach port is a different question, answered by `rosetta3::shims::machthread`.
+/// own Mach port is a different question, answered by `rosemary::shims::machthread`.
 pub fn id() -> u32 {
     #[cfg(target_os = "macos")]
     {
@@ -774,7 +774,7 @@ pub unsafe extern "C" fn key_delete(key: u64) -> i32 {
 /// `int pthread_key_create(pthread_key_t *, void (*destructor)(void *))`
 ///
 /// The entry point the *native* backend binds. Under emulation the destructor is
-/// guest code that needs a thunk, so `rosetta3::shims::pthread` intercepts the
+/// guest code that needs a thunk, so `rosemary::shims::pthread` intercepts the
 /// call by name; here the guest's code is host code already.
 ///
 /// The key is written out as **eight** bytes, because that is what the guest
@@ -822,7 +822,7 @@ pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
 /// The stack a guest thread's frames go on when its attributes ask for nothing.
 ///
 /// This host's own default, which is deliberately not the 512 KiB
-/// `rosetta3::thread::THREAD_STACK` gives an *emulated* guest thread. There the
+/// `rosemary::thread::THREAD_STACK` gives an *emulated* guest thread. There the
 /// guest's frames have a stack to themselves; here they share one with every shim
 /// this crate runs on their behalf, and those are deeper than the Darwin libc the
 /// guest was compiled against. A guest reading `pthread_get_stacksize_np` back
@@ -865,7 +865,7 @@ struct Start {
 extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     // Reclaimed and copied out before the guest runs, because a start routine may
     // call `pthread_exit` - which ends the thread from under these frames without
-    // unwinding them, leaking anything still boxed. `rosetta3::thread::entry` does
+    // unwinding them, leaking anything still boxed. `rosemary::thread::entry` does
     // the same for the same reason.
     // SAFETY: the same allocation, reclaimed once.
     let start = *unsafe { Box::from_raw(context as *mut Start) };

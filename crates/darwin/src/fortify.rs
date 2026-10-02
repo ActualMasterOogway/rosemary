@@ -159,10 +159,10 @@ unsafe extern "C" fn sprintf_chk_body(
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".text",
-    ".globl rosetta3_sprintf_chk",
-    ".hidden rosetta3_sprintf_chk",
-    ".type rosetta3_sprintf_chk, @function",
-    "rosetta3_sprintf_chk:",
+    ".globl rosemary_sprintf_chk",
+    ".hidden rosemary_sprintf_chk",
+    ".type rosemary_sprintf_chk, @function",
+    "rosemary_sprintf_chk:",
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 208",
@@ -191,17 +191,17 @@ core::arch::global_asm!(
     "mov rsp, rbp",
     "pop rbp",
     "ret",
-    ".size rosetta3_sprintf_chk, . - rosetta3_sprintf_chk",
+    ".size rosemary_sprintf_chk, . - rosemary_sprintf_chk",
     body = sym sprintf_chk_body,
 );
 
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
-    fn rosetta3_sprintf_chk();
+    fn rosemary_sprintf_chk();
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-unsafe extern "C" fn rosetta3_sprintf_chk() {
+unsafe extern "C" fn rosemary_sprintf_chk() {
     // Native Darwin supplies its own variadic entry. Other architectures only
     // reach this address if the emulator failed to intercept the import.
     unsafe { libc::abort() }
@@ -212,7 +212,7 @@ exports::exports! {
         "__memcpy_chk" => memcpy_chk,
         "__memmove_chk" => memmove_chk,
         "__memset_chk" => memset_chk,
-        "__sprintf_chk" => rosetta3_sprintf_chk,
+        "__sprintf_chk" => rosemary_sprintf_chk,
         "__strcat_chk" => strcat_chk,
         "__strcpy_chk" => strcpy_chk,
         "__strlcat_chk" => strlcat_chk,

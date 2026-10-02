@@ -302,7 +302,7 @@ fn local_position(sdl: sdl3::Window, x: i32, y: i32) -> (i32, i32) {
     }
 }
 
-/// `ROSETTA3_TRACE_WINDOW=1`: report every change to a window's identity - its
+/// `ROSEMARY_TRACE_WINDOW=1`: report every change to a window's identity - its
 /// creation, style mask, level, frame and ordering.
 ///
 /// A toolkit says what kind of window it wants through those five and nothing
@@ -310,7 +310,7 @@ fn local_position(sdl: sdl3::Window, x: i32, y: i32) -> (i32, i32) {
 /// deaf to the pointer" is which of them arrived, in what order, and with what.
 /// Written to the event log as well as to stderr, because a guest that replaces
 /// its own stderr takes every later line with it.
-pub const TRACE_ENV: &str = "ROSETTA3_TRACE_WINDOW";
+pub const TRACE_ENV: &str = "ROSEMARY_TRACE_WINDOW";
 
 pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -321,7 +321,7 @@ pub(crate) fn trace(args: std::fmt::Arguments) {
     if !tracing() {
         return;
     }
-    let line = format!("rosetta3: appkit: window: {args}");
+    let line = format!("rosemary: appkit: window: {args}");
     eprintln!("{line}");
     crate::event::debug_log(&line);
 }
@@ -585,11 +585,11 @@ pub fn delegate_of(object: Id) -> Id {
     }
 }
 
-/// `ROSETTA3_WINDOW_SIZE=WIDTHxHEIGHT`, the size every window is created at.
+/// `ROSEMARY_WINDOW_SIZE=WIDTHxHEIGHT`, the size every window is created at.
 fn forced_size() -> Option<(i32, i32)> {
     static SIZE: std::sync::OnceLock<Option<(i32, i32)>> = std::sync::OnceLock::new();
     *SIZE.get_or_init(|| {
-        let value = std::env::var("ROSETTA3_WINDOW_SIZE").ok()?;
+        let value = std::env::var("ROSEMARY_WINDOW_SIZE").ok()?;
         let (width, height) = value.split_once(['x', 'X'])?;
         Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
     })
@@ -1792,7 +1792,7 @@ unsafe extern "C" fn make_first_responder(receiver: Id, _sel: Sel, responder: Id
         // SAFETY: null or a live object this runtime allocated.
         let class = unsafe { objc::object::class_of(responder) };
         eprintln!(
-            "rosetta3: appkit: -makeFirstResponder: {responder:p} ({})",
+            "rosemary: appkit: -makeFirstResponder: {responder:p} ({})",
             class.map_or("nil", |c| c.name_str())
         );
     }

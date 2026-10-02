@@ -50,7 +50,7 @@ pub struct MissingSymbol {
     /// follows `call rel32` into the six-byte stub, decodes `jmp qword
     /// [rip+disp]` as guest code, and lands on the zero the binder wrote - so the
     /// diagnostic a program gets for an import nobody satisfied is "no code at
-    /// 0x0" rather than the symbol's name. See `rosetta3::Program`.
+    /// 0x0" rather than the symbol's name. See `rosemary::Program`.
     pub stub_va: Option<Word>,
     /// Whether the image tolerates the absence.
     pub weak_import: bool,

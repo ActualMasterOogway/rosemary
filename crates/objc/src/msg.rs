@@ -66,7 +66,7 @@ unsafe fn describe_unrecognised(receiver: Id, sel: Sel) -> String {
     format!("unrecognized selector sent to instance of {name}: {selector}")
 }
 
-/// `ROSETTA3_LOG_UNRECOGNIZED=1`: report each unanswered message once and answer
+/// `ROSEMARY_LOG_UNRECOGNIZED=1`: report each unanswered message once and answer
 /// nil, instead of aborting on the first one.
 ///
 /// A diagnostic and not a mode, and the difference matters: answering nil to a
@@ -77,7 +77,7 @@ unsafe fn describe_unrecognised(receiver: Id, sel: Sel) -> String {
 /// out which of forty-odd missing classes a large program actually uses.
 pub fn logging_unrecognised() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("ROSETTA3_LOG_UNRECOGNIZED").is_some())
+    *ON.get_or_init(|| std::env::var_os("ROSEMARY_LOG_UNRECOGNIZED").is_some())
 }
 
 /// [`unrecognised`] under [`logging_unrecognised`]: one line per distinct
@@ -89,7 +89,7 @@ unsafe extern "C" fn unrecognised_logged(receiver: Id, sel: Sel) -> usize {
     let line = unsafe { describe_unrecognised(receiver, sel) };
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if seen.get_or_insert_default().insert(line.clone()) {
-        eprintln!("rosetta3: objc: {line} - answering nil (ROSETTA3_LOG_UNRECOGNIZED is set)");
+        eprintln!("rosemary: objc: {line} - answering nil (ROSEMARY_LOG_UNRECOGNIZED is set)");
     }
     0
 }
@@ -340,7 +340,7 @@ unsafe extern "C" fn msg_send_stret() {
 /// `class` is what the search starts *at* for `objc_msgSendSuper` and the class
 /// whose superclass it starts at for `objc_msgSendSuper2`. Both slots are filled
 /// from a `__objc_superrefs` entry, which is why those have to name a class this
-/// runtime knows: see `rosetta3::objc::rewrite_refs`.
+/// runtime knows: see `rosemary::objc::rewrite_refs`.
 #[repr(C)]
 struct Super {
     receiver: Id,

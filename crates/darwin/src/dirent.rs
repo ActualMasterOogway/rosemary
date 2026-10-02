@@ -482,7 +482,8 @@ mod tests {
     /// A directory of three files, named per test so the suite can run in
     /// parallel.
     fn fixture(test: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("r3-dirent-{test}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rosemary-dirent-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temporary directory");
         for name in ["beta", "alpha", "gamma"] {
@@ -623,7 +624,7 @@ mod tests {
     /// zero-length listing.
     #[test]
     fn a_missing_directory_fails_rather_than_reading_empty() {
-        let path = c"/nonexistent-rosetta3-dirent-test";
+        let path = c"/nonexistent-rosemary-dirent-test";
         let mut list: *mut *mut Dirent = std::ptr::null_mut();
         // SAFETY: a static path, and a live out-parameter.
         unsafe {

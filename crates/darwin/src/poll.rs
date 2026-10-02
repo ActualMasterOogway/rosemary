@@ -63,7 +63,7 @@ fn say_vnode_dropped(darwin: i16) {
         }
         *said |= bit;
         eprintln!(
-            "rosetta3: poll for Darwin's {name} ({bit:#06x}): dropped - this host has no vnode \
+            "rosemary: poll for Darwin's {name} ({bit:#06x}): dropped - this host has no vnode \
              event a descriptor can be polled for, and {bit:#06x} here is a real bit meaning \
              something else. The poll will report that nothing happened."
         );

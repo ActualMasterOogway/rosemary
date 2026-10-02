@@ -46,7 +46,7 @@ pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> I
     // `-commandBuffer` owns nothing it hands back: Metal vends an autoreleased
     // command buffer, and a guest which keeps one retains it itself.
     objc::arc::autorelease(object::make(
-        c"R3MTLCommandBuffer",
+        c"RosemaryMTLCommandBuffer",
         CommandBuffer {
             gpu,
             timestamps,

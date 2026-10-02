@@ -3,7 +3,7 @@ use static_init::dynamic;
 #[inline]
 pub fn on() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_TRACE_AUDIO").is_some();
+    static ON: bool = std::env::var_os("ROSEMARY_TRACE_AUDIO").is_some();
     *ON
 }
 

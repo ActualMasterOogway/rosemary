@@ -295,7 +295,8 @@ pub(crate) mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     pub(crate) fn scratch(name: &str) -> PathBuf {
-        let at = std::env::temp_dir().join(format!("r3-prefix-{name}-{}", std::process::id()));
+        let at =
+            std::env::temp_dir().join(format!("rosemary-prefix-{name}-{}", std::process::id()));
         let _ = make_writable_and_remove(&at);
         std::fs::create_dir_all(&at).expect("scratch directory");
         at

@@ -2,11 +2,11 @@
  *
  * These are the symbols Valve's libsteam_api.dylib looks up after it loads
  * steamclient.dylib. Everything they do is forwarded to the host's real Steam
- * client through rosetta3_steamclient_dispatch; the only state kept on this
+ * client through rosemary_steamclient_dispatch; the only state kept on this
  * side is the table of interface wrappers handed back to the guest.
  */
 
-#include "rosetta3_steam.h"
+#include "rosemary_steam.h"
 #include "steamclient_methods.h"
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
@@ -97,7 +97,7 @@ EXPORT void *CreateInterface(const char *name, int32_t *return_code)
     params.name = name;
     params.return_code = return_code;
 
-    if (rosetta3_steamclient_dispatch(STEAM_DISPATCH_CREATE_INTERFACE, &params))
+    if (rosemary_steamclient_dispatch(STEAM_DISPATCH_CREATE_INTERFACE, &params))
         return nullptr;
     if (!params._ret)
         return nullptr;
@@ -108,7 +108,7 @@ EXPORT int8_t Steam_IsKnownInterface(const char *version)
 {
     steam_params_name_only params = {};
     params.name = version;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_IS_KNOWN_INTERFACE, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_IS_KNOWN_INTERFACE, &params);
     return params._ret;
 }
 
@@ -117,7 +117,7 @@ EXPORT void Steam_NotifyMissingInterface(int32_t pipe, const char *version)
     steam_params_notify_missing params = {};
     params.pipe = pipe;
     params.name = version;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_NOTIFY_MISSING_INTERFACE, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_NOTIFY_MISSING_INTERFACE, &params);
 }
 
 EXPORT int8_t Steam_BGetCallback(int32_t pipe, void *msg, int32_t *ignored)
@@ -126,7 +126,7 @@ EXPORT int8_t Steam_BGetCallback(int32_t pipe, void *msg, int32_t *ignored)
     params.pipe = pipe;
     params.msg = msg;
     params.ignored = ignored;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_GET_CALLBACK, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_GET_CALLBACK, &params);
     return params._ret;
 }
 
@@ -134,7 +134,7 @@ EXPORT int8_t Steam_FreeLastCallback(int32_t pipe)
 {
     steam_params_pipe_only params = {};
     params.pipe = pipe;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_FREE_LAST_CALLBACK, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_FREE_LAST_CALLBACK, &params);
     return params._ret;
 }
 
@@ -149,7 +149,7 @@ EXPORT int8_t Steam_GetAPICallResult(int32_t pipe, uint64_t call, void *callback
     params.callback_size = callback_size;
     params.callback_expected = callback_expected;
     params.failed = failed;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_GET_API_CALL_RESULT, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_GET_API_CALL_RESULT, &params);
     return params._ret;
 }
 
@@ -157,7 +157,7 @@ EXPORT void Steam_ReleaseThreadLocalMemory(int32_t thread_exit)
 {
     steam_params_release_tls params = {};
     params.thread_exit = thread_exit;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_RELEASE_THREAD_LOCAL_MEMORY, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_RELEASE_THREAD_LOCAL_MEMORY, &params);
 }
 
 EXPORT void Breakpad_SteamMiniDumpInit(uint32_t a, const char *b, const char *c)
@@ -166,21 +166,21 @@ EXPORT void Breakpad_SteamMiniDumpInit(uint32_t a, const char *b, const char *c)
     params.a = a;
     params.b = b;
     params.c = c;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_MINIDUMP_INIT, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_MINIDUMP_INIT, &params);
 }
 
 EXPORT void Breakpad_SteamSetAppID(uint32_t appid)
 {
     steam_params_breakpad_appid params = {};
     params.appid = appid;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_SET_APPID, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_SET_APPID, &params);
 }
 
 EXPORT int32_t Breakpad_SteamSetSteamID(uint64_t steamid)
 {
     steam_params_breakpad_steamid params = {};
     params.steamid = steamid;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_SET_STEAMID, &params);
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_SET_STEAMID, &params);
     return params._ret;
 }
 
@@ -188,7 +188,7 @@ EXPORT int32_t Breakpad_SteamWriteMiniDumpSetComment(const char *comment)
 {
     steam_params_breakpad_comment params = {};
     params.comment = comment;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_WRITE_MINIDUMP_SET_COMMENT,
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_WRITE_MINIDUMP_SET_COMMENT,
                                   &params);
     return params._ret;
 }
@@ -198,6 +198,6 @@ EXPORT void Breakpad_SteamWriteMiniDumpUsingExceptionInfoWithBuildId(int32_t a, 
     steam_params_breakpad_minidump params = {};
     params.a = a;
     params.b = b;
-    rosetta3_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_WRITE_MINIDUMP_WITH_BUILD_ID,
+    rosemary_steamclient_dispatch(STEAM_DISPATCH_BREAKPAD_WRITE_MINIDUMP_WITH_BUILD_ID,
                                   &params);
 }

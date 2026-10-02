@@ -236,7 +236,7 @@ unsafe extern "C" fn getaddrinfo(
     0
 }
 
-/// Whether `ROSETTA3_BLOCK_HOST` names this host, as a comma-separated list.
+/// Whether `ROSEMARY_BLOCK_HOST` names this host, as a comma-separated list.
 ///
 /// A diagnostic, not a policy: a client that reads its configuration from a
 /// server cannot be told to use the local file instead, and answering
@@ -249,7 +249,7 @@ unsafe extern "C" fn getaddrinfo(
 /// `node` is NUL-terminated or null.
 unsafe fn blocked(node: *const c_char) -> bool {
     #[static_init::dynamic]
-    static NAMES: Vec<String> = std::env::var("ROSETTA3_BLOCK_HOST")
+    static NAMES: Vec<String> = std::env::var("ROSEMARY_BLOCK_HOST")
         .unwrap_or_default()
         .split(',')
         .map(|name| name.trim().to_ascii_lowercase())
@@ -265,7 +265,7 @@ unsafe fn blocked(node: *const c_char) -> bool {
     let name = name.to_ascii_lowercase();
     let refused = NAMES.iter().any(|blocked| name == *blocked);
     if refused {
-        eprintln!("rosetta3: {name}: refused (ROSETTA3_BLOCK_HOST names it)");
+        eprintln!("rosemary: {name}: refused (ROSEMARY_BLOCK_HOST names it)");
     }
     refused
 }

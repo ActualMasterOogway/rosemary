@@ -222,7 +222,7 @@ fn key_name(key: CFTypeRef) -> Option<&'static str> {
 }
 
 fn refuse(what: &str) -> CFTypeRef {
-    eprintln!("rosetta3: IOSurfaceCreate: {what}; no surface is made");
+    eprintln!("rosemary: IOSurfaceCreate: {what}; no surface is made");
     std::ptr::null()
 }
 

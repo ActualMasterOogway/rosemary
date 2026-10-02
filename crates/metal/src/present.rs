@@ -211,7 +211,7 @@ fn make_drawable(
         return None;
     }
     let drawable = object::make(
-        c"R3CAMetalDrawable",
+        c"RosemaryCAMetalDrawable",
         Drawable {
             gpu,
             texture,
@@ -334,7 +334,7 @@ pub(crate) fn present(drawable: Id) {
 /// Attach the swapchain copy directly behind the guest submission. The
 /// swapchain owns a retained reference until its copy fence signals.
 pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
-    if drawable.is_null() || !object::is_kind(drawable, c"R3CAMetalDrawable") {
+    if drawable.is_null() || !object::is_kind(drawable, c"RosemaryCAMetalDrawable") {
         return false;
     }
     // SAFETY: a drawable of this crate's, checked above.
@@ -350,7 +350,7 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
     let Some(frame) = layer_frame(described.layer) else {
         return false;
     };
-    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
+    if std::env::var_os("ROSEMARY_PRESENT_READBACK").is_some() {
         return false;
     }
     // Where a web view sits over this layer, the window's store carries its
@@ -431,7 +431,7 @@ fn present_readback(drawable: Id) {
 }
 
 fn present_inner(drawable: Id) {
-    if drawable.is_null() || !object::is_kind(drawable, c"R3CAMetalDrawable") {
+    if drawable.is_null() || !object::is_kind(drawable, c"RosemaryCAMetalDrawable") {
         return;
     }
     // SAFETY: a drawable of this crate's, checked above.
@@ -544,21 +544,21 @@ pub(crate) fn layer_frame(layer: Id) -> Option<appkit::view::Frame> {
     unsafe { appkit::view::presentation_frame(view) }
 }
 
-/// Write a presented frame to `ROSETTA3_FRAME_OUT` as a binary PPM.
+/// Write a presented frame to `ROSEMARY_FRAME_OUT` as a binary PPM.
 ///
 /// What reached the window is the one thing a log cannot say, and a headless
-/// or remote session has no other way to see it. `ROSETTA3_FRAME_INTERVAL`
+/// or remote session has no other way to see it. `ROSEMARY_FRAME_INTERVAL`
 /// says how many frames to skip between files; the default keeps a run's
 /// output to a few files a second rather than one per frame.
 fn dump_frame(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    let Some(directory) = std::env::var_os("ROSETTA3_FRAME_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_FRAME_OUT") else {
         return;
     };
     static PRESENTED: AtomicU64 = AtomicU64::new(0);
     let frame = PRESENTED.fetch_add(1, Ordering::Relaxed);
-    let interval = std::env::var("ROSETTA3_FRAME_INTERVAL")
+    let interval = std::env::var("ROSEMARY_FRAME_INTERVAL")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|interval| *interval > 0)
@@ -696,8 +696,8 @@ pub(crate) fn install() {
     appkit::backing::set_presenter(present_store);
     appkit::backing::set_importer(crate::overlay::importer);
     appkit::window::add_destroy_hook(forget_window);
-    object::register::<Drawable>(c"R3CAMetalDrawable");
-    let drawable = objc::class::lookup(c"R3CAMetalDrawable").expect("just registered");
+    object::register::<Drawable>(c"RosemaryCAMetalDrawable");
+    let drawable = objc::class::lookup(c"RosemaryCAMetalDrawable").expect("just registered");
     methods!(drawable, {
         "dealloc" => drawable_dealloc, c"v16@0:8";
         "texture" => drawable_texture, c"@16@0:8";
@@ -780,7 +780,7 @@ pub(crate) fn present_store(
     holes: &[appkit::backing::Hole],
     overlays: &[appkit::backing::GpuOverlay],
 ) -> bool {
-    if std::env::var_os("ROSETTA3_PRESENT_READBACK").is_some() {
+    if std::env::var_os("ROSEMARY_PRESENT_READBACK").is_some() {
         return false;
     }
     // SAFETY: the Metal framework's exported constructor, which has no

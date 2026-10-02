@@ -4,19 +4,19 @@ use super::*;
 #[inline(always)]
 fn tracing() -> bool {
     #[dynamic]
-    static ENABLED: bool = std::env::var_os("ROSETTA3_TRACE_METAL").is_some();
+    static ENABLED: bool = std::env::var_os("ROSEMARY_TRACE_METAL").is_some();
 
     *ENABLED
 }
 
-/// Write one module to `ROSETTA3_SPIRV_OUT`, so that a driver which rejects or
+/// Write one module to `ROSEMARY_SPIRV_OUT`, so that a driver which rejects or
 /// crashes on a shader can be met with the exact bytes it was given.
 ///
 /// A driver's SPIR-V front end is not a validator, and a module `spirv-val`
 /// accepts can still take one down; the file is the only way to tell which of
 /// the thousands a game compiles was the one.
 pub(super) fn dump_spirv(entry: &str, words: &[u32]) {
-    let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_SPIRV_OUT") else {
         return;
     };
     let directory = std::path::PathBuf::from(directory);
@@ -49,7 +49,7 @@ pub(super) fn dump_spirv(entry: &str, words: &[u32]) {
 
 pub fn trace(message: impl std::fmt::Display) {
     if tracing() {
-        eprintln!("rosetta3: Metal: {message}");
+        eprintln!("rosemary: Metal: {message}");
     }
 }
 
@@ -64,7 +64,7 @@ pub fn trace_once(message: impl std::fmt::Display) {
     let message = message.to_string();
     let mut seen = SEEN.lock().expect("trace list");
     if !seen.contains(&message) {
-        eprintln!("rosetta3: Metal: {message}");
+        eprintln!("rosemary: Metal: {message}");
         seen.push(message);
     }
 }
@@ -83,6 +83,6 @@ pub fn milestone(what: &'static str) {
     let mut seen = SEEN.lock().expect("milestone list");
     if !seen.contains(&what) {
         seen.push(what);
-        eprintln!("rosetta3: Metal: first {what}");
+        eprintln!("rosemary: Metal: first {what}");
     }
 }

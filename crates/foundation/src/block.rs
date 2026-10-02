@@ -2,7 +2,7 @@ use objc::object::Id;
 
 /// Byte offset of `invoke` in a `Block_layout`: `isa`, `flags`, `reserved`.
 ///
-/// The same constant `rosetta3::shims::block` reads, and for the mirror-image
+/// The same constant `rosemary::shims::block` reads, and for the mirror-image
 /// reason: that module rewrites the pointer so a host call reaches the guest,
 /// and this one calls what it finds there.
 pub(crate) const INVOKE_OFFSET: usize = 16;
@@ -18,7 +18,7 @@ unsafe fn invoke(block: Id) -> Option<usize> {
     }
     // SAFETY: `invoke` is the third word. Under the
     // emulated backend the pointer found there is already a thunk, because the
-    // method's `@?` encoding had `rosetta3::shims::block` rewrite it on the way
+    // method's `@?` encoding had `rosemary::shims::block` rewrite it on the way
     // in.
     let found = unsafe { *((block as *const u8).add(INVOKE_OFFSET) as *const usize) };
     (found != 0).then_some(found)

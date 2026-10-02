@@ -105,7 +105,7 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
     let elements = (0..COLOR_ATTACHMENTS)
         .map(|index| {
             object::make(
-                c"R3MTLColorAttachmentDescriptor",
+                c"RosemaryMTLColorAttachmentDescriptor",
                 ColorElement {
                     owner: receiver,
                     index,
@@ -114,10 +114,10 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
         })
         .collect::<Vec<_>>();
     let collection = object::make(
-        c"R3MTLIndexedCollection",
+        c"RosemaryMTLIndexedCollection",
         crate::resource::IndexedCollection {
             elements,
-            // SAFETY: every element here is an `R3MTLColorAttachmentDescriptor`.
+            // SAFETY: every element here is an `RosemaryMTLColorAttachmentDescriptor`.
             orphan: |element| unsafe { crate::resource::orphan_element::<ColorElement>(element) },
         },
     );

@@ -17,7 +17,7 @@ const HONORED: c_int = oflag::O_CREAT | oflag::O_EXCL | oflag::O_TRUNC | oflag::
 ///
 /// The leading `/` is kept, because glibc skips exactly that; every `/` after
 /// it becomes `%2F`, and a literal `%` becomes `%25` so the mapping stays
-/// injective. Two rosetta3 processes sharing a segment agree on the host name
+/// injective. Two rosemary processes sharing a segment agree on the host name
 /// because they run the same translation.
 fn to_host_name(name: &CStr) -> Option<CString> {
     let text = name.to_str().ok()?;
@@ -162,7 +162,7 @@ mod tests {
     /// End to end, on the host's own shared memory: create, reopen, unlink.
     #[test]
     fn a_segment_created_with_darwin_flags_can_be_reopened() {
-        let name = CString::new(format!("/rosetta3-shm-test-{}", std::process::id())).unwrap();
+        let name = CString::new(format!("/rosemary-shm-test-{}", std::process::id())).unwrap();
         // SAFETY: a live name, and a mode that matters because `O_CREAT` is set.
         let fd = unsafe {
             shm_open(

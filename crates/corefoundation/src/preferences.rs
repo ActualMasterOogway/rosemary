@@ -379,7 +379,7 @@ mod tests {
     /// reads on a Mac it has never run on - and the case that has to work.
     #[test]
     fn an_unset_key_is_absent_rather_than_false() {
-        let (key, app) = (string("R3NeverSet"), string("com.example.absent"));
+        let (key, app) = (string("RosemaryNeverSet"), string("com.example.absent"));
         let mut exists = 1u8;
         // SAFETY: two strings this test made, and a live `Boolean`.
         unsafe {
@@ -399,7 +399,7 @@ mod tests {
     /// in another.
     #[test]
     fn a_value_reads_back_in_its_own_domain() {
-        let key = string("R3Enabled");
+        let key = string("RosemaryEnabled");
         let (mine, theirs) = (string("com.example.mine"), string("com.example.theirs"));
         let value = crate::collections::new_number(crate::collections::Number::Integer(1));
         let mut exists = 0u8;

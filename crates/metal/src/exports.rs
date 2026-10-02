@@ -7,7 +7,7 @@ pub(super) fn devices() -> &'static [usize] {
         let adapters = match vulkan::adapters() {
             Ok(adapters) => adapters,
             Err(reason) => {
-                eprintln!("rosetta3: Metal: {reason}");
+                eprintln!("rosemary: Metal: {reason}");
                 return Vec::new();
             }
         };
@@ -19,14 +19,14 @@ pub(super) fn devices() -> &'static [usize] {
                     Ok(gpu) => Some(gpu),
                     Err(reason) => {
                         eprintln!(
-                            "rosetta3: Metal: {} has no logical device: {reason}",
+                            "rosemary: Metal: {} has no logical device: {reason}",
                             adapter.name
                         );
                         None
                     }
                 };
                 object::make(
-                    c"R3MTLDevice",
+                    c"RosemaryMTLDevice",
                     Device {
                         ordinal: ordinal as u64 + 1,
                         name: foundation::string::from_str(&adapter.name),

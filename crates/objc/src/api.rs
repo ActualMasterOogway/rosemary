@@ -204,7 +204,7 @@ pub unsafe extern "C" fn class_getClassMethod(cls: *const c_void, name: Sel) -> 
 
 /// The resolved `IMP` itself, never a forwarding trampoline.
 ///
-/// `rosetta3`'s dispatch caches this value and re-probes it to notice a swizzle,
+/// `rosemary`'s dispatch caches this value and re-probes it to notice a swizzle,
 /// so it must change exactly when the resolution does. See the crate doc.
 pub unsafe extern "C" fn class_getMethodImplementation(cls: *const c_void, name: Sel) -> Imp {
     unsafe { class(cls) }.map_or(std::ptr::null(), |c| {
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn class_createInstance(cls: *const c_void, extra: usize) 
 
 /// The `IMP` exactly as it was installed.
 ///
-/// Never a wrapper: `rosetta3` compares this against its own thunk table to tell
+/// Never a wrapper: `rosemary` compares this against its own thunk table to tell
 /// a guest method from a host one. See the crate doc.
 pub unsafe extern "C" fn method_getImplementation(m: *const c_void) -> Imp {
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.implementation())

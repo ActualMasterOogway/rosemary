@@ -1,13 +1,12 @@
-# Rosetta 3
+# Rosemary
 
-Rosetta 3 runs macOS applications across architectures and operating systems. It
+Rosemary runs macOS applications across architectures and operating systems. It
 combines two closely related projects:
 
-* a high-level x86-64 emulator built on the Microlift binary lifter and JIT; and
-* a macOS compatibility layer that reimplements Darwin APIs and Apple frameworks
-  on non-macOS hosts.
+* a high-level x86-64 emulator built on the Microlift binary lifter and JIT
+* a macOS compatibility layer that reimplements Darwin APIs and Apple frameworks on non-macOS hosts.
 
-Rosetta 3 aims to make macOS software portable across macOS and non-macOS systems while
+Rosemary aims to make macOS software portable across macOS and non-macOS systems while
 sharing one Mach-O loader, runtime, ABI bridge, and framework implementation. It
 is an experimental compatibility project rather than a drop-in replacement for
 Apple's Rosetta 2, and application coverage is still incomplete.
@@ -29,7 +28,7 @@ x86-64 image through Microlift.
 * Prefer behavioral compatibility and correctness first, then improve application
   coverage and performance incrementally.
 
-Rosetta 3 currently has two execution backends:
+Rosemary currently has two execution backends:
 
 * `native` loads a slice matching the host CPU, links it to the available native
   or reimplemented libraries, and calls it directly.
@@ -39,17 +38,17 @@ Rosetta 3 currently has two execution backends:
 
 ## Building
 
-Rosetta 3 uses the Rust 2024 edition and currently requires Rust 1.96 or newer.
+Rosemary uses the Rust 2024 edition and currently requires Rust 1.96 or newer.
 The Microlift and Microlift Wasmtime repositories are Git dependencies, so the
 build environment must be able to fetch them.
 
 For a release build on the current host:
 
 ```sh
-cargo build --release --bin rosetta3
+cargo build --release --bin rosemary
 ```
 
-The resulting executable is `target/release/rosetta3`. Release builds are
+The resulting executable is `target/release/rosemary`. Release builds are
 strongly recommended for emulation; debug builds are substantially slower.
 
 ### Nix development environment
@@ -63,11 +62,11 @@ nix develop
 ```
 
 The shell provides the Rust toolchain and the build, runtime, and development
-dependencies needed to build Rosetta 3 and its workspace components. From inside
+dependencies needed to build Rosemary and its workspace components. From inside
 the shell, the normal Cargo commands work without any additional setup:
 
 ```sh
-cargo build --release --bin rosetta3
+cargo build --release --bin rosemary
 cargo test --release
 ```
 
@@ -91,14 +90,14 @@ first:
 ```sh
 sudo apt-get install build-essential pkg-config libcurl4-openssl-dev \
     zlib1g-dev libsdl3-dev libglu1-mesa
-cargo build --release --bin rosetta3
+cargo build --release --bin rosemary
 ```
 
 On FreeBSD, install the native build and runtime dependencies first:
 
 ```sh
 sudo pkg install curl sdl3 mesa-libs libGLU
-cargo build --release --bin rosetta3
+cargo build --release --bin rosemary
 ```
 
 FreeBSD support is newer than the Linux port and is not yet at parity: the build
@@ -119,14 +118,14 @@ container setup and dependency details.
 
 ## Running
 
-Rosetta 3 automatically uses a native Mach-O slice when one matches the host and
+Rosemary automatically uses a native Mach-O slice when one matches the host and
 falls back to an available emulated slice. A backend can also be selected
 explicitly:
 
 ```sh
-target/release/rosetta3 run /path/to/application [args...]
-target/release/rosetta3 run --emulated /path/to/application [args...]
-target/release/rosetta3 run --native /path/to/application [args...]
+target/release/rosemary run /path/to/application [args...]
+target/release/rosemary run --emulated /path/to/application [args...]
+target/release/rosemary run --native /path/to/application [args...]
 ```
 
 See [`docs/usage.md`](docs/usage.md) for runtime options and environment
@@ -134,20 +133,20 @@ variables.
 
 ## Performance
 
-Rosetta 3 is relatively fast, though not up to speed with Rosetta 2 in all cases. Rosetta 2 largely outperforms Rosetta 3 in binaries that make heavy use of Objective C, as our trampoline layer for Objective C shimming carries quite a bit of overhead at the moment. We are working out quirks and investigating alternatives that will allow us to achieve equivalent performance from Rosetta 2.
+Rosemary is relatively fast, though not up to speed with Rosetta 2 in all cases. Rosetta 2 largely outperforms Rosemary in binaries that make heavy use of Objective C, as our trampoline layer for Objective C shimming carries quite a bit of overhead at the moment. We are working out quirks and investigating alternatives that will allow us to achieve equivalent performance from Rosetta 2.
 
-Rosetta 3, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosetta 3 acts as the runtime that implements it.
+Rosemary, like many other high level emulators, implements Block Linking, a feature that makes jumping between different unknown blocks at lift time possible directly in the recompiled code via a jump table and a pinned register ABI. Microlift exposes the core of this functionality, and Rosemary acts as the runtime that implements it.
 
-Rosetta 3 can optionally use Microlift's automatic flag analysis to optimize overflow and carry flag calculation via native hardware support. It is disabled by default out of accuracy concerns, following the same suit as Microlift (accuracy first, performance second). In most applications, leaving it off should not have a substantial performance impact.
+Rosemary can optionally use Microlift's automatic flag analysis to optimize overflow and carry flag calculation via native hardware support. It is disabled by default out of accuracy concerns, following the same suit as Microlift (accuracy first, performance second). In most applications, leaving it off should not have a substantial performance impact.
 
 ## Running on Linux
 
-Rosetta 3 builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host. It also has reimplementations of various macOS APIs, and a custom Objective-C runtime that can even be differentially tested against an actual macOS installation by forcing `ROSETTA3_OBJC=builtin` and `ROSETTA3_BUNDLED=1`. This enables reimplementations of macOS frameworks and the Objective C runtime on top of cross platform Rust and SDL libraries.
+Rosemary builds and runs on Linux via the Darwin shim crate. It works by reimplementing Darwin APIs where they diverge on Linux, and passing the rest of them through to the host. It also has reimplementations of various macOS APIs, and a custom Objective-C runtime that can even be differentially tested against an actual macOS installation by forcing `ROSEMARY_OBJC=builtin` and `ROSEMARY_BUNDLED=1`. This enables reimplementations of macOS frameworks and the Objective C runtime on top of cross platform Rust and SDL libraries.
 
 ## Differences from Rosetta 2
 
-Rosetta 3 diverges from Rosetta 2 in a few ways at the moment - in particular, these are the differences that will likely be most impactful:
+Rosemary diverges from Rosetta 2 in a few ways at the moment - in particular, these are the differences that will likely be most impactful:
 
-* Rosetta 3 uses a full on compiler IR rather than direct translation - this can improve code quality, however, it increases lift time by a large margin.
-* Rosetta 3 does not support AOT recompilation yet. There are complications involving how to link a cached AOT object back into the address space without losing efficiency from having to convert direct IP-relative instructions to `image_base + offset` - we plan to possibly make all memory references link-time variables that we can relocate when loading up the cached AOT recompiled basic blocks.
-* Rosetta 3 does not use x86-64 system libraries like Rosetta 2 does. All libraries, from the libc to the Objective C runtime, OpenGL, and libdispatch, are all bridged with Microlift's fast import system, which allows direct calling of host ARM functions. This gives us a slight edge over Rosetta 2 in terms of on-disk size, given how our job is to just bridge to existing ARM ports of system libraries rather than recompile them. The exception to this is `libc++` libraries, which contain ABI differences between the x86-64 ABI and the AArch64 one. Bridging these differences is technically possible, however, the C++ ABI is a bit unstable and we would rather not delve into that mess. Most C++ functions call out to host libc functions anyway, so the performance impact is minimal.
+* Rosemary uses a full on compiler IR rather than direct translation - this can improve code quality, however, it increases lift time by a large margin.
+* Rosemary does not support AOT recompilation yet. There are complications involving how to link a cached AOT object back into the address space without losing efficiency from having to convert direct IP-relative instructions to `image_base + offset` - we plan to possibly make all memory references link-time variables that we can relocate when loading up the cached AOT recompiled basic blocks.
+* Rosemary does not use x86-64 system libraries like Rosetta 2 does. All libraries, from the libc to the Objective C runtime, OpenGL, and libdispatch, are all bridged with Microlift's fast import system, which allows direct calling of host ARM functions. This gives us a slight edge over Rosetta 2 in terms of on-disk size, given how our job is to just bridge to existing ARM ports of system libraries rather than recompile them. The exception to this is `libc++` libraries, which contain ABI differences between the x86-64 ABI and the AArch64 one. Bridging these differences is technically possible, however, the C++ ABI is a bit unstable and we would rather not delve into that mess. Most C++ functions call out to host libc functions anyway, so the performance impact is minimal.

@@ -39,13 +39,13 @@ fn log_of(handle: *const c_void) -> Option<&'static Log> {
 /// Whether debug-level messages are written.
 ///
 /// Off by default, which is Apple's default too: `qDebug` is `OS_LOG_TYPE_DEBUG`
-/// and a Qt application emits a great many of them. `ROSETTA3_OS_LOG_DEBUG=1`
+/// and a Qt application emits a great many of them. `ROSEMARY_OS_LOG_DEBUG=1`
 /// turns them on, which is what makes a guest's own tracing readable while
 /// something is being diagnosed.
 fn debug_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var_os("ROSETTA3_OS_LOG_DEBUG").is_some_and(|v| !v.is_empty() && v != "0")
+        std::env::var_os("ROSEMARY_OS_LOG_DEBUG").is_some_and(|v| !v.is_empty() && v != "0")
     })
 }
 

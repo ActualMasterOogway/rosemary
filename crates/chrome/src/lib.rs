@@ -1,4 +1,4 @@
-//! Rosetta 3's own interface toolkit.
+//! Rosemary's own interface toolkit.
 //!
 //! A small, host-side layer - geometry, a software painter, text, a theme and
 //! a few views.

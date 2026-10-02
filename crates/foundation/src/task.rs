@@ -301,7 +301,7 @@ fn launch(task: &mut Task) -> Result<(), c_int> {
         Ok(pid) => state.pid = pid,
         Err(error) => {
             eprintln!(
-                "rosetta3: foundation: NSTask could not launch {:?}: {}",
+                "rosemary: foundation: NSTask could not launch {:?}: {}",
                 task.launch_path.as_deref().unwrap_or("<no launch path>"),
                 std::io::Error::from_raw_os_error(error)
             );
@@ -590,7 +590,7 @@ mod tests {
     fn a_task_that_cannot_launch_says_so() {
         let pool = objc::arc::pool_push();
         let task = new_task();
-        let path = crate::string::from_str("/r3-no-such-directory/tool");
+        let path = crate::string::from_str("/rosemary-no-such-directory/tool");
         send(task, "setLaunchPath:", path);
         let pipe = crate::filehandle::tests_pipe();
         send(task, "setStandardOutput:", pipe);

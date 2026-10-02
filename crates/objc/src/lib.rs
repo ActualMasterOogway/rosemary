@@ -21,7 +21,7 @@ use std::sync::Once;
 #[macro_export]
 macro_rules! fail {
     ($($arg:tt)*) => {{
-        eprintln!("rosetta3: objc: {}", format_args!($($arg)*));
+        eprintln!("rosemary: objc: {}", format_args!($($arg)*));
         std::process::abort()
     }};
 }
@@ -208,7 +208,7 @@ mod tests {
     }
 }
 
-/// The two invariants `rosetta3`'s dispatch depends on, as tests.
+/// The two invariants `rosemary`'s dispatch depends on, as tests.
 ///
 /// Neither is stated by the C API, and breaking either produces a wrong `IMP`
 /// months later rather than a failure here. See the crate doc.
@@ -239,7 +239,7 @@ mod invariants {
 
     #[test]
     fn method_get_implementation_returns_the_pointer_that_was_installed() {
-        let class = class_named(c"Rosetta3InvariantA");
+        let class = class_named(c"RosemaryInvariantA");
         let sel = sel::get("answer");
         let installed = first as *const c_void;
         assert!(class.add_method(sel, installed, c"Q16@0:8"));
@@ -259,7 +259,7 @@ mod invariants {
 
     #[test]
     fn the_method_implementation_probe_moves_when_the_resolution_does() {
-        let class = class_named(c"Rosetta3InvariantB");
+        let class = class_named(c"RosemaryInvariantB");
         let sel = sel::get("answer");
         assert!(class.add_method(sel, first as *const c_void, c"Q16@0:8"));
 
@@ -283,10 +283,10 @@ mod invariants {
     /// the same invariant reached by the other route: resolution, not storage.
     #[test]
     fn an_override_added_after_the_fact_moves_the_probe() {
-        let base = class_named(c"Rosetta3InvariantC");
+        let base = class_named(c"RosemaryInvariantC");
         let sel = sel::get("answer");
         assert!(base.add_method(sel, first as *const c_void, c"Q16@0:8"));
-        let derived = class::allocate_pair(Some(base), c"Rosetta3InvariantCSub", 0).unwrap();
+        let derived = class::allocate_pair(Some(base), c"RosemaryInvariantCSub", 0).unwrap();
         class::register_pair(derived);
 
         assert_eq!(
@@ -308,7 +308,7 @@ mod invariants {
     /// `IMP` directly.
     #[test]
     fn a_message_reaches_an_inherited_implementation_through_msg_send() {
-        let class = class_named(c"Rosetta3InvariantD");
+        let class = class_named(c"RosemaryInvariantD");
         // SAFETY: `+alloc` and `-init` are `id (*)(id, SEL)`, and
         // `-isKindOfClass:` is `BOOL (*)(id, SEL, Class)`.
         unsafe {

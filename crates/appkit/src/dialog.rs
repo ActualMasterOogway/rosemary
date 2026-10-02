@@ -19,7 +19,7 @@ pub struct Request {
     pub message: String,
     pub informative: String,
     /// Styled informative text with links, shown in place of `informative`.
-    /// For Rosetta 3's own prompts only: what a program asks to show stays
+    /// For Rosemary's own prompts only: what a program asks to show stays
     /// plain, so its text can never become something to click.
     pub rich_informative: Option<RichText>,
     pub buttons: Vec<String>,
@@ -202,7 +202,7 @@ impl Dialog {
             flags,
         ) else {
             eprintln!(
-                "rosetta3: appkit: could not open a dialog: {}",
+                "rosemary: appkit: could not open a dialog: {}",
                 sdl3::error()
             );
             if started_video {
@@ -281,7 +281,7 @@ impl Dialog {
             return;
         };
         if !sdl3::open_url(url) {
-            eprintln!("rosetta3: appkit: could not open {url}: {}", sdl3::error());
+            eprintln!("rosemary: appkit: could not open {url}: {}", sdl3::error());
         }
     }
 
@@ -420,10 +420,10 @@ impl Dialog {
     }
 }
 
-/// `ROSETTA3_STORE_OUT=DIR` writes each dialog as it is painted, as the menu
+/// `ROSEMARY_STORE_OUT=DIR` writes each dialog as it is painted, as the menu
 /// panels are, for a session with no screen to look at.
 fn dump(id: u32, surface: &sdl3::video::Presentation, pixels: &[u8]) {
-    let Some(directory) = std::env::var_os("ROSETTA3_STORE_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_STORE_OUT") else {
         return;
     };
     let (width, height) = (surface.width as usize, surface.height as usize);

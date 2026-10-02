@@ -50,7 +50,7 @@ impl FunctionConstantValues {
     /// specialized with one set of values is not the library another emits.
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update_field(b"rosetta3 metal_translate function constants v1");
+        hasher.update_field(b"rosemary metal_translate function constants v1");
         for (index, value) in &self.by_index {
             hasher.update(&[0]);
             hasher.update(&index.to_le_bytes());

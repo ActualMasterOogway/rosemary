@@ -22,7 +22,7 @@ pub fn trace_code(value: u32) -> String {
     trace::code(value)
 }
 
-/// Say what one call did, under `ROSETTA3_TRACE_AUDIO`. For [`audiotoolbox`].
+/// Say what one call did, under `ROSEMARY_TRACE_AUDIO`. For [`audiotoolbox`].
 pub fn trace(what: std::fmt::Arguments<'_>, status: i32) {
     trace::say(what, status);
 }
@@ -680,7 +680,7 @@ fn report_unsupported_rate() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         eprintln!(
-            "rosetta3: audio: this program sets a mixer playback rate, which this runtime does \
+            "rosemary: audio: this program sets a mixer playback rate, which this runtime does \
              not resample - those voices play at their recorded pitch"
         );
     });

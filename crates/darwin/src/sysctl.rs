@@ -168,7 +168,7 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
 ///
 /// Only reached on a host with no Darwin `sysctl` behind it. Deliberately narrow: a
 /// key nobody has needed yet is better as an `ENOENT` naming itself under
-/// `ROSETTA3_TRACE_SYSCTL` than as a plausible invention.
+/// `ROSEMARY_TRACE_SYSCTL` than as a plausible invention.
 #[cfg(not(target_os = "macos"))]
 fn host_value(mib: &[i32]) -> Option<Value> {
     match mib {
@@ -202,7 +202,7 @@ fn host_value(mib: &[i32]) -> Option<Value> {
 /// that belongs rather than a rebuild.
 #[cfg(not(target_os = "macos"))]
 fn release() -> String {
-    env_or("ROSETTA3_DARWIN_RELEASE", "24.0.0")
+    env_or("ROSEMARY_DARWIN_RELEASE", "24.0.0")
 }
 
 /// The macOS version the [`release`] above implies, as `(major, minor, patch)`.
@@ -226,13 +226,13 @@ pub fn macos_version() -> (i32, i32, i32) {
 
 #[cfg(not(target_os = "macos"))]
 fn build() -> String {
-    env_or("ROSETTA3_DARWIN_BUILD", "24A335")
+    env_or("ROSEMARY_DARWIN_BUILD", "24A335")
 }
 
 #[cfg(not(target_os = "macos"))]
 fn version() -> String {
     env_or(
-        "ROSETTA3_DARWIN_VERSION",
+        "ROSEMARY_DARWIN_VERSION",
         &format!(
             "Darwin Kernel Version {}: root:xnu-11215.1.10~2/RELEASE_{}",
             release(),
@@ -246,7 +246,7 @@ fn version() -> String {
 
 #[cfg(not(target_os = "macos"))]
 fn model() -> String {
-    env_or("ROSETTA3_DARWIN_MODEL", "Mac15,3")
+    env_or("ROSEMARY_DARWIN_MODEL", "Mac15,3")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -326,15 +326,15 @@ unsafe fn copy_out(value: &Value, oldp: *mut libc::c_void, oldlenp: *mut libc::s
     0
 }
 
-/// Report a key nothing here answers, under `ROSETTA3_TRACE_SYSCTL`.
+/// Report a key nothing here answers, under `ROSEMARY_TRACE_SYSCTL`.
 ///
 /// The list above is narrow on purpose, so the way it grows is by a program naming
 /// what it wanted - which it cannot do through an `ENOENT` alone.
 fn say_unanswered(what: &std::fmt::Arguments<'_>) {
-    if std::env::var_os("ROSETTA3_TRACE_SYSCTL").is_none() {
+    if std::env::var_os("ROSEMARY_TRACE_SYSCTL").is_none() {
         return;
     }
-    eprintln!("rosetta3: sysctl: no answer for {what}");
+    eprintln!("rosemary: sysctl: no answer for {what}");
 }
 
 /// `int sysctl(int *, u_int, void *, size_t *, void *, size_t)`.
@@ -494,8 +494,8 @@ const BY_NAME: &[(&str, &[i32])] = &[
 #[cfg(not(target_os = "macos"))]
 fn named(name: &str) -> Option<Value> {
     match name {
-        "kern.osproductversion" => Some(Value::Str(env_or("ROSETTA3_MACOS_VERSION", "15.0"))),
-        "kern.osproductversioncompat" => Some(Value::Str(env_or("ROSETTA3_MACOS_VERSION", "15.0"))),
+        "kern.osproductversion" => Some(Value::Str(env_or("ROSEMARY_MACOS_VERSION", "15.0"))),
+        "kern.osproductversioncompat" => Some(Value::Str(env_or("ROSEMARY_MACOS_VERSION", "15.0"))),
         "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
         "hw.cpufamily" | "hw.cpusubfamily" => Some(Value::U32(0)),
         // Both guest architectures are 64-bit. A caller that reads a missing
@@ -591,7 +591,7 @@ fn brand_string() -> String {
         }
         None
     }
-    env_or_else("ROSETTA3_CPU_BRAND", || {
+    env_or_else("ROSEMARY_CPU_BRAND", || {
         from_cpuinfo().unwrap_or_else(|| "Unknown CPU".to_string())
     })
 }

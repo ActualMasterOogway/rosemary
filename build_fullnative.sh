@@ -1,3 +1,3 @@
 #!/bin/sh -eu
 
-RUSTFLAGS="-C target-cpu=native" CFLAGS="-march=native" CXXFLAGS="-march=native" cargo build --bin rosetta3 --profile fullnative
+RUSTFLAGS="-C target-cpu=native" CFLAGS="-march=native" CXXFLAGS="-march=native" cargo build --bin rosemary --profile fullnative

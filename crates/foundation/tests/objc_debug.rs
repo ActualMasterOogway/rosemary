@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 
-const CHILD: &str = "ROSETTA3_FOUNDATION_OBJC_DEBUG_CHILD";
+const CHILD: &str = "ROSEMARY_FOUNDATION_OBJC_DEBUG_CHILD";
 
 #[test]
 fn pointer_value_survives_its_debug_checked_dealloc_chain() {

@@ -374,7 +374,7 @@ pub unsafe extern "C" fn CGSetDisplayTransferByTable(
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
         eprintln!(
-            "rosetta3: appkit: the program set a display gamma table; it is kept but not \
+            "rosemary: appkit: the program set a display gamma table; it is kept but not \
              applied, as SDL has no gamma ramp control"
         )
     });
@@ -722,7 +722,7 @@ pub unsafe extern "C" fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> CFTyp
     let mut bytes = [0u8; 16];
     // A fixed prefix so the UUID reads as this runtime's rather than looking like
     // a real display's, and the id in the last four bytes.
-    bytes[..8].copy_from_slice(b"ROSETTA3");
+    bytes[..8].copy_from_slice(b"ROSEMARY");
     bytes[12..].copy_from_slice(&display.to_be_bytes());
     // Version 4, variant RFC 4122.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -1015,7 +1015,7 @@ pub unsafe extern "C" fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i3
     if seconds != 0.0 {
         TOLD.call_once(|| {
             eprintln!(
-                "rosetta3: appkit: CGSetLocalEventsSuppressionInterval({seconds}) is not honoured; \
+                "rosemary: appkit: CGSetLocalEventsSuppressionInterval({seconds}) is not honoured; \
                  input is never suppressed after a warp"
             )
         });
@@ -1087,7 +1087,7 @@ pub fn mouse_is_associated() -> bool {
     ASSOCIATED.load(std::sync::atomic::Ordering::Acquire)
 }
 
-/// `ROSETTA3_CONFINE_POINTER=1`: keep the pointer inside whichever window has
+/// `ROSEMARY_CONFINE_POINTER=1`: keep the pointer inside whichever window has
 /// focus.
 ///
 /// FIXME (ACCURACY): a workaround, not AppKit. Some ports confine the cursor
@@ -1095,7 +1095,7 @@ pub fn mouse_is_associated() -> bool {
 /// macOS delivering drags outside the window to warp it back; Wayland neither
 /// delivers those nor lets a warp reach a pointer outside the window. Life Is
 /// Strange's drag interactions stop short without this, on macOS too.
-pub const CONFINE_ENV: &str = "ROSETTA3_CONFINE_POINTER";
+pub const CONFINE_ENV: &str = "ROSEMARY_CONFINE_POINTER";
 
 fn confining() -> bool {
     #[dynamic]

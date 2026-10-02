@@ -168,12 +168,12 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
     let mut accessory_buttons = Vec::new();
     collect_accessory_buttons(alert.accessory, &mut accessory_buttons);
 
-    eprintln!("rosetta3: guest alert: {message}");
+    eprintln!("rosemary: guest alert: {message}");
     if !informative.is_empty() {
-        eprintln!("rosetta3: guest alert: {informative}");
+        eprintln!("rosemary: guest alert: {informative}");
     }
     if !buttons.is_empty() {
-        eprintln!("rosetta3: guest alert: buttons {}", buttons.join(" / "));
+        eprintln!("rosemary: guest alert: buttons {}", buttons.join(" / "));
     }
 
     let request = crate::dialog::Request {
@@ -212,7 +212,7 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
     }
     let answer = FIRST_BUTTON_RETURN + index as i64;
     let chosen = buttons.get(index).map_or("<none>", |t| t.as_str());
-    eprintln!("rosetta3: guest alert: answered {answer} ({chosen})");
+    eprintln!("rosemary: guest alert: answered {answer} ({chosen})");
     answer
 }
 

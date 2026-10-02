@@ -391,7 +391,7 @@ impl Pass {
             unsafe { device.destroy_pipeline_layout(layout, None) };
         });
         let words = shader();
-        let module = gpu.create_shader_module(&words, "rosetta3_overlay_blend")?;
+        let module = gpu.create_shader_module(&words, "rosemary_overlay_blend")?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)

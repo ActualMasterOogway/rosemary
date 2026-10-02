@@ -1,7 +1,7 @@
 #!/bin/zsh
 # What a bundle will ask for that this runtime cannot yet describe.
 #
-# `rosetta3 <exe> --audit` answers the same question for one *dependency
+# `rosemary <exe> --audit` answers the same question for one *dependency
 # graph*, and under-reports twice over: it does not see the plugins a guest
 # `dlopen`s at run time, and it counts data imports - which need no signature at
 # all - alongside functions. Both matter. Subnautica's audit reports 811
@@ -66,10 +66,10 @@ grep -vE '^(_?_Z|objc_|_objc_|OBJC_|dyld_stub_binder)' $work/undefined > $work/c
 # and dropped from the queue. That under-reports by a name or two; the other way
 # round over-reported by seventeen.
 grep -rhoE '"[A-Za-z_][A-Za-z_0-9$]*"' \
-  "$root"/crates/rosetta3/src/abi/table.rs \
-  "$root"/crates/rosetta3/src/shims/ \
-  "$root"/crates/rosetta3/src/*.rs \
-  "$root"/crates/rosetta3/src/objc/ \
+  "$root"/crates/rosemary/src/abi/table.rs \
+  "$root"/crates/rosemary/src/shims/ \
+  "$root"/crates/rosemary/src/*.rs \
+  "$root"/crates/rosemary/src/objc/ \
   | tr -d '"' | sort -u > $work/known
 
 # A `$`-suffixed spelling is answered by the plain name, exactly as

@@ -18,10 +18,10 @@ unsafe fn send(receiver: Id, selector: &str, argument: Id) -> Id {
 
 #[test]
 fn argument_domain_enumerates_protocol_string_and_overrides_defaults() {
-    let home = std::env::temp_dir().join(format!("rosetta3-defaults-test-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("rosemary-defaults-test-{}", std::process::id()));
     let preferences = home.join("Library/Preferences");
     std::fs::create_dir_all(&preferences).unwrap();
-    let path = preferences.join("rosetta3-defaults.tsv");
+    let path = preferences.join("rosemary-defaults.tsv");
     let stored = "protocolString\tpersistent\nfallback\tstored\n";
     std::fs::write(&path, stored).unwrap();
     // SAFETY: this integration test process has one test and no other threads

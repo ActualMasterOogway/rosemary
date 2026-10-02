@@ -444,7 +444,8 @@ mod tests {
         crate::bootstrap();
         let mut handle: *const c_void = std::ptr::null();
         // SAFETY: a string this test made and a live out-parameter.
-        let rc = unsafe { PasteboardCreate(string(&format!("r3.test.{which}")), &raw mut handle) };
+        let rc =
+            unsafe { PasteboardCreate(string(&format!("rosemary.test.{which}")), &raw mut handle) };
         assert_eq!(rc, status::NO_ERR);
         assert!(!handle.is_null());
         handle

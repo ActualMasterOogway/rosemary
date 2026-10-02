@@ -85,7 +85,7 @@ unsafe extern "C" fn add_local_monitor(_class: Id, _sel: Sel, mask: u64, handler
         .unwrap_or_else(|e| e.into_inner())
         .push(Monitor { token, mask, block });
     if crate::event::tracing() {
-        eprintln!("rosetta3: appkit: +addLocalMonitorForEventsMatchingMask: {mask:#x}");
+        eprintln!("rosemary: appkit: +addLocalMonitorForEventsMatchingMask: {mask:#x}");
     }
     token
 }

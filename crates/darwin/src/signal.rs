@@ -911,7 +911,7 @@ pub mod entry {
         static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
             eprintln!(
-                "rosetta3: an SA_SIGINFO handler was installed - it will be entered with this \
+                "rosemary: an SA_SIGINFO handler was installed - it will be entered with this \
                  host's siginfo_t and ucontext_t rather than Darwin's, so a handler that reads \
                  si_addr or the interrupted registers reads the wrong words"
             );

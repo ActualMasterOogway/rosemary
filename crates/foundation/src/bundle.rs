@@ -824,31 +824,36 @@ mod tests {
     fn a_provided_framework_is_a_bundle_with_its_executable_at_the_top() {
         darwin::images::install(darwin::images::Loader {
             virtual_directory: |path| {
-                path.trim_end_matches('/') == "/System/Library/Frameworks/R3Probe.framework"
+                path.trim_end_matches('/') == "/System/Library/Frameworks/RosemaryProbe.framework"
             },
             open: |_| None,
             symbol: |_, _| None,
             image_path: |_| None,
         });
-        let layout = Layout::provided_framework("/System/Library/Frameworks/R3Probe.framework/")
-            .expect("a provided framework");
+        let layout =
+            Layout::provided_framework("/System/Library/Frameworks/RosemaryProbe.framework/")
+                .expect("a provided framework");
         assert_eq!(
             spelled(&layout.executable).as_deref(),
             Some(Path::new(
-                "/System/Library/Frameworks/R3Probe.framework/R3Probe"
+                "/System/Library/Frameworks/RosemaryProbe.framework/RosemaryProbe"
             ))
         );
-        assert_eq!(layout.info_string("CFBundleExecutable"), Some("R3Probe"));
+        assert_eq!(
+            layout.info_string("CFBundleExecutable"),
+            Some("RosemaryProbe")
+        );
         assert_eq!(layout.info_string("CFBundlePackageType"), Some("FMWK"));
         assert_eq!(layout.identifier(), None);
         assert!(
-            Layout::provided_framework("/System/Library/Frameworks/R3Absent.framework").is_none()
+            Layout::provided_framework("/System/Library/Frameworks/RosemaryAbsent.framework")
+                .is_none()
         );
     }
 
     /// Build a bundle-shaped directory, since the claim is about shape.
     fn scratch(name: &str, info: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("rosetta3-bundle-{name}"));
+        let root = std::env::temp_dir().join(format!("rosemary-bundle-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         let app = root.join("Thing.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();

@@ -534,7 +534,7 @@ unsafe extern "C" fn decide(block: *mut HostBlock<Decision>, policy: isize) {
     };
     if engine::tracing() {
         let verdict = if policy == 1 { "allow" } else { "cancel" };
-        eprintln!("rosetta3: webkit: {verdict} {}", context.url);
+        eprintln!("rosemary: webkit: {verdict} {}", context.url);
     }
     // SAFETY: the referenced decision, used once and released.
     unsafe {
@@ -590,7 +590,7 @@ unsafe extern "C" fn decide_policy(gtk: Ptr, decision: Ptr, kind: c_int, data: P
                 (action, gtk::text((api.webkit_uri_request_get_uri)(request)))
             };
             if engine::tracing() {
-                eprintln!("rosetta3: webkit: navigation to {url}");
+                eprintln!("rosemary: webkit: navigation to {url}");
             }
             if !engine::responds(view.navigation, SELECTOR) {
                 return 0;
@@ -687,7 +687,7 @@ unsafe extern "C" fn load_changed(gtk: Ptr, event: c_int, data: Ptr) {
     {
         // SAFETY: the view the signal is about.
         let url = unsafe { gtk::text((engine.api.webkit_web_view_get_uri)(gtk)) };
-        eprintln!("rosetta3: webkit: load event {event} for {url}");
+        eprintln!("rosemary: webkit: load event {event} for {url}");
     }
     match event {
         gtk::LOAD_STARTED => notify(&view, id, "webView:didStartProvisionalNavigation:"),
@@ -724,7 +724,7 @@ unsafe extern "C" fn load_failed(
             gtk::text((*error).message),
         )
     };
-    eprintln!("rosetta3: webkit: loading {url} failed: {message} ({domain} {code})");
+    eprintln!("rosemary: webkit: loading {url} failed: {message} ({domain} {code})");
     // WebKit reports a network failure in Foundation's URL error domain, and
     // what it decided itself in its own.
     let (domain, code) = match domain.as_str() {
@@ -760,7 +760,7 @@ unsafe extern "C" fn load_failed(
 }
 
 unsafe extern "C" fn web_process_terminated(_gtk: Ptr, reason: c_int, data: Ptr) {
-    eprintln!("rosetta3: webkit: the web process terminated (reason {reason})");
+    eprintln!("rosemary: webkit: the web process terminated (reason {reason})");
     let Some(view) = delegates(data as usize) else {
         return;
     };
@@ -895,7 +895,7 @@ unsafe fn make_gtk_view(engine: &Engine, configuration: Id, id: usize) -> Ptr {
     unsafe { (api.g_object_ref_sink)(gtk) };
     let agent = unsafe { user_agent(configuration) };
     if engine::tracing() {
-        eprintln!("rosetta3: webkit: user agent {agent}");
+        eprintln!("rosemary: webkit: user agent {agent}");
     }
     let header = header_user_agent(&agent);
     // SAFETY: the view's content controller.
@@ -1004,7 +1004,7 @@ fn focus(engine: &Engine, surface: u32, focused: bool) {
     }
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: keyboard focus {} surface {surface}",
+            "rosemary: webkit: keyboard focus {} surface {surface}",
             match focused {
                 true => "to",
                 false => "away from",
@@ -1263,7 +1263,7 @@ pub fn tick(engine: &Engine) {
                     appkit::backing::Picture::Dmabuf(_) => "dma-buf",
                 };
                 eprintln!(
-                    "rosetta3: webkit: view {id}: new {}x{} {kind} frame",
+                    "rosemary: webkit: view {id}: new {}x{} {kind} frame",
                     picture.width, picture.height
                 );
             }
@@ -1362,7 +1362,7 @@ unsafe extern "C" fn reset_cursor_rects(receiver: Id, _sel: Sel) {
     appkit::cursor::add_rect(receiver, appkit::view::bounds_of(receiver), cursor);
 }
 
-/// `ROSETTA3_TRACE_WEBKIT`: every few seconds, where the page is, whether
+/// `ROSEMARY_TRACE_WEBKIT`: every few seconds, where the page is, whether
 /// WebKit thinks it visible and what has focus - what separates a page that is
 /// not drawing from one that is not being given input.
 fn trace_page(engine: &Engine, id: usize, gtk: Ptr) {
@@ -1400,7 +1400,7 @@ fn trace_page(engine: &Engine, id: usize, gtk: Ptr) {
                 owned
             },
         };
-        eprintln!("rosetta3: webkit: view {}: page {text}", data as usize);
+        eprintln!("rosemary: webkit: view {}: page {text}", data as usize);
     }
     let script = c"JSON.stringify({ url: location.href.slice(0, 80), state: document.readyState, visibility: document.visibilityState, focus: document.hasFocus(), active: document.activeElement ? document.activeElement.outerHTML.slice(0, 80) : null })";
     // SAFETY: the view's widget and a script it copies.
@@ -1418,7 +1418,7 @@ fn trace_page(engine: &Engine, id: usize, gtk: Ptr) {
     };
 }
 
-/// `ROSETTA3_TRACE_WEBKIT`: say why a view is or is not being drawn, when
+/// `ROSEMARY_TRACE_WEBKIT`: say why a view is or is not being drawn, when
 /// that changes.
 fn trace_state(id: usize, gtk: Ptr, hidden: bool, window: Id, frame: Option<&appkit::view::Frame>) {
     thread_local! {
@@ -1436,7 +1436,7 @@ fn trace_state(id: usize, gtk: Ptr, hidden: bool, window: Id, frame: Option<&app
             Some((_, seen)) => *seen = state.clone(),
             None => last.push((id, state.clone())),
         }
-        eprintln!("rosetta3: webkit: view {id}: {state}");
+        eprintln!("rosemary: webkit: view {id}: {state}");
     });
 }
 
@@ -1477,7 +1477,7 @@ unsafe extern "C" fn load_request(receiver: Id, _sel: Sel, request: Id) -> Id {
     else {
         return std::ptr::null_mut();
     };
-    eprintln!("rosetta3: webkit: loading {url}");
+    eprintln!("rosemary: webkit: loading {url}");
     let Some((engine, gtk)) = gtk_of(receiver) else {
         return std::ptr::null_mut();
     };
@@ -1840,7 +1840,7 @@ fn key(receiver: Id, event: Id, pressed: bool) {
     }
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: key {key} {}",
+            "rosemary: webkit: key {key} {}",
             if pressed { "down" } else { "up" }
         );
     }
@@ -1891,7 +1891,7 @@ unsafe extern "C" fn flags_changed(receiver: Id, _sel: Sel, event: Id) {
 fn editing(receiver: Id, command: &std::ffi::CStr) {
     if let Some((engine, gtk)) = gtk_of(receiver) {
         if engine::tracing() {
-            eprintln!("rosetta3: webkit: editing command {command:?}");
+            eprintln!("rosemary: webkit: editing command {command:?}");
         }
         // SAFETY: the view's widget and a command name.
         unsafe { (engine.api.webkit_web_view_execute_editing_command)(gtk, command.as_ptr()) };

@@ -148,7 +148,7 @@ impl Compositor {
         let thread_shared = shared.clone();
         let thread_socket = socket.clone();
         std::thread::Builder::new()
-            .name("rosetta3-webkit-compositor".to_string())
+            .name("rosemary-webkit-compositor".to_string())
             .spawn(move || state::run(thread_socket, thread_shared, composition, sender))
             .map_err(|e| format!("could not start the compositor thread: {e}"))?;
         let (commands, gpu) = receiver
@@ -199,8 +199,8 @@ fn socket_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let serial = STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = match serial {
-        0 => format!("rosetta3-webkit-{}", std::process::id()),
-        _ => format!("rosetta3-webkit-{}-{serial}", std::process::id()),
+        0 => format!("rosemary-webkit-{}", std::process::id()),
+        _ => format!("rosemary-webkit-{}-{serial}", std::process::id()),
     };
     directory.join(name)
 }

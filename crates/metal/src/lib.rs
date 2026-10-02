@@ -122,26 +122,26 @@ pub(crate) unsafe extern "C" fn no_op(_receiver: Id, _sel: Sel) {}
 
 /// The logical device behind an `MTLDevice`, or `None` when Vulkan gave none.
 fn gpu_of(receiver: Id) -> Option<&'static Gpu> {
-    // SAFETY: every caller is a method registered on `R3MTLDevice`.
+    // SAFETY: every caller is a method registered on `RosemaryMTLDevice`.
     unsafe { object::body::<Device>(receiver) }.gpu
 }
 
 /// As `gpu_of`, for a caller holding an object which may not be a device.
 pub(crate) fn gpu_of_device(device: Id) -> Option<&'static Gpu> {
-    object::is_kind(device, c"R3MTLDevice").then(|| gpu_of(device))?
+    object::is_kind(device, c"RosemaryMTLDevice").then(|| gpu_of(device))?
 }
 
 pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         foundation::bootstrap();
-        let class = object::register::<Device>(c"R3MTLDevice");
-        let library_class = object::register::<Library>(c"R3MTLLibrary");
-        let function_class = object::register::<Function>(c"R3MTLFunction");
+        let class = object::register::<Device>(c"RosemaryMTLDevice");
+        let library_class = object::register::<Library>(c"RosemaryMTLLibrary");
+        let function_class = object::register::<Function>(c"RosemaryMTLFunction");
         let constant_values_class =
             object::register::<ConstantValues>(c"MTLFunctionConstantValues");
-        object::register::<pipeline::ComputePipeline>(c"R3MTLComputePipelineState");
-        object::register::<pipeline::RenderPipeline>(c"R3MTLRenderPipelineState");
+        object::register::<pipeline::ComputePipeline>(c"RosemaryMTLComputePipelineState");
+        object::register::<pipeline::RenderPipeline>(c"RosemaryMTLRenderPipelineState");
 
         methods!(class, {
             "name" => name, c"@16@0:8";

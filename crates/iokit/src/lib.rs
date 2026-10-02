@@ -7,11 +7,11 @@ pub mod power;
 pub mod registry;
 pub mod value;
 
-/// Emit HID discovery diagnostics when `ROSETTA3_TRACE_HID` is set.
+/// Emit HID discovery diagnostics when `ROSEMARY_TRACE_HID` is set.
 pub(crate) fn trace_hid(message: impl std::fmt::Display) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_HID").is_some()) {
-        eprintln!("rosetta3: HID: {message}");
+    if *ENABLED.get_or_init(|| std::env::var_os("ROSEMARY_TRACE_HID").is_some()) {
+        eprintln!("rosemary: HID: {message}");
     }
 }
 

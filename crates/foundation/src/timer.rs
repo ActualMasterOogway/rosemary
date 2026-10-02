@@ -613,8 +613,8 @@ mod tests {
     /// main queue delivers the selector.
     #[test]
     fn a_selector_is_deferred_to_the_main_queue() {
-        let receiver = target(c"R3TestMainThreadPerformTarget", performed_on_main);
-        let object = target(c"R3TestMainThreadPerformObject", once);
+        let receiver = target(c"RosemaryTestMainThreadPerformTarget", performed_on_main);
+        let object = target(c"RosemaryTestMainThreadPerformObject", once);
         let expected = object as usize;
         MAIN_THREAD_ARGUMENT.store(0, Ordering::SeqCst);
 
@@ -640,7 +640,7 @@ mod tests {
     /// invalidated.
     #[test]
     fn a_scheduled_timer_fires_until_it_is_invalidated() {
-        let target = target(c"R3TestRepeatingTarget", repeated);
+        let target = target(c"RosemaryTestRepeatingTarget", repeated);
         REPEATED.store(0, Ordering::SeqCst);
         // SAFETY: the prototype is the class method's.
         let timer = unsafe {
@@ -694,7 +694,7 @@ mod tests {
     /// one-shot from becoming a frame loop.
     #[test]
     fn a_one_shot_timer_stops_itself() {
-        let target = target(c"R3TestOneShotTarget", once);
+        let target = target(c"RosemaryTestOneShotTarget", once);
         ONCE.store(0, Ordering::SeqCst);
         // SAFETY: the prototype is the class method's.
         let timer = unsafe {

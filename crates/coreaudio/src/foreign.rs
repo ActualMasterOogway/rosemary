@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_void};
 
 /// Whether a foreign handle is handed back to the framework that made it.
 ///
-/// `ROSETTA3_NO_FOREIGN` turns it off, which is how a run proves it needs no
+/// `ROSEMARY_NO_FOREIGN` turns it off, which is how a run proves it needs no
 /// host framework at all: a unit that is not this crate's is then refused with
 /// the framework's own `kAudioUnitErr_InvalidElement` rather than serviced by
 /// Apple's. `corefoundation::foreign` reads the same variable, for the same
@@ -11,7 +11,7 @@ use std::ffi::{CStr, c_void};
 fn forwarding() -> bool {
     use static_init::dynamic;
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_NO_FOREIGN").is_none();
+    static ON: bool = std::env::var_os("ROSEMARY_NO_FOREIGN").is_none();
     *ON
 }
 

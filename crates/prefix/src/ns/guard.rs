@@ -83,7 +83,7 @@ pub fn may_write_at(dirfd: libc::c_int, host: &CStr) -> Result<(), libc::c_int> 
     if first {
         let _ = system::mark(&guard.dirty, &path);
         if guard.policy == SystemFiles::Warn {
-            eprintln!("rosetta3: prefix: the guest is writing the system file {path}");
+            eprintln!("rosemary: prefix: the guest is writing the system file {path}");
         }
     }
     Ok(())

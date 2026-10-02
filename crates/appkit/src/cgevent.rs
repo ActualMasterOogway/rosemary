@@ -174,7 +174,7 @@ pub unsafe extern "C" fn CGEventPost(_tap: u32, event: CFTypeRef) {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             eprintln!(
-                "rosetta3: appkit: CGEventPost: this program synthesises mouse button events, \
+                "rosemary: appkit: CGEventPost: this program synthesises mouse button events, \
                  which this runtime cannot deliver - its event queue is the window system's and \
                  is not writable"
             );

@@ -106,7 +106,7 @@ fn report_unbuilt(description: &ComponentDescription) {
     }
     said.push(*description);
     eprintln!(
-        "rosetta3: audio: this program's audio graph wants an audio unit of type {} subtype {} \
+        "rosemary: audio: this program's audio graph wants an audio unit of type {} subtype {} \
          ({}), which this runtime does not implement - the graph runs without it",
         coreaudio::trace_code(description.kind),
         coreaudio::trace_code(description.subtype),

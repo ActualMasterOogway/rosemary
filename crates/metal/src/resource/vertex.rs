@@ -140,7 +140,7 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
     let elements = (0..VERTEX_SLOTS)
         .map(|index| {
             object::make(
-                c"R3MTLVertexElement",
+                c"RosemaryMTLVertexElement",
                 VertexElement {
                     owner: receiver,
                     index,
@@ -150,10 +150,10 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
         })
         .collect::<Vec<_>>();
     let collection = object::make(
-        c"R3MTLIndexedCollection",
+        c"RosemaryMTLIndexedCollection",
         IndexedCollection {
             elements,
-            // SAFETY: every element of this collection is an `R3MTLVertexElement`.
+            // SAFETY: every element of this collection is an `RosemaryMTLVertexElement`.
             orphan: |element| unsafe { orphan_element::<VertexElement>(element) },
         },
     );
@@ -183,7 +183,7 @@ pub(super) unsafe extern "C" fn indexed_element(receiver: Id, _sel: Sel, index: 
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// `-[R3MTLIndexedCollection dealloc]`: the elements are the collection's own.
+/// `-[RosemaryMTLIndexedCollection dealloc]`: the elements are the collection's own.
 ///
 /// Metal vends `-colorAttachments`, `-layouts` and `-attributes` as objects a
 /// game subscripts and mutates in place, so the descriptor which made one holds

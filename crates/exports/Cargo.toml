@@ -9,7 +9,7 @@ license.workspace = true
 default = []
 # The loader's library as a sink. Off by default because `objc` and the
 # framework crates know nothing about Mach-O and must not gain that edge; only
-# `darwin` and `rosetta3`, which already build a `SyntheticDylib`, turn it on.
+# `darwin` and `rosemary`, which already build a `SyntheticDylib`, turn it on.
 machish = ["dep:machish"]
 
 [dependencies]

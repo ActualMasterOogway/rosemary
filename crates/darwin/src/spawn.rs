@@ -1354,7 +1354,7 @@ mod tests {
     /// and the host's own binaries are not.
     #[test]
     fn a_mach_o_is_told_from_an_elf() {
-        let dir = std::env::temp_dir().join(format!("rosetta3-spawn-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
 
         let mach_o = dir.join("thin");
@@ -1376,7 +1376,7 @@ mod tests {
     /// guest's `argv[0]` - which this runtime derives from the image instead.
     #[test]
     fn a_mach_o_spawn_is_repointed_at_this_runtime() {
-        let dir = std::env::temp_dir().join(format!("rosetta3-rewrite-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-rewrite-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let helper = dir.join("ExampleAppCrashHandler");
         std::fs::write(&helper, 0xfeed_facfu32.to_le_bytes()).expect("write");
@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     fn scratch(test: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rosetta3-{test}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-{test}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir
     }
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(found.to_bytes().ends_with(b"/sh"));
         assert_eq!(search_path(c"./anything"), Ok(c"./anything".to_owned()));
         assert_eq!(
-            search_path(c"no-such-program-anywhere-rosetta3"),
+            search_path(c"no-such-program-anywhere-rosemary"),
             Err(libc::ENOENT)
         );
         assert_eq!(search_path(c""), Err(libc::ENOENT));

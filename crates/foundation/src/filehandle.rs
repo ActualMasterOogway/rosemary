@@ -84,7 +84,7 @@ fn file(fd: c_int) -> ManuallyDrop<std::fs::File> {
 /// Apple raises `NSFileHandleOperationException` here. There is no way to
 /// raise from this side, so the failure is named and the caller gets nothing.
 fn refuse(what: &str, error: &dyn std::fmt::Display) {
-    eprintln!("rosetta3: foundation: NSFileHandle {what} failed: {error}");
+    eprintln!("rosemary: foundation: NSFileHandle {what} failed: {error}");
 }
 
 fn autoreleased_data(bytes: Vec<u8>) -> Id {
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn a_handle_for_a_missing_path_is_nil() {
         crate::bootstrap();
-        let path = crate::string::from_str("/r3-no-such-directory/file");
+        let path = crate::string::from_str("/rosemary-no-such-directory/file");
         // SAFETY: `+fileHandleForReadingAtPath:` is `id (Class, SEL, id)`.
         let handle = unsafe {
             for_reading_at_path(

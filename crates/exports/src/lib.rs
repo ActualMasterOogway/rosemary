@@ -17,7 +17,7 @@ pub use sink::{Denying, NonNull, Recording};
 /// Where a module's symbols go.
 ///
 /// Every published symbol passes through one of these two calls, so a policy
-/// that has to see all of them - refusing a null address, `ROSETTA3_WITHHOLD` -
+/// that has to see all of them - refusing a null address, `ROSEMARY_WITHHOLD` -
 /// is a wrapper here rather than a copy of `define_fn` in each crate that has
 /// one.
 ///

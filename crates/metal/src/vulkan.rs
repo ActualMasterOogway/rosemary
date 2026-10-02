@@ -82,7 +82,7 @@ fn initialize() -> Result<State, String> {
         return Err("the Vulkan loader does not support Vulkan 1.1".to_string());
     }
     let application = vk::ApplicationInfo::default()
-        .application_name(c"rosetta3")
+        .application_name(c"rosemary")
         .application_version(1)
         .engine_name(c"metal_translate")
         .engine_version(1)
@@ -306,7 +306,7 @@ pub fn instance_handle() -> Option<u64> {
 }
 
 fn load_entry() -> Result<Entry, String> {
-    if let Some(path) = std::env::var_os("ROSETTA3_VULKAN_LIBRARY") {
+    if let Some(path) = std::env::var_os("ROSEMARY_VULKAN_LIBRARY") {
         // SAFETY: the entry and its library remain owned by the process-wide state.
         return unsafe { Entry::load_from(&path) }.map_err(|error| {
             format!(
@@ -511,8 +511,8 @@ fn target_profile(version: (u8, u8)) -> metal_translate::TargetProfile {
 }
 
 fn trace(message: impl std::fmt::Display) {
-    if std::env::var_os("ROSETTA3_TRACE_METAL").is_some() {
-        eprintln!("rosetta3: Metal: {message}");
+    if std::env::var_os("ROSEMARY_TRACE_METAL").is_some() {
+        eprintln!("rosemary: Metal: {message}");
     }
 }
 
@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn configured_vulkan_runtime_enumerates_an_adapter() {
-        if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+        if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
             return;
         }
         let adapters = adapters().expect("configured Vulkan runtime");

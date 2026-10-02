@@ -217,7 +217,7 @@ impl Gpu {
             Ok(Some(bytes)) => appkit::backing::Picture::Pixels(bytes),
             Ok(None) => appkit::backing::Picture::Dmabuf(shared),
             Err(why) => {
-                eprintln!("rosetta3: webkit: compositor: composing on the GPU failed: {why}");
+                eprintln!("rosemary: webkit: compositor: composing on the GPU failed: {why}");
                 return None;
             }
         };
@@ -255,14 +255,14 @@ impl Gpu {
         ) {
             Ok(image) => image,
             Err(why) => {
-                eprintln!("rosetta3: webkit: compositor: no buffer to compose into: {why}");
+                eprintln!("rosemary: webkit: compositor: no buffer to compose into: {why}");
                 return None;
             }
         };
         let dmabuf = match image.export() {
             Ok(dmabuf) => dmabuf,
             Err(why) => {
-                eprintln!("rosetta3: webkit: compositor: a buffer could not be shared: {why}");
+                eprintln!("rosemary: webkit: compositor: a buffer could not be shared: {why}");
                 return None;
             }
         };

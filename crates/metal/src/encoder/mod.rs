@@ -145,7 +145,7 @@ pub(crate) struct CommandBuffer {
     uploads: Vec<GpuBuffer>,
     upload_used: u64,
     framebuffers: Vec<vk::Framebuffer>,
-    /// `ROSETTA3_PASS_OUT`: attachment readbacks written once the work is done.
+    /// `ROSEMARY_PASS_OUT`: attachment readbacks written once the work is done.
     captures: Vec<crate::capture::Capture>,
     scheduled_handlers: Vec<OwnedBlock>,
     completed_handlers: Vec<OwnedBlock>,
@@ -179,7 +179,7 @@ pub(crate) struct Encoder {
     /// Resolves a subpass cannot perform because the attachment has one sample,
     /// recorded as image copies once the pass has ended.
     pending_copies: Vec<PendingCopy>,
-    /// `ROSETTA3_PASS_OUT`: the attachments to read back when this pass ends,
+    /// `ROSEMARY_PASS_OUT`: the attachments to read back when this pass ends,
     /// and the ordinal the capture of this pass is named by.
     capture_targets: Vec<crate::capture::Target>,
     capture_pass: Option<u64>,
@@ -374,11 +374,11 @@ impl Default for RenderPassDescriptor {
 }
 
 pub(crate) fn install() {
-    object::register::<CommandQueue>(c"R3MTLCommandQueue");
-    object::register::<CommandBuffer>(c"R3MTLCommandBuffer");
-    object::register::<Encoder>(c"R3MTLCommandEncoder");
+    object::register::<CommandQueue>(c"RosemaryMTLCommandQueue");
+    object::register::<CommandBuffer>(c"RosemaryMTLCommandBuffer");
+    object::register::<Encoder>(c"RosemaryMTLCommandEncoder");
 
-    let queue = objc::class::lookup(c"R3MTLCommandQueue").expect("just registered");
+    let queue = objc::class::lookup(c"RosemaryMTLCommandQueue").expect("just registered");
     methods!(queue, {
         "device" => queue_device, c"@16@0:8";
         "commandBuffer" => new_command_buffer, c"@16@0:8";
@@ -387,7 +387,7 @@ pub(crate) fn install() {
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
 
-    let command = objc::class::lookup(c"R3MTLCommandBuffer").expect("just registered");
+    let command = objc::class::lookup(c"RosemaryMTLCommandBuffer").expect("just registered");
     methods!(command, {
         "commandQueue" => command_buffer_queue, c"@16@0:8";
         "status" => command_buffer_status, c"Q16@0:8";
@@ -405,7 +405,7 @@ pub(crate) fn install() {
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
 
-    let encoder = objc::class::lookup(c"R3MTLCommandEncoder").expect("just registered");
+    let encoder = objc::class::lookup(c"RosemaryMTLCommandEncoder").expect("just registered");
     methods!(encoder, {
         "endEncoding" => end_encoding, c"v16@0:8";
         "dealloc" => encoder_dealloc, c"v16@0:8";
@@ -451,7 +451,8 @@ pub(crate) fn install() {
     });
 
     let pass = object::register::<RenderPassDescriptor>(c"MTLRenderPassDescriptor");
-    let attachment = object::register::<AttachmentElement>(c"R3MTLRenderPassAttachmentDescriptor");
+    let attachment =
+        object::register::<AttachmentElement>(c"RosemaryMTLRenderPassAttachmentDescriptor");
     let metaclass = pass.metaclass();
     metaclass.replace_method(
         objc::sel::get("renderPassDescriptor"),

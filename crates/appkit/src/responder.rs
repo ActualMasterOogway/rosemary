@@ -629,7 +629,7 @@ mod tests {
             try_to_perform(
                 view,
                 objc::sel::get("tryToPerform:with:"),
-                objc::sel::get("r3NoSuchAction:"),
+                objc::sel::get("rosemaryNoSuchAction:"),
                 std::ptr::null_mut(),
             )
         };
@@ -648,7 +648,7 @@ mod tests {
             ARGUMENT.store(object as usize, Ordering::Release);
         }
         crate::bootstrap();
-        let action = objc::sel::get("r3Perform:");
+        let action = objc::sel::get("rosemaryPerform:");
         let view = objc::class::lookup(c"NSView").expect("NSView");
         let class = objc::class::allocate_pair(Some(view), c"ActionTarget", 0).expect("a subclass");
         class.add_method(action, perform as objc::class::Imp, c"v24@0:8@16");

@@ -66,7 +66,7 @@ pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 /// this machine's `PATH` - host libraries in it may launch host helpers - so
 /// the guest's value, which may be one the guest set itself, travels here and
 /// becomes the child guest's `PATH` in place of [`DEFAULT_PATH`].
-pub const GUEST_PATH_VAR: &str = "ROSETTA3_GUEST_PATH";
+pub const GUEST_PATH_VAR: &str = "ROSEMARY_GUEST_PATH";
 
 /// The `PATH` a prefixed guest starts with: its parent's, if it has one.
 fn guest_path(inherited: Option<String>) -> String {
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn putenv(entry: *mut c_char) -> c_int {
 /// A guest environment block with this runtime's corrections undone.
 ///
 /// For the one place the two environments meet: a guest that `exec`s another
-/// Mach-O is rewritten into `rosetta3 run ...`, and the child is a *host*
+/// Mach-O is rewritten into `rosemary run ...`, and the child is a *host*
 /// process that resolves its own prefix from `HOME` before it builds a guest
 /// block of its own. Handing it the guest's `HOME` would have it look for the
 /// prefix inside the prefix.
@@ -350,7 +350,7 @@ mod tests {
     /// The block is one process-wide object, so each test uses a name of its
     /// own rather than a shared one.
     fn unique(what: &str) -> CString {
-        CString::new(format!("ROSETTA3_TEST_{what}_{}", std::process::id())).expect("no NUL")
+        CString::new(format!("ROSEMARY_TEST_{what}_{}", std::process::id())).expect("no NUL")
     }
 
     #[test]

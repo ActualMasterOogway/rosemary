@@ -615,7 +615,7 @@ fn announce_undelivered_notifications() {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: mach_port_request_notification accepted but never delivered - nothing here \
+            "rosemary: mach_port_request_notification accepted but never delivered - nothing here \
              watches a port's reference counts, so a caller waiting for a dead-name notification \
              waits forever rather than being told a live port died"
         );

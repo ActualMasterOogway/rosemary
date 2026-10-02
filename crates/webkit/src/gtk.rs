@@ -223,7 +223,7 @@ pub fn api() -> Result<&'static Api, &'static str> {
 }
 
 /// The CSS class every web view's window carries.
-pub const WINDOW_CLASS: &std::ffi::CStr = c"rosetta3-web-view";
+pub const WINDOW_CLASS: &std::ffi::CStr = c"rosemary-web-view";
 
 /// Give web view windows no background of their own, so that a page drawn
 /// without one (`drawsBackground` off) shows what is under the view.
@@ -240,7 +240,7 @@ pub unsafe fn make_windows_transparent(api: &Api, display: Ptr) {
         let provider = (api.gtk_css_provider_new)();
         (api.gtk_css_provider_load_from_string)(
             provider,
-            c"window.rosetta3-web-view { background: none; box-shadow: none; }".as_ptr(),
+            c"window.rosemary-web-view { background: none; box-shadow: none; }".as_ptr(),
         );
         (api.gtk_style_context_add_provider_for_display)(display, provider, PRIORITY);
         (api.g_object_unref)(provider);

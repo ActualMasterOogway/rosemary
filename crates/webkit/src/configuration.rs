@@ -98,7 +98,7 @@ unsafe extern "C" fn script_message_received(manager: Ptr, value: Ptr, data: Ptr
     // SAFETY: the signal's value, live for its duration.
     let body = unsafe { crate::web_view::bridge(engine.api, value) };
     if engine::tracing() {
-        eprintln!("rosetta3: webkit: script message to '{name}'");
+        eprintln!("rosemary: webkit: script message to '{name}'");
     }
     let message = crate::web_view::script_message(manager as usize, &name, body);
     // SAFETY: a handler answers the `WKScriptMessageHandler` method.
@@ -455,7 +455,7 @@ unsafe extern "C" fn add_user_script(receiver: Id, _sel: Sel, user_script: Id) {
     };
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: user script (start {}, main frame only {}):\n{}",
+            "rosemary: webkit: user script (start {}, main frame only {}):\n{}",
             user_script.at_document_start, user_script.main_frame_only, user_script.source
         );
     }
@@ -608,7 +608,7 @@ unsafe extern "C" fn set_preference_value(receiver: Id, _sel: Sel, value: Id, ke
         "developerExtrasEnabled" => preferences.developer_extras = enabled,
         other => {
             if engine::tracing() {
-                eprintln!("rosetta3: webkit: preference {other} = {enabled} ignored");
+                eprintln!("rosemary: webkit: preference {other} = {enabled} ignored");
             }
         }
     }

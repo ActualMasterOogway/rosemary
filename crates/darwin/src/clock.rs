@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn utime_sets_both_times() {
-        let path = std::env::temp_dir().join(format!("r3-utime-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rosemary-utime-{}", std::process::id()));
         std::fs::write(&path, b"x").expect("a file");
         let name = std::ffi::CString::new(path.to_str().expect("utf-8")).expect("no NUL");
         let times = libc::utimbuf {

@@ -112,7 +112,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> Scratch {
-        let at = std::env::temp_dir().join(format!("r3-path-{name}-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-path-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&at);
         std::fs::create_dir_all(at.join("Contents")).expect("a scratch directory");
         std::fs::write(at.join("Contents").join("Game.ios"), b"x").expect("a file");
@@ -200,7 +200,7 @@ mod tests {
     /// long as the byte length remains within the filesystem's limit.
     #[test]
     fn a_valid_path_with_more_than_sixty_four_components_is_walked() {
-        let at = std::env::temp_dir().join(format!("r3-path-deep-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-path-deep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&at);
         let mut directory = at.clone();
         for _ in 0..70 {
@@ -219,7 +219,7 @@ mod tests {
         assert!(found.to_bytes().ends_with(b"/D/D/D/D/D/Leaf"));
 
         // The resolved path owns no resources, so the tree can be removed now.
-        let root = std::env::temp_dir().join(format!("r3-path-deep-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rosemary-path-deep-{}", std::process::id()));
         std::fs::remove_dir_all(root).expect("the fixture is removed");
     }
 }

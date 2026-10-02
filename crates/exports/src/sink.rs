@@ -28,7 +28,7 @@ impl Exports for NonNull<'_> {
 
 /// Publish everything `deny` does not name.
 ///
-/// `ROSETTA3_WITHHOLD`'s half of the A/B this tree could not otherwise run: a
+/// `ROSEMARY_WITHHOLD`'s half of the A/B this tree could not otherwise run: a
 /// framework answer that is subtly wrong is invisible, and the way to find one
 /// is to compare against a runtime that does not answer at all.
 pub struct Denying<'a> {

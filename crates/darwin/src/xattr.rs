@@ -538,7 +538,7 @@ mod tests {
     /// attributes, which is a property of the host and not of this code.
     #[test]
     fn an_attribute_round_trips_in_the_guests_spelling() {
-        let path = std::env::temp_dir().join(format!("r3-xattr-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rosemary-xattr-{}", std::process::id()));
         std::fs::write(&path, b"x").expect("a scratch file");
         let c = CString::new(path.to_str().unwrap()).unwrap();
 

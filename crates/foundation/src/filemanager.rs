@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn file_system_attributes_report_available_space() {
         let manager = manager();
-        let root = std::env::temp_dir().join(format!("r3-fs-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rosemary-fs-{}", std::process::id()));
         let path = crate::string::from_str(&root.to_string_lossy());
         // SAFETY: the manager and path are Foundation objects; no error slot is needed.
         assert_eq!(
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn a_directory_is_created_seen_and_removed() {
         let manager = manager();
-        let root = std::env::temp_dir().join(format!("r3-fm-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rosemary-fm-{}", std::process::id()));
         let nested = root.join("a/b");
         let path = crate::string::from_str(&nested.to_string_lossy());
 

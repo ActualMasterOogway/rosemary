@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn new_command_queue(gpu: &'static Gpu, device: Id) -> Id {
     object::make(
-        c"R3MTLCommandQueue",
+        c"RosemaryMTLCommandQueue",
         CommandQueue {
             gpu,
             device: objc::arc::retain(device),

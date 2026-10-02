@@ -1,7 +1,7 @@
 //! Styled text: runs of plain, bold, monospace and linked text, wrapped
 //! together as one paragraph and hit-tested for their links.
 //!
-//! Only Rosetta 3's own dialogs build it. A program's alert text stays plain,
+//! Only Rosemary's own dialogs build it. A program's alert text stays plain,
 //! as it is on a Mac unless the program supplies an attributed string.
 
 use std::sync::Arc;
@@ -458,12 +458,12 @@ mod tests {
     fn styling_drops_out_of_the_plain_text() {
         let rich = RichText::new()
             .plain("Run ")
-            .code("rosetta3 prefix create")
+            .code("rosemary prefix create")
             .plain(" or see ")
             .link("the docs", "https://example.com");
         assert_eq!(
             rich.to_plain(),
-            "Run rosetta3 prefix create or see the docs"
+            "Run rosemary prefix create or see the docs"
         );
     }
 

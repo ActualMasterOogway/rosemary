@@ -172,7 +172,7 @@ struct ContextBudget {
 
 impl ContextBudget {
     fn new() -> Self {
-        let limit = std::env::var("ROSETTA3_METAL_MAX_COMMAND_BUFFERS")
+        let limit = std::env::var("ROSEMARY_METAL_MAX_COMMAND_BUFFERS")
             .ok()
             .and_then(|value| value.parse().ok())
             .filter(|limit| *limit > 0)

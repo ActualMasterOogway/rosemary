@@ -80,7 +80,7 @@ impl State {
     pub fn render(&self) -> String {
         let q = |s: &str| yaml::quote(s);
         let mut out = vec![
-            "# Written by `rosetta3 prefix`. See docs/prefixes.md.".to_string(),
+            "# Written by `rosemary prefix`. See docs/prefixes.md.".to_string(),
             "version: 1".to_string(),
             "created_with:".to_string(),
             format!(
@@ -209,7 +209,7 @@ mod tests {
         let path = at.join("state.yaml");
         std::fs::write(
             &path,
-            "# Written by `rosetta3 prefix create`. See docs/prefixes.md.\n\
+            "# Written by `rosemary prefix create`. See docs/prefixes.md.\n\
              version: 1\ncreated_with:\n  runtime_version: 0.1.0\n",
         )
         .unwrap();

@@ -161,7 +161,7 @@ impl From<&DepthStencilState> for DepthStencilKey {
 
 pub(crate) fn install() {
     let descriptor = object::register::<RenderPipelineDescriptor>(c"MTLRenderPipelineDescriptor");
-    let color = object::register::<ColorElement>(c"R3MTLColorAttachmentDescriptor");
+    let color = object::register::<ColorElement>(c"RosemaryMTLColorAttachmentDescriptor");
     // `MTLCompileOptions` carries nothing this translator reads: a game sets a
     // language version and preprocessor macros, and the MSL frontend accepts
     // one dialect. It exists so `-newLibraryWithSource:options:error:` has
@@ -222,7 +222,8 @@ pub(crate) fn install() {
         );
     }
 
-    let compute = objc::class::lookup(c"R3MTLComputePipelineState").expect("registered first");
+    let compute =
+        objc::class::lookup(c"RosemaryMTLComputePipelineState").expect("registered first");
     methods!(compute, {
         "dealloc" => compute_pipeline_dealloc, c"v16@0:8";
         "device" => compute_pipeline_device, c"@16@0:8";
@@ -230,7 +231,7 @@ pub(crate) fn install() {
         "maxTotalThreadsPerThreadgroup" => compute_pipeline_max_threads, c"Q16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
     });
-    let render = objc::class::lookup(c"R3MTLRenderPipelineState").expect("registered first");
+    let render = objc::class::lookup(c"RosemaryMTLRenderPipelineState").expect("registered first");
     methods!(render, {
         "dealloc" => render_pipeline_dealloc, c"v16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";

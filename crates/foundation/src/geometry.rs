@@ -294,7 +294,7 @@ mod tests {
     /// Each of the three shapes survives being boxed and read back.
     ///
     /// Called directly rather than through `objc_msgSend`: what a *guest* send
-    /// does to these is `rosetta3`'s marshaller's business and is covered by
+    /// does to these is `rosemary`'s marshaller's business and is covered by
     /// `tests/msgsend.rs`. What this pins is that the storage is the right width
     /// and the encoding is the right string.
     #[test]

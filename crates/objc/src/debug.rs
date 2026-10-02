@@ -187,10 +187,10 @@ fn allocation_name(allocation: &Allocation) -> &'static str {
 }
 
 fn violation(operation: &str, object: Id, reason: &str) -> ! {
-    eprintln!("rosetta3: objc debug: {operation}({object:p}): {reason}");
+    eprintln!("rosemary: objc debug: {operation}({object:p}): {reason}");
     GUEST_CONTEXT.with(|context| {
         if let Some((pc, symbol)) = context.borrow().last() {
-            eprintln!("rosetta3: objc debug: guest {symbol} at {pc:#x}");
+            eprintln!("rosemary: objc debug: guest {symbol} at {pc:#x}");
         }
     });
     std::process::abort()
@@ -519,7 +519,7 @@ mod tests {
     use super::*;
     use crate::class::Imp;
 
-    const CHILD: &str = "ROSETTA3_OBJC_DEBUG_TEST";
+    const CHILD: &str = "ROSEMARY_OBJC_DEBUG_TEST";
 
     fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = std::ffi::OsString> + 'a {
         values.iter().map(std::ffi::OsString::from)
@@ -558,7 +558,7 @@ mod tests {
         enable();
         match case {
             "valid" => {
-                let object = object(c"R3DebugValid", None);
+                let object = object(c"RosemaryDebugValid", None);
                 assert_eq!(crate::arc::retain(object), object);
                 crate::arc::release(object);
                 crate::arc::release(object);
@@ -566,7 +566,7 @@ mod tests {
             // What clang emits for a `__weak` local captured by value: the
             // slot is moved out of, and the scope cleanup destroys it anyway.
             "moved-weak" => {
-                let object = object(c"R3DebugMovedWeak", None);
+                let object = object(c"RosemaryDebugMovedWeak", None);
                 let (mut from, mut to) = (std::ptr::null_mut(), std::ptr::null_mut());
                 // SAFETY: two words of this frame's own storage.
                 unsafe {
@@ -578,7 +578,7 @@ mod tests {
             }
             // A `__weak` ivar is born zeroed and never sees `objc_initWeak`.
             "zeroed-weak" => {
-                let object = object(c"R3DebugZeroedWeak", None);
+                let object = object(c"RosemaryDebugZeroedWeak", None);
                 let mut ivar = std::ptr::null_mut();
                 // SAFETY: one word of this frame's own storage.
                 unsafe {
@@ -588,7 +588,7 @@ mod tests {
                 }
             }
             "guard" => {
-                let object = object(c"R3DebugGuard", None);
+                let object = object(c"RosemaryDebugGuard", None);
                 // SAFETY: deliberately corrupt the first debug-only guard byte.
                 unsafe {
                     let class = crate::object::class_of(object).expect("class");
@@ -597,12 +597,12 @@ mod tests {
                 crate::arc::retain(object);
             }
             "overrelease" => {
-                let object = object(c"R3DebugOverrelease", None);
+                let object = object(c"RosemaryDebugOverrelease", None);
                 crate::arc::release(object);
                 crate::arc::release(object);
             }
             "dealloc" => {
-                let object = object(c"R3DebugDealloc", Some(incomplete_dealloc as Imp));
+                let object = object(c"RosemaryDebugDealloc", Some(incomplete_dealloc as Imp));
                 crate::arc::release(object);
             }
             "pool" => {
@@ -620,7 +620,7 @@ mod tests {
                 crate::arc::destroy_weak(&mut garbage);
             }
             "property" => {
-                let object = object(c"R3DebugProperty", None);
+                let object = object(c"RosemaryDebugProperty", None);
                 // SAFETY: deliberately supplies an offset outside the object.
                 unsafe {
                     crate::shorthand::objc_getProperty(
@@ -636,7 +636,7 @@ mod tests {
                 unsafe { crate::api::class_getName(0x10usize as *const c_void) };
             }
             "selector" => {
-                let object = object(c"R3DebugSelector", None);
+                let object = object(c"RosemaryDebugSelector", None);
                 // SAFETY: deliberately supplies an invalid selector handle.
                 unsafe {
                     crate::object::class_of(object)
@@ -645,7 +645,7 @@ mod tests {
                 }
             }
             "sync" => {
-                let object = object(c"R3DebugSync", None);
+                let object = object(c"RosemaryDebugSync", None);
                 crate::arc::sync_exit(object);
             }
             "external" => {

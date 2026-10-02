@@ -155,35 +155,35 @@ unsafe extern "C" fn asprintf_l_body(
 // `rdi, rsi, rdx, rcx, r8, r9` is the order, so the argument after four named
 // ones is `r8` and after three is `rcx`.
 trampoline!(
-    "rosetta3_snprintf_l",
+    "rosemary_snprintf_l",
     snprintf_l_body,
     gp_offset = 32,
     slot = "r8"
 );
 trampoline!(
-    "rosetta3_sscanf_l",
+    "rosemary_sscanf_l",
     sscanf_l_body,
     gp_offset = 24,
     slot = "rcx"
 );
 trampoline!(
-    "rosetta3_asprintf_l",
+    "rosemary_asprintf_l",
     asprintf_l_body,
     gp_offset = 24,
     slot = "rcx"
 );
 
 unsafe extern "C" {
-    fn rosetta3_snprintf_l();
-    fn rosetta3_sscanf_l();
-    fn rosetta3_asprintf_l();
+    fn rosemary_snprintf_l();
+    fn rosemary_sscanf_l();
+    fn rosemary_asprintf_l();
 }
 
 exports::exports! {
     functions {
-        "snprintf_l" => rosetta3_snprintf_l,
-        "sscanf_l" => rosetta3_sscanf_l,
-        "asprintf_l" => rosetta3_asprintf_l,
+        "snprintf_l" => rosemary_snprintf_l,
+        "sscanf_l" => rosemary_sscanf_l,
+        "asprintf_l" => rosemary_asprintf_l,
     }
 }
 

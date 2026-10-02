@@ -166,7 +166,7 @@ pub(crate) fn new_texture(gpu: &'static Gpu, descriptor: TextureDescriptor) -> I
         }
     };
     let texture = object::make(
-        c"R3MTLTexture",
+        c"RosemaryMTLTexture",
         Texture {
             gpu,
             descriptor,
@@ -197,7 +197,7 @@ pub(crate) fn drawable_texture(gpu: &'static Gpu, image: GpuImage, pixel_format:
         usage: gpu::USAGE_RENDER_TARGET | gpu::USAGE_SHADER_READ,
     };
     object::make(
-        c"R3MTLTexture",
+        c"RosemaryMTLTexture",
         Texture {
             gpu,
             descriptor,

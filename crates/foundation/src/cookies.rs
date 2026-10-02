@@ -84,7 +84,7 @@ fn store_path() -> PathBuf {
 fn store_file_name(identifier: Option<&str>) -> String {
     let identifier = identifier
         .filter(|id| !id.is_empty() && !id.contains('/') && !id.starts_with('.'))
-        .unwrap_or("rosetta3");
+        .unwrap_or("rosemary");
     format!("{identifier}.cookies.tsv")
 }
 
@@ -621,7 +621,7 @@ unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
-/// `ROSETTA3_TRACE_COOKIES=1`: report each call and what it answered.
+/// `ROSEMARY_TRACE_COOKIES=1`: report each call and what it answered.
 ///
 /// A cookie jar is invisible from both ends: a client that asks for a cookie it
 /// has never been given and one that is never asked look the same from outside,
@@ -630,8 +630,8 @@ unsafe extern "C" fn cookie_properties(receiver: Id, _sel: Sel) -> Id {
 fn trace(what: std::fmt::Arguments) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-    if *ON.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_COOKIES").is_some()) {
-        eprintln!("rosetta3: cookies: {what}");
+    if *ON.get_or_init(|| std::env::var_os("ROSEMARY_TRACE_COOKIES").is_some()) {
+        eprintln!("rosemary: cookies: {what}");
     }
 }
 
@@ -883,10 +883,10 @@ mod tests {
             store_file_name(Some("com.test.app1")),
             store_file_name(Some("com.test.app2"))
         );
-        assert_eq!(store_file_name(None), "rosetta3.cookies.tsv");
-        assert_eq!(store_file_name(Some("")), "rosetta3.cookies.tsv");
-        assert_eq!(store_file_name(Some("../evil")), "rosetta3.cookies.tsv");
-        assert_eq!(store_file_name(Some("a/b")), "rosetta3.cookies.tsv");
+        assert_eq!(store_file_name(None), "rosemary.cookies.tsv");
+        assert_eq!(store_file_name(Some("")), "rosemary.cookies.tsv");
+        assert_eq!(store_file_name(Some("../evil")), "rosemary.cookies.tsv");
+        assert_eq!(store_file_name(Some("a/b")), "rosemary.cookies.tsv");
     }
 
     #[test]

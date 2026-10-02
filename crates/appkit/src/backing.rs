@@ -1633,7 +1633,7 @@ fn blend_overlay(
     }
 }
 
-/// `ROSETTA3_STORE_OUT=DIR`: write each window's store as a binary PPM when it
+/// `ROSEMARY_STORE_OUT=DIR`: write each window's store as a binary PPM when it
 /// is presented, at most once a second per window, overwriting the last.
 ///
 /// The Metal frame dump sees only layers; this is the half of a window that
@@ -1646,7 +1646,7 @@ static DUMPED: Mutex<Vec<(usize, std::time::Instant, bool)>> = Mutex::new(Vec::n
 /// written: without this, a window that stops changing within a second of
 /// its last dump leaves a stale picture of itself behind.
 fn dump_overdue(window: sdl3::Window) -> bool {
-    std::env::var_os("ROSETTA3_STORE_OUT").is_some()
+    std::env::var_os("ROSEMARY_STORE_OUT").is_some()
         && DUMPED
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1658,7 +1658,7 @@ fn dump_overdue(window: sdl3::Window) -> bool {
 
 fn dump(window: sdl3::Window, store: &Store) {
     use std::time::Instant;
-    let Some(directory) = std::env::var_os("ROSETTA3_STORE_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_STORE_OUT") else {
         return;
     };
     let mut last = DUMPED.lock().unwrap_or_else(|e| e.into_inner());
@@ -1836,7 +1836,7 @@ mod tests {
     fn view(frame: NSRect, flipped: bool) -> Id {
         crate::bootstrap();
         let name = match flipped {
-            true => c"R3BackingFlippedView",
+            true => c"RosemaryBackingFlippedView",
             false => c"NSView",
         };
         let class = objc::class::lookup(name).unwrap_or_else(|| {

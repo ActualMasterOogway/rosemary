@@ -80,7 +80,7 @@ impl Default for DepthStencilState {
 }
 
 pub(crate) fn install() {
-    let buffer = object::register::<Buffer>(c"R3MTLBuffer");
+    let buffer = object::register::<Buffer>(c"RosemaryMTLBuffer");
     methods!(buffer, {
         "dealloc" => buffer_dealloc, c"v16@0:8";
         "contents" => buffer_contents, c"^v16@0:8";
@@ -91,7 +91,7 @@ pub(crate) fn install() {
     });
 
     let descriptor = object::register::<TextureDescriptor>(c"MTLTextureDescriptor");
-    let texture = object::register::<Texture>(c"R3MTLTexture");
+    let texture = object::register::<Texture>(c"RosemaryMTLTexture");
     methods!(descriptor, {
         "init" => descriptor_init, c"@16@0:8";
     });
@@ -145,7 +145,7 @@ pub(crate) fn install() {
     });
 
     let sampler_descriptor = object::register::<SamplerDescriptor>(c"MTLSamplerDescriptor");
-    let sampler_state = object::register::<SamplerState>(c"R3MTLSamplerState");
+    let sampler_state = object::register::<SamplerState>(c"RosemaryMTLSamplerState");
     methods!(sampler_state, {
         "dealloc" => sampler_state_dealloc, c"v16@0:8";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
@@ -176,7 +176,7 @@ pub(crate) fn install() {
     }
 
     let depth = object::register::<DepthStencilState>(c"MTLDepthStencilDescriptor");
-    object::register::<DepthStencilState>(c"R3MTLDepthStencilState");
+    object::register::<DepthStencilState>(c"RosemaryMTLDepthStencilState");
     let stencil = object::register::<StencilState>(c"MTLStencilDescriptor");
     methods!(depth, {
         "init" => depth_descriptor_init, c"@16@0:8";
@@ -209,8 +209,8 @@ pub(crate) fn install() {
     }
 
     let vertex = object::register::<VertexDescriptor>(c"MTLVertexDescriptor");
-    let collection = object::register::<IndexedCollection>(c"R3MTLIndexedCollection");
-    let element = object::register::<VertexElement>(c"R3MTLVertexElement");
+    let collection = object::register::<IndexedCollection>(c"RosemaryMTLIndexedCollection");
+    let element = object::register::<VertexElement>(c"RosemaryMTLVertexElement");
     methods!(vertex, {
         "init" => vertex_descriptor_init, c"@16@0:8";
         "layouts" => vertex_layouts, c"@16@0:8";

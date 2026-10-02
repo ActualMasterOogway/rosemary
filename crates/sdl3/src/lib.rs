@@ -1256,7 +1256,7 @@ mod tests {
         }
         init(init::JOYSTICK).expect("the joystick subsystem");
 
-        let label = c"rosetta3 test pad";
+        let label = c"rosemary test pad";
         let desc = virtual_joystick::Desc {
             kind: 1,
             vendor_id: 0x1234,
@@ -1279,7 +1279,7 @@ mod tests {
         let joystick = open(id).expect("the joystick opens");
         // SAFETY: a joystick just opened, closed at the end of this test.
         unsafe {
-            assert_eq!(name(joystick), "rosetta3 test pad");
+            assert_eq!(name(joystick), "rosemary test pad");
             assert_eq!(vendor(joystick), 0x1234);
             assert_eq!(product(joystick), 0x5678);
             assert_eq!(axes(joystick), 6);
@@ -2067,7 +2067,7 @@ pub mod video {
     ///
     /// On a desktop that shows a per-window icon this is that icon; on macOS
     /// SDL routes it to the application icon, which is the Dock tile - and that
-    /// is the only way to set it here, because the *process* is `rosetta3` and
+    /// is the only way to set it here, because the *process* is `rosemary` and
     /// its own bundle is not the guest's.
     ///
     /// SDL converts the surface into its own representation, so nothing here

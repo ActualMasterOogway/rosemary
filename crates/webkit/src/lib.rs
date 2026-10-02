@@ -210,7 +210,7 @@ mod tests {
     fn web_view_is_a_view_that_keeps_its_configuration() {
         // SAFETY: no other test reads the environment; a unit test must not
         // start GTK and a web process.
-        unsafe { std::env::set_var("ROSETTA3_WEBKIT", "0") };
+        unsafe { std::env::set_var("ROSEMARY_WEBKIT", "0") };
         bootstrap();
         let class = objc::class::lookup(c"WKWebView").expect("registered");
         let view = objc::class::lookup(c"NSView").expect("NSView");

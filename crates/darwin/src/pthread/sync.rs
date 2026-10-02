@@ -99,7 +99,7 @@ pub(super) fn say_unsupported(what: &str) {
         return;
     }
     let _ = what;
-    const MESSAGE: &[u8] = b"rosetta3: pthread: a process-shared object is unsupported\n";
+    const MESSAGE: &[u8] = b"rosemary: pthread: a process-shared object is unsupported\n";
     // SAFETY: a fixed static buffer; `write` is async-signal-safe.
     unsafe { libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len()) };
 }

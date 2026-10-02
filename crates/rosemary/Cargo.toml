@@ -1,0 +1,47 @@
+[package]
+name = "rosemary"
+description = "Run Intel macOS applications on Apple Silicon or Intel Macs atop the Microlift JIT recompiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+machish.workspace = true
+exports = { workspace = true, features = ["machish"] }
+darwin.workspace = true
+prefix.workspace = true
+objc.workspace = true
+corefoundation.workspace = true
+iokit.workspace = true
+foundation.workspace = true
+appkit.workspace = true
+applicationservices.workspace = true
+coreservices.workspace = true
+audiotoolbox.workspace = true
+sdl3.workspace = true
+corevideo.workspace = true
+iosurface.workspace = true
+coreaudio.workspace = true
+contacts.workspace = true
+avfoundation.workspace = true
+security.workspace = true
+gamecontroller.workspace = true
+webkit.workspace = true
+forcefeedback.workspace = true
+metal.workspace = true
+gimli.workspace = true
+libc.workspace = true
+static_init.workspace = true
+iced-x86 = "1"
+microlift = { git = "https://github.com/microlift/microlift", features = ["disasm", "runtime"] }
+# `override` feature disabled on macOS for now because it has a bug where it improperly sets `_malloc_fork` info,
+# causing child processes to get their memory allocator corrupted.
+[target.'cfg(target_os = "macos")'.dependencies]
+mimalloc = "0.1.52"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+mimalloc = { version = "0.1.52", features = ["override"] }
+
+[dev-dependencies]
+libc.workspace = true
+darwin.workspace = true

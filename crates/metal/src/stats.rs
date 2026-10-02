@@ -60,7 +60,7 @@ static VALUES: [AtomicU64; COUNTERS] = [ZERO; COUNTERS];
 #[inline(always)]
 pub fn enabled() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_METAL_STATS").is_some_and(|value| value != "0");
+    static ON: bool = std::env::var_os("ROSEMARY_METAL_STATS").is_some_and(|value| value != "0");
 
     *ON
 }
@@ -132,7 +132,7 @@ pub fn tick() {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    eprintln!("rosetta3: Metal: stats {line}");
+    eprintln!("rosemary: Metal: stats {line}");
     report_shader_cache();
 }
 
@@ -149,7 +149,7 @@ fn report_shader_cache() {
         return;
     }
     eprintln!(
-        "rosetta3: Metal: shader cache total hits={} misses={} writes={} errors={}",
+        "rosemary: Metal: shader cache total hits={} misses={} writes={} errors={}",
         cache.hits, cache.misses, cache.writes, cache.errors
     );
 }

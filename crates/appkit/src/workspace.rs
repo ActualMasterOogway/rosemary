@@ -286,7 +286,7 @@ unsafe extern "C" fn launch_application(
             match unsafe { text(*key as Id) }.as_str() {
                 LAUNCH_ARGUMENTS => arguments = unsafe { strings_of(*value as Id) },
                 other => eprintln!(
-                    "rosetta3: appkit: -launchApplicationAtURL: does not apply {other}; \
+                    "rosemary: appkit: -launchApplicationAtURL: does not apply {other}; \
                      launching without it"
                 ),
             }
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn a_file_type_icon_is_an_image_even_for_an_unknown_type() {
         crate::bootstrap();
-        let kind = foundation::string::from_str("r3-no-such-type");
+        let kind = foundation::string::from_str("rosemary-no-such-type");
         // SAFETY: `-iconForFileType:` is `id (id, SEL, id)`.
         let icon = unsafe {
             icon_for_file_type(

@@ -52,7 +52,7 @@ pub(crate) struct RenderPassDescriptor {
     pub visibility_result_buffer: Id,
 }
 
-/// `ROSETTA3_TRACE_PASSES=1`: each distinct render pass shape, once.
+/// `ROSEMARY_TRACE_PASSES=1`: each distinct render pass shape, once.
 ///
 /// A frame's device time is spent in its passes, and a log which says only how
 /// many there were cannot say which one to look at. The size, the sample count
@@ -61,7 +61,7 @@ pub(crate) struct RenderPassDescriptor {
 pub(super) fn trace_pass(key: &RenderPassKey, width: u32, height: u32) {
     static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     #[static_init::dynamic]
-    static ENABLED: bool = std::env::var_os("ROSETTA3_TRACE_PASSES").is_some();
+    static ENABLED: bool = std::env::var_os("ROSEMARY_TRACE_PASSES").is_some();
     if !*ENABLED {
         return;
     }
@@ -407,7 +407,7 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
     let mut width = u32::MAX;
     let mut height = u32::MAX;
     let mut textures = Vec::new();
-    // The targets only matter to `ROSETTA3_PASS_OUT`, and naming each one
+    // The targets only matter to `ROSEMARY_PASS_OUT`, and naming each one
     // formats a string.
     let capturing = crate::capture::enabled();
 
@@ -768,7 +768,7 @@ pub(super) unsafe fn release_pass_contents(receiver: Id, orphaning: bool) {
     for slot in [&mut descriptor.depth_object, &mut descriptor.stencil_object] {
         let element = std::mem::replace(slot, std::ptr::null_mut());
         if orphaning && !element.is_null() {
-            // SAFETY: an `R3MTLRenderPassAttachmentDescriptor` this descriptor
+            // SAFETY: an `RosemaryMTLRenderPassAttachmentDescriptor` this descriptor
             // made.
             unsafe { crate::resource::orphan_element::<AttachmentElement>(element) };
         }
@@ -859,7 +859,7 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
     let elements = (0..RENDER_TARGETS)
         .map(|index| {
             object::make(
-                c"R3MTLRenderPassAttachmentDescriptor",
+                c"RosemaryMTLRenderPassAttachmentDescriptor",
                 AttachmentElement {
                     owner: receiver,
                     slot: AttachmentSlot::Color(index),
@@ -868,11 +868,11 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
         })
         .collect::<Vec<_>>();
     let collection = object::make(
-        c"R3MTLIndexedCollection",
+        c"RosemaryMTLIndexedCollection",
         crate::resource::IndexedCollection {
             elements,
             // SAFETY: every element here is an
-            // `R3MTLRenderPassAttachmentDescriptor`.
+            // `RosemaryMTLRenderPassAttachmentDescriptor`.
             orphan: |element| unsafe {
                 crate::resource::orphan_element::<AttachmentElement>(element)
             },
@@ -896,7 +896,7 @@ pub(super) unsafe extern "C" fn pass_single_attachment(receiver: Id, sel: Sel) -
         return existing;
     }
     let element = object::make(
-        c"R3MTLRenderPassAttachmentDescriptor",
+        c"RosemaryMTLRenderPassAttachmentDescriptor",
         AttachmentElement {
             owner: receiver,
             slot: if depth {

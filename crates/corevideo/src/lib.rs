@@ -143,7 +143,7 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *mut *mut 
 /// # Safety
 ///
 /// `callback` must be a host-callable function of the display link's prototype -
-/// which for a guest's own function is the thunk `rosetta3`'s ABI layer made,
+/// which for a guest's own function is the thunk `rosemary`'s ABI layer made,
 /// because the table entry names the parameter a callback.
 pub unsafe extern "C" fn CVDisplayLinkSetOutputCallback(
     handle: *mut c_void,

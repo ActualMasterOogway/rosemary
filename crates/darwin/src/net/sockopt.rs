@@ -417,7 +417,7 @@ fn say_unknown_option(level: i32, name: i32) {
     }
     said.push((level, name));
     eprintln!(
-        "rosetta3: socket option level {level:#x} name {name:#x} is not in \
+        "rosemary: socket option level {level:#x} name {name:#x} is not in \
          darwin::net::sockopt's tables - refused with ENOPROTOOPT"
     );
 }

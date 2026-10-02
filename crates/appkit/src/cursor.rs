@@ -102,7 +102,7 @@ fn hot_spot_pixels(hot_spot: NSPoint, size: NSSize, width: u32, height: u32) -> 
     )
 }
 
-/// `ROSETTA3_TRACE_CURSOR`: name every cursor a program builds, every rectangle
+/// `ROSEMARY_TRACE_CURSOR`: name every cursor a program builds, every rectangle
 /// it installs one in, and which one the pointer ends up showing.
 ///
 /// It exists because none of that is visible from the outside: a custom cursor
@@ -113,7 +113,7 @@ fn hot_spot_pixels(hot_spot: NSPoint, size: NSSize, width: u32, height: u32) -> 
 #[inline(always)]
 pub fn tracing() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_TRACE_CURSOR").is_some();
+    static ON: bool = std::env::var_os("ROSEMARY_TRACE_CURSOR").is_some();
 
     *ON
 }
@@ -182,7 +182,7 @@ fn is_cursor(object: Id) -> bool {
 fn cursor_from_image(image: Id, hot_spot: NSPoint) -> sdl3::Cursor {
     let Some(bitmap) = crate::image::bitmap(image) else {
         eprintln!(
-            "rosetta3: appkit: -[NSCursor initWithImage:hotSpot:]: no pixels for this image - \
+            "rosemary: appkit: -[NSCursor initWithImage:hotSpot:]: no pixels for this image - \
              the pointer keeps the desktop's cursor"
         );
         return std::ptr::null_mut();
@@ -209,7 +209,7 @@ unsafe extern "C" fn init_with_image(receiver: Id, _sel: Sel, image: Id, hot_spo
     if tracing() {
         let size = crate::image::declared_size(image);
         eprintln!(
-            "rosetta3: appkit: -[NSCursor initWithImage:hotSpot:] {receiver:p}: \
+            "rosemary: appkit: -[NSCursor initWithImage:hotSpot:] {receiver:p}: \
              {}x{} points, point ({}, {}), {}",
             size.width,
             size.height,
@@ -300,7 +300,7 @@ pub fn add_rect(view: Id, rect: NSRect, cursor: Id) {
     if !is_cursor(cursor) {
         if tracing() {
             eprintln!(
-                "rosetta3: appkit: -[NSView addCursorRect:cursor:] {view:p}: {cursor:p} is \
+                "rosemary: appkit: -[NSView addCursorRect:cursor:] {view:p}: {cursor:p} is \
                  not an NSCursor - the rectangle is dropped"
             );
         }
@@ -308,7 +308,7 @@ pub fn add_rect(view: Id, rect: NSRect, cursor: Id) {
     }
     if tracing() {
         eprintln!(
-            "rosetta3: appkit: -[NSView addCursorRect:cursor:] {view:p}: ({}, {}) {}x{} -> \
+            "rosemary: appkit: -[NSView addCursorRect:cursor:] {view:p}: ({}, {}) {}x{} -> \
              {cursor:p}",
             rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
         );
@@ -366,7 +366,7 @@ pub unsafe fn reset_rects(view: Id) {
         // from the outside.
         let window = unsafe { crate::view::window_of(view) };
         eprintln!(
-            "rosetta3: appkit: -resetCursorRects to {view:p} (in window {window:p}): {}",
+            "rosemary: appkit: -resetCursorRects to {view:p} (in window {window:p}): {}",
             match method.is_some() {
                 true => "implemented",
                 false => "NOT implemented - this view has no cursor of its own",
@@ -431,7 +431,7 @@ pub fn apply() {
             std::sync::atomic::AtomicUsize::new(usize::MAX);
         if LAST.swap(chosen as usize, std::sync::atomic::Ordering::AcqRel) != chosen as usize {
             eprintln!(
-                "rosetta3: appkit: the pointer shows {chosen:p}, from {} cursor rectangle(s){}",
+                "rosemary: appkit: the pointer shows {chosen:p}, from {} cursor rectangle(s){}",
                 RECTS.lock().unwrap_or_else(|e| e.into_inner()).len(),
                 match std::ptr::eq(chosen, current) {
                     true => " - none of them holds the pointer",
@@ -728,7 +728,7 @@ pub fn forget_tracking(window: Id) {
 
 fn tracking_event(kind: u64, window: Id, location: NSPoint, area: Id) -> Id {
     if tracing() {
-        eprintln!("rosetta3: appkit: tracking event {kind} for area {area:p}");
+        eprintln!("rosemary: appkit: tracking event {kind} for area {area:p}");
     }
     crate::nsevent::make(crate::nsevent::Fields {
         kind,
@@ -827,7 +827,7 @@ unsafe extern "C" fn named_cursor(_class: Id, sel: Sel) -> Id {
     }
 }
 
-/// Whether the pointer is on Rosetta 3's own chrome (the titlebar, the menu
+/// Whether the pointer is on Rosemary's own chrome (the titlebar, the menu
 /// strip, or an open menu). That is not the program's to dress: a game that
 /// hid the pointer or set a crosshair would otherwise leave nothing visible to
 /// pick a menu item with, so the chrome always gets the desktop's arrow.
@@ -841,7 +841,7 @@ pub fn set_over_chrome(over: bool) {
     }
     if tracing() {
         eprintln!(
-            "rosetta3: appkit: the pointer is {} the chrome",
+            "rosemary: appkit: the pointer is {} the chrome",
             match over {
                 true => "on",
                 false => "off",
@@ -854,7 +854,7 @@ pub fn set_over_chrome(over: bool) {
     apply();
 }
 
-/// Put the pointing hand up while the pointer is on a link in one of Rosetta
+/// Put the pointing hand up while the pointer is on a link in one of Rosemary
 /// 3's own dialogs, and whatever the program shows back after.
 pub(crate) fn set_over_link(over: bool) {
     static OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -885,7 +885,7 @@ static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 unsafe extern "C" fn set(receiver: Id, _sel: Sel) {
     CURRENT.store(receiver as usize, std::sync::atomic::Ordering::Release);
     if tracing() {
-        eprintln!("rosetta3: appkit: -[NSCursor set] {receiver:p}");
+        eprintln!("rosemary: appkit: -[NSCursor set] {receiver:p}");
     }
     // A named cursor has no SDL cursor, which restores the desktop's own: a
     // program that sets `+arrowCursor` back is taking its custom cursor off.
@@ -925,7 +925,7 @@ static HIDDEN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::
 fn hide_cursor() {
     let count = HIDDEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
     if tracing() {
-        eprintln!("rosetta3: appkit: cursor hidden {count} deep");
+        eprintln!("rosemary: appkit: cursor hidden {count} deep");
     }
     if count == 1 && !OVER_CHROME.load(std::sync::atomic::Ordering::Acquire) {
         sdl3::video::set_cursor_visible(false);
@@ -935,7 +935,7 @@ fn hide_cursor() {
 fn show_cursor() {
     let previous = HIDDEN.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     if tracing() {
-        eprintln!("rosetta3: appkit: cursor was hidden {previous} deep");
+        eprintln!("rosemary: appkit: cursor was hidden {previous} deep");
     }
     if previous <= 0 {
         // AppKit clamps at zero rather than letting the count go negative, or a

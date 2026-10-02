@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn a_dotfile_is_hidden_and_an_app_is_a_package() {
-        let dir = std::env::temp_dir().join("r3-urlresource");
+        let dir = std::env::temp_dir().join("rosemary-urlresource");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Thing.app")).expect("a package to look at");
         std::fs::write(dir.join(".secret"), b"x").expect("a dotfile to look at");

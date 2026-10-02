@@ -356,7 +356,7 @@ fn described(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
         (OUTPUT_DEVICE, selector::NAME) => string_property(&device.name),
         (OUTPUT_DEVICE, selector::MANUFACTURER) => string_property("SDL"),
         (OUTPUT_DEVICE, selector::DEVICE_UID) | (OUTPUT_DEVICE, selector::MODEL_UID) => {
-            string_property("rosetta3:default-output")
+            string_property("rosemary:default-output")
         }
         // `kAudioDeviceTransportTypeBuiltIn`. A program checks this to decide
         // whether the device may vanish - USB and Bluetooth ones do.

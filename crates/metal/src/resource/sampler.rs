@@ -108,7 +108,7 @@ pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> 
             return std::ptr::null_mut();
         }
     };
-    object::make(c"R3MTLSamplerState", SamplerState { gpu, sampler })
+    object::make(c"RosemaryMTLSamplerState", SamplerState { gpu, sampler })
 }
 
 pub(super) unsafe extern "C" fn sampler_descriptor_init(receiver: Id, _sel: Sel) -> Id {

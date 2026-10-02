@@ -541,7 +541,7 @@ pub fn load(prefix: &Prefix) -> Result<Provisioned, Invalid> {
     let state = State::read(&layout::state_path(prefix.directory()))?;
     let Some(base) = state.base.clone() else {
         return Err(Invalid::new(format!(
-            "{}: no base has been installed; run `rosetta3 prefix create`",
+            "{}: no base has been installed; run `rosemary prefix create`",
             prefix.directory().display()
         )));
     };
@@ -561,7 +561,7 @@ pub fn load(prefix: &Prefix) -> Result<Provisioned, Invalid> {
     let sha = crate::format::sha256_hex(&raw);
     if sha != base.manifest_sha256 {
         return Err(Invalid::new(format!(
-            "{}: sha256 {sha}, but {} was installed; run `rosetta3 prefix reset-system`",
+            "{}: sha256 {sha}, but {} was installed; run `rosemary prefix reset-system`",
             manifest_path.display(),
             base.manifest_sha256
         )));

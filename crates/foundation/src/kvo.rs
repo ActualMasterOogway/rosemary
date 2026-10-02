@@ -297,7 +297,7 @@ mod tests {
     fn observer_object() -> Id {
         crate::bootstrap();
         let class =
-            corefoundation::base::register(c"R3KvoObserver", None, size_of::<usize>(), false);
+            corefoundation::base::register(c"RosemaryKvoObserver", None, size_of::<usize>(), false);
         class.replace_method(
             objc::sel::get("observeValueForKeyPath:ofObject:change:context:"),
             observed as *const std::ffi::c_void,

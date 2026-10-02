@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use sdl3::video::Event;
 
-pub const ENV: &str = "ROSETTA3_DEBUG_INPUT";
-pub const FILE_ENV: &str = "ROSETTA3_DEBUG_INPUT_FILE";
-pub const WINDOW_ENV: &str = "ROSETTA3_DEBUG_INPUT_WINDOW";
+pub const ENV: &str = "ROSEMARY_DEBUG_INPUT";
+pub const FILE_ENV: &str = "ROSEMARY_DEBUG_INPUT_FILE";
+pub const WINDOW_ENV: &str = "ROSEMARY_DEBUG_INPUT_WINDOW";
 
 /// Where the script last put the pointer, in SDL window coordinates, and
 /// whether it has put it anywhere at all.
@@ -62,7 +62,7 @@ enum Action {
     /// Each character in turn, as the key that types it.
     Type(String),
     /// Drive a different window from here on, by the names
-    /// `ROSETTA3_DEBUG_INPUT_WINDOW` takes.
+    /// `ROSEMARY_DEBUG_INPUT_WINDOW` takes.
     ///
     /// A menu is opened by a click on one window and answers clicks on another,
     /// so which window a script drives cannot be settled before it runs.
@@ -83,16 +83,16 @@ fn parse(value: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     for piece in value.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         let Some((at, rest)) = piece.split_once(':') else {
-            eprintln!("rosetta3: appkit: {ENV}: {piece:?} has no SECONDS: prefix");
+            eprintln!("rosemary: appkit: {ENV}: {piece:?} has no SECONDS: prefix");
             continue;
         };
         let Ok(at) = at.trim().parse::<f64>() else {
-            eprintln!("rosetta3: appkit: {ENV}: {at:?} is not a number of seconds");
+            eprintln!("rosemary: appkit: {ENV}: {at:?} is not a number of seconds");
             continue;
         };
         match action(rest.trim()) {
             Some(action) => steps.push(Step { at, action }),
-            None => eprintln!("rosetta3: appkit: {ENV}: {rest:?} is not an action"),
+            None => eprintln!("rosemary: appkit: {ENV}: {rest:?} is not an action"),
         }
     }
     steps.sort_by(|a, b| a.at.total_cmp(&b.at));
@@ -171,7 +171,7 @@ fn point(argument: &str) -> Option<(f32, f32)> {
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
-/// Perform whatever has been appended to `ROSETTA3_DEBUG_INPUT_FILE`.
+/// Perform whatever has been appended to `ROSEMARY_DEBUG_INPUT_FILE`.
 ///
 /// A timed script has to be written before the run begins, which is exactly
 /// backwards for finding one's way through a program's own interface: where the
@@ -215,7 +215,7 @@ fn run_file() {
     for line in complete.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match action(line) {
             Some(action) => perform(&action),
-            None => eprintln!("rosetta3: appkit: {FILE_ENV}: {line:?} is not an action"),
+            None => eprintln!("rosemary: appkit: {FILE_ENV}: {line:?} is not an action"),
         }
     }
 }
@@ -252,7 +252,7 @@ pub fn run() {
 /// `window` step chooses a different one and the steps that follow it - in the
 /// same batch of lines, usually - are exactly the ones that have to go there.
 ///
-/// `ROSETTA3_DEBUG_INPUT_WINDOW` says which: `key` for the key window, for a
+/// `ROSEMARY_DEBUG_INPUT_WINDOW` says which: `key` for the key window, for a
 /// dialog; `main` for the largest shown one, for an application window the
 /// compositor has not given focus to; `top` for the most recently shown, for a
 /// menu; the first window made otherwise.
@@ -311,8 +311,8 @@ fn main_window() -> Option<sdl3::Window> {
 static CHOSEN: Mutex<Option<String>> = Mutex::new(None);
 
 fn perform(action: &Action) {
-    eprintln!("rosetta3: appkit: {ENV}: {action:?}");
-    // And to `ROSETTA3_EVENT_LOG`, which a guest that replaces its own stderr
+    eprintln!("rosemary: appkit: {ENV}: {action:?}");
+    // And to `ROSEMARY_EVENT_LOG`, which a guest that replaces its own stderr
     // cannot take with it.
     crate::event::debug_log(&format!("script {action:?}"));
     let Some(window) = target() else {
@@ -382,7 +382,7 @@ fn perform(action: &Action) {
                         },
                     ),
                     None => eprintln!(
-                        "rosetta3: appkit: {ENV}: no US key types {character:?} - skipped"
+                        "rosemary: appkit: {ENV}: no US key types {character:?} - skipped"
                     ),
                 }
             }

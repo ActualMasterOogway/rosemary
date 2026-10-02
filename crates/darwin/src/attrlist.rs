@@ -100,7 +100,7 @@ fn check(list: &AttrList, options: u64) -> Result<(), c_int> {
         .map(|(what, bits)| format!("{what} {bits:#x}"))
         .collect();
     eprintln!(
-        "rosetta3: getattrlist: attributes not implemented: {}",
+        "rosemary: getattrlist: attributes not implemented: {}",
         named.join(", ")
     );
     Err(libc::ENOTSUP)

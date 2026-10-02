@@ -1,5 +1,5 @@
 /// The variable that turns the refusal on. Any value but `0`.
-pub const VAR: &str = "ROSETTA3_NO_PASSTHROUGH";
+pub const VAR: &str = "ROSEMARY_NO_PASSTHROUGH";
 
 /// Whether this run refuses to answer a guest import with a host symbol.
 pub fn enabled() -> bool {

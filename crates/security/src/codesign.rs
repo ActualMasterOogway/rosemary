@@ -163,7 +163,7 @@ pub unsafe extern "C" fn SecCodeCheckValidity(
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
         eprintln!(
-            "rosetta3: security: the guest checked its own code signature. There is no \
+            "rosemary: security: the guest checked its own code signature. There is no \
              code-signing on this host, so nothing was examined and the check is reported as \
              passing - see crates/security/src/codesign.rs"
         );

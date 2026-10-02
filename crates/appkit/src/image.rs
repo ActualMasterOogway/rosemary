@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn a_name_nothing_has_is_nil() {
         crate::bootstrap();
-        let name = foundation::string::from_str("R3NoSuchImage");
+        let name = foundation::string::from_str("RosemaryNoSuchImage");
         // SAFETY: `+imageNamed:` is `id (Class, SEL, id)`.
         let image =
             unsafe { image_named(std::ptr::null_mut(), objc::sel::get("imageNamed:"), name) };

@@ -56,11 +56,11 @@ pub enum Kind {
     RwLockAttr = 8,
 }
 
-/// The high bytes of every signature this crate writes: `"r3"`, then the kind.
+/// The high bytes of every signature this crate writes: `"rm"`, then the kind.
 ///
 /// Chosen so it cannot collide with a Darwin signature, all of which fit in 32 bits,
 /// and so it is legible in a hex dump of guest memory.
-const TAG: u64 = 0x7233_0000_0000_0000;
+const TAG: u64 = 0x726d_0000_0000_0000;
 
 /// The signature an initialised object of `kind` carries.
 pub const fn ours(kind: Kind) -> u64 {
@@ -372,7 +372,7 @@ pub(crate) fn say_copied(kind: Kind, at: u64, identity: u64) {
         return;
     }
     let _ = (kind, at, identity);
-    const MESSAGE: &[u8] = b"rosetta3: pthread: a copied initialised pthread object was refused\n";
+    const MESSAGE: &[u8] = b"rosemary: pthread: a copied initialised pthread object was refused\n";
     // SAFETY: a fixed static buffer; `write` is async-signal-safe.
     unsafe { libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len()) };
 }

@@ -1,5 +1,5 @@
 /// The libc implementation used for guest imports.
-pub const VAR: &str = "ROSETTA3_LIBC";
+pub const VAR: &str = "ROSEMARY_LIBC";
 
 pub fn using_builtin() -> bool {
     static CHOICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

@@ -9,8 +9,8 @@ address, and the half of the profile that matters is blank. There is no Darwin
 equivalent of a jitdump for Instruments to read, so the join is done afterwards
 and this is the thing that does it.
 
-The left-hand side is `ROSETTA3_PROFILE_MAP` from the *same run*, written by
-`rosetta3::profile::write_map`. Addresses only mean something within the run
+The left-hand side is `ROSEMARY_PROFILE_MAP` from the *same run*, written by
+`rosemary::profile::write_map`. Addresses only mean something within the run
 that produced them; `tools/guest-trace.sh` records both together for that
 reason.
 
@@ -88,7 +88,7 @@ class Map:
 
     Two levels, because the map has two. `I` lines are one guest instruction
     each and are what a branch trace deserves; `R` lines are one region and are
-    what is there when `ROSETTA3_PROFILE_MAP_INSTRUCTIONS` was not set. A
+    what is there when `ROSEMARY_PROFILE_MAP_INSTRUCTIONS` was not set. A
     lookup prefers the instruction and falls back to the region, so a map
     recorded either way answers.
     """
@@ -116,7 +116,7 @@ class Map:
                 e.append(hi)
                 w.append(payload)
         if not rows and not rrows:
-            sys.exit(f"{path}: no R or I lines - was ROSETTA3_PROFILE_MAP set?")
+            sys.exit(f"{path}: no R or I lines - was ROSEMARY_PROFILE_MAP set?")
 
     @staticmethod
     def _find(starts, ends, what, addr):
@@ -202,7 +202,7 @@ def main():
                 "trace was recorded, not runtime addresses - so there is nothing here to\n"
                 "look up, and every translation is folded into one unnamed sentinel.\n"
                 "Record 'Time Profiler' or 'CPU Counters' to join, and use\n"
-                "ROSETTA3_PROFILE=1 for guest-attributed time.")
+                "ROSEMARY_PROFILE=1 for guest-attributed time.")
         if not schema:
             sys.exit("no backtrace-bearing table in this trace; pass --xpath. "
                      f"It has: {', '.join(sorted(set(have)))}")
@@ -242,7 +242,7 @@ def main():
         print(f"  {totals[key]:>9}  {key}")
     if approximate:
         print(f"  {approximate:>9}  resolved only to a region "
-              f"(run with ROSETTA3_PROFILE_MAP_INSTRUCTIONS=1 for instructions)")
+              f"(run with ROSEMARY_PROFILE_MAP_INSTRUCTIONS=1 for instructions)")
     if unmatched:
         # Not a failure to hide. An unsymbolicated address in no translation is
         # a host library's own generated code, or a trace and a map from

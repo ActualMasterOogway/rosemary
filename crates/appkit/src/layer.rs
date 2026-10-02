@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn display_prefers_the_delegates_display_layer() {
-        let (layer, _delegate) = layer_with_delegate(c"Rosetta3DisplayingLayerDelegate", true);
+        let (layer, _delegate) = layer_with_delegate(c"RosemaryDisplayingLayerDelegate", true);
         let sel = objc::sel::get("x");
         // SAFETY: a layer this test made.
         unsafe {
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn display_draws_through_the_delegate_into_a_context() {
-        let (layer, delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        let (layer, delegate) = layer_with_delegate(c"RosemaryDrawingLayerDelegate", false);
         let sel = objc::sel::get("x");
         // SAFETY: a layer this test made.
         unsafe {
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn layout_and_actions_consult_the_delegate() {
-        let (layer, _delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        let (layer, _delegate) = layer_with_delegate(c"RosemaryDrawingLayerDelegate", false);
         let sel = objc::sel::get("x");
         // SAFETY: a layer this test made.
         unsafe {
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_delegate_is_not_retained_and_is_zeroed_when_it_goes() {
-        let (layer, delegate) = layer_with_delegate(c"Rosetta3DrawingLayerDelegate", false);
+        let (layer, delegate) = layer_with_delegate(c"RosemaryDrawingLayerDelegate", false);
         assert_eq!(objc::arc::retain_count(delegate), 1);
         objc::arc::release(delegate);
         // SAFETY: a layer this test made.

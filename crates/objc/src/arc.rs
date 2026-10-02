@@ -232,7 +232,7 @@ fn no_pool() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static SAID: AtomicBool = AtomicBool::new(false);
     if !SAID.swap(true, Ordering::Relaxed) {
-        eprintln!("rosetta3: objc: autorelease with no pool in place; leaking");
+        eprintln!("rosemary: objc: autorelease with no pool in place; leaking");
     }
 }
 

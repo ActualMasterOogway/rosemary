@@ -6,7 +6,7 @@
 # addresses in whatever anonymous mappings the JIT got that time, and the map
 # says what those addresses were lifted from; run them separately and the
 # addresses in one mean nothing in the other. So this launches the guest under
-# `xctrace` with `ROSETTA3_PROFILE_MAP` set, and both land beside each other.
+# `xctrace` with `ROSEMARY_PROFILE_MAP` set, and both land beside each other.
 #
 #     tools/guest-trace.sh [-t TEMPLATE] [-o OUT] <guest> [args...]
 #
@@ -57,7 +57,7 @@ done
 [ -n "$xctrace" ] || { echo "no working xctrace: install Xcode (the app, not just the Command Line Tools)" >&2; exit 1; }
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-driver="${ROSETTA3:-$root/target/release/rosetta3}"
+driver="${ROSEMARY:-$root/target/release/rosemary}"
 [ -x "$driver" ] || { echo "no driver at $driver: cargo build --release" >&2; exit 1; }
 
 echo "recording '$template' -> $out.trace, map -> $out.map"
@@ -71,10 +71,10 @@ rm -rf "$out.trace"
     --template "$template" \
     --output "$out.trace" \
     --target-stdout - \
-    --env "ROSETTA3_PROFILE_MAP=$out.map" \
-    --env "ROSETTA3_PROFILE_MAP_INSTRUCTIONS=1" \
-    --env "ROSETTA3_PROFILE=${ROSETTA3_PROFILE:-1}" \
-    --env "ROSETTA3_PROFILE_OUT=$out.profile" \
+    --env "ROSEMARY_PROFILE_MAP=$out.map" \
+    --env "ROSEMARY_PROFILE_MAP_INSTRUCTIONS=1" \
+    --env "ROSEMARY_PROFILE=${ROSEMARY_PROFILE:-1}" \
+    --env "ROSEMARY_PROFILE_OUT=$out.profile" \
     --launch -- "$driver" run "$guest" "$@"
 
 echo

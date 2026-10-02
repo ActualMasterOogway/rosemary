@@ -9,8 +9,8 @@ pub struct Cache {
     root: PathBuf,
 }
 
-/// `ROSETTA3_ROOTFS_CACHE`, then `$XDG_CACHE_HOME/rosetta3/rootfs`, then
-/// `$HOME/.cache/rosetta3/rootfs` - the same shape as the shader cache's.
+/// `ROSEMARY_ROOTFS_CACHE`, then `$XDG_CACHE_HOME/rosemary/rootfs`, then
+/// `$HOME/.cache/rosemary/rootfs` - the same shape as the shader cache's.
 pub fn base_directory_from(
     override_directory: Option<OsString>,
     xdg_cache_home: Option<OsString>,
@@ -20,10 +20,10 @@ pub fn base_directory_from(
         return Some(PathBuf::from(directory));
     }
     if let Some(cache) = xdg_cache_home.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(cache).join("rosetta3/rootfs"));
+        return Some(PathBuf::from(cache).join("rosemary/rootfs"));
     }
     let home = home.filter(|value| !value.is_empty())?;
-    Some(PathBuf::from(home).join(".cache/rosetta3/rootfs"))
+    Some(PathBuf::from(home).join(".cache/rosemary/rootfs"))
 }
 
 /// One cached object, for `cache list`.
@@ -42,7 +42,7 @@ impl Cache {
 
     pub fn from_env() -> Option<Cache> {
         base_directory_from(
-            std::env::var_os("ROSETTA3_ROOTFS_CACHE"),
+            std::env::var_os("ROSEMARY_ROOTFS_CACHE"),
             std::env::var_os("XDG_CACHE_HOME"),
             std::env::var_os("HOME"),
         )
@@ -235,11 +235,11 @@ mod tests {
         );
         assert_eq!(
             base_directory_from(None, Some("/x".into()), Some("/h".into())),
-            Some(PathBuf::from("/x/rosetta3/rootfs"))
+            Some(PathBuf::from("/x/rosemary/rootfs"))
         );
         assert_eq!(
             base_directory_from(None, Some("".into()), Some("/h".into())),
-            Some(PathBuf::from("/h/.cache/rosetta3/rootfs"))
+            Some(PathBuf::from("/h/.cache/rosemary/rootfs"))
         );
         assert_eq!(base_directory_from(None, None, None), None);
     }

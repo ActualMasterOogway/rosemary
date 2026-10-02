@@ -10,7 +10,7 @@ use crate::base::CFTypeRef;
 /// `CFRunLoopSourceContext::perform` and the timer's callback: a C function this
 /// process can call.
 ///
-/// For a guest's own callback this is a trampoline `rosetta3` compiled - see
+/// For a guest's own callback this is a trampoline `rosemary` compiled - see
 /// `shims::corefoundation` - so nothing here ever holds a guest address.
 pub type Perform = unsafe extern "C" fn(*mut c_void);
 pub type TimerCallback = unsafe extern "C" fn(CFTypeRef, *mut c_void);

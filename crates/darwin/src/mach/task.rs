@@ -114,7 +114,7 @@ fn announce(symbol: &str) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: {symbol} accepted but not honoured - a Mach exception message carries this \
+            "rosemary: {symbol} accepted but not honoured - a Mach exception message carries this \
              CPU's thread state for a fault inside a translation, not the guest's registers, so \
              the registration is recorded and no exception is ever delivered"
         );

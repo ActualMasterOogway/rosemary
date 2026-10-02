@@ -150,7 +150,7 @@ unsafe fn send1(receiver: Id, sel: Sel, argument: *mut c_void) -> Id {
 /// `+alloc` is `[self allocWithZone:nil]`, and not a shortcut to the allocator.
 ///
 /// A class that overrides `+allocWithZone:` - which is how a C++ ivar
-/// constructor gets to run, see `rosetta3`'s `objc::cxxivars` - must be the one
+/// constructor gets to run, see `rosemary`'s `objc::cxxivars` - must be the one
 /// that allocates.
 unsafe extern "C" fn alloc(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: `+alloc`'s receiver is the class, and `+allocWithZone:` takes one
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn method_for_selector_answers_the_installed_imp() {
-        let object = instance(c"Rosetta3MethodForA");
+        let object = instance(c"RosemaryMethodForA");
         let found = send(
             object,
             "methodForSelector:",
@@ -459,7 +459,7 @@ mod tests {
     /// reports neither the class nor the selector.
     #[test]
     fn method_for_selector_never_answers_nil() {
-        let object = instance(c"Rosetta3MethodForB");
+        let object = instance(c"RosemaryMethodForB");
         let found = send(
             object,
             "methodForSelector:",
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn perform_selector_reaches_the_method() {
-        let object = instance(c"Rosetta3MethodForC");
+        let object = instance(c"RosemaryMethodForC");
         let result = send(
             object,
             "performSelector:",
@@ -487,7 +487,7 @@ mod tests {
     /// answered by `NSObject`.
     #[test]
     fn copy_sends_copy_with_zone() {
-        let object = instance(c"Rosetta3CopyA");
+        let object = instance(c"RosemaryCopyA");
         // SAFETY: an instance made above.
         let class = unsafe { crate::object::class_of(object) }.expect("an instance");
         assert!(class.add_method(

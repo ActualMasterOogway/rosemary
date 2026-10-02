@@ -286,7 +286,7 @@ fn note_voices(count: usize) {
 }
 
 /// Count what reached the device, and say so every few seconds under
-/// `ROSETTA3_TRACE_AUDIO`.
+/// `ROSEMARY_TRACE_AUDIO`.
 ///
 /// The one number that matters is how much of the stream was real: a device fed
 /// silence because a pull failed sounds like a stutter and looks like nothing
@@ -315,7 +315,7 @@ fn tally(played: usize, silenced: usize) {
     eprintln!("audio: fed {played} bytes, silenced {silenced}, {voices} voices mixing");
 }
 
-/// `ROSETTA3_DUMP_AUDIO_SOURCE=FILE`: append every buffer a guest callback
+/// `ROSEMARY_DUMP_AUDIO_SOURCE=FILE`: append every buffer a guest callback
 /// filled, before anything in this crate touched it.
 ///
 /// The companion to [`dump`]: the two files together say whether what came out
@@ -326,7 +326,7 @@ fn dump_source(bytes: &[u8]) {
 
     #[dynamic]
     static WANTED: Option<std::path::PathBuf> =
-        std::env::var_os("ROSETTA3_DUMP_AUDIO_SOURCE").map(Into::into);
+        std::env::var_os("ROSEMARY_DUMP_AUDIO_SOURCE").map(Into::into);
 
     static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
 
@@ -343,7 +343,7 @@ fn dump_source(bytes: &[u8]) {
     }
 }
 
-/// `ROSETTA3_DUMP_AUDIO=FILE`: append every buffer handed to the device.
+/// `ROSEMARY_DUMP_AUDIO=FILE`: append every buffer handed to the device.
 ///
 /// Raw frames in the output unit's own format, which is what a program's own
 /// silence, clipping or stutter can be measured out of - none of which is
@@ -353,7 +353,7 @@ fn dump(bytes: &[u8]) {
     static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
     #[dynamic]
     static WANTED: Option<std::path::PathBuf> =
-        std::env::var_os("ROSETTA3_DUMP_AUDIO").map(Into::into);
+        std::env::var_os("ROSEMARY_DUMP_AUDIO").map(Into::into);
     let Some(path) = WANTED.as_ref() else {
         return;
     };
@@ -782,7 +782,7 @@ fn report_unmixable(format: Format) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         eprintln!(
-            "rosetta3: audio: this program's mixer was given a stream this runtime cannot mix \
+            "rosemary: audio: this program's mixer was given a stream this runtime cannot mix \
              ({} Hz, {} channels, {} bits, flags {:#x}) - those voices are silent",
             format.sample_rate,
             format.channels_per_frame,

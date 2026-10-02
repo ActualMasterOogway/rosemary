@@ -1549,8 +1549,8 @@ mod tests {
     fn delegate_text_view() -> Id {
         crate::bootstrap();
         let text = objc::class::lookup(c"NSTextView").expect("NSTextView");
-        let class = objc::class::lookup(c"Rosetta3TextSelectionDelegate").unwrap_or_else(|| {
-            let class = objc::class::allocate_pair(Some(text), c"Rosetta3TextSelectionDelegate", 0)
+        let class = objc::class::lookup(c"RosemaryTextSelectionDelegate").unwrap_or_else(|| {
+            let class = objc::class::allocate_pair(Some(text), c"RosemaryTextSelectionDelegate", 0)
                 .expect("a fresh test class");
             assert!(class.add_method(
                 objc::sel::get("textView:willChangeSelectionFromCharacterRange:toCharacterRange:"),

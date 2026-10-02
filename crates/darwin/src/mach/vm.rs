@@ -96,7 +96,7 @@ fn unsupported(flavor: i32) {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
         eprintln!(
-            "rosetta3: vm_region_64: flavour {flavor} has a layout this tree does not \
+            "rosemary: vm_region_64: flavour {flavor} has a layout this tree does not \
              publish; only VM_REGION_BASIC_INFO_64 is answered"
         );
     });

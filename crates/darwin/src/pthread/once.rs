@@ -20,7 +20,7 @@ const _: () = assert!(8 + BODY <= object::size::ONCE);
 /// that `pthread_once` returning means the thing it initialises is ready.
 ///
 /// Not an `extern "C"` function, because the routine a guest passes is *guest code*
-/// and reaching it needs a thunk. `rosetta3::shims::pthread` supplies the call and
+/// and reaching it needs a thunk. `rosemary::shims::pthread` supplies the call and
 /// this supplies the once-and-only-once.
 ///
 /// # Safety
@@ -71,7 +71,7 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
 ///
 /// The entry point the *native* backend binds, where the guest's code is already host
 /// code and the routine can simply be called. Under emulation the routine is x86-64
-/// that needs a thunk, so `rosetta3::shims::pthread` intercepts the call by name and
+/// that needs a thunk, so `rosemary::shims::pthread` intercepts the call by name and
 /// reaches [`once`] itself.
 ///
 /// # Safety

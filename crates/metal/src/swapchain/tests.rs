@@ -17,11 +17,11 @@ fn mailbox_presentation_is_preferred_when_available() {
 /// Everything this module does is a call into a driver and a window
 /// system, so there is nothing here a unit test can stand in for: the
 /// test opens a real window on the host it runs on, presents into it, and
-/// is skipped where there is no such host. `ROSETTA3_TEST_VULKAN=1` asks
+/// is skipped where there is no such host. `ROSEMARY_TEST_VULKAN=1` asks
 /// for it, the same switch the adapter test uses.
 #[test]
 fn a_window_is_presented_to_through_its_swapchain() {
-    if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
     }
     let Ok(adapters) = crate::vulkan::adapters() else {
@@ -44,7 +44,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
     // which asked for `VULKAN` here would not be testing the conversion
     // every real window goes through.
     let flags = sdl3::video::flags::HIGH_PIXEL_DENSITY;
-    let Some(window) = sdl3::video::create_window(c"rosetta3 swapchain", 320, 240, flags) else {
+    let Some(window) = sdl3::video::create_window(c"rosemary swapchain", 320, 240, flags) else {
         return;
     };
     sdl3::video::show_window(window);
@@ -153,7 +153,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
 /// which is the path that needs the composite image.
 #[test]
 fn two_layers_in_a_window_are_composited_into_one_image() {
-    if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
     }
     let Ok(adapters) = crate::vulkan::adapters() else {
@@ -163,7 +163,7 @@ fn two_layers_in_a_window_are_composited_into_one_image() {
         return;
     };
     let flags = sdl3::video::flags::HIGH_PIXEL_DENSITY;
-    let Some(window) = sdl3::video::create_window(c"rosetta3 compositing", 320, 240, flags) else {
+    let Some(window) = sdl3::video::create_window(c"rosemary compositing", 320, 240, flags) else {
         return;
     };
     sdl3::video::show_window(window);
@@ -242,7 +242,7 @@ fn two_layers_in_a_window_are_composited_into_one_image() {
 /// corners pass, on a surface that shows its alpha, whatever size it is.
 #[test]
 fn a_transparent_window_is_presented_through_the_corners_pass() {
-    if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
     }
     let Ok(adapters) = crate::vulkan::adapters() else {
@@ -252,7 +252,7 @@ fn a_transparent_window_is_presented_through_the_corners_pass() {
         return;
     };
     let flags = sdl3::video::flags::HIGH_PIXEL_DENSITY | sdl3::video::flags::TRANSPARENT;
-    let Some(window) = sdl3::video::create_window(c"rosetta3 corners", 320, 240, flags) else {
+    let Some(window) = sdl3::video::create_window(c"rosemary corners", 320, 240, flags) else {
         return;
     };
     sdl3::video::show_window(window);
@@ -331,7 +331,7 @@ fn a_transparent_window_is_presented_through_the_corners_pass() {
 /// window and fall back to the readback rather than convert it.
 #[test]
 fn an_opengl_window_is_refused_rather_than_converted() {
-    if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
     }
     let Ok(adapters) = crate::vulkan::adapters() else {
@@ -341,7 +341,7 @@ fn an_opengl_window_is_refused_rather_than_converted() {
         return;
     };
     let flags = sdl3::video::flags::OPENGL | sdl3::video::flags::HIGH_PIXEL_DENSITY;
-    let Some(window) = sdl3::video::create_window(c"rosetta3 opengl", 320, 240, flags) else {
+    let Some(window) = sdl3::video::create_window(c"rosemary opengl", 320, 240, flags) else {
         return;
     };
     sdl3::video::show_window(window);
@@ -408,7 +408,7 @@ fn an_opengl_window_is_refused_rather_than_converted() {
 /// exactly what once left every real window unable to have a swapchain.
 #[test]
 fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
-    if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
     }
     let Ok(adapters) = crate::vulkan::adapters() else {

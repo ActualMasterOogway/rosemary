@@ -390,7 +390,7 @@ fn unrendered_conversion() {
     static SAID: AtomicBool = AtomicBool::new(false);
     if !SAID.swap(true, Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: foundation: a format reached +[NSString stringWithFormat:] with a \
+            "rosemary: foundation: a format reached +[NSString stringWithFormat:] with a \
              conversion still in it, which means it was not rendered on the way"
         );
     }
@@ -496,7 +496,7 @@ unsafe extern "C" fn data_using_encoding(receiver: Id, _sel: Sel, ns: usize) -> 
         // under the right name.
         _ => {
             eprintln!(
-                "rosetta3: foundation: -[NSString dataUsingEncoding:]: encoding {ns} is not one \
+                "rosemary: foundation: -[NSString dataUsingEncoding:]: encoding {ns} is not one \
                  this runtime encodes"
             );
             None

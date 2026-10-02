@@ -213,7 +213,7 @@ impl Class {
     /// Every method this class declares itself, in no particular order.
     ///
     /// For a caller checking a whole class table at once - the encoding guard in
-    /// `rosetta3` - rather than for dispatch, which asks by selector.
+    /// `rosemary` - rather than for dispatch, which asks by selector.
     pub fn own_methods(&'static self) -> Vec<&'static Method> {
         self.contents
             .read()
@@ -526,7 +526,7 @@ pub unsafe fn from_ptr(p: *const Class) -> Option<&'static Class> {
 /// The `IMP` `sel` resolves to on `class`, or null.
 ///
 /// Returns the resolved `IMP` itself. A caller may cache it and re-probe to
-/// notice a swizzle, which is exactly what `rosetta3`'s dispatch plan does, and
+/// notice a swizzle, which is exactly what `rosemary`'s dispatch plan does, and
 /// only holds because nothing is wrapped on the way out.
 pub fn method_implementation(class: &'static Class, sel: Sel) -> Imp {
     class

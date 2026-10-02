@@ -105,7 +105,7 @@ impl Corners {
         });
 
         let words = shader();
-        let module = gpu.create_shader_module(&words, "rosetta3_window_corners")?;
+        let module = gpu.create_shader_module(&words, "rosemary_window_corners")?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
@@ -586,10 +586,10 @@ mod tests {
 
     /// The pass run on a real device, over a composite whose every pixel has
     /// the colour a guest might leave: some, with no alpha at all.
-    /// `ROSETTA3_TEST_VULKAN=1` asks for it.
+    /// `ROSEMARY_TEST_VULKAN=1` asks for it.
     #[test]
     fn content_is_sealed_and_the_bottom_corners_cut() {
-        if std::env::var_os("ROSETTA3_TEST_VULKAN").is_none() {
+        if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
             return;
         }
         let Ok(adapters) = crate::vulkan::adapters() else {

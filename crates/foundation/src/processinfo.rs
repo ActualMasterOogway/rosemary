@@ -150,7 +150,7 @@ unsafe extern "C" fn process_name(_receiver: Id, _sel: Sel) -> Id {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "rosetta3".to_string());
+        .unwrap_or_else(|| "rosemary".to_string());
     autoreleased(&name)
 }
 

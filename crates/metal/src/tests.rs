@@ -4,7 +4,7 @@ fn device_for_tests() -> Id {
     bootstrap();
     let target = Box::leak(Box::new(metal_translate::TargetProfile::vulkan_1_3()));
     object::make(
-        c"R3MTLDevice",
+        c"RosemaryMTLDevice",
         Device {
             ordinal: 1,
             name: foundation::string::from_str("Test Device"),
@@ -52,25 +52,28 @@ fn every_export_resolves_with_both_spellings() {
 fn device_registers_the_metal_object_graph() {
     bootstrap();
     for (class, selector) in [
-        (c"R3MTLDevice", "newLibraryWithSource:options:error:"),
-        (c"R3MTLDevice", "newDefaultLibrary"),
+        (c"RosemaryMTLDevice", "newLibraryWithSource:options:error:"),
+        (c"RosemaryMTLDevice", "newDefaultLibrary"),
         (
-            c"R3MTLDevice",
+            c"RosemaryMTLDevice",
             "newRenderPipelineStateWithDescriptor:error:",
         ),
         (
-            c"R3MTLCommandEncoder",
+            c"RosemaryMTLCommandEncoder",
             "drawPrimitives:vertexStart:vertexCount:instanceCount:",
         ),
-        (c"R3MTLCommandBuffer", "GPUStartTime"),
-        (c"R3MTLCommandBuffer", "GPUEndTime"),
+        (c"RosemaryMTLCommandBuffer", "GPUStartTime"),
+        (c"RosemaryMTLCommandBuffer", "GPUEndTime"),
         (c"MTLRenderPassDescriptor", "colorAttachments"),
         (c"MTLRenderPipelineDescriptor", "setVertexFunction:"),
         (c"MTLSamplerDescriptor", "setMinFilter:"),
         (c"MTLDepthStencilDescriptor", "setDepthWriteEnabled:"),
         (c"MTLDepthStencilDescriptor", "backFaceStencil"),
-        (c"R3CAMetalDrawable", "texture"),
-        (c"R3MTLLibrary", "newFunctionWithName:constantValues:error:"),
+        (c"RosemaryCAMetalDrawable", "texture"),
+        (
+            c"RosemaryMTLLibrary",
+            "newFunctionWithName:constantValues:error:",
+        ),
         (
             c"MTLFunctionConstantValues",
             "setConstantValue:type:atIndex:",
@@ -521,7 +524,7 @@ unsafe fn send_with_object(receiver: Id, selector: &str, argument: Id) {
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder`.
+/// `encoder` must be an `RosemaryMTLCommandEncoder`.
 unsafe fn set_buffer_at(encoder: Id, buffer: Id, offset: u64, index: u64) {
     let sel = objc::sel::get("setBuffer:offset:atIndex:");
     // SAFETY: an object the runtime allocated.
@@ -536,7 +539,7 @@ unsafe fn set_buffer_at(encoder: Id, buffer: Id, offset: u64, index: u64) {
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder`.
+/// `encoder` must be an `RosemaryMTLCommandEncoder`.
 unsafe fn dispatch(encoder: Id, groups: u64) {
     let sel = objc::sel::get("dispatchThreadgroups:threadsPerThreadgroup:");
     // SAFETY: an object the runtime allocated.
@@ -1028,7 +1031,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
 
 /// # Safety
 ///
-/// `command` must be an `R3MTLCommandBuffer` and `pass` a render pass
+/// `command` must be an `RosemaryMTLCommandBuffer` and `pass` a render pass
 /// descriptor.
 unsafe fn render_encoder(command: Id, pass: Id) -> Id {
     let sel = objc::sel::get("renderCommandEncoderWithDescriptor:");
@@ -1044,7 +1047,7 @@ unsafe fn render_encoder(command: Id, pass: Id) -> Id {
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder`.
+/// `encoder` must be an `RosemaryMTLCommandEncoder`.
 unsafe fn set_buffer_named(encoder: Id, selector: &str, buffer: Id, offset: u64, index: u64) {
     let sel = objc::sel::get(selector);
     // SAFETY: an object the runtime allocated.
@@ -1059,7 +1062,7 @@ unsafe fn set_buffer_named(encoder: Id, selector: &str, buffer: Id, offset: u64,
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder` inside a render pass.
+/// `encoder` must be an `RosemaryMTLCommandEncoder` inside a render pass.
 unsafe fn draw(encoder: Id, vertices: u64) {
     let sel = objc::sel::get("drawPrimitives:vertexStart:vertexCount:instanceCount:");
     // SAFETY: an object the runtime allocated.
@@ -1075,7 +1078,7 @@ unsafe fn draw(encoder: Id, vertices: u64) {
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder`.
+/// `encoder` must be an `RosemaryMTLCommandEncoder`.
 unsafe fn copy_texture_to_buffer(encoder: Id, texture: Id, buffer: Id, size: u64) {
     let sel = objc::sel::get(
         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:",
@@ -1122,7 +1125,7 @@ unsafe fn copy_texture_to_buffer(encoder: Id, texture: Id, buffer: Id, size: u64
 
 /// # Safety
 ///
-/// `encoder` must be an `R3MTLCommandEncoder`.
+/// `encoder` must be an `RosemaryMTLCommandEncoder`.
 unsafe fn set_bytes_named(encoder: Id, selector: &str, bytes: &[u8], index: u64) {
     let sel = objc::sel::get(selector);
     // SAFETY: an object the runtime allocated.

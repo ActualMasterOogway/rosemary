@@ -545,7 +545,7 @@ fn render_pattern(pattern: &str, when: f64, offset: i64) -> String {
             }
             _ => {
                 eprintln!(
-                    "rosetta3: foundation: NSDateFormatter does not know the pattern letter \
+                    "rosemary: foundation: NSDateFormatter does not know the pattern letter \
                      {c:?} in {pattern:?}; writing it as itself"
                 );
                 std::iter::repeat_n(c, run).collect()

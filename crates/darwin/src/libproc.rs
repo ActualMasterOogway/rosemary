@@ -322,7 +322,7 @@ fn process_name(cmdline: &[u8]) -> Option<String> {
         text.rsplit('/').next().map(str::to_owned)
     };
     let program = base(arguments.first()?)?;
-    if program == "rosetta3"
+    if program == "rosemary"
         && arguments.get(1).is_some_and(|a| *a == b"run")
         && let Some(guest) = arguments[2..]
             .iter()
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn a_guest_is_named_for_its_executable_not_the_runtime() {
         assert_eq!(
-            process_name(b"/x/rosetta3\0run\0--emulated\0/A.app/Contents/MacOS/Studio\0-p\0"),
+            process_name(b"/x/rosemary\0run\0--emulated\0/A.app/Contents/MacOS/Studio\0-p\0"),
             Some("Studio".to_owned())
         );
         assert_eq!(

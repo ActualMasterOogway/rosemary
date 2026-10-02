@@ -107,13 +107,13 @@ pub(super) unsafe extern "C" fn new_compute_pipeline(
         gpu::trace(message);
         std::ptr::null_mut()
     };
-    if function.is_null() || !object::is_kind(function, c"R3MTLFunction") {
+    if function.is_null() || !object::is_kind(function, c"RosemaryMTLFunction") {
         return fail("newComputePipelineStateWithFunction:error: requires an MTLFunction");
     }
     let Some(gpu) = gpu_of(receiver) else {
         return fail("Metal device has no Vulkan device");
     };
-    // SAFETY: an `R3MTLFunction`, checked above.
+    // SAFETY: an `RosemaryMTLFunction`, checked above.
     let entry = unsafe { object::body::<Function>(function) };
     // SAFETY: a function holds the library which vended it.
     let Some(artifact) = (unsafe { entry.artifact() }) else {
@@ -122,7 +122,7 @@ pub(super) unsafe extern "C" fn new_compute_pipeline(
     match pipeline::ComputePipeline::new(gpu, receiver, artifact) {
         Ok(state) => {
             objc::arc::retain(receiver);
-            object::make(c"R3MTLComputePipelineState", state)
+            object::make(c"RosemaryMTLComputePipelineState", state)
         }
         Err(reason) => fail(&reason),
     }
@@ -171,7 +171,7 @@ pub(super) unsafe extern "C" fn new_render_pipeline(
         (vertex_descriptor.layouts, vertex_descriptor.attributes)
     };
     match pipeline::RenderPipeline::new(gpu, vertex, fragment, described, &layouts, &attributes) {
-        Ok(state) => object::make(c"R3MTLRenderPipelineState", state),
+        Ok(state) => object::make(c"RosemaryMTLRenderPipelineState", state),
         Err(reason) => fail(&reason),
     }
 }
@@ -180,9 +180,9 @@ pub(super) unsafe extern "C" fn new_render_pipeline(
 ///
 /// # Safety
 ///
-/// `function` must be null or an `R3MTLFunction`.
+/// `function` must be null or an `RosemaryMTLFunction`.
 pub(super) unsafe fn artifact_of(function: Id) -> Option<&'static metal_translate::EntryArtifact> {
-    if function.is_null() || !object::is_kind(function, c"R3MTLFunction") {
+    if function.is_null() || !object::is_kind(function, c"RosemaryMTLFunction") {
         return None;
     }
     // SAFETY: the caller guarantees the class.
@@ -197,7 +197,7 @@ pub(super) unsafe extern "C" fn current_allocated_size(_receiver: Id, _sel: Sel)
 }
 
 pub(super) unsafe extern "C" fn name(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: an `R3MTLDevice`.
+    // SAFETY: an `RosemaryMTLDevice`.
     unsafe { object::body::<Device>(receiver) }.name
 }
 
@@ -210,7 +210,7 @@ pub(super) unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> bool {
 }
 
 pub(super) unsafe extern "C" fn recommended_working_set(receiver: Id, _sel: Sel) -> u64 {
-    // SAFETY: an `R3MTLDevice`.
+    // SAFETY: an `RosemaryMTLDevice`.
     unsafe { object::body::<Device>(receiver) }.recommended_working_set
 }
 

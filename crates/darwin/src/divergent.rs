@@ -29,7 +29,7 @@ use why::*;
 pub const NAMES: &[(&str, &str)] = &[
     // `struct stat` differs in field order, in the width of `st_ino`, and in whether
     // the timespecs are `st_atimespec` or `st_atim`. The `$INODE64` spellings are the
-    // same function; `rosetta3::abi::table` already folds the suffix away.
+    // same function; `rosemary::abi::table` already folds the suffix away.
     ("stat", STAT),
     ("fstat", STAT),
     ("lstat", STAT),
@@ -97,7 +97,7 @@ pub const NAMES: &[(&str, &str)] = &[
     ),
     // `struct sigaction` differs in layout and the `SA_*` differ in value; a guest
     // handler installed through the host's would be entered with a `ucontext_t` that
-    // is not the one Darwin describes. `rosetta3::signal` shims these.
+    // is not the one Darwin describes. `rosemary::signal` shims these.
     ("sigaction", SIGNAL),
     ("sigaltstack", SIGNAL),
     ("sigprocmask", SIGNAL),
@@ -256,7 +256,7 @@ pub const NAMES: &[(&str, &str)] = &[];
 /// Families that must not reach the host.
 #[cfg(not(target_os = "macos"))]
 pub const PREFIXES: &[(&str, &str)] = &[
-    // Mach is not an interface this host has. `rosetta3::shims::machthread` answers
+    // Mach is not an interface this host has. `rosemary::shims::machthread` answers
     // the handful a guest actually needs.
     ("mach_", MACH),
     ("vm_", MACH),
@@ -265,7 +265,7 @@ pub const PREFIXES: &[(&str, &str)] = &[
     ("host_", MACH),
     ("semaphore_", MACH),
     ("bootstrap_", MACH),
-    // dyld introspection, which `rosetta3::dyld` answers about the *guest's* images.
+    // dyld introspection, which `rosemary::dyld` answers about the *guest's* images.
     ("dyld_", "the host has no dyld"),
     ("NSGet", "a Darwin process-introspection interface"),
     // The Objective-C runtime, libdispatch, and the frameworks above them. Not

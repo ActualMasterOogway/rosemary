@@ -125,7 +125,7 @@ pub fn make(name: &str, object: Id, user_info: Id) -> Id {
 /// and neither end can answer: a notification nobody observes and an observer
 /// nobody posts to look identical from outside, and a release build inlines
 /// this whole path so a breakpoint cannot tell them apart either.
-pub const TRACE_ENV: &str = "ROSETTA3_TRACE_EVENT";
+pub const TRACE_ENV: &str = "ROSEMARY_TRACE_EVENT";
 
 fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -141,7 +141,7 @@ pub fn post(name: &str, object: Id, user_info: Id) {
             .filter(|o| o.name.as_deref().is_none_or(|n| n == name))
             .filter(|o| o.object.is_null() || o.object == object)
             .count();
-        eprintln!("rosetta3: foundation: post {name} object {object:p} to {takers} observer(s)");
+        eprintln!("rosemary: foundation: post {name} object {object:p} to {takers} observer(s)");
     }
     let notification = make(name, object, user_info);
     // Copied out before sending: an observer is entitled to add or remove one
@@ -320,7 +320,7 @@ unsafe extern "C" fn add_observer(
     let name = (!name.is_null()).then(|| unsafe { text_of(name) });
     if tracing() {
         eprintln!(
-            "rosetta3: foundation: addObserver {observer:p} -{} for {} object {object:p}",
+            "rosemary: foundation: addObserver {observer:p} -{} for {} object {object:p}",
             // SAFETY: a selector this runtime uniqued, whose name is a live
             // NUL-terminated string for the life of the process.
             unsafe { std::ffi::CStr::from_ptr(objc::sel::name(selector)) }.to_string_lossy(),
@@ -645,21 +645,25 @@ mod tests {
 
     #[test]
     fn an_observer_hears_the_name_it_registered_and_no_other() {
-        let who = observer(c"R3TestNotificationObserver");
+        let who = observer(c"RosemaryTestNotificationObserver");
         OBSERVERS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Observer {
                 observer: who,
                 selector: objc::sel::get("heard:"),
-                name: Some("R3Wanted".into()),
+                name: Some("RosemaryWanted".into()),
                 object: std::ptr::null_mut(),
             });
         SEEN.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        post("R3Unwanted", std::ptr::null_mut(), std::ptr::null_mut());
-        post("R3Wanted", std::ptr::null_mut(), std::ptr::null_mut());
+        post(
+            "RosemaryUnwanted",
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        post("RosemaryWanted", std::ptr::null_mut(), std::ptr::null_mut());
         let seen = SEEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(seen, ["R3Wanted"]);
+        assert_eq!(seen, ["RosemaryWanted"]);
     }
 
     /// The notification the observer is handed carries the sender it was posted
@@ -668,13 +672,13 @@ mod tests {
     fn a_notification_carries_its_sender() {
         crate::bootstrap();
         let sender = crate::string::from_str("sender");
-        let n = make("R3Named", sender, std::ptr::null_mut());
+        let n = make("RosemaryNamed", sender, std::ptr::null_mut());
         // SAFETY: `-object` is `id (id, SEL)`.
         let got = unsafe { object(n, objc::sel::get("object")) };
         assert_eq!(got, sender);
         // SAFETY: `-name` is `id (id, SEL)`, and its result is a string.
         let text = unsafe { text_of(name(n, objc::sel::get("name"))) };
-        assert_eq!(text, "R3Named");
+        assert_eq!(text, "RosemaryNamed");
     }
 
     /// The same name is the same object every time, because a guest compares
@@ -727,20 +731,24 @@ mod tests {
     #[test]
     fn a_block_observer_hears_its_name_until_it_is_removed() {
         let (token, _block) = add_block_observer(
-            "R3BlockWanted",
+            "RosemaryBlockWanted",
             std::ptr::null_mut(),
             record_block as *const c_void,
         );
         HEARD.lock().unwrap_or_else(|e| e.into_inner()).clear();
         post(
-            "R3BlockUnwanted",
+            "RosemaryBlockUnwanted",
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        post("R3BlockWanted", std::ptr::null_mut(), std::ptr::null_mut());
+        post(
+            "RosemaryBlockWanted",
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
         assert_eq!(
             HEARD.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            ["R3BlockWanted"]
+            ["RosemaryBlockWanted"]
         );
 
         // SAFETY: `-removeObserver:` is `void (id, SEL, id)`.
@@ -751,7 +759,11 @@ mod tests {
                 token,
             )
         };
-        post("R3BlockWanted", std::ptr::null_mut(), std::ptr::null_mut());
+        post(
+            "RosemaryBlockWanted",
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
         assert_eq!(
             HEARD.lock().unwrap_or_else(|e| e.into_inner()).len(),
             1,
@@ -783,9 +795,13 @@ mod tests {
         assert!(!queue.is_null());
 
         let (token, _block) =
-            add_block_observer("R3BlockQueued", queue, record_thread as *const c_void);
+            add_block_observer("RosemaryBlockQueued", queue, record_thread as *const c_void);
         DELIVERED.store(0, Ordering::SeqCst);
-        post("R3BlockQueued", std::ptr::null_mut(), std::ptr::null_mut());
+        post(
+            "RosemaryBlockQueued",
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
 
         for _ in 0..500 {
             if DELIVERED.load(Ordering::SeqCst) != 0 {

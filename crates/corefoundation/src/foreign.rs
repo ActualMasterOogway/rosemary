@@ -7,7 +7,7 @@ use crate::base::CFTypeRef;
 
 /// Whether a foreign object is handed back to the framework that made it.
 ///
-/// `ROSETTA3_NO_FOREIGN` turns it off, which is how a run proves it needs no
+/// `ROSEMARY_NO_FOREIGN` turns it off, which is how a run proves it needs no
 /// host framework at all: an object that is not this runtime's is then refused
 /// by name rather than quietly serviced by Apple's. It is a refusal rather than
 /// an error return because there is no answer to give - carrying on would read
@@ -18,7 +18,7 @@ use crate::base::CFTypeRef;
 /// `kAudioUnitErr_InvalidElement` is an answer its callers already check for.
 pub fn forwarding() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_NO_FOREIGN").is_none();
+    static ON: bool = std::env::var_os("ROSEMARY_NO_FOREIGN").is_none();
     *ON
 }
 

@@ -1145,7 +1145,7 @@ mod tests {
     /// A directory of three files, named per test so the suite can run in
     /// parallel.
     fn fixture(test: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("r3-glob-{test}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-glob-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temporary directory");
         for name in ["beta", "alpha", "gamma"] {

@@ -439,7 +439,7 @@ mod tests {
         }
     }
 
-    /// The fixture in `rosetta3/tests/cfstring.rs`, run against this crate
+    /// The fixture in `rosemary/tests/cfstring.rs`, run against this crate
     /// directly: create, measure, size a buffer, convert, release.
     #[test]
     fn a_string_round_trips_the_way_the_guest_fixture_does() {

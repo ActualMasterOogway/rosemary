@@ -35,13 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The AIR itself, for `llvm-dis`, when a rejection needs to be
                 // read against the bitcode which produced it. Off unless asked
                 // for: this is the shader's own source in another form.
-                if let Some(directory) = std::env::var_os("ROSETTA3_AIR_OUT") {
+                if let Some(directory) = std::env::var_os("ROSEMARY_AIR_OUT") {
                     let path = std::path::Path::new(&directory).join(format!("{ordinal}.bc"));
                     let _ = std::fs::write(path, air);
                 }
             })
             .and_then(|air| parse_air(AirInput::Bitcode(air)));
-        // The same IR passes the runtime runs, as `ROSETTA3_METAL_PASSES`
+        // The same IR passes the runtime runs, as `ROSEMARY_METAL_PASSES`
         // selects them, so that a rejection here is one a game would see.
         let result = result.and_then(|mut module| {
             specialize(&mut module, &FunctionConstantValues::new())?;
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(library) => {
                         // Writing the modules out lets an external validator check
                         // them; this example never claims they run on a GPU.
-                        if let Some(directory) = std::env::var_os("ROSETTA3_SPIRV_OUT") {
+                        if let Some(directory) = std::env::var_os("ROSEMARY_SPIRV_OUT") {
                             for (index, entry) in library.entries.iter().enumerate() {
                                 let path = std::path::Path::new(&directory)
                                     .join(format!("{ordinal}-{index}.spv"));

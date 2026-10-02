@@ -798,7 +798,7 @@ pub(crate) fn write_bytes_to_file(
     // Appended, not `with_extension`, which would *replace* `.dat` and could
     // collide with a real neighbour.
     let mut temporary = path.clone().into_os_string();
-    temporary.push(format!(".rosetta3-{}", std::process::id()));
+    temporary.push(format!(".rosemary-{}", std::process::id()));
     let temporary = std::path::PathBuf::from(temporary);
     std::fs::write(&temporary, bytes)?;
     match std::fs::rename(&temporary, &path) {

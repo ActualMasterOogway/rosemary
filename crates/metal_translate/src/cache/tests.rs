@@ -389,11 +389,11 @@ fn the_cache_directory_follows_the_environment() {
 
     assert_eq!(
         base_directory_from(None, Some("/xdg".into()), Some("/home/user".into())),
-        Some(PathBuf::from("/xdg/rosetta3/metal-shaders")),
+        Some(PathBuf::from("/xdg/rosemary/metal-shaders")),
     );
     assert_eq!(
         base_directory_from(None, Some("".into()), Some("/home/user".into())),
-        Some(PathBuf::from("/home/user/.cache/rosetta3/metal-shaders")),
+        Some(PathBuf::from("/home/user/.cache/rosemary/metal-shaders")),
     );
     assert_eq!(base_directory_from(None, None, None), None);
 }

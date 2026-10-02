@@ -21,7 +21,7 @@ fn main() {
     files.sort();
 
     let mut hasher = sha256::Sha256::new();
-    hasher.update_field(b"rosetta3 metal_translate crate content v1");
+    hasher.update_field(b"rosemary metal_translate crate content v1");
     hasher.update(&(files.len() as u64).to_le_bytes());
     for (relative, absolute) in &files {
         let contents = std::fs::read(absolute)

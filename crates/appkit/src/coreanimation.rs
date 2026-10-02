@@ -602,7 +602,7 @@ fn number(value: Id) -> Option<f64> {
         static SAID: std::sync::Once = std::sync::Once::new();
         SAID.call_once(|| {
             eprintln!(
-                "rosetta3: appkit: a CABasicAnimation value that is not an NSNumber is not \
+                "rosemary: appkit: a CABasicAnimation value that is not an NSNumber is not \
                  interpolated here; the property keeps its model value"
             );
         });
@@ -891,7 +891,7 @@ fn say_unanimated(key_path: &str) {
     }
     said.push(key_path.to_string());
     eprintln!(
-        "rosetta3: appkit: a CABasicAnimation of {key_path:?} is not animated here; the layer \
+        "rosemary: appkit: a CABasicAnimation of {key_path:?} is not animated here; the layer \
          shows its model value"
     );
 }
@@ -1211,7 +1211,7 @@ fn say_undrawn_format(format: u32) {
     if !said.contains(&format) {
         said.push(format);
         eprintln!(
-            "rosetta3: appkit: layer contents in IOSurface pixel format {:?} are not drawn; only \
+            "rosemary: appkit: layer contents in IOSurface pixel format {:?} are not drawn; only \
              'BGRA' and 'RGBA' are",
             String::from_utf8_lossy(&format.to_be_bytes())
         );
@@ -1853,9 +1853,9 @@ mod tests {
     #[test]
     fn a_wanted_layer_comes_from_the_views_make_backing_layer() {
         crate::bootstrap();
-        let class = objc::class::lookup(c"R3MetalBackedView").unwrap_or_else(|| {
+        let class = objc::class::lookup(c"RosemaryMetalBackedView").unwrap_or_else(|| {
             let class = corefoundation::base::register(
-                c"R3MetalBackedView",
+                c"RosemaryMetalBackedView",
                 objc::class::lookup(c"NSView"),
                 crate::view::INSTANCE_SIZE,
                 false,

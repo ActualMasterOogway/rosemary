@@ -212,7 +212,7 @@ fn start(
             Ok(gpu) => Some(gpu),
             Err(why) => {
                 eprintln!(
-                    "rosetta3: webkit: compositor: composing on the CPU, as the GPU cannot be used: {why}"
+                    "rosemary: webkit: compositor: composing on the CPU, as the GPU cannot be used: {why}"
                 );
                 None
             }
@@ -231,7 +231,7 @@ fn start(
                     .display
                     .insert_client(stream, Arc::new(ClientState::default()))
                 {
-                    eprintln!("rosetta3: webkit: compositor: GTK could not connect: {why}");
+                    eprintln!("rosemary: webkit: compositor: GTK could not connect: {why}");
                     return Ok(PostAction::Continue);
                 }
                 // One client, and nobody else should find the socket.
@@ -245,7 +245,7 @@ fn start(
             |_, display, state| {
                 // SAFETY: the display is not dropped while its source is live.
                 if let Err(why) = unsafe { display.get_mut() }.dispatch_clients(state) {
-                    eprintln!("rosetta3: webkit: compositor: {why}");
+                    eprintln!("rosemary: webkit: compositor: {why}");
                 }
                 Ok(PostAction::Continue)
             },
@@ -282,7 +282,7 @@ impl State {
                     dmabuf.create_global_with_default_feedback::<State>(&display, &feedback);
                 }
                 Err(why) => {
-                    eprintln!("rosetta3: webkit: compositor: composing on the CPU: {why}");
+                    eprintln!("rosemary: webkit: compositor: composing on the CPU: {why}");
                     gpu = None;
                 }
             }
@@ -313,11 +313,11 @@ impl State {
             .expect("the US keymap always compiles");
         let pointer = seat.add_pointer();
         let output = Output::new(
-            "rosetta3".to_string(),
+            "rosemary".to_string(),
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
-                make: "Rosetta 3".to_string(),
+                make: "Rosemary".to_string(),
                 model: "WebKit".to_string(),
             },
         );
@@ -405,7 +405,7 @@ impl State {
             (self.shared.wake)();
         }
         if let Err(why) = self.display.flush_clients() {
-            eprintln!("rosetta3: webkit: compositor: {why}");
+            eprintln!("rosemary: webkit: compositor: {why}");
         }
     }
 
@@ -709,7 +709,7 @@ impl State {
                 })
                 .unwrap_or_default();
                 eprintln!(
-                    "rosetta3: webkit: closing GTK window {title:?}, which no web view shows"
+                    "rosemary: webkit: closing GTK window {title:?}, which no web view shows"
                 );
                 window.closed = true;
                 window.toplevel.send_close();
@@ -827,7 +827,7 @@ impl State {
         }
         if crate::engine::tracing() {
             eprintln!(
-                "rosetta3: webkit: compositor: window {window} is on {:?} at {} mHz",
+                "rosemary: webkit: compositor: window {window} is on {:?} at {} mHz",
                 monitor.name, monitor.refresh
             );
         }
@@ -850,11 +850,11 @@ impl State {
             monitor
                 .name
                 .clone()
-                .unwrap_or_else(|| "rosetta3".to_string()),
+                .unwrap_or_else(|| "rosemary".to_string()),
             PhysicalProperties {
                 size: (width_mm as i32, height_mm as i32).into(),
                 subpixel: Subpixel::Unknown,
-                make: "Rosetta 3".to_string(),
+                make: "Rosemary".to_string(),
                 model: "WebKit".to_string(),
             },
         );
@@ -874,7 +874,7 @@ impl State {
         self.next_output += 1;
         if crate::engine::tracing() {
             eprintln!(
-                "rosetta3: webkit: compositor: output {id} for {:?}: {}x{} at {} mHz, {width_mm}x{height_mm} mm",
+                "rosemary: webkit: compositor: output {id} for {:?}: {}x{} at {} mHz, {width_mm}x{height_mm} mm",
                 monitor.name, monitor.width, monitor.height, monitor.refresh
             );
         }
@@ -939,7 +939,7 @@ impl State {
                     let bytes = read_all(read);
                     if crate::engine::tracing() {
                         eprintln!(
-                            "rosetta3: webkit: compositor: read {ty}: {:?}",
+                            "rosemary: webkit: compositor: read {ty}: {:?}",
                             bytes.as_ref().map(Vec::len)
                         );
                     }
@@ -1278,7 +1278,7 @@ impl XdgShellHandler for State {
         let geometry = self.constrain(&kind, positioner);
         surface.with_pending_state(|state| state.geometry = geometry);
         if let Err(why) = self.popups.track_popup(kind) {
-            eprintln!("rosetta3: webkit: compositor: a popup could not be tracked: {why:?}");
+            eprintln!("rosemary: webkit: compositor: a popup could not be tracked: {why:?}");
         }
         let scale = surface
             .get_parent_surface()
@@ -1364,7 +1364,7 @@ impl SelectionHandler for State {
         };
         let offered = source.mime_types();
         if crate::engine::tracing() {
-            eprintln!("rosetta3: webkit: compositor: GTK offers {offered:?}");
+            eprintln!("rosemary: webkit: compositor: GTK offers {offered:?}");
         }
         let text = TEXT_TYPES
             .iter()

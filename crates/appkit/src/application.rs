@@ -996,7 +996,7 @@ mod tests {
     fn the_shared_application_is_the_class_it_was_asked_for_and_is_what_ns_app_holds() {
         crate::bootstrap();
         let subclass = corefoundation::base::register(
-            c"R3TestApplicationSubclass",
+            c"RosemaryTestApplicationSubclass",
             objc::class::lookup(c"NSApplication"),
             INSTANCE_SIZE,
             false,
@@ -1011,7 +1011,7 @@ mod tests {
         assert!(!app.is_null());
         // SAFETY: a live object this runtime allocated.
         let class = unsafe { objc::object::class_of(app) }.expect("a class");
-        assert_eq!(class.name_str(), "R3TestApplicationSubclass");
+        assert_eq!(class.name_str(), "RosemaryTestApplicationSubclass");
 
         // The same object the second time, whatever it is sent to.
         let again = unsafe {
@@ -1089,7 +1089,7 @@ mod tests {
         }
 
         let delegate_class = corefoundation::base::register(
-            c"R3TestOpenUrlsDelegate",
+            c"RosemaryTestOpenUrlsDelegate",
             objc::class::lookup(c"NSObject"),
             size_of::<usize>(),
             false,
@@ -1165,7 +1165,7 @@ mod tests {
 
         SEEN.lock().expect("no panic").clear();
         let class = corefoundation::base::register(
-            c"R3TestPostedEventApplication",
+            c"RosemaryTestPostedEventApplication",
             objc::class::lookup(c"NSApplication"),
             INSTANCE_SIZE,
             false,

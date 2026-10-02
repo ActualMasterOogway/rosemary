@@ -124,7 +124,8 @@ mod tests {
     /// A prefix root with the directories the mounts sit in, named per test
     /// so the suite can run in parallel.
     fn prefix(test: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("r3-listing-{test}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("rosemary-listing-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for dir in ["private/etc", "Volumes/Host", "Users"] {
             std::fs::create_dir_all(root.join(dir)).expect("a fixture directory");

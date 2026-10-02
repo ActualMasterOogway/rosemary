@@ -46,7 +46,7 @@ struct Resolved {
 
 fn resolved() -> &'static Resolved {
     static RESOLVED: LazyLock<Resolved> = LazyLock::new(|| {
-        let setting = crate::layout::setting_from(std::env::var_os("ROSETTA3_PREFIX"));
+        let setting = crate::layout::setting_from(std::env::var_os("ROSEMARY_PREFIX"));
         let Setting::At(directory) = setting else {
             return Resolved {
                 prefix: None,
@@ -99,7 +99,7 @@ pub fn host_home_directory() -> String {
 /// delete or archive, and a guest cannot scribble on the real one.
 fn host_home() -> Option<&'static Path> {
     static HOME: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-        if std::env::var("ROSETTA3_PREFIX_HOME").as_deref() != Ok("host") {
+        if std::env::var("ROSEMARY_PREFIX_HOME").as_deref() != Ok("host") {
             return None;
         }
         std::env::var_os("HOME")
@@ -111,14 +111,14 @@ fn host_home() -> Option<&'static Path> {
 
 /// Whether every translation is announced on stderr.
 ///
-/// `ROSETTA3_TRACE_PREFIX=1`. The namespace sits underneath every file call a
+/// `ROSEMARY_TRACE_PREFIX=1`. The namespace sits underneath every file call a
 /// guest makes, so when a program behaves differently inside a prefix this is
 /// the first thing to look at: it shows the exact pair of spellings, which is
 /// what a wrong answer here looks like.
 fn tracing() -> bool {
     #[dynamic]
     static ON: bool =
-        std::env::var_os("ROSETTA3_TRACE_PREFIX").is_some_and(|v| v != "0" && !v.is_empty());
+        std::env::var_os("ROSEMARY_TRACE_PREFIX").is_some_and(|v| v != "0" && !v.is_empty());
     *ON
 }
 
@@ -226,7 +226,7 @@ fn cstring(path: PathBuf) -> Option<CString> {
 mod tests {
     use super::*;
 
-    /// The tests here cannot set `ROSETTA3_PREFIX` - the table is resolved once
+    /// The tests here cannot set `ROSEMARY_PREFIX` - the table is resolved once
     /// per process - so they assert the shape the process actually has, which
     /// on a machine with no prefix created is identity.
     #[test]

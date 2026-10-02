@@ -760,7 +760,7 @@ unsafe extern "C" fn set_event_handler(
     });
     if tracing() {
         eprintln!(
-            "rosetta3: foundation: handler for {}/{} is -[{} {}]",
+            "rosemary: foundation: handler for {}/{} is -[{} {}]",
             spelling(event_class),
             spelling(event_id),
             // SAFETY: a live object the guest handed over.
@@ -894,7 +894,7 @@ pub unsafe fn dispatch(event: Id) -> Id {
         .map(|h| (h.handler, h.selector));
     if tracing() {
         eprintln!(
-            "rosetta3: foundation: dispatch {}/{} to {} handler(s)",
+            "rosemary: foundation: dispatch {}/{} to {} handler(s)",
             spelling(event_class),
             spelling(event_id),
             found.is_some() as u8,
@@ -1259,8 +1259,12 @@ mod tests {
 
     fn install_handler(class: u32, id: u32) -> Id {
         crate::bootstrap();
-        let handler =
-            corefoundation::base::register(c"R3AppleEventHandler", None, size_of::<usize>(), false);
+        let handler = corefoundation::base::register(
+            c"RosemaryAppleEventHandler",
+            None,
+            size_of::<usize>(),
+            false,
+        );
         handler.replace_method(
             objc::sel::get("handle:withReply:"),
             record as *const c_void,
@@ -1288,13 +1292,13 @@ mod tests {
         let handler = install_handler(INTERNET_EVENT_CLASS, GET_URL);
         let e = event(INTERNET_EVENT_CLASS, GET_URL);
         // SAFETY: two descriptors this call made.
-        unsafe { set_param(e, KEY_DIRECT_OBJECT, string("r3://open")) };
+        unsafe { set_param(e, KEY_DIRECT_OBJECT, string("rosemary://open")) };
         let reply = unsafe { dispatch(e) };
         assert!(!reply.is_null());
 
         assert_eq!(
             seen(INTERNET_EVENT_CLASS),
-            [(INTERNET_EVENT_CLASS, GET_URL, "r3://open".to_string())]
+            [(INTERNET_EVENT_CLASS, GET_URL, "rosemary://open".to_string())]
         );
 
         // SAFETY: neither of the first two arguments is read.
@@ -1314,7 +1318,7 @@ mod tests {
     #[test]
     fn an_event_nobody_registered_for_is_not_an_error() {
         crate::bootstrap();
-        let e = event(four(b"r3ev"), four(b"none"));
+        let e = event(four(b"rmev"), four(b"none"));
         // SAFETY: a descriptor this call made.
         let reply = unsafe { dispatch(e) };
         // SAFETY: the reply is a descriptor this module made.
@@ -1328,16 +1332,16 @@ mod tests {
     /// replaces, and two would deliver the event twice.
     #[test]
     fn registering_twice_replaces_the_handler() {
-        let a = install_handler(four(b"r3tw"), four(b"twic"));
-        let b = install_handler(four(b"r3tw"), four(b"twic"));
-        raise(four(b"r3tw"), four(b"twic"));
-        assert_eq!(seen(four(b"r3tw")).len(), 1);
+        let a = install_handler(four(b"rmtw"), four(b"twic"));
+        let b = install_handler(four(b"rmtw"), four(b"twic"));
+        raise(four(b"rmtw"), four(b"twic"));
+        assert_eq!(seen(four(b"rmtw")).len(), 1);
         // SAFETY: neither of the first two arguments is read.
         unsafe {
             remove_event_handler(
                 std::ptr::null_mut(),
                 objc::sel::get("x"),
-                four(b"r3tw"),
+                four(b"rmtw"),
                 four(b"twic"),
             )
         };
@@ -1349,18 +1353,18 @@ mod tests {
     /// `-removeEventHandlerForEventClass:andEventID:` worth having.
     #[test]
     fn a_removed_handler_hears_nothing() {
-        let handler = install_handler(four(b"r3rm"), four(b"gone"));
+        let handler = install_handler(four(b"rmrm"), four(b"gone"));
         // SAFETY: neither of the first two arguments is read.
         unsafe {
             remove_event_handler(
                 std::ptr::null_mut(),
                 objc::sel::get("x"),
-                four(b"r3rm"),
+                four(b"rmrm"),
                 four(b"gone"),
             )
         };
-        raise(four(b"r3rm"), four(b"gone"));
-        assert!(seen(four(b"r3rm")).is_empty());
+        raise(four(b"rmrm"), four(b"gone"));
+        assert!(seen(four(b"rmrm")).is_empty());
         objc::arc::release(handler);
     }
 
@@ -1503,7 +1507,7 @@ mod tests {
     #[test]
     fn a_suspended_event_is_readable_until_it_is_resumed() {
         crate::bootstrap();
-        let e = event(four(b"r3su"), four(b"susp"));
+        let e = event(four(b"rmsu"), four(b"susp"));
         let reply = event(CORE_EVENT_CLASS, ANSWER);
         CURRENT.with(|c| c.set((e, reply)));
         // SAFETY: neither argument is read.

@@ -89,7 +89,7 @@ unsafe extern "C" fn remove_suite_named(receiver: Id, _sel: Sel, name: Id) {
 /// Under the directory macOS keeps preferences in, so a second launch finds
 /// what the first one wrote.
 fn store_path() -> PathBuf {
-    crate::host_home_directory().join("Library/Preferences/rosetta3-defaults.tsv")
+    crate::host_home_directory().join("Library/Preferences/rosemary-defaults.tsv")
 }
 
 /// Tab-separated `key\tvalue`. A key or a value containing a tab or a newline

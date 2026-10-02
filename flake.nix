@@ -1,5 +1,5 @@
 {
-  description = "Rosetta 3 development shell";
+  description = "Rosemary development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

@@ -51,7 +51,7 @@ pub fn offer(engine: &Engine) {
 pub fn copied(entries: Vec<(String, Vec<u8>)>) {
     if crate::engine::tracing() {
         let types: Vec<&str> = entries.iter().map(|(ty, _)| ty.as_str()).collect();
-        eprintln!("rosetta3: webkit: the page copied {types:?}");
+        eprintln!("rosemary: webkit: the page copied {types:?}");
     }
     let mut text = None;
     let mut html = None;

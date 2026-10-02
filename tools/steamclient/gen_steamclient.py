@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the guest-facing SteamClient dylib sources.
 
-Rosetta 3 bridges a macOS guest's Steam calls to the host's native Steam
+Rosemary bridges a macOS guest's Steam calls to the host's native Steam
 client, the way Proton's lsteamclient bridges a Windows guest's. This script
 generates the guest half: a macOS dylib that publishes every historical
 Steamworks interface with the vtable layout the guest expects, and forwards
@@ -11,7 +11,7 @@ Unlike Proton, nothing here converts data. A macOS x86-64 (or arm64) guest and
 a Linux host share the Itanium C++ ABI and the same struct layouts, so only the
 vtable shape has to be reproduced. Types the bridge does not need to understand
 cross as opaque pointers; the eleven types that are passed or returned by value
-decide a calling convention and are declared in support/rosetta3_steam.h.
+decide a calling convention and are declared in support/rosemary_steam.h.
 
 Usage:
     gen_steamclient.py --sdk-root DIR [--out DIR] [--sdk VERSION ...]
@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sdkparse
 from sdkparse import ParseError
 
-SUPPORT_FILES = ["rosetta3_steam.h", "steamclient_main.cpp"]
+SUPPORT_FILES = ["rosemary_steam.h", "steamclient_main.cpp"]
 
 # Guest spelling and size for every scalar that reaches a signature. Sizes are
 # LP64, which both a macOS guest and a Linux host agree on.
@@ -68,7 +68,7 @@ PRIMITIVES = {
     "wchar_t": ("int32_t", 4),
 }
 
-# Types crossing by value. Their layout is reproduced in rosetta3_steam.h; the
+# Types crossing by value. Their layout is reproduced in rosemary_steam.h; the
 # sizes here let the generator record parameter offsets for the host side.
 BY_VALUE_TYPES = {
     "CSteamID": 8,
@@ -205,7 +205,7 @@ def resolve_type(sdk, spelling):
 
     raise ParseError(
         f"SDK {sdk.version}: no ABI mapping for type {source!r}. Add it to "
-        f"BY_VALUE_TYPES (with a layout in support/rosetta3_steam.h) if it "
+        f"BY_VALUE_TYPES (with a layout in support/rosemary_steam.h) if it "
         f"crosses by value.")
 
 
@@ -346,8 +346,8 @@ def write_methods_header(out, interfaces):
     ids = {}
     with open(os.path.join(out, "steamclient_methods.h"), "w") as f:
         f.write(HEADER)
-        f.write("\n#ifndef ROSETTA3_STEAMCLIENT_METHODS_H\n")
-        f.write("#define ROSETTA3_STEAMCLIENT_METHODS_H\n\n")
+        f.write("\n#ifndef ROSEMARY_STEAMCLIENT_METHODS_H\n")
+        f.write("#define ROSEMARY_STEAMCLIENT_METHODS_H\n\n")
         f.write("enum steam_dispatch_method\n{\n")
         next_id = 0
         for name in BUILTIN_DISPATCH:
@@ -370,7 +370,7 @@ def write_interface_source(out, name, interfaces, ids):
     path = os.path.join(out, f"iface_{name}.cpp")
     with open(path, "w") as f:
         f.write(HEADER)
-        f.write('\n#include "rosetta3_steam.h"\n')
+        f.write('\n#include "rosemary_steam.h"\n')
         f.write('#include "steamclient_methods.h"\n\n')
 
         for iface in interfaces:
@@ -401,7 +401,7 @@ def write_interface_source(out, name, interfaces, ids):
                 f.write("        p.iface = this->u_iface;\n")
                 for arg in method.args:
                     f.write(f"        p.{arg.name} = {arg.name};\n")
-                f.write(f"        rosetta3_steamclient_dispatch("
+                f.write(f"        rosemary_steamclient_dispatch("
                         f"STEAM_METHOD_{method.unique_name}, &p);\n")
                 if method.iface_version:
                     f.write(f"        return steam_wrap_interface("
@@ -422,7 +422,7 @@ def write_interface_source(out, name, interfaces, ids):
 def write_registry(out, interfaces):
     with open(os.path.join(out, "steamclient_registry.cpp"), "w") as f:
         f.write(HEADER)
-        f.write('\n#include "rosetta3_steam.h"\n\n')
+        f.write('\n#include "rosemary_steam.h"\n\n')
         for iface in interfaces:
             f.write(f"extern void *steam_create_{iface.class_name}"
                     f"(void *storage, void *u_iface);\n")
@@ -441,7 +441,7 @@ def write_registry(out, interfaces):
 # JSON would do the same job, but it is five megabytes of it and the runtime has
 # no JSON reader; this is one sequential walk with no allocation per method.
 #
-#   magic "R3SC", u32 version, u32 method_count
+#   magic "RMSC", u32 version, u32 method_count
 #   then one record per dispatch id, in id order:
 #     u16 vtable_index   0xffff for an id that is not an interface method
 #     u16 iface_offset
@@ -484,7 +484,7 @@ def write_dispatch_table(out, interfaces, ids):
             body += struct.pack("<BBH", arg.type.abi_class, arg.type.size, arg.offset)
 
     with open(os.path.join(out, "steamclient_dispatch.bin"), "wb") as f:
-        f.write(b"R3SC")
+        f.write(b"RMSC")
         f.write(struct.pack("<II", DISPATCH_TABLE_VERSION, count))
         f.write(body)
 
@@ -522,7 +522,7 @@ BUILD_SH = r'''#!/bin/sh
 #
 # Builds the guest-facing SteamClient dylib. Nothing here needs a macOS SDK:
 # the sources are freestanding, and the one symbol they leave undefined,
-# rosetta3_steamclient_dispatch, is resolved by Rosetta 3 when the guest loads
+# rosemary_steamclient_dispatch, is resolved by Rosemary when the guest loads
 # the dylib.
 set -eu
 

@@ -1161,11 +1161,14 @@ mod tests {
             let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
             f(class as Id, objc::sel::get("sharedApplication"));
         }
-        let target_class =
-            objc::class::allocate_pair(objc::class::lookup(c"NSObject"), c"R3TestMenuTarget", 0)
-                .expect("a class of this name is not declared elsewhere");
+        let target_class = objc::class::allocate_pair(
+            objc::class::lookup(c"NSObject"),
+            c"RosemaryTestMenuTarget",
+            0,
+        )
+        .expect("a class of this name is not declared elsewhere");
         target_class.add_method(
-            objc::sel::get("r3TestSave:"),
+            objc::sel::get("rosemaryTestSave:"),
             save as objc::class::Imp,
             c"v24@0:8@16",
         );
@@ -1187,7 +1190,7 @@ mod tests {
             set_item_action(
                 save_item,
                 objc::sel::get("setAction:"),
-                objc::sel::get("r3TestSave:"),
+                objc::sel::get("rosemaryTestSave:"),
             );
             set_item_target(save_item, objc::sel::get("setTarget:"), target);
             set_key_equivalent(
@@ -1240,7 +1243,7 @@ mod tests {
             set_item_action(
                 orphan,
                 objc::sel::get("setAction:"),
-                objc::sel::get("r3TestNobodyImplementsThis:"),
+                objc::sel::get("rosemaryTestNobodyImplementsThis:"),
             );
             add_item(file, objc::sel::get("addItem:"), orphan);
         }

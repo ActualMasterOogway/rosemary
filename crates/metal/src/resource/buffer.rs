@@ -1,6 +1,6 @@
 use super::*;
 
-/// `ROSETTA3_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
+/// `ROSEMARY_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
 /// length, its `MTLResourceOptions` and how many are live.
 ///
 /// The aggregate counters say a run is allocating gigabytes a second; only the
@@ -10,7 +10,7 @@ use super::*;
 #[inline(always)]
 pub(super) fn tracing_buffers() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_TRACE_BUFFERS").is_some();
+    static ON: bool = std::env::var_os("ROSEMARY_TRACE_BUFFERS").is_some();
 
     *ON
 }
@@ -22,7 +22,7 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
     crate::stats::peak(crate::stats::Counter::BufferPeakBytes, length as u64);
     if tracing_buffers() {
         eprintln!(
-            "rosetta3: Metal: newBuffer {length} options {options:#x} live {}",
+            "rosemary: Metal: newBuffer {length} options {options:#x} live {}",
             crate::live_buffers(1)
         );
     }
@@ -39,7 +39,7 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
     crate::stats::count(crate::stats::Counter::BuffersCreated);
     crate::stats::add(crate::stats::Counter::BufferBytes, length as u64);
     object::make(
-        c"R3MTLBuffer",
+        c"RosemaryMTLBuffer",
         Buffer {
             gpu,
             inner,
@@ -73,12 +73,12 @@ pub(super) unsafe extern "C" fn buffer_storage_mode(receiver: Id, _sel: Sel) -> 
 /// The last reference is gone, so nothing can bind it again, and a command
 /// buffer which did bind it holds a reference of its own until the work it was
 /// recorded into has completed.
-/// TEMPORARY: `ROSETTA3_METAL_LEAK=1` keeps every device resource alive, to tell
+/// TEMPORARY: `ROSEMARY_METAL_LEAK=1` keeps every device resource alive, to tell
 /// a fault caused by freeing one too early from every other kind.
 #[inline(always)]
 pub(crate) fn leaking() -> bool {
     #[dynamic]
-    static LEAK: bool = std::env::var_os("ROSETTA3_METAL_LEAK").is_some();
+    static LEAK: bool = std::env::var_os("ROSEMARY_METAL_LEAK").is_some();
 
     *LEAK
 }
@@ -88,7 +88,7 @@ pub(super) unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
     let buffer = unsafe { object::body::<Buffer>(receiver) };
     if tracing_buffers() {
         eprintln!(
-            "rosetta3: Metal: freeBuffer {} live {}",
+            "rosemary: Metal: freeBuffer {} live {}",
             buffer.inner.length,
             crate::live_buffers(-1)
         );

@@ -28,18 +28,18 @@ use crate::gtk::{self, Ptr};
 use crate::{send, web_view};
 
 /// The message of a bridge prompt; any other prompt is the page's own.
-const MAGIC: &str = "\u{1}rosetta3-webscript";
+const MAGIC: &str = "\u{1}rosemary-webscript";
 
 /// How long a synchronous evaluation waits for the page.
 const EVALUATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run at document start in the top frame, before the page's scripts.
 const HELPER: &str = r#"(function () {
-  if (window.__rosetta3WebScript) return;
+  if (window.__rosemaryWebScript) return;
   var ask = window.prompt.bind(window);
   var run = eval;
   function call(message) {
-    var text = ask("\u0001rosetta3-webscript", JSON.stringify(message));
+    var text = ask("\u0001rosemary-webscript", JSON.stringify(message));
     var answer = JSON.parse(text || "{}");
     (answer.s || []).forEach(function (script) { run(script); });
     if (answer.e !== undefined) throw new Error(answer.e);
@@ -54,7 +54,7 @@ const HELPER: &str = r#"(function () {
     });
     window[binding.k] = object;
   }
-  Object.defineProperty(window, "__rosetta3WebScript", {value: {call: call, define: define}});
+  Object.defineProperty(window, "__rosemaryWebScript", {value: {call: call, define: define}});
   call({t: "clear"});
 })();"#;
 
@@ -192,7 +192,7 @@ fn run_script(object: Id, script: String) -> Id {
     .flatten();
     if deferred.is_some() {
         if engine::tracing() {
-            eprintln!("rosetta3: webkit: script deferred until the page's bridge call returns");
+            eprintln!("rosemary: webkit: script deferred until the page's bridge call returns");
         }
         return std::ptr::null_mut();
     }
@@ -217,7 +217,7 @@ unsafe extern "C" fn evaluated(source: Ptr, result: Ptr, data: Ptr) {
         unsafe { (api.webkit_web_view_evaluate_javascript_finish)(source, result, &mut error) };
     let object = match unsafe { gtk::take_error(api, error) } {
         Some((_, message)) => {
-            eprintln!("rosetta3: webkit: a script native code ran threw: {message}");
+            eprintln!("rosemary: webkit: a script native code ran threw: {message}");
             std::ptr::null_mut()
         }
         // SAFETY: a value this callback owns; the bridged object is
@@ -267,7 +267,7 @@ fn evaluate_now(object: Id, script: &str) -> Id {
     }
     let slot = slot.borrow();
     if !slot.done {
-        eprintln!("rosetta3: webkit: a script native code ran did not answer in time");
+        eprintln!("rosemary: webkit: a script native code ran did not answer in time");
         return std::ptr::null_mut();
     }
     objc::arc::autorelease(slot.value)
@@ -349,7 +349,7 @@ fn set_window_value(object: Id, key: &str, value: Id) {
     let names: Vec<String> = methods.iter().map(|(n, _)| crate::js::quote(n)).collect();
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: window.{key} is an Objective-C object answering {}",
+            "rosemary: webkit: window.{key} is an Objective-C object answering {}",
             names.join(", ")
         );
     }
@@ -363,7 +363,7 @@ fn set_window_value(object: Id, key: &str, value: Id) {
     run_script(
         object,
         format!(
-            "window.__rosetta3WebScript.define({{o: {id}, k: {}, m: [{}]}});",
+            "window.__rosemaryWebScript.define({{o: {id}, k: {}, m: [{}]}});",
             crate::js::quote(key),
             names.join(", ")
         ),
@@ -559,7 +559,7 @@ fn call(object: Id, message: Id) -> Result<Option<String>, String> {
         args.push(argument(value, *code)?);
     }
     if engine::tracing() {
-        eprintln!("rosetta3: webkit: the page calls {name} ({types})");
+        eprintln!("rosemary: webkit: the page calls {name} ({types})");
     }
     // SAFETY: the receiver answers `sel` with word-sized arguments, as checked.
     let value = unsafe { send_words(receiver, sel, &args) }
@@ -592,7 +592,7 @@ fn clear(object: Id) {
 fn handle(object: Id, request: &str) -> String {
     if engine::tracing() {
         let shown: String = request.chars().take(300).collect();
-        eprintln!("rosetta3: webkit: bridge request {shown}");
+        eprintln!("rosemary: webkit: bridge request {shown}");
     }
     let pool = objc::arc::pool_push();
     with(object, |v| v.depth += 1);
@@ -617,7 +617,7 @@ fn handle(object: Id, request: &str) -> String {
         Ok(Some(value)) => out.push_str(&format!("\"r\": {value}, ")),
         Ok(None) => {}
         Err(why) => {
-            eprintln!("rosetta3: webkit: a page's call into native code failed: {why}");
+            eprintln!("rosemary: webkit: a page's call into native code failed: {why}");
             out.push_str(&format!("\"e\": {}, ", crate::js::quote(&why)));
         }
     }
@@ -625,7 +625,7 @@ fn handle(object: Id, request: &str) -> String {
     out.push_str(&format!("\"s\": [{}]}}", scripts.join(", ")));
     if engine::tracing() {
         let shown: String = out.chars().take(300).collect();
-        eprintln!("rosetta3: webkit: bridge answer {shown}");
+        eprintln!("rosemary: webkit: bridge answer {shown}");
     }
     out
 }
@@ -694,7 +694,7 @@ unsafe extern "C" fn script_dialog(_gtk: Ptr, dialog: Ptr, data: Ptr) -> c_int {
                     }
                 }
             }
-            _ => eprintln!("rosetta3: webkit: the page's dialog went unshown: {message}"),
+            _ => eprintln!("rosemary: webkit: the page's dialog went unshown: {message}"),
         }
     }
     1
@@ -801,7 +801,7 @@ unsafe extern "C" fn decide_policy(_gtk: Ptr, decision: Ptr, kind: c_int, data: 
         _ => std::ptr::null_mut(),
     };
     if engine::tracing() {
-        eprintln!("rosetta3: webkit: asking the policy delegate about {url}");
+        eprintln!("rosemary: webkit: asking the policy delegate about {url}");
     }
     // SAFETY: the delegate answers the selector, `void (id, SEL, id x5)`.
     unsafe {
@@ -1115,7 +1115,7 @@ unsafe extern "C" fn set_application_name(receiver: Id, _sel: Sel, name: Id) {
         false => format!("{} {name}", web_view::USER_AGENT),
     };
     if engine::tracing() {
-        eprintln!("rosetta3: webkit: user agent {agent}");
+        eprintln!("rosemary: webkit: user agent {agent}");
     }
     let agent = gtk::c_string(&agent);
     // SAFETY: the view's own settings, and a string they copy.
@@ -1321,7 +1321,7 @@ unsafe extern "C" fn script_call(receiver: Id, _sel: Sel, name: Id, arguments: I
             Ok(text) => text,
             Err(why) => {
                 eprintln!(
-                    "rosetta3: webkit: {name} was not called: its arguments are not data ({why})"
+                    "rosemary: webkit: {name} was not called: its arguments are not data ({why})"
                 );
                 return undefined();
             }
@@ -1352,7 +1352,7 @@ unsafe extern "C" fn script_string(_receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn throw_exception(_class: Id, _sel: Sel, message: Id) -> u8 {
     eprintln!(
-        "rosetta3: webkit: a native method threw into the page: {}",
+        "rosemary: webkit: a native method threw into the page: {}",
         engine::text_of(message)
     );
     0
@@ -1399,7 +1399,7 @@ unsafe extern "C" fn listener_ignore(receiver: Id, _sel: Sel) {
 
 unsafe extern "C" fn listener_download(receiver: Id, _sel: Sel) {
     eprintln!(
-        "rosetta3: webkit: a policy delegate asked for a download, which is not supported; ignored"
+        "rosemary: webkit: a policy delegate asked for a download, which is not supported; ignored"
     );
     decide(receiver, |api, d| unsafe {
         (api.webkit_policy_decision_ignore)(d)

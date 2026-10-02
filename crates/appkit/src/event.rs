@@ -50,7 +50,7 @@ pub fn add_pump_hook(hook: fn()) {
     }
 }
 
-/// `ROSETTA3_DEBUG_RESIZE=WxH@SECONDS`: resize the program's window once, that
+/// `ROSEMARY_DEBUG_RESIZE=WxH@SECONDS`: resize the program's window once, that
 /// many seconds in.
 ///
 /// A resize is the one window event that cannot be produced without a person
@@ -69,7 +69,7 @@ fn debug_resize() {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let request = *REQUEST.get_or_init(|| {
-        let value = std::env::var("ROSETTA3_DEBUG_RESIZE").ok()?;
+        let value = std::env::var("ROSEMARY_DEBUG_RESIZE").ok()?;
         let (size, after) = value.split_once('@').unwrap_or((value.as_str(), "5"));
         let (width, height) = size.split_once('x')?;
         Some((
@@ -90,14 +90,14 @@ fn debug_resize() {
     let Some(sdl) = window::sdl_windows().into_iter().next() else {
         return;
     };
-    eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_RESIZE: resizing to {width}x{height}");
+    eprintln!("rosemary: appkit: ROSEMARY_DEBUG_RESIZE: resizing to {width}x{height}");
     sdl3::video::set_window_size(sdl, width, height);
 }
 
-/// `ROSETTA3_DEBUG_KEY=NAME[,NAME...]@SECONDS`: press and release each key in
+/// `ROSEMARY_DEBUG_KEY=NAME[,NAME...]@SECONDS`: press and release each key in
 /// turn, that many seconds in.
 ///
-/// The companion to `ROSETTA3_DEBUG_RESIZE`, and there for the same reason: a
+/// The companion to `ROSEMARY_DEBUG_RESIZE`, and there for the same reason: a
 /// keystroke cannot be produced from a script under a compositor that does not
 /// implement the virtual-keyboard protocol, so "does the program answer the
 /// keyboard" is otherwise only testable by hand. The event goes through
@@ -112,7 +112,7 @@ fn debug_key() {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let request = REQUEST.get_or_init(|| {
-        let value = std::env::var("ROSETTA3_DEBUG_KEY").ok()?;
+        let value = std::env::var("ROSEMARY_DEBUG_KEY").ok()?;
         let (names, after) = value.split_once('@').unwrap_or((value.as_str(), "5"));
         let keys: Vec<u32> = names
             .split(',')
@@ -140,7 +140,7 @@ fn debug_key() {
     else {
         return;
     };
-    eprintln!("rosetta3: appkit: ROSETTA3_DEBUG_KEY: pressing scancodes {keys:?}");
+    eprintln!("rosemary: appkit: ROSEMARY_DEBUG_KEY: pressing scancodes {keys:?}");
     for scancode in keys {
         for down in [true, false] {
             deliver(sdl3::video::Event::Key {
@@ -155,7 +155,7 @@ fn debug_key() {
     }
 }
 
-/// The USB HID usage id `ROSETTA3_DEBUG_KEY`'s value names, or a raw number.
+/// The USB HID usage id `ROSEMARY_DEBUG_KEY`'s value names, or a raw number.
 pub(crate) fn scancode(name: &str) -> Option<u32> {
     use sdl3::keycodes::scancode;
     Some(match name.to_ascii_lowercase().as_str() {
@@ -171,10 +171,10 @@ pub(crate) fn scancode(name: &str) -> Option<u32> {
     })
 }
 
-/// `ROSETTA3_TRACE_VIEWS=SECONDS`: print each window and the tree of views under
+/// `ROSEMARY_TRACE_VIEWS=SECONDS`: print each window and the tree of views under
 /// it, once, that many seconds in.
 ///
-/// Companion to `ROSETTA3_DEBUG_RESIZE`, and needed for the same reason: the
+/// Companion to `ROSEMARY_DEBUG_RESIZE`, and needed for the same reason: the
 /// question a resize raises is which view ended up the wrong size, and the view
 /// that matters is one the *guest* made - so it is in no debugger's symbol
 /// table, and a release build has inlined every accessor that would name it.
@@ -188,7 +188,7 @@ fn trace_views() {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let Some(after) = *AFTER.get_or_init(|| {
-        std::env::var("ROSETTA3_TRACE_VIEWS")
+        std::env::var("ROSEMARY_TRACE_VIEWS")
             .ok()
             .map(|value| value.trim().parse().unwrap_or(5.0))
     }) else {
@@ -207,7 +207,7 @@ fn trace_views() {
         let sdl = unsafe { window::sdl_window(object) };
         let size = sdl3::video::window_size(sdl).unwrap_or((0, 0));
         out.push_str(&format!(
-            "rosetta3: appkit: window {object:p} sdl {}x{}\n",
+            "rosemary: appkit: window {object:p} sdl {}x{}\n",
             size.0, size.1
         ));
         // SAFETY: null or a view this runtime allocated.
@@ -489,7 +489,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             if held.is_none() && !wants_mouse_moved(object_for(id)) {
                 if tracing() {
                     eprintln!(
-                        "rosetta3: appkit: -mouseMoved: dropped: the window did not ask for it \
+                        "rosemary: appkit: -mouseMoved: dropped: the window did not ask for it \
                          and no view is tracking"
                     );
                 }
@@ -670,7 +670,7 @@ pub(crate) fn dispatch(window: Id, event: Id) {
     // only take it back.
     if !crate::monitor::allows(event) {
         if tracing() {
-            eprintln!("rosetta3: appkit: a local event monitor swallowed the event");
+            eprintln!("rosemary: appkit: a local event monitor swallowed the event");
         }
         return;
     }
@@ -690,13 +690,13 @@ pub(crate) fn dispatch(window: Id, event: Id) {
 /// an event with a position goes to the view under it, and a key event goes to
 /// the first responder. Either way the search walks up the responder chain from
 /// there, and an event nothing implements is dropped.
-/// `ROSETTA3_EVENT_LOG=FILE`: append a line per input event and scripted
+/// `ROSEMARY_EVENT_LOG=FILE`: append a line per input event and scripted
 /// action to a file.
 ///
 /// Not stderr: a guest which redirects its own - Studio replaces it with its
 /// log file once it is running - takes every later trace line with it, and
 /// input arrives long after that.
-pub const LOG_ENV: &str = "ROSETTA3_EVENT_LOG";
+pub const LOG_ENV: &str = "ROSEMARY_EVENT_LOG";
 
 fn log_path() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -763,7 +763,7 @@ pub fn route(window: Id, event: Id) {
         let method = unsafe { objc::object::class_of(owner) }.and_then(|c| c.method(sel));
         if tracing() {
             eprintln!(
-                "rosetta3: appkit: -{selector} to tracking area owner {owner:p}{}",
+                "rosemary: appkit: -{selector} to tracking area owner {owner:p}{}",
                 match method.is_some() {
                     true => "",
                     false => " - NOT implemented",
@@ -789,7 +789,7 @@ pub fn route(window: Id, event: Id) {
     };
     let Some((responder, method)) = chain(start, sel) else {
         if tracing() {
-            eprintln!("rosetta3: appkit: -{selector}: nothing from {start:p} up implements it");
+            eprintln!("rosemary: appkit: -{selector}: nothing from {start:p} up implements it");
         }
         return;
     };
@@ -797,7 +797,7 @@ pub fn route(window: Id, event: Id) {
         // SAFETY: a live object this runtime allocated.
         let class = unsafe { objc::object::class_of(responder) };
         eprintln!(
-            "rosetta3: appkit: -{selector} to {responder:p} ({})",
+            "rosemary: appkit: -{selector} to {responder:p} ({})",
             class.map_or("no class", |c| c.name_str()),
         );
     }
@@ -1023,7 +1023,7 @@ pub(crate) fn object_for(id: u32) -> Id {
 /// simply does not react - and a release build inlines every function on this
 /// path, so a breakpoint cannot answer it either. This is the answer: the name,
 /// the window, its delegate, and whether that delegate implements the method.
-pub const TRACE_ENV: &str = "ROSETTA3_TRACE_EVENT";
+pub const TRACE_ENV: &str = "ROSEMARY_TRACE_EVENT";
 
 pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1034,7 +1034,7 @@ fn post(id: u32, name: &str) {
     let object = object_for(id);
     if object.is_null() {
         if tracing() {
-            eprintln!("rosetta3: appkit: {name}: SDL window {id} is no window this crate made");
+            eprintln!("rosemary: appkit: {name}: SDL window {id} is no window this crate made");
         }
         return;
     }
@@ -1046,7 +1046,7 @@ fn post(id: u32, name: &str) {
 pub(crate) fn post_for(object: Id, name: &str) {
     let delegate = window::delegate_of(object);
     if tracing() {
-        eprintln!("rosetta3: appkit: {name}: window {object:p}, delegate {delegate:p}");
+        eprintln!("rosemary: appkit: {name}: window {object:p}, delegate {delegate:p}");
     }
     if !delegate.is_null() {
         let selector = delegate_selector(name);
@@ -1058,7 +1058,7 @@ pub(crate) fn post_for(object: Id, name: &str) {
         let method = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel));
         if tracing() {
             eprintln!(
-                "rosetta3: appkit:   -{selector} is {}",
+                "rosemary: appkit:   -{selector} is {}",
                 match method.is_some() {
                     true => "implemented by the delegate",
                     false => "NOT implemented by the delegate",

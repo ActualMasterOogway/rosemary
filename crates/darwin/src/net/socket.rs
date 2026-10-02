@@ -340,7 +340,7 @@ fn say_control_refused(refused: super::control::Untranslatable) {
     said.push(refused);
     let (level, kind) = (refused.level, refused.kind);
     eprintln!(
-        "rosetta3: sendmsg with ancillary data of level {level:#x} type {kind:#x}: refused - \
+        "rosemary: sendmsg with ancillary data of level {level:#x} type {kind:#x}: refused - \
          the control message type or payload shape is unsupported; types can have \
          different numbers on the two platforms, so a payload it does not know the shape of \
          cannot be handed across unread"

@@ -428,7 +428,7 @@ pub mod entry {
         }
         said.push(dropped);
         eprintln!(
-            "rosetta3: fcntl F_SETFL: no equivalent on this host for Darwin O_ flags {dropped:#x} - dropped"
+            "rosemary: fcntl F_SETFL: no equivalent on this host for Darwin O_ flags {dropped:#x} - dropped"
         );
     }
 
@@ -548,7 +548,7 @@ mod tests {
     fn a_whole_file_write_lock_is_taken_and_then_contended() {
         use std::os::fd::IntoRawFd;
 
-        let path = std::env::temp_dir().join(format!("rosetta3-flock-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rosemary-flock-{}", std::process::id()));
         let one = std::fs::File::create(&path).expect("a temporary file");
         let two = std::fs::File::open(&path).expect("a second descriptor");
         let (one, two) = (one.into_raw_fd(), two.into_raw_fd());
@@ -603,7 +603,7 @@ mod tests {
         use std::os::fd::AsRawFd;
 
         let path = std::env::temp_dir().join(format!(
-            "rosetta3-preallocate-{}-{}",
+            "rosemary-preallocate-{}-{}",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));

@@ -586,7 +586,7 @@ pub unsafe fn describe(view: Id, depth: usize, out: &mut String) {
     let class = unsafe { objc::object::class_of(view) }.map_or("?", objc::class::Class::name_str);
     let _ = writeln!(
         out,
-        "rosetta3: appkit: {:indent$}{class} {view:p} frame {}x{} at ({},{}) mask {:#x}{}",
+        "rosemary: appkit: {:indent$}{class} {view:p} frame {}x{} at ({},{}) mask {:#x}{}",
         "",
         v.frame.size.width,
         v.frame.size.height,
@@ -2041,9 +2041,9 @@ mod tests {
 
     fn flipped_view(frame: NSRect) -> Id {
         crate::bootstrap();
-        let class = objc::class::lookup(c"R3TestFlippedView").unwrap_or_else(|| {
+        let class = objc::class::lookup(c"RosemaryTestFlippedView").unwrap_or_else(|| {
             let class = corefoundation::base::register(
-                c"R3TestFlippedView",
+                c"RosemaryTestFlippedView",
                 objc::class::lookup(c"NSView"),
                 INSTANCE_SIZE,
                 false,
@@ -2202,7 +2202,7 @@ mod tests {
     fn a_hit_test_override_can_call_super_once() {
         crate::bootstrap();
         let class = corefoundation::base::register(
-            c"R3TestHitView",
+            c"RosemaryTestHitView",
             objc::class::lookup(c"NSView"),
             INSTANCE_SIZE,
             false,
@@ -2239,7 +2239,7 @@ mod tests {
     fn a_subclasss_own_resize_method_is_what_runs() {
         crate::bootstrap();
         let class = corefoundation::base::register(
-            c"R3TestResizeView",
+            c"RosemaryTestResizeView",
             objc::class::lookup(c"NSView"),
             INSTANCE_SIZE,
             false,

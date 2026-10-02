@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::format::manifest::{DIR_MODE, Entry, Kind, Manifest};
 
 /// The directory holding the prefix's own bookkeeping.
-pub const CONTROL: &str = ".rosetta3";
+pub const CONTROL: &str = ".rosemary";
 
 /// The directory that is the guest's `/`.
 pub const DRIVE: &str = "root";
@@ -78,7 +78,7 @@ fn directory_entry(path: String) -> Entry {
     }
 }
 
-/// What `ROSETTA3_PREFIX` asked for.
+/// What `ROSEMARY_PREFIX` asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Setting {
     /// No prefix: a guest path is a host path. The default on macOS, which has
@@ -88,7 +88,7 @@ pub enum Setting {
     At(PathBuf),
 }
 
-/// Which prefix this process uses, from `ROSETTA3_PREFIX`.
+/// Which prefix this process uses, from `ROSEMARY_PREFIX`.
 ///
 /// The variable is an argument rather than a read, because the answer is
 /// resolved once for the process and a test that set it could not otherwise
@@ -96,7 +96,7 @@ pub enum Setting {
 ///
 /// Unset means *off*, deliberately. Whether there should be a prefix when
 /// nobody said is a policy question, and the answer differs between a guest the
-/// `rosetta3` command is running - where Linux gets one by default - and this
+/// `rosemary` command is running - where Linux gets one by default - and this
 /// crate used as a library, where quietly adopting a directory that happens to
 /// exist would make behaviour depend on what a previous run left behind. The
 /// command decides, and says so by setting the variable.
@@ -165,7 +165,7 @@ fn state_file() -> String {
     // end of a line in a Rust string eats the indentation on the next one, and
     // indentation is what makes this YAML.
     [
-        "# Written by `rosetta3 prefix create`. See docs/prefixes.md.",
+        "# Written by `rosemary prefix create`. See docs/prefixes.md.",
         "version: 1",
         "created_with:",
         &format!("  runtime_version: {}", env!("CARGO_PKG_VERSION")),
@@ -174,16 +174,16 @@ fn state_file() -> String {
     .join("\n")
 }
 
-/// `$XDG_DATA_HOME/rosetta3/prefixes/default`, or `$HOME/.local/share/…`.
+/// `$XDG_DATA_HOME/rosemary/prefixes/default`, or `$HOME/.local/share/…`.
 pub fn default_directory(
     xdg_data_home: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
     if let Some(data) = xdg_data_home.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(data).join("rosetta3/prefixes/default"));
+        return Some(PathBuf::from(data).join("rosemary/prefixes/default"));
     }
     let home = home.filter(|value| !value.is_empty())?;
-    Some(PathBuf::from(home).join(".local/share/rosetta3/prefixes/default"))
+    Some(PathBuf::from(home).join(".local/share/rosemary/prefixes/default"))
 }
 
 /// A prefix directory and the two paths inside it everything else is relative
@@ -271,7 +271,8 @@ mod tests {
 
     #[test]
     fn a_fresh_prefix_has_the_shape_a_mac_program_expects() {
-        let at = std::env::temp_dir().join(format!("r3-prefix-create-{}", std::process::id()));
+        let at =
+            std::env::temp_dir().join(format!("rosemary-prefix-create-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&at);
 
         assert!(create(&at).expect("a prefix is made"));
@@ -347,12 +348,12 @@ mod tests {
                 Some(OsString::from("/data")),
                 Some(OsString::from("/home/user"))
             ),
-            Some(PathBuf::from("/data/rosetta3/prefixes/default"))
+            Some(PathBuf::from("/data/rosemary/prefixes/default"))
         );
         assert_eq!(
             default_directory(Some(OsString::new()), Some(OsString::from("/home/user"))),
             Some(PathBuf::from(
-                "/home/user/.local/share/rosetta3/prefixes/default"
+                "/home/user/.local/share/rosemary/prefixes/default"
             ))
         );
         assert_eq!(default_directory(None, None), None);
@@ -362,6 +363,6 @@ mod tests {
     fn a_prefix_knows_its_drive_and_control_directories() {
         let prefix = Prefix::at("/prefixes/game");
         assert_eq!(prefix.drive(), PathBuf::from("/prefixes/game/root"));
-        assert_eq!(prefix.control(), PathBuf::from("/prefixes/game/.rosetta3"));
+        assert_eq!(prefix.control(), PathBuf::from("/prefixes/game/.rosemary"));
     }
 }

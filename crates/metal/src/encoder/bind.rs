@@ -6,7 +6,7 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
     // command buffer for as long as it lives - so it holds a reference to it
     // rather than trusting the guest to outlive the encoder it made.
     objc::arc::autorelease(object::make(
-        c"R3MTLCommandEncoder",
+        c"RosemaryMTLCommandEncoder",
         Encoder {
             command_buffer: objc::arc::retain(command_buffer),
             kind,

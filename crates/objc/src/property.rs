@@ -32,7 +32,7 @@ impl Property {
 
 /// An attribute string as `(name, value)` pairs.
 ///
-/// Public because the replay pass in `rosetta3` needs it too: a guest's
+/// Public because the replay pass in `rosemary` needs it too: a guest's
 /// `property_t` carries the string, and `class_addProperty` - whichever runtime
 /// answers it - takes the pairs.
 pub fn attributes_of(attributes: &CStr) -> Vec<(CString, CString)> {

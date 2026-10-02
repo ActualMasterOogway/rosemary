@@ -240,7 +240,7 @@ unsafe fn set(
         static SAID: std::sync::Once = std::sync::Once::new();
         SAID.call_once(|| {
             eprintln!(
-                "rosetta3: coreaudio: a matrix mixer's levels are kept but not applied; every \
+                "rosemary: coreaudio: a matrix mixer's levels are kept but not applied; every \
                  input is mixed to the output at unity"
             )
         });

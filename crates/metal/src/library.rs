@@ -18,7 +18,7 @@ pub(super) unsafe extern "C" fn new_default_library(receiver: Id, _sel: Sel) -> 
             return std::ptr::null_mut();
         }
     };
-    // SAFETY: an `R3MTLDevice`.
+    // SAFETY: an `RosemaryMTLDevice`.
     let target = unsafe { object::body::<Device>(receiver) }.target;
     // SAFETY: the profile belongs to the process-wide adapter list.
     let Some(target) = (unsafe { target.as_ref() }) else {
@@ -47,7 +47,7 @@ pub(super) unsafe extern "C" fn new_library_with_data(
     };
     // SAFETY: dispatch reported this range as the data's bytes.
     let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
-    // SAFETY: an `R3MTLDevice`.
+    // SAFETY: an `RosemaryMTLDevice`.
     let target = unsafe { object::body::<Device>(receiver) }.target;
     // SAFETY: the profile belongs to the process-wide adapter list.
     let Some(target) = (unsafe { target.as_ref() }) else {
@@ -121,7 +121,7 @@ pub(super) fn retain_library(
         .filter(|_| !translated.function_constants.is_empty())
         .map(|modules| modules.into_iter().map(<[u8]>::to_vec).collect());
     let library = object::make(
-        c"R3MTLLibrary",
+        c"RosemaryMTLLibrary",
         Library {
             translated,
             air,
@@ -151,7 +151,7 @@ pub(super) unsafe extern "C" fn new_library_with_source(
     if source.is_null() {
         return fail_library(error, "newLibraryWithSource: requires an NSString source");
     }
-    // SAFETY: an `R3MTLDevice`.
+    // SAFETY: an `RosemaryMTLDevice`.
     let target = unsafe { object::body::<Device>(receiver) }.target;
     // SAFETY: the profile belongs to the process-wide adapter list.
     let Some(target) = (unsafe { target.as_ref() }) else {
@@ -189,7 +189,7 @@ pub(super) unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, 
     let Ok(name) = std::str::from_utf8(&name) else {
         return std::ptr::null_mut();
     };
-    // SAFETY: an `R3MTLLibrary`.
+    // SAFETY: an `RosemaryMTLLibrary`.
     let library = unsafe { object::body::<Library>(receiver) };
     let Some(entry) = library
         .translated
@@ -200,7 +200,7 @@ pub(super) unsafe extern "C" fn new_function_with_name(receiver: Id, _sel: Sel, 
         return std::ptr::null_mut();
     };
     object::make(
-        c"R3MTLFunction",
+        c"RosemaryMTLFunction",
         Function {
             library: objc::arc::retain(receiver),
             entry,
@@ -233,7 +233,7 @@ pub(super) unsafe extern "C" fn new_function_with_constants(
             "newFunctionWithName: names a function in invalid UTF-8",
         );
     };
-    // SAFETY: an `R3MTLLibrary`.
+    // SAFETY: an `RosemaryMTLLibrary`.
     let library = unsafe { object::body::<Library>(receiver) };
     let Some(entry) = library
         .translated
@@ -294,7 +294,7 @@ pub(super) unsafe extern "C" fn new_function_with_constants(
         _ => None,
     };
     object::make(
-        c"R3MTLFunction",
+        c"RosemaryMTLFunction",
         Function {
             library: objc::arc::retain(receiver),
             entry,
@@ -306,7 +306,7 @@ pub(super) unsafe extern "C" fn new_function_with_constants(
 /// `-[MTLLibrary functionNames]`: the entry points the translation produced,
 /// in the order the library declares them.
 pub(super) unsafe extern "C" fn library_function_names(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: an `R3MTLLibrary`.
+    // SAFETY: an `RosemaryMTLLibrary`.
     let library = unsafe { object::body::<Library>(receiver) };
     let names: Vec<CFTypeRef> = library
         .translated
@@ -331,7 +331,7 @@ pub(super) unsafe extern "C" fn library_device(_receiver: Id, _sel: Sel) -> Id {
 }
 
 pub(super) unsafe extern "C" fn function_name(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: an `R3MTLFunction`.
+    // SAFETY: an `RosemaryMTLFunction`.
     let function = unsafe { object::body::<Function>(receiver) };
     // SAFETY: the library which vended the function.
     let library = unsafe { object::body::<Library>(function.library) };
@@ -350,7 +350,7 @@ pub(super) fn fail_library(error: *mut Id, message: &str) -> Id {
 }
 
 pub(super) fn report_library_error(message: impl std::fmt::Display) {
-    if std::env::var_os("ROSETTA3_TRACE_METAL").is_none() {
+    if std::env::var_os("ROSEMARY_TRACE_METAL").is_none() {
         return;
     }
     let message = message.to_string();
@@ -358,18 +358,18 @@ pub(super) fn report_library_error(message: impl std::fmt::Display) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if seen.insert(message.clone()) {
-        eprintln!("rosetta3: Metal: shader library translation stopped: {message}");
+        eprintln!("rosemary: Metal: shader library translation stopped: {message}");
     }
 }
 
 /// Report just enough information to identify the first guest source library
 /// without placing proprietary game shaders in a log file.
 pub(super) fn report_source_library(source: &str) {
-    if std::env::var_os("ROSETTA3_TRACE_METAL").is_some()
+    if std::env::var_os("ROSEMARY_TRACE_METAL").is_some()
         && !REPORTED_SOURCE_LIBRARY.swap(true, Ordering::Relaxed)
     {
         eprintln!(
-            "rosetta3: Metal: source library: {} bytes, fnv1a64={:016x}",
+            "rosemary: Metal: source library: {} bytes, fnv1a64={:016x}",
             source.len(),
             fnv1a64(source.as_bytes()),
         );
@@ -377,7 +377,7 @@ pub(super) fn report_source_library(source: &str) {
 }
 
 pub(super) fn dump_source_library(source: &str) {
-    let Some(directory) = std::env::var_os("ROSETTA3_MSL_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_MSL_OUT") else {
         return;
     };
     let directory = std::path::PathBuf::from(directory);

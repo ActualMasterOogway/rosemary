@@ -31,7 +31,7 @@ unsafe extern "C" fn load_named(
     let loaded = match load(&path, owner) {
         Ok(loaded) => loaded,
         Err(why) => {
-            eprintln!("rosetta3: appkit: {}: {why}", path.display());
+            eprintln!("rosemary: appkit: {}: {why}", path.display());
             return 0;
         }
     };
@@ -97,14 +97,14 @@ impl Loaded {
     pub fn report(&self, path: &Path) {
         if !self.placeholders.is_empty() {
             eprintln!(
-                "rosetta3: appkit: {}: {} class(es) with no implementation: {}",
+                "rosemary: appkit: {}: {} class(es) with no implementation: {}",
                 path.display(),
                 self.placeholders.len(),
                 self.placeholders.join(", ")
             );
         }
         for line in &self.unwired {
-            eprintln!("rosetta3: appkit: {}: {line}", path.display());
+            eprintln!("rosemary: appkit: {}: {line}", path.display());
         }
     }
 }
@@ -624,10 +624,10 @@ mod tests {
 			<key>$classes</key><array><string>NSNibOutletConnector</string></array>
 			<key>$classname</key><string>NSNibOutletConnector</string>
 		</dict>
-		<string>R3TestNibDelegate</string>
+		<string>RosemaryTestNibDelegate</string>
 		<dict>
-			<key>$classes</key><array><string>R3TestUnbuiltClass</string></array>
-			<key>$classname</key><string>R3TestUnbuiltClass</string>
+			<key>$classes</key><array><string>RosemaryTestUnbuiltClass</string></array>
+			<key>$classname</key><string>RosemaryTestUnbuiltClass</string>
 		</dict>
 	</array>
 	<key>$top</key>
@@ -643,14 +643,15 @@ mod tests {
     /// finds one rather than inventing a placeholder for it.
     fn delegate_class() {
         crate::bootstrap();
-        corefoundation::base::register(c"R3TestNibDelegate", None, size_of::<usize>(), false);
+        corefoundation::base::register(c"RosemaryTestNibDelegate", None, size_of::<usize>(), false);
     }
 
     /// A file of this test's own: the tests run in one process and in parallel,
     /// so a shared path is two of them writing the same bytes and one of them
     /// deleting the other's.
     fn write(name: &str, nib: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("r3-nib-{}-{name}.nib", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("rosemary-nib-{}-{name}.nib", std::process::id()));
         std::fs::write(&path, nib).expect("writable");
         path
     }
@@ -675,11 +676,11 @@ mod tests {
         assert!(!delegate.is_null(), "the delegate outlet was not set");
         // SAFETY: a live object this runtime allocated.
         let class = unsafe { objc::object::class_of(delegate) }.expect("a class");
-        assert_eq!(class.name_str(), "R3TestNibDelegate");
+        assert_eq!(class.name_str(), "RosemaryTestNibDelegate");
         assert!(
             loaded
                 .placeholders
-                .contains(&"R3TestUnbuiltClass".to_string()),
+                .contains(&"RosemaryTestUnbuiltClass".to_string()),
             "the class nothing implements was not reported: {:?}",
             loaded.placeholders
         );
@@ -701,7 +702,7 @@ mod tests {
             loaded
                 .unwired
                 .iter()
-                .any(|u| u.contains("R3TestUnbuiltClass") && u.contains("delegate")),
+                .any(|u| u.contains("RosemaryTestUnbuiltClass") && u.contains("delegate")),
             "{:?}",
             loaded.unwired
         );

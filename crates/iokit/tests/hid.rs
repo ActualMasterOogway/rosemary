@@ -128,7 +128,7 @@ fn a_guest_reads_a_gamepad_through_the_run_loop() {
     corefoundation::bootstrap();
     let pool = unsafe { objc::api::objc_autoreleasePoolPush() };
 
-    let label = c"rosetta3 test pad";
+    let label = c"rosemary test pad";
     let desc = sdl3::virtual_joystick::Desc {
         // `SDL_JOYSTICK_TYPE_GAMEPAD`, so SDL reports it as one.
         kind: 1,

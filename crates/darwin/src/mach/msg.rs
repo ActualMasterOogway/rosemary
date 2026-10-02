@@ -378,7 +378,7 @@ fn announce_out_of_line() {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosetta3: mach_msg refused a message carrying out-of-line memory - a page mapped into \
+            "rosemary: mach_msg refused a message carrying out-of-line memory - a page mapped into \
              the receiver is not something one unrelated process can do to another here, and \
              copying the pointer across would hand the receiver an address that means something \
              else in its own space"

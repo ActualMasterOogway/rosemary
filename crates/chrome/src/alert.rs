@@ -15,7 +15,7 @@ pub struct Alert {
     pub message: String,
     pub informative: String,
     /// Styled informative text with links, in place of `informative`. Only
-    /// Rosetta 3's own alerts set it; a program's text is always plain.
+    /// Rosemary's own alerts set it; a program's text is always plain.
     pub rich_informative: Option<RichText>,
     /// The first is the default, answered by Return.
     pub buttons: Vec<String>,

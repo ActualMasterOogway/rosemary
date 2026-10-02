@@ -104,8 +104,8 @@ static CONTROLLERS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 
 fn trace_controller(message: impl std::fmt::Display) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ENABLED.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_GAMECONTROLLER").is_some()) {
-        eprintln!("rosetta3: GameController: {message}");
+    if *ENABLED.get_or_init(|| std::env::var_os("ROSEMARY_TRACE_GAMECONTROLLER").is_some()) {
+        eprintln!("rosemary: GameController: {message}");
     }
 }
 
@@ -114,7 +114,7 @@ fn sdl_ready() -> bool {
     *READY.get_or_init(|| match sdl3::init(sdl3::init::GAMEPAD) {
         Ok(()) => true,
         Err(reason) => {
-            eprintln!("rosetta3: GameController: {reason}");
+            eprintln!("rosemary: GameController: {reason}");
             false
         }
     })

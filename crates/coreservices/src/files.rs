@@ -24,7 +24,7 @@ const FS_REF_BYTES: usize = 80;
 /// A reference that does not carry it came from somewhere else - a guest that
 /// zeroed its storage, or a structure that is not an `FSRef` at all - and is
 /// refused rather than read as an index into the table below.
-const MAGIC: u64 = u64::from_le_bytes(*b"R3FSRef\0");
+const MAGIC: u64 = u64::from_le_bytes(*b"RMFSRef\0");
 
 /// Every path a reference has been made for, and the index of each.
 ///
@@ -756,7 +756,7 @@ pub unsafe extern "C" fn FSGetVolumeInfo(
 ) -> i16 {
     if which != 0 || !info.is_null() {
         eprintln!(
-            "rosetta3: coreservices: FSGetVolumeInfo was asked for FSVolumeInfo ({which:#x}), \
+            "rosemary: coreservices: FSGetVolumeInfo was asked for FSVolumeInfo ({which:#x}), \
              which describes a volume format this host has not got"
         );
         return PARAM_ERR as i16;
@@ -826,14 +826,14 @@ pub unsafe extern "C" fn FSGetCatalogInfo(
     };
     if !fs_spec.is_null() {
         eprintln!(
-            "rosetta3: coreservices: FSGetCatalogInfo was asked for an FSSpec, which names a \
+            "rosemary: coreservices: FSGetCatalogInfo was asked for an FSSpec, which names a \
              file by a volume and a directory id this tree has not got"
         );
         return PARAM_ERR as i16;
     }
     if which & !info::ANSWERED != 0 {
         eprintln!(
-            "rosetta3: coreservices: FSGetCatalogInfo: {:#x} of the catalog bitmap is not \
+            "rosemary: coreservices: FSGetCatalogInfo: {:#x} of the catalog bitmap is not \
              something this tree can answer",
             which & !info::ANSWERED
         );

@@ -26,15 +26,15 @@ use store::{entry_path, pending_entry, queue_entry, read_entry, root};
 pub const CACHE_VERSION: &str = env!("METAL_TRANSLATE_CACHE_VERSION");
 
 /// The container magic, which changes when the entry encoding does.
-const MAGIC: &[u8; 8] = b"R3MTLC02";
+const MAGIC: &[u8; 8] = b"RMMTLC02";
 
 /// Directory to hold the cache, overriding the user's cache directory.
 ///
 /// Set to `0`, `off` or the empty string to translate every library afresh.
-const DIRECTORY_VARIABLE: &str = "ROSETTA3_SHADER_CACHE";
+const DIRECTORY_VARIABLE: &str = "ROSEMARY_SHADER_CACHE";
 
 /// Set to keep the entries of every other build of this crate on disk.
-const KEEP_VARIABLE: &str = "ROSETTA3_SHADER_CACHE_KEEP";
+const KEEP_VARIABLE: &str = "ROSEMARY_SHADER_CACHE_KEEP";
 
 /// Which frontend produced an entry, so that two frontends given identical
 /// bytes cannot collide.
@@ -193,7 +193,7 @@ fn cached_in(
 /// runs, and this build of the translator.
 ///
 /// The build covers what each pass does; the pipeline covers which of them a
-/// process chose to run, which `ROSETTA3_METAL_PASSES` changes without a
+/// process chose to run, which `ROSEMARY_METAL_PASSES` changes without a
 /// rebuild. An entry made without a pass is not what a run with it emits.
 fn key(
     frontend: Frontend,

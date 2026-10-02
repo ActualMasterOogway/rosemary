@@ -26,7 +26,7 @@ pub fn get() -> Option<&'static Engine> {
     let engine = ENGINE.get_or_init(|| {
         let started = start();
         if let Err(why) = &started {
-            eprintln!("rosetta3: webkit: web views will have no content: {why}");
+            eprintln!("rosemary: webkit: web views will have no content: {why}");
         }
         started
     });
@@ -45,8 +45,8 @@ fn running() -> Option<&'static Engine> {
 }
 
 fn start() -> Result<Engine, String> {
-    if std::env::var_os("ROSETTA3_WEBKIT").is_some_and(|value| value == "0") {
-        return Err("disabled by ROSETTA3_WEBKIT=0".to_string());
+    if std::env::var_os("ROSEMARY_WEBKIT").is_some_and(|value| value == "0") {
+        return Err("disabled by ROSEMARY_WEBKIT=0".to_string());
     }
     if appkit::decor::config().decorations == appkit::decor::Decorations::Server
         && std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -54,12 +54,12 @@ fn start() -> Result<Engine, String> {
         // SDL may have loaded libdecor's GTK 3 plugin for the host titlebar,
         // and GTK 3 and the GTK 4 loaded next cannot share a process.
         warn_once(
-            "ROSETTA3_DECORATIONS=server lets libdecor load GTK 3 next to \
+            "ROSEMARY_DECORATIONS=server lets libdecor load GTK 3 next to \
              WebKit's GTK 4; if the program crashes, use the default client decorations",
         );
     }
     let api = gtk::api()?;
-    let mode = std::env::var("ROSETTA3_WEBKIT_GPU").unwrap_or_default();
+    let mode = std::env::var("ROSEMARY_WEBKIT_GPU").unwrap_or_default();
     let composition = match mode.as_str() {
         "0" => Composition::Cpu,
         _ => Composition::Gpu(appkit::backing::importer()),
@@ -104,7 +104,7 @@ fn start() -> Result<Engine, String> {
     unsafe { gtk::make_windows_transparent(api, display) };
     let identifier = foundation::bundle::main()
         .and_then(|bundle| bundle.identifier())
-        .unwrap_or("rosetta3")
+        .unwrap_or("rosemary")
         .to_string();
     let home = foundation::host_home_directory();
     let data = home.join("Library/WebKit").join(&identifier);
@@ -160,14 +160,14 @@ pub fn warn_once(message: &str) {
     static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
     if !warned.iter().any(|seen| seen == message) {
-        eprintln!("rosetta3: webkit: {message}");
+        eprintln!("rosemary: webkit: {message}");
         warned.push(message.to_string());
     }
 }
 
 pub fn tracing() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("ROSETTA3_TRACE_WEBKIT").is_some())
+    *TRACE.get_or_init(|| std::env::var_os("ROSEMARY_TRACE_WEBKIT").is_some())
 }
 
 thread_local! {

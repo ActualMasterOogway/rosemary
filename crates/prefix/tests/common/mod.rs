@@ -9,7 +9,8 @@ use prefix::system::{self, SystemFiles};
 /// A prefix whose base is `/usr/lib/libSystem.B.dylib`, under `policy`, set as
 /// this process's prefix.
 pub fn provisioned(name: &str, policy: SystemFiles) -> Prefix {
-    let at: PathBuf = std::env::temp_dir().join(format!("r3-guard-{name}-{}", std::process::id()));
+    let at: PathBuf =
+        std::env::temp_dir().join(format!("rosemary-guard-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&at);
     prefix::layout::create(&at).unwrap();
     let prefix = Prefix::at(&at);
@@ -70,6 +71,6 @@ pub fn provisioned(name: &str, policy: SystemFiles) -> Prefix {
     };
     state.write(&prefix::layout::state_path(&at)).unwrap();
     // SAFETY: before the namespace or any other thread reads the environment.
-    unsafe { std::env::set_var("ROSETTA3_PREFIX", &at) };
+    unsafe { std::env::set_var("ROSEMARY_PREFIX", &at) };
     prefix
 }

@@ -437,7 +437,7 @@ fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
-            .user_agent(concat!("rosetta3/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("rosemary/", env!("CARGO_PKG_VERSION")))
             .http_status_as_error(false)
             .build()
             .into()
@@ -534,7 +534,7 @@ unsafe fn call_completion(block: Id, data: Id, response: Id, error: Id) {
     }
     // SAFETY: a block literal, whose `invoke` is the
     // third word. Under the emulated backend the pointer found there is already
-    // a thunk, because the method's `@?` encoding had `rosetta3::shims::block`
+    // a thunk, because the method's `@?` encoding had `rosemary::shims::block`
     // rewrite it on the way in.
     unsafe {
         let invoke = *((block as *const u8).add(block::INVOKE_OFFSET) as *const usize);
@@ -634,7 +634,7 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
                 }
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let path = format!(
-                    "/tmp/rosetta3-download-{}-{}",
+                    "/tmp/rosemary-download-{}-{}",
                     std::process::id(),
                     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 );
@@ -1042,7 +1042,7 @@ mod tests {
         request.method = "POST".to_string();
         request
             .headers
-            .push(("x-rosetta3".to_string(), "1".to_string()));
+            .push(("x-rosemary".to_string(), "1".to_string()));
         request.body = b"a body".to_vec();
         let (response, body) = match perform(&request) {
             Ok(pair) => pair,
@@ -1054,7 +1054,7 @@ mod tests {
         assert_eq!(response.status, 200);
         let echoed = String::from_utf8_lossy(&body);
         assert!(echoed.contains("a body"), "the body was sent: {echoed}");
-        assert!(echoed.contains("x-rosetta3"), "the header was sent");
+        assert!(echoed.contains("x-rosemary"), "the header was sent");
     }
 
     /// A URL nothing serves is an error rather than a response, and the message

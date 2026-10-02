@@ -242,7 +242,7 @@ unsafe extern "C" fn all_cookies_ready(source: Ptr, result: Ptr, data: Ptr) {
     unsafe { (api.g_list_free)(list) };
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: getAllCookies: {} cookie(s)",
+            "rosemary: webkit: getAllCookies: {} cookie(s)",
             objects.len()
         );
     }
@@ -321,7 +321,7 @@ fn change_cookie(cookie: Id, completion: Id, adding: bool) {
     let soup = unsafe { soup_cookie(api, cookie) };
     if engine::tracing() {
         eprintln!(
-            "rosetta3: webkit: {} cookie {}",
+            "rosemary: webkit: {} cookie {}",
             if adding { "setting" } else { "deleting" },
             // SAFETY: a live cookie.
             unsafe { gtk::text((api.soup_cookie_get_name)(soup)) }

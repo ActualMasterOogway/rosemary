@@ -10,7 +10,7 @@ static LIVE: LazyLock<Mutex<HashMap<&'static str, i64>>> =
 #[inline]
 pub fn enabled() -> bool {
     #[dynamic]
-    static ON: bool = std::env::var_os("ROSETTA3_OBJC_CENSUS").is_some_and(|value| value != "0");
+    static ON: bool = std::env::var_os("ROSEMARY_OBJC_CENSUS").is_some_and(|value| value != "0");
     *ON
 }
 
@@ -59,5 +59,5 @@ fn report() {
         .map(|(count, name)| format!("{name}={count}"))
         .collect::<Vec<_>>()
         .join(" ");
-    eprintln!("rosetta3: objc: live {line}");
+    eprintln!("rosemary: objc: live {line}");
 }

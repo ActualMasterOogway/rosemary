@@ -18,14 +18,14 @@ use objc::object::Id;
 use objc::sel::Sel;
 use static_init::dynamic;
 
-/// `ROSETTA3_DECORATIONS`: `client` (the default) draws the titlebar here;
+/// `ROSEMARY_DECORATIONS`: `client` (the default) draws the titlebar here;
 /// `server` leaves it to the host's window manager.
-pub const DECORATIONS_ENV: &str = "ROSETTA3_DECORATIONS";
-/// `ROSETTA3_MENU`: `titlebar`, `strip` or `none`.
-pub const MENU_ENV: &str = "ROSETTA3_MENU";
-/// `ROSETTA3_MENU_CTRL=0` stops Control standing in for Command in menu key
+pub const DECORATIONS_ENV: &str = "ROSEMARY_DECORATIONS";
+/// `ROSEMARY_MENU`: `titlebar`, `strip` or `none`.
+pub const MENU_ENV: &str = "ROSEMARY_MENU";
+/// `ROSEMARY_MENU_CTRL=0` stops Control standing in for Command in menu key
 /// equivalents.
-pub const MENU_CTRL_ENV: &str = "ROSETTA3_MENU_CTRL";
+pub const MENU_CTRL_ENV: &str = "ROSEMARY_MENU_CTRL";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decorations {
@@ -57,7 +57,7 @@ impl Config {
     /// unrecognised is the default, with a warning.
     pub fn parse(decorations: Option<&str>, menu: Option<&str>, control: Option<&str>) -> Config {
         let warn = |name: &str, value: &str| {
-            eprintln!("rosetta3: appkit: {name}={value} is not recognised; using the default");
+            eprintln!("rosemary: appkit: {name}={value} is not recognised; using the default");
         };
         let decorations = match decorations.map(|v| v.trim().to_ascii_lowercase()) {
             None => Decorations::Client,
@@ -1464,11 +1464,11 @@ fn repaint_menus() {
     });
 }
 
-/// `ROSETTA3_STORE_OUT=DIR` writes each menu panel and full-screen reveal as
+/// `ROSEMARY_STORE_OUT=DIR` writes each menu panel and full-screen reveal as
 /// it is painted, beside the window stores, for a session with no screen to
 /// look at.
 fn dump_popup(kind: &str, id: u32, surface: &sdl3::video::Presentation, pixels: &[u8]) {
-    let Some(directory) = std::env::var_os("ROSETTA3_STORE_OUT") else {
+    let Some(directory) = std::env::var_os("ROSEMARY_STORE_OUT") else {
         return;
     };
     let (width, height) = (surface.width as usize, surface.height as usize);

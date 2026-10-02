@@ -731,7 +731,7 @@ fn say_unknown_open_flags(unknown: c_int) {
         return;
     }
     said.push(unknown);
-    eprintln!("rosetta3: open: no equivalent on this host for Darwin O_ flags {unknown:#x}");
+    eprintln!("rosemary: open: no equivalent on this host for Darwin O_ flags {unknown:#x}");
 }
 
 /// Every name this module answers, in both spellings a Mach-O may import them
@@ -963,7 +963,7 @@ mod tests {
     /// The layout is the guest's, and the size a guest reads is the file's.
     #[test]
     fn a_size_survives_the_conversion() {
-        let at = std::env::temp_dir().join(format!("r3-stat-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-stat-{}", std::process::id()));
         std::fs::write(&at, vec![0u8; 1234]).expect("a file");
         let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
         let mut out = Stat::default();
@@ -978,7 +978,7 @@ mod tests {
     /// And the case-insensitive fallback reaches through it.
     #[test]
     fn a_lowercased_path_still_stats() {
-        let dir = std::env::temp_dir().join(format!("r3-stat-ci-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-stat-ci-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Contents")).expect("a directory");
         std::fs::write(dir.join("Contents").join("Game.ios"), b"xyz").expect("a file");
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn open_translates_darwin_status_flags() {
-        let at = std::env::temp_dir().join(format!("r3-open-flags-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-open-flags-{}", std::process::id()));
         std::fs::write(&at, b"x").expect("a file");
         let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
 
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn openat_translates_at_fdcwd_flags_and_mode() {
-        let at = std::env::temp_dir().join(format!("r3-openat-cwd-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-openat-cwd-{}", std::process::id()));
         let _ = std::fs::remove_file(&at);
         let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
         let guest_flags = crate::fcntl::oflag::O_WRONLY
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test]
     fn openat_resolves_a_relative_path_against_its_descriptor() {
-        let dir = std::env::temp_dir().join(format!("r3-openat-dir-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-openat-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a directory");
         let directory = CString::new(dir.to_str().expect("utf-8")).expect("no NUL");
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn openat_case_folds_relative_to_its_descriptor() {
-        let dir = std::env::temp_dir().join(format!("r3-openat-case-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-openat-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Contents")).expect("a directory");
         std::fs::write(dir.join("Contents").join("Game.ios"), b"x").expect("a file");
@@ -1130,7 +1130,7 @@ mod tests {
 
     #[test]
     fn fstatat_translates_at_fdcwd() {
-        let at = std::env::temp_dir().join(format!("r3-fstatat-cwd-{}", std::process::id()));
+        let at = std::env::temp_dir().join(format!("rosemary-fstatat-cwd-{}", std::process::id()));
         std::fs::write(&at, vec![0u8; 321]).expect("a file");
         let path = CString::new(at.to_str().expect("utf-8")).expect("no NUL");
         let mut out = Stat::default();
@@ -1143,7 +1143,7 @@ mod tests {
 
     #[test]
     fn fstatat_resolves_relative_to_its_descriptor_and_honours_nofollow() {
-        let dir = std::env::temp_dir().join(format!("r3-fstatat-dir-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-fstatat-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Contents")).expect("a directory");
         std::fs::write(dir.join("Contents").join("Game.ios"), b"xyz").expect("a file");
@@ -1183,7 +1183,7 @@ mod tests {
     fn resolve_beneath_finds_what_is_inside_and_refuses_what_is_not() {
         const AT_RESOLVE_BENEATH: c_int = 0x2000;
         const O_RESOLVE_BENEATH: c_int = 0x1000;
-        let dir = std::env::temp_dir().join(format!("r3-beneath-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rosemary-beneath-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("inside")).expect("a directory");
         std::fs::write(dir.join("inside").join("file"), b"ab").expect("a file");

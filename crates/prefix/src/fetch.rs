@@ -75,7 +75,7 @@ fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
-            .user_agent(concat!("rosetta3/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("rosemary/", env!("CARGO_PKG_VERSION")))
             // A redirect to plain HTTP would put a MITM in front of a file
             // whose hash is checked anyway - but there is no reason to allow
             // it, and a refusal is easier to diagnose than a hash mismatch.

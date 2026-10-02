@@ -203,7 +203,7 @@ fn until(queue: &mut EventQueue<Client>, client: &mut Client, done: impl Fn(&Cli
 
 fn shm_file(bytes: &[u8]) -> OwnedFd {
     // SAFETY: a NUL-terminated name and no flags.
-    let fd = unsafe { libc::memfd_create(c"rosetta3-test".as_ptr(), 0) };
+    let fd = unsafe { libc::memfd_create(c"rosemary-test".as_ptr(), 0) };
     assert!(fd >= 0, "memfd_create");
     // SAFETY: a new descriptor this owns.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };

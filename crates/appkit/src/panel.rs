@@ -24,7 +24,7 @@ unsafe extern "C" fn run_modal(receiver: Id, _sel: Sel) -> i64 {
     static SAID: std::sync::Once = std::sync::Once::new();
     SAID.call_once(|| {
         eprintln!(
-            "rosetta3: appkit: the guest asked for a file panel, and nothing here draws one - \
+            "rosemary: appkit: the guest asked for a file panel, and nothing here draws one - \
              so it is answered as cancelled"
         );
     });

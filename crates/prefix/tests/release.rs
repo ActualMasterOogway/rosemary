@@ -5,7 +5,10 @@ use prefix::provision::{self, Answer, Chosen};
 use prefix::verify::{Scope, compare};
 
 fn scratch(name: &str) -> PathBuf {
-    let at = std::env::temp_dir().join(format!("r3-prefix-release-{name}-{}", std::process::id()));
+    let at = std::env::temp_dir().join(format!(
+        "rosemary-prefix-release-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&at);
     std::fs::create_dir_all(&at).unwrap();
     at
@@ -15,7 +18,7 @@ fn scratch(name: &str) -> PathBuf {
 fn the_pinned_release_verifies_offline() {
     for arch in prefix::pinned::architectures() {
         let mut chosen = Chosen::pinned(arch).expect("pinned spec");
-        let bundle = std::env::var_os("ROSETTA3_TEST_BUNDLE")
+        let bundle = std::env::var_os("ROSEMARY_TEST_BUNDLE")
             .map(PathBuf::from)
             .filter(|path| path.to_string_lossy().contains(arch));
         let user_cache = Cache::from_env();
@@ -37,8 +40,8 @@ fn the_pinned_release_verifies_offline() {
             (None, true) => user_cache.unwrap(),
             (None, false) => {
                 eprintln!(
-                    "skipped {arch}: set ROSETTA3_TEST_BUNDLE to its bundle.zip, or cache it \
-                     with `rosetta3 prefix create`"
+                    "skipped {arch}: set ROSEMARY_TEST_BUNDLE to its bundle.zip, or cache it \
+                     with `rosemary prefix create`"
                 );
                 continue;
             }

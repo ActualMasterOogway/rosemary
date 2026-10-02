@@ -77,7 +77,7 @@ fn sockaddr(address: Address) -> (libc::sockaddr_un, libc::socklen_t) {
     let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let uid = unsafe { libc::getuid() };
-    let name = format!("rosetta3.mach.{uid}.{address:016x}");
+    let name = format!("rosemary.mach.{uid}.{address:016x}");
     // The leading NUL is the abstract namespace; the name is what follows it and
     // is *not* NUL-terminated, so the length has to be exact.
     let bytes = name.as_bytes();

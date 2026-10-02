@@ -25,12 +25,12 @@
 #
 # One-time container setup:
 #
-#     container run -d --name r3debian --cpus 8 --memory 8g debian:trixie tail -f /dev/null
-#     container exec r3debian sh -c 'apt-get update -qq && \
+#     container run -d --name rosemary-debian --cpus 8 --memory 8g debian:trixie tail -f /dev/null
+#     container exec rosemary-debian sh -c 'apt-get update -qq && \
 #         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 #         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
 #         libglu1-mesa libvulkan1 mesa-vulkan-drivers libxkbcommon-dev'
-#     container exec r3debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
+#     container exec rosemary-debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
 #         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
 #
@@ -53,31 +53,31 @@ set -e
 # attributes. `capstone-sys`'s build script globs `*.c`, finds `._MCInst.c`, and
 # hands a resource fork to the compiler.
 export COPYFILE_DISABLE=1
-NAME=${R3_CONTAINER:-r3debian}
-VENDOR=${R3_VENDOR:-/tmp/r3vendor}
+NAME=${ROSEMARY_CONTAINER:-rosemary-debian}
+VENDOR=${ROSEMARY_VENDOR:-/tmp/rosemary-vendor}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 if [ "$1" = "--vendor" ]; then
     [ -d "$VENDOR" ] || cargo vendor --versioned-dirs "$VENDOR" >/dev/null
-    tar -C "$VENDOR" --exclude='._*' -czf /tmp/r3vendor.tgz .
+    tar -C "$VENDOR" --exclude='._*' -czf /tmp/rosemary-vendor.tgz .
     container exec "$NAME" sh -c 'rm -rf /vendor && mkdir -p /vendor'
-    container cp /tmp/r3vendor.tgz "$NAME":/tmp/r3vendor.tgz
-    container exec "$NAME" sh -c 'tar -C /vendor -xzf /tmp/r3vendor.tgz'
+    container cp /tmp/rosemary-vendor.tgz "$NAME":/tmp/rosemary-vendor.tgz
+    container exec "$NAME" sh -c 'tar -C /vendor -xzf /tmp/rosemary-vendor.tgz'
     echo "vendored sources pushed to $NAME:/vendor"
     exit 0
 fi
 
-tar -C "$HERE" -czf /tmp/r3src.tgz \
+tar -C "$HERE" -czf /tmp/rosemary-src.tgz \
     --exclude=target --exclude=.git --exclude=.DS_Store --exclude='._*' .
 container exec "$NAME" sh -c 'rm -rf /src && mkdir -p /src'
-container cp /tmp/r3src.tgz "$NAME":/tmp/r3src.tgz
+container cp /tmp/rosemary-src.tgz "$NAME":/tmp/rosemary-src.tgz
 # `-m`: give every extracted file the current time rather than the one the Mac
 # recorded. `container cp` is not a mount, so cargo compares a *fresh* source
 # tree against artifacts built from the previous push, and a source file whose
 # mtime is older than the artifact is one cargo does not rebuild - which shows up
 # as an edit that had no effect and a test that fails against code that is no
 # longer there.
-container exec "$NAME" sh -c 'tar -m -C /src -xzf /tmp/r3src.tgz'
+container exec "$NAME" sh -c 'tar -m -C /src -xzf /tmp/rosemary-src.tgz'
 
 # Container-side only: the host tree keeps its own `.cargo/config.toml`.
 container exec "$NAME" sh -c 'mkdir -p /src/.cargo && cat > /src/.cargo/config.toml <<CFG
@@ -101,7 +101,7 @@ replace-with = "vendored-sources"
 directory = "/vendor"
 CFG'
 
-[ $# -eq 0 ] && set -- cargo build --bin rosetta3
+[ $# -eq 0 ] && set -- cargo build --bin rosemary
 # No display and no sound card. SDL is told so rather than left to fail at the
 # first `SDL_Init`, and the joystick driver is the virtual one so the HID layer
 # has something deterministic to enumerate.

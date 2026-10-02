@@ -185,7 +185,7 @@ pub fn host_symbol(name: &str) -> Option<u64> {
 /// GL itself is deliberately **not** opened here. Its entry points have to come
 /// out of the library SDL made the context against, which is not necessarily
 /// this loader's `libGL.so.1`, and a global one would answer every `gl` name
-/// first. See `rosetta3::opengl`.
+/// first. See `rosemary::opengl`.
 fn load_host_libraries() {
     #[cfg(not(target_os = "macos"))]
     {
@@ -488,7 +488,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn libc_mode_child() {
-        let Ok(want) = std::env::var("ROSETTA3_LIBC_TEST_CHILD") else {
+        let Ok(want) = std::env::var("ROSEMARY_LIBC_TEST_CHILD") else {
             return;
         };
         assert_eq!(libc_backend::using_builtin(), want == "builtin");
@@ -537,7 +537,7 @@ mod tests {
         ] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command.args(["--exact", "tests::libc_mode_child"]);
-            command.env("ROSETTA3_LIBC_TEST_CHILD", want);
+            command.env("ROSEMARY_LIBC_TEST_CHILD", want);
             match setting {
                 Some(value) => {
                     command.env(libc_backend::VAR, value);

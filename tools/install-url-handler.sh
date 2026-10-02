@@ -25,7 +25,7 @@ shift
 # Absolute, because a desktop entry is read from anywhere.
 guest=$(cd "$(dirname "$guest")" && pwd)/$(basename "$guest")
 name=$(basename "$guest")
-entry="$applications/rosetta3-$name.desktop"
+entry="$applications/rosemary-$name.desktop"
 
 if [ -n "$uninstall" ]; then
     rm -f "$entry"
@@ -36,8 +36,8 @@ fi
 
 [ -x "$guest" ] || { echo "$0: $guest: not an executable" >&2; exit 1; }
 
-rosetta3=$(cd "$(dirname "$0")/.." && pwd)/target/release/rosetta3
-[ -x "$rosetta3" ] || { echo "$0: build rosetta3 first: cargo build --release --bin rosetta3" >&2; exit 1; }
+rosemary=$(cd "$(dirname "$0")/.." && pwd)/target/release/rosemary
+[ -x "$rosemary" ] || { echo "$0: build rosemary first: cargo build --release --bin rosemary" >&2; exit 1; }
 
 mime=
 for scheme in "$@"; do
@@ -48,15 +48,15 @@ mkdir -p "$applications"
 cat > "$entry" <<ENTRY
 [Desktop Entry]
 Type=Application
-Name=$name (rosetta3)
+Name=$name (rosemary)
 NoDisplay=true
 Terminal=false
-Exec=$rosetta3 run $guest -protocolString %u
+Exec=$rosemary run $guest -protocolString %u
 MimeType=$mime
 ENTRY
 
 for scheme in "$@"; do
-    xdg-mime default "rosetta3-$name.desktop" "x-scheme-handler/$scheme"
+    xdg-mime default "rosemary-$name.desktop" "x-scheme-handler/$scheme"
 done
 update-desktop-database "$applications" 2>/dev/null || true
 

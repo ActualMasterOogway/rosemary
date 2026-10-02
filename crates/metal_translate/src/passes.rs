@@ -19,7 +19,7 @@ use crate::{Diagnostic, Phase, TranslateError};
 /// item is `-name` starts from the default pipeline and removes the named
 /// passes. `default` adds the default passes, and `none`, `off`, `0` or the
 /// empty string runs none at all.
-const PASSES_VARIABLE: &str = "ROSETTA3_METAL_PASSES";
+const PASSES_VARIABLE: &str = "ROSEMARY_METAL_PASSES";
 
 /// How many times the pipeline is repeated over one function before it is
 /// left as it stands. Each pass exposes work for the others, and the result is
@@ -51,7 +51,7 @@ impl Pass {
         Pass::EliminateDeadCode,
     ];
 
-    /// The name the pass has in `ROSETTA3_METAL_PASSES` and in the cache key.
+    /// The name the pass has in `ROSEMARY_METAL_PASSES` and in the cache key.
     ///
     /// Renaming a pass changes the key of every entry it contributed to, which
     /// is correct: the key names what the translation did.
@@ -119,7 +119,7 @@ impl PassPipeline {
         }
     }
 
-    /// Parse the pipeline syntax `ROSETTA3_METAL_PASSES` takes.
+    /// Parse the pipeline syntax `ROSEMARY_METAL_PASSES` takes.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let spec = spec.trim();
         if matches!(spec, "" | "0" | "off" | "none") {
@@ -162,7 +162,7 @@ impl PassPipeline {
         Ok(pipeline)
     }
 
-    /// The pipeline `ROSETTA3_METAL_PASSES` names, or the default one.
+    /// The pipeline `ROSEMARY_METAL_PASSES` names, or the default one.
     ///
     /// Read once per process: a pipeline which changed between two libraries
     /// would give one run two meanings of the same cache key.
@@ -190,7 +190,7 @@ impl PassPipeline {
     /// already carries; this covers the choice made at run time.
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update_field(b"rosetta3 metal_translate ir passes v1");
+        hasher.update_field(b"rosemary metal_translate ir passes v1");
         hasher.update(&(self.passes.len() as u64).to_le_bytes());
         for pass in &self.passes {
             hasher.update_field(pass.name().as_bytes());

@@ -58,9 +58,9 @@ unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
     if !unsafe { crate::foreign::is(object) } {
         return false;
     }
-    if std::env::var_os("ROSETTA3_TRACE_FOREIGN_CF").is_some() {
+    if std::env::var_os("ROSEMARY_TRACE_FOREIGN_CF").is_some() {
         eprintln!(
-            "rosetta3: foreign CoreFoundation {}({object:p})",
+            "rosemary: foreign CoreFoundation {}({object:p})",
             name.to_string_lossy()
         );
     }
@@ -71,7 +71,7 @@ unsafe fn forwarded(name: &std::ffi::CStr, object: CFTypeRef) -> bool {
     }
     if !crate::foreign::forwarding() {
         objc::fail!(
-            "{}: the object is not this runtime's, and ROSETTA3_NO_FOREIGN forbids passing it to \
+            "{}: the object is not this runtime's, and ROSEMARY_NO_FOREIGN forbids passing it to \
              the CoreFoundation that made it",
             name.to_string_lossy()
         );
@@ -1539,7 +1539,7 @@ pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTyp
     if unsafe { crate::foreign::is(data) } {
         if !crate::foreign::forwarding() {
             objc::fail!(
-                "CFDataCreateCopy: the data is not this runtime's, and ROSETTA3_NO_FOREIGN                  forbids passing it to the CoreFoundation that made it"
+                "CFDataCreateCopy: the data is not this runtime's, and ROSEMARY_NO_FOREIGN                  forbids passing it to the CoreFoundation that made it"
             );
         }
         let Some(f) = crate::foreign::entry(c"CFDataCreateCopy") else {
@@ -1868,7 +1868,7 @@ pub unsafe extern "C" fn CFURLGetFSRef(url: CFTypeRef, fs_ref: *mut c_void) -> B
 /// What starts every bookmark this tree makes; the guest path of the item
 /// follows. Apple's format records volume and file identifiers this host
 /// cannot supply, and a bookmark is opaque to the program that holds one.
-const BOOKMARK_MAGIC: &[u8] = b"R3Bookmark\0";
+const BOOKMARK_MAGIC: &[u8] = b"RMBookmark\0";
 
 /// The guest path of a file URL, and the host path it names.
 fn url_paths(url: CFTypeRef) -> Option<(String, std::path::PathBuf)> {
