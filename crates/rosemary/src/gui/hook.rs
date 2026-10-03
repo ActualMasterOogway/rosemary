@@ -156,14 +156,13 @@ fn flush_drawable(
     // As in [`before_send`]: the frame is counted whether or not the overlay is
     // drawing on it.
     crate::stats::record_frame();
-    if super::armed() {
+    if !crate::frameworks::using_builtin() && super::armed() {
         super::guarded(|| super::gl::present(context as usize));
     }
     let host = crate::shims::host::host_or_refuse(symbol)?;
     // SAFETY: the symbol [`shim_for`] matched, whose declaration in
-    // `<OpenGL/CGLCurrent.h>` is `CGLError (*)(CGLContextObj)` - one pointer in,
-    // an `int` back. Resolved out of an OpenGL framework this process has
-    // loaded, which the guest's own context brought in.
+    // `<OpenGL/OpenGL.h>` is `CGLError (*)(CGLContextObj)`. The selected
+    // framework provider supplies the matching implementation and handle.
     let f: extern "C" fn(u64) -> i32 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> i32>(host) };
     crate::shims::set_int_return(ctx, f(context));
@@ -175,7 +174,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
         // Installed even with the overlay off, because it is also where a frame
         // is counted on the CGL path. The shim calls straight through to the
-        // host's own `CGLFlushDrawable` either way, so the only cost of taking it
+        // selected framework's `CGLFlushDrawable`, so the only cost of taking it
         // when nothing is drawing is one indirection per presented frame.
         "CGLFlushDrawable" => Some(flush_drawable),
         _ => None,

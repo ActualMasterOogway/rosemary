@@ -16,6 +16,7 @@ fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         darwin::register_provider(symbol);
+        darwin::register_host_symbol_filter(|name| !crate::opengl::owns(name));
         register_dlopen_names();
         crate::dyld::install_image_hooks();
         install_block_runtime();

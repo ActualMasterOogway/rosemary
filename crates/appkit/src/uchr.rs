@@ -136,7 +136,7 @@ static PRINTABLE: &[(u16, char, char, Opt, char)] = &[
     (vk::ANSI_LEFT_BRACKET, '[', '{', Ch('“'), '”'),
     (vk::ANSI_RIGHT_BRACKET, ']', '}', Ch('‘'), '’'),
     (vk::ANSI_BACKSLASH, '\\', '|', Ch('«'), '»'),
-    (vk::ANSI_SEMICOLON, ';', ':', Ch('...'), 'Ú'),
+    (vk::ANSI_SEMICOLON, ';', ':', Ch('\u{2026}'), 'Ú'),
     (vk::ANSI_QUOTE, '\'', '"', Ch('æ'), 'Æ'),
     (vk::ANSI_GRAVE, '`', '~', Dead(dead::GRAVE), '\u{0060}'),
     (vk::ANSI_COMMA, ',', '<', Ch('≤'), '\u{00AF}'),

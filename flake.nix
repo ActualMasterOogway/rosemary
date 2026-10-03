@@ -31,7 +31,6 @@
           runtimeLibs = [ pkgs.sdl3 pkgs.curl pkgs.zlib ]
             ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.libglvnd
-              pkgs.libGLU
               pkgs.vulkan-loader
               # OpenAL: dlopened by the OpenAL.framework bridge.
               pkgs.openal

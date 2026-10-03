@@ -1,14 +1,15 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use machish::resolve::{LazyDylib, NativeDylibProvider, Resolved};
 
-/// Whether GL entry points are answered here rather than by the host loader.
-///
-/// Off on macOS, where SDL makes its contexts against the same
-/// `OpenGL.framework` the loader would bind - there is nothing to keep apart -
-/// and where a guest on Apple's own AppKit never brings SDL up at all.
+/// Built-in frameworks always draw through SDL's GL backend.
 pub fn interposed() -> bool {
-    !cfg!(target_os = "macos")
+    crate::frameworks::using_builtin()
+}
+
+/// Symbol families owned here, including unsupported entry points.
+pub fn owns(name: &str) -> bool {
+    interposed() && (name.starts_with("gl") || name.starts_with("CGL"))
 }
 
 /// The paths a guest names the framework by: the install name an
@@ -31,15 +32,14 @@ pub const INSTALL_PATHS: &[&str] = &[
 /// placement would otherwise open a display connection and a GL driver in every
 /// process, including the ones that never draw.
 pub fn provider() -> LazyDylib {
-    let mut lib = LazyDylib::new(INSTALL_PATHS[0], open, resolve);
+    let mut lib = LazyDylib::new(INSTALL_PATHS[0], interposed, resolve);
     for name in &INSTALL_PATHS[1..] {
         lib.alias(name);
     }
-    // Flat, so every import of every guest passes through here; opening the
-    // library for one that is not its own would bring up the host driver in a
-    // guest that never uses it.
+    // Claims are backend-dependent even for explicitly named imports. Driver
+    // loading stays in symbol(), so CGL queries need no graphics initialization.
     lib.flat(interposed())
-        .claims(|symbol| symbol.strip_prefix('_').is_some_and(is_gl));
+        .claims(|symbol| symbol.strip_prefix('_').is_some_and(owns));
     lib
 }
 
@@ -56,6 +56,7 @@ pub fn provider() -> LazyDylib {
 pub fn deny_host_gl(provider: &mut NativeDylibProvider) {
     if interposed() {
         provider.deny_prefix("_gl");
+        provider.deny_prefix("_CGL");
     }
 }
 
@@ -63,14 +64,17 @@ pub fn deny_host_gl(provider: &mut NativeDylibProvider) {
 ///
 /// The C name, without the leading underscore an import carries.
 pub fn symbol(name: &str) -> Option<u64> {
-    if !interposed() || !is_gl(name) || !open() {
+    if !owns(name) {
         return None;
     }
-    address(name)
-}
-
-fn is_gl(name: &str) -> bool {
-    name.starts_with("gl")
+    // Opaque CGL handles and queries do not require a display or driver.
+    if name.starts_with("CGL") {
+        return appkit::symbol(name);
+    }
+    if name.starts_with("glu") && name != "gluOrtho2D" {
+        return None;
+    }
+    open().then(|| address(name)).flatten()
 }
 
 fn open() -> bool {
@@ -91,12 +95,8 @@ fn open() -> bool {
     })
 }
 
-fn resolve(symbol: &str) -> Option<Resolved> {
-    let name = symbol.strip_prefix('_')?;
-    is_gl(name)
-        .then(|| address(name))
-        .flatten()
-        .map(Resolved::function)
+fn resolve(name: &str) -> Option<Resolved> {
+    symbol(name.strip_prefix('_')?).map(Resolved::function)
 }
 
 fn address(name: &str) -> Option<u64> {
@@ -108,25 +108,17 @@ fn address(name: &str) -> Option<u64> {
     if name == "glDrawElements" {
         return Some(draw_elements as *const () as usize as u64);
     }
-    // Apple's 2.1 contexts expose vertex array objects through the APPLE
-    // extension. Mesa may return addresses for those old spellings even when
-    // the active context implements only the core/ARB object, in which case
-    // calls quietly leave VAO zero bound. Their prototypes and semantics are
-    // identical, so route the three object operations to the core names.
-    let host_name = match name {
-        "glBindVertexArrayAPPLE" => "glBindVertexArray",
-        "glGenVertexArraysAPPLE" => "glGenVertexArrays",
-        "glDeleteVertexArraysAPPLE" => "glDeleteVertexArrays",
-        _ => name,
+    let wrapper = match name {
+        "glBindVertexArrayAPPLE" => Some(bind_vertex_array as *const ()),
+        "glGenVertexArraysAPPLE" => Some(gen_vertex_arrays as *const ()),
+        "glDeleteVertexArraysAPPLE" => Some(delete_vertex_arrays as *const ()),
+        "gluOrtho2D" => Some(ortho_2d as *const ()),
+        _ => None,
     };
-    let c = CString::new(host_name).ok()?;
-    // GLU is not the driver's. It is a client-side library layered on GL, which
-    // SDL does not load and whose names `SDL_GL_GetProcAddress` therefore does
-    // not know - so this is the one part of the framework that is still the
-    // host's, and the `gl` denial above is what routes it through here.
-    if name.starts_with("glu") {
-        return darwin::host_symbol(name);
+    if let Some(wrapper) = wrapper {
+        return Some(wrapper as usize as u64);
     }
+    let c = CString::new(name).ok()?;
     sdl3::video::gl_proc_address(&c).map(|p| p as usize as u64)
 }
 
@@ -149,7 +141,12 @@ unsafe extern "C" fn draw_elements(mode_: u32, count: i32, type_: u32, indices: 
         return;
     };
     // SAFETY: both pointers came from SDL for the named GL prototypes.
-    let (draw, get): (Draw, Get) = unsafe { (std::mem::transmute(draw), std::mem::transmute(get)) };
+    let (draw, get) = unsafe {
+        (
+            std::mem::transmute::<usize, Draw>(draw),
+            std::mem::transmute::<usize, Get>(get),
+        )
+    };
     const ELEMENT_ARRAY_BUFFER_BINDING: u32 = 0x8895;
     const VERTEX_ARRAY_BINDING: u32 = 0x85b5;
     let (mut element, mut vao) = (0, 0);
@@ -165,4 +162,132 @@ unsafe extern "C" fn draw_elements(mode_: u32, count: i32, type_: u32, indices: 
         return;
     }
     unsafe { draw(mode_, count, type_, indices) };
+}
+
+/// Select VAO entry points by the active driver's capabilities. A legacy
+/// Apple legacy contexts have APPLE VAOs; other drivers can expose core/ARB VAOs.
+fn vao_entry(core: &CStr, apple: &CStr) -> Option<*mut std::ffi::c_void> {
+    let core_supported = sdl3::video::gl_current_version().is_some()
+        || sdl3::video::gl_extension_supported(c"GL_ARB_vertex_array_object");
+    let name = if core_supported {
+        core
+    } else if sdl3::video::gl_extension_supported(c"GL_APPLE_vertex_array_object") {
+        apple
+    } else {
+        return None;
+    };
+    sdl3::video::gl_proc_address(name)
+}
+
+unsafe extern "C" fn bind_vertex_array(array: u32) {
+    if let Some(entry) = vao_entry(c"glBindVertexArray", c"glBindVertexArrayAPPLE") {
+        // SAFETY: both spellings have the prototype void (GLuint).
+        let f: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(entry) };
+        unsafe { f(array) };
+    }
+}
+
+unsafe extern "C" fn gen_vertex_arrays(count: i32, arrays: *mut u32) {
+    if let Some(entry) = vao_entry(c"glGenVertexArrays", c"glGenVertexArraysAPPLE") {
+        // SAFETY: both spellings have the prototype void (GLsizei, GLuint *).
+        let f: unsafe extern "C" fn(i32, *mut u32) = unsafe { std::mem::transmute(entry) };
+        unsafe { f(count, arrays) };
+    }
+}
+
+unsafe extern "C" fn delete_vertex_arrays(count: i32, arrays: *const u32) {
+    if let Some(entry) = vao_entry(c"glDeleteVertexArrays", c"glDeleteVertexArraysAPPLE") {
+        // SAFETY: both spellings have the prototype void (GLsizei, const GLuint *).
+        let f: unsafe extern "C" fn(i32, *const u32) = unsafe { std::mem::transmute(entry) };
+        unsafe { f(count, arrays) };
+    }
+}
+
+unsafe extern "C" fn ortho_2d(left: f64, right: f64, bottom: f64, top: f64) {
+    if let Some(entry) = sdl3::video::gl_proc_address(c"glOrtho") {
+        // SAFETY: glOrtho takes six GLdouble parameters, per OpenGL/gl.h.
+        let f: unsafe extern "C" fn(f64, f64, f64, f64, f64, f64) =
+            unsafe { std::mem::transmute(entry) };
+        unsafe { f(left, right, bottom, top, -1.0, 1.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use machish::fixups::{LibraryRef, SymbolRef};
+    use machish::resolve::SymbolProvider;
+
+    #[test]
+    fn backend_selection_child() {
+        let Ok(mode) = std::env::var("ROSEMARY_GL_TEST_CHILD") else {
+            return;
+        };
+        let builtin = mode == "builtin";
+        assert_eq!(interposed(), builtin);
+        let lib = provider();
+        let mut host = NativeDylibProvider::system();
+        deny_host_gl(&mut host);
+        assert_eq!(host.is_denied("_CGLChoosePixelFormat"), builtin);
+        assert_eq!(host.is_denied("_glClear"), builtin);
+        crate::frameworks::provider();
+        for name in [
+            "CGLGetCurrentContext",
+            "CGLFlushDrawable",
+            "CGLGetShareGroup",
+        ] {
+            let mangled = format!("_{name}");
+            let request = SymbolRef {
+                name: &mangled,
+                library: LibraryRef::InstallName(INSTALL_PATHS[0]),
+                weak_import: false,
+            };
+            if builtin {
+                let expected = appkit::symbol(name).unwrap();
+                assert_eq!(symbol(name), Some(expected));
+                assert_eq!(lib.resolve(&request).unwrap().addr, expected);
+                assert_eq!(darwin::symbol(name), Some(expected));
+                assert_eq!(darwin::shim_symbol(name), Some(expected));
+            } else {
+                assert!(symbol(name).is_none());
+                assert!(lib.resolve(&request).is_none());
+            }
+        }
+        if builtin {
+            for name in ["CGLChoosePixelFormat", "gluPerspective"] {
+                assert!(symbol(name).is_none());
+                assert!(darwin::symbol(name).is_none());
+                assert!(darwin::shim_symbol(name).is_none());
+            }
+        } else {
+            assert_eq!(lib.opened(), None);
+        }
+    }
+
+    #[test]
+    fn backend_selection_controls_imports_and_fallbacks() {
+        let modes: &[&str] = if cfg!(target_os = "macos") {
+            &["native", "builtin"]
+        } else {
+            &["builtin"]
+        };
+        for mode in modes {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "opengl::tests::backend_selection_child",
+                    "--nocapture",
+                ])
+                .env("ROSEMARY_OBJC", mode)
+                .env("ROSEMARY_GL_TEST_CHILD", mode)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

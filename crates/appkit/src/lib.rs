@@ -237,6 +237,7 @@ exports::exports! {
         "CGLDisable" => opengl::CGLDisable,
         "CGLSetParameter" => opengl::CGLSetParameter,
         "CGLSetCurrentContext" => opengl::CGLSetCurrentContext,
+        "CGLGetCurrentContext" => opengl::CGLGetCurrentContext,
         "CGLFlushDrawable" => opengl::CGLFlushDrawable,
         "CGLClearDrawable" => opengl::CGLClearDrawable,
         "CGLLockContext" => opengl::CGLLockContext,

@@ -1095,6 +1095,10 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 
     // A handle from the host's loader.
     if let Some(path) = native_handle(handle) {
+        if crate::opengl::owns(name) {
+            return crate::opengl::symbol(name)
+                .map(|addr| remember_native_symbol(addr, name, Some(path)));
+        }
         let c = CString::new(name).ok()?;
         // SAFETY: a handle this module obtained from `dlopen` and never closed,
         // and a null-terminated name.
@@ -1896,6 +1900,34 @@ pub fn provider() -> SyntheticDylib {
 mod tests {
     use super::*;
     use crate::abi::{Classification, Lookup};
+
+    #[test]
+    fn native_library_handles_cannot_bypass_builtin_gl() {
+        if !cfg!(target_os = "macos") || !crate::frameworks::using_builtin() {
+            return;
+        }
+        crate::frameworks::provider();
+        let handle = open_native(crate::opengl::INSTALL_PATHS[0]).expect("host OpenGL framework");
+        // Prove the host really has the entry point that the guest must not see.
+        let host = unsafe {
+            libc::dlsym(
+                handle as *mut libc::c_void,
+                c"CGLChoosePixelFormat".as_ptr(),
+            )
+        };
+        assert!(!host.is_null());
+        assert!(lookup(handle, "CGLChoosePixelFormat").is_none());
+        assert!(lookup(handle, "gluPerspective").is_none());
+        let expected = appkit::symbol("CGLGetCurrentContext").unwrap();
+        assert_eq!(
+            lookup(handle, "CGLGetCurrentContext"),
+            Some(remember_native_symbol(
+                expected,
+                "CGLGetCurrentContext",
+                None
+            ))
+        );
+    }
 
     /// A provided framework's bundle and the folder it is in exist for the
     /// File Manager, and a framework nobody registered does not.

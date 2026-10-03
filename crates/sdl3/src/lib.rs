@@ -218,6 +218,7 @@ struct Api {
     SDL_GL_SetAttribute: Option<unsafe extern "C" fn(c_int, c_int) -> bool>,
     SDL_GL_SetSwapInterval: Option<unsafe extern "C" fn(c_int) -> bool>,
     SDL_GL_GetProcAddress: Option<unsafe extern "C" fn(*const c_char) -> *mut c_void>,
+    SDL_GL_ExtensionSupported: Option<unsafe extern "C" fn(*const c_char) -> bool>,
 
     /// The EGL objects SDL made, for the one thing `SDL_GL_*` cannot express -
     /// see [`video::egl`]. Absent on an SDL whose GL is not EGL-backed.
@@ -450,6 +451,7 @@ fn api() -> Option<&'static Api> {
             SDL_GL_SetAttribute,
             SDL_GL_SetSwapInterval,
             SDL_GL_GetProcAddress,
+            SDL_GL_ExtensionSupported,
             SDL_EGL_GetCurrentDisplay,
             SDL_EGL_GetCurrentConfig,
             SDL_EGL_GetProcAddress,
@@ -2508,9 +2510,24 @@ pub mod video {
     /// This is what a second context has to be asked for so that the guest sees
     /// the same GL on both of its threads; see [`egl::create_shared`].
     pub fn gl_current_version() -> Option<(i32, i32, i32)> {
-        const MAJOR_VERSION: u32 = 0x821B;
-        const MINOR_VERSION: u32 = 0x821C;
+        const VERSION: u32 = 0x1F02;
         const CONTEXT_PROFILE_MASK: u32 = 0x9126;
+        let f = gl_proc_address(c"glGetString")?;
+        // SAFETY: const GLubyte *glGetString(GLenum).
+        let get_string: unsafe extern "C" fn(u32) -> *const c_char =
+            unsafe { std::mem::transmute(f) };
+        let text = unsafe { get_string(VERSION) };
+        if text.is_null() {
+            return None;
+        }
+        // GL_MAJOR_VERSION is invalid before GL 3.0. Parse the universally
+        // supported version string without consuming or introducing GL errors.
+        let version = unsafe { CStr::from_ptr(text) }.to_str().ok()?;
+        let mut parts = version.split_whitespace().next()?.split('.');
+        let (major, minor): (i32, i32) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?);
+        if major < 3 {
+            return None;
+        }
         let f = gl_proc_address(c"glGetIntegerv")?;
         // SAFETY: `void glGetIntegerv(GLenum, GLint *)`.
         let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(f) };
@@ -2520,12 +2537,6 @@ pub mod video {
             unsafe { get(name, &mut value) };
             value
         };
-        let (major, minor) = (read(MAJOR_VERSION), read(MINOR_VERSION));
-        if major < 3 {
-            // Pre-3.0 has no `GL_MAJOR_VERSION`, so the reads above only set
-            // `GL_INVALID_ENUM` and leave the sentinel behind.
-            return None;
-        }
         // The profile mask is GL 3.2 and later; below that it stays zero, which
         // is what "no profile was asked for" is spelled as.
         let profile = match (major, minor) {
@@ -2729,6 +2740,15 @@ pub mod video {
         // SAFETY: a NUL-terminated name.
         let found = unsafe { f(name.as_ptr()) };
         (!found.is_null()).then_some(found)
+    }
+
+    /// Whether the current driver context supports this extension.
+    pub fn gl_extension_supported(name: &CStr) -> bool {
+        let Some(f) = api().and_then(|a| a.SDL_GL_ExtensionSupported) else {
+            return false;
+        };
+        // SAFETY: a NUL-terminated extension name.
+        unsafe { f(name.as_ptr()) }
     }
 
     pub fn primary_display() -> u32 {

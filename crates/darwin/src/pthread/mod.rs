@@ -816,6 +816,7 @@ pub unsafe extern "C" fn key_create(
 /// `thread` is a handle this process's `pthread_create` produced and `value` is
 /// a writable pointer slot or null.
 pub unsafe extern "C" fn join(thread: u64, value: u64) -> i32 {
+    super::idle::reached(super::idle::Idle::Wait);
     err::from_host(unsafe { libc::pthread_join(thread_of(thread), value as usize as *mut _) })
 }
 
@@ -1062,7 +1063,6 @@ exports::exports! {
         "pthread_setspecific" => setspecific,
 
         "pthread_create" => create,
-        "pthread_join" => join,
         "pthread_detach" => detach,
         "pthread_kill" => kill,
         #[cfg(not(target_os = "macos"))]

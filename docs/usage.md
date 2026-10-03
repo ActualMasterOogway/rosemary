@@ -146,3 +146,23 @@ Rosemary has two execution modes currently:
 If not specified at the CLI, Rosemary will automatically try to see if there is a slice available in the app for your native architecture and run it without getting Microlift involved. Otherwise, it will check if it has an emulated implementation for the architecture.
 
 ARM emulation is not supported yet, but the groundwork is laid for it.
+
+## Built-in OpenGL
+
+`ROSEMARY_OBJC=builtin` uses the same SDL3-backed OpenGL and CGL compatibility
+implementation on every host, including macOS. Linked imports and dynamic
+lookups use that implementation; unsupported GL/CGL functions do not fall back
+to Apple's OpenGL framework. Native Objective-C continues to use native frameworks.
+
+CGL handles obtained from `NSOpenGLContext` belong to Rosemary. Querying a handle
+does not create or bind a GL context. The Objective-C and CGL current-context
+queries share thread-local state, and swap interval settings apply to the named
+context. Contexts move between threads through a bounded handoff; an EGL backend
+can fall back to a sibling sharing textures and buffers, but not vertex arrays,
+framebuffers, or queries. Other backends report contention if handoff fails.
+
+Direct CGL pixel-format/context creation and lifetime APIs, and explicit context
+sharing, remain unsupported. The built-in GLU surface provides `gluOrtho2D`
+through SDL-resolved `glOrtho`; other GLU functions remain unsupported. No host
+GLU library is required. Driver capabilities still determine available profiles
+and extensions.

@@ -66,5 +66,6 @@ exports::exports! {
         "sleep" => sleep,
         "nanosleep" => nanosleep,
         "sched_yield" => sched_yield,
+        "pthread_join" => crate::pthread::join,
     }
 }

@@ -89,14 +89,14 @@ first:
 
 ```sh
 sudo apt-get install build-essential pkg-config libcurl4-openssl-dev \
-    zlib1g-dev libsdl3-dev libglu1-mesa
+    zlib1g-dev libsdl3-dev
 cargo build --release --bin rosemary
 ```
 
 On FreeBSD, install the native build and runtime dependencies first:
 
 ```sh
-sudo pkg install curl sdl3 mesa-libs libGLU
+sudo pkg install curl sdl3 mesa-libs
 cargo build --release --bin rosemary
 ```
 

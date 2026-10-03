@@ -29,7 +29,7 @@
 #     container exec rosemary-debian sh -c 'apt-get update -qq && \
 #         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 #         build-essential curl pkg-config libcurl4-openssl-dev zlib1g-dev libsdl3-dev \\
-#         libglu1-mesa libvulkan1 mesa-vulkan-drivers libxkbcommon-dev'
+#         libvulkan1 mesa-vulkan-drivers libxkbcommon-dev'
 #     container exec rosemary-debian sh -c 'curl --proto "=https" --tlsv1.2 -sSf \
 #         https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0 --profile minimal'
 #     tools/linux-sync.sh --vendor
@@ -38,9 +38,7 @@
 # which link against the real libraries on either host - they are on the macOS
 # SDK's include path and need the `-dev` packages here. `libsdl3-dev` is what the
 # reimplemented AppKit, IOKit and CoreAudio are built on, and it brings libGL with
-# it. `libglu1-mesa` does not come with it: `gluOrtho2D` is in Apple's OpenGL
-# framework and in a library of its own here, and a guest's `glu*` imports go
-# unresolved without it. See `darwin::load_host_libraries`.
+# it. Built-in GLU compatibility uses SDL-resolved GL entry points too.
 # `libvulkan1` is Metal's loader and `mesa-vulkan-drivers` supplies an ICD,
 # including lavapipe for the container's headless adapter-discovery tests.
 # `libxkbcommon-dev` is linked by smithay, the compositor WebKitGTK's windows

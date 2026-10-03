@@ -27,6 +27,7 @@ pub mod intdiv;
 pub mod ioctl;
 pub mod math;
 pub mod openat;
+pub mod opengl;
 pub mod printf;
 pub mod process;
 pub mod pthread;
@@ -69,6 +70,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
         .or_else(|| component::shim_for(name))
         .or_else(|| coregraphics::shim_for(name))
         .or_else(|| appkit::shim_for(name))
+        .or_else(|| opengl::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -79,8 +81,6 @@ fn macos_shim_for(name: &str) -> Option<Shim> {
     coremedia::shim_for(name)
         .or_else(|| cfuuid::shim_for(name))
         .or_else(|| machthread::shim_for(name))
-        // The overlay's OpenGL seam. Only present when the overlay is on;
-        // see [`crate::gui::hook::shim_for`].
         .or_else(|| crate::gui::hook::shim_for(name))
 }
 

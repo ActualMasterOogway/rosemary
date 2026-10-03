@@ -25,9 +25,6 @@ pub struct Context {
     /// swap a window that had gone.
     view: Id,
     format: Id,
-    /// The `CGLContextObj` behind the SDL context, recorded the first time it is
-    /// made current - see [`cgl_context`].
-    cgl: *mut c_void,
     /// What it takes to be current on more than one thread at once, allocated
     /// on first use by [`shared_of`]. Leaked with the object.
     shared: *mut Cell,
@@ -63,12 +60,13 @@ struct Cell {
 /// renderer up on the thread that starts, then draw on the thread that draws.
 ///
 /// A holder that never comes back to its event loop would hang the program, so
-/// the wait gives up and the asking thread gets a context of its own in the
-/// same *share group* instead: a distinct context through which every shared
+/// the wait gives up. An EGL backend can give the asking thread a context in
+/// the same *share group*: a distinct context through which every shared
 /// object - textures, buffers, shaders, programs, renderbuffers - is the same
 /// object. Vertex arrays, framebuffers and queries are **not** shared by
 /// OpenGL, so that fallback draws what a program that made none of those on the
-/// other thread would draw, and nothing otherwise.
+/// other thread would draw, and nothing otherwise. Other backends report the
+/// contention because SDL has no portable sibling-context creation API.
 #[derive(Default)]
 struct Shared {
     /// The thread the SDL context itself is current on, while one holds it.
@@ -86,6 +84,8 @@ struct Shared {
     version: Option<(i32, i32, i32)>,
     /// A context per thread that asked while another thread held the SDL one.
     siblings: Vec<(std::thread::ThreadId, sdl3::GlContext)>,
+    /// Deferred until this context is current on the calling thread.
+    swap_interval: Option<i32>,
 }
 
 pub const PIXEL_FORMAT_INSTANCE_SIZE: usize = size_of::<PixelFormat>();
@@ -651,6 +651,9 @@ fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
         }
     };
     if context.sdl.is_null() {
+        // SDL's format attributes are global, including across contexts.
+        static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CREATION.lock().unwrap_or_else(|e| e.into_inner());
         let core = apply(context.format);
         // A host that has no 4.1 is a Mac that has none either, and that Mac
         // hands a core request 3.2 instead.
@@ -674,6 +677,17 @@ unsafe extern "C" fn view(receiver: Id, _sel: Sel) -> Id {
     context_of(receiver).view
 }
 
+struct ThreadBinding(std::cell::Cell<Id>);
+
+impl Drop for ThreadBinding {
+    fn drop(&mut self) {
+        let receiver = self.0.replace(std::ptr::null_mut());
+        if !receiver.is_null() {
+            let_go(receiver);
+        }
+    }
+}
+
 thread_local! {
     /// The context this thread made current last, which `+currentContext`
     /// answers. Per thread because that is what AppKit promises: a render
@@ -684,6 +698,10 @@ thread_local! {
     /// The context this thread's guest let go of, which SDL still has bound
     /// here - see [`clear_current_context`]. Null when nothing is left bound.
     static LINGERING: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    static APPLIED_INTERVAL: std::cell::Cell<(sdl3::GlContext, sdl3::Window, Option<i32>)> =
+        const { std::cell::Cell::new((std::ptr::null_mut(), std::ptr::null_mut(), None)) };
+    // Ownership must be released even when a guest's render thread exits.
+    static BINDING: ThreadBinding = const { ThreadBinding(std::cell::Cell::new(std::ptr::null_mut())) };
 }
 
 /// `ROSEMARY_GL_DEBUG`, read once: it is asked on every make-current.
@@ -697,6 +715,7 @@ fn gl_debug() -> bool {
 /// context back if this thread held it, waking a thread waiting for it.
 fn let_go(receiver: Id) {
     sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    let _ = BINDING.try_with(|binding| binding.0.set(std::ptr::null_mut()));
     let cell = shared_of(context_of(receiver));
     let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
     if state.owner == Some(std::thread::current().id()) {
@@ -791,6 +810,7 @@ pub fn release_for_other_threads() {
         return;
     }
     sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    BINDING.with(|binding| binding.0.set(std::ptr::null_mut()));
     state.owner = None;
     state.wanted = false;
     CURRENT.set(std::ptr::null_mut());
@@ -822,19 +842,24 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
     if !lingering.is_null() && lingering != receiver {
         let_go(lingering);
     }
+    let previous = CURRENT.replace(std::ptr::null_mut());
+    if !previous.is_null() && previous != receiver {
+        let_go(previous);
+    }
+    // Serialize lazy creation as well as subsequent ownership changes.
+    let cell = shared_of(context_of(receiver));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
     let window = ensure(receiver, "makeCurrentContext");
     let context = context_of(receiver);
     let primary = context.sdl;
     let thread = std::thread::current().id();
-    let cell = shared_of(context);
-    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
 
     // Another thread holds it, on a GL where that is a refusal rather than the
     // program's own business to serialise. Ask, and wait: the objects a program
     // makes on the thread it sets its renderer up on are only *some* of them
     // shared, so the context itself is worth waiting for and a sibling is the
     // fallback rather than the answer.
-    if state.egl && state.owner.is_some_and(|owner| owner != thread) {
+    if state.owner.is_some_and(|owner| owner != thread) {
         state.wanted = true;
         let (guard, wait) = cell
             .released
@@ -845,14 +870,13 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
         state = guard;
         if wait.timed_out() {
             state.wanted = false;
-            warn_about_the_fallback();
+            if state.egl {
+                warn_about_the_fallback();
+            }
         }
     }
 
-    // Where a context *can* be current on several threads at once - CGL can,
-    // which is the contract AppKit's own is written against - none of the above
-    // applies and every thread simply gets the context SDL made.
-    let holds_primary = !state.egl || state.owner.is_none_or(|owner| owner == thread);
+    let holds_primary = state.owner.is_none_or(|owner| owner == thread);
     let sdl = match holds_primary {
         true => primary,
         false => sibling(&mut state, primary, thread),
@@ -890,12 +914,23 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
             install_debug_output();
         }
     }
+    if let Some(interval) = state.swap_interval.or_else(swap_interval) {
+        let setting = (sdl, window, Some(interval));
+        if !bound || APPLIED_INTERVAL.get() != setting {
+            if !sdl3::video::gl_set_swap_interval(interval) {
+                objc::fail!(
+                    "-[NSOpenGLContext makeCurrentContext]: SDL could not set swap interval \
+                     {interval}: {}",
+                    sdl3::error()
+                );
+            }
+            APPLIED_INTERVAL.set(setting);
+        }
+    }
     drop(state);
 
     CURRENT.set(receiver);
-    if context.cgl.is_null() {
-        context.cgl = current_cgl_context();
-    }
+    BINDING.with(|binding| binding.0.set(receiver));
 }
 
 /// `ROSEMARY_GL_DEBUG`: report every message the GL driver has about the calls
@@ -971,80 +1006,12 @@ fn install_debug_output() {
     }
 }
 
-/// The CGL context current on this thread, or null where there is no CGL.
-///
-/// Through SDL's loader rather than a link: `CGLGetCurrentContext` lives in the
-/// OpenGL framework, which is what SDL opened to make the context, and asking
-/// SDL for it keeps this file building where that framework does not exist.
-fn current_cgl_context() -> *mut c_void {
-    // Looked up once: where there is no CGL the answer is null, and the caller
-    // asks again on every make-current of a context that has none.
-    static ENTRY: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    let entry = ENTRY
-        .get_or_init(|| sdl3::video::gl_proc_address(c"CGLGetCurrentContext").map(|f| f as usize));
-    let Some(f) = *entry else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: `CGLContextObj CGLGetCurrentContext(void)`.
-    unsafe {
-        let f: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(f);
-        f()
-    }
-}
-
-/// Whether making this context current on this thread would take it away from
-/// another thread that is drawing through it.
-///
-/// Only ever true where the GL underneath is one a context cannot be current on
-/// two threads at once - see [`Shared`]. Where it can, which is the CGL this
-/// class is modelled on, every thread holds the context and nothing is taken.
-fn held_by_another_thread(context: &mut Context) -> bool {
-    let cell = shared_of(context);
-    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
-    state.egl
-        && state
-            .owner
-            .is_some_and(|owner| owner != std::thread::current().id())
-}
-
-/// `-CGLContextObj`, the context SDL made underneath this one.
-///
-/// Recorded when the context is made current, because the only way to name
-/// SDL's is to ask the thread it is current on. A receiver that has never been
-/// current is made current here: the alternative is answering null, and the CGL
-/// calls a program makes with it - `CGLEnable`, `CGLSetParameter` - would then
-/// silently do nothing to the context it meant.
-///
-/// Except when another thread is drawing through it, which is the case that is
-/// not worth the answer: there is no CGL under an EGL, so making the context
-/// current here would interrupt the thread that is rendering only to answer
-/// null anyway. A program asks this during startup - Unreal does, from
-/// `-applicationDidFinishLaunching:`, while its render thread is already
-/// drawing - and taking the context there is what stops the program dead.
-unsafe extern "C" fn cgl_context(receiver: Id, sel: Sel) -> *mut c_void {
-    if context_of(receiver).cgl.is_null() && !held_by_another_thread(context_of(receiver)) {
-        // SAFETY: the receiver is a context of this crate's.
-        unsafe { make_current_context(receiver, sel) };
-    }
-    let host = context_of(receiver).cgl;
-    if !host.is_null() {
-        return host;
-    }
-    // No CGL under this SDL - it is EGL or GLX - and null is the one answer
-    // that cannot be given: a program stores this handle and then *calls*
-    // through it, and `CGLSetCurrentContext(NULL)` means "make nothing
-    // current" rather than "this context". So the handle is the
-    // `NSOpenGLContext` itself, and the CGL entry points below take it back
-    // apart again.
+/// A borrowed compatibility handle; querying it never changes GL bindings.
+unsafe extern "C" fn cgl_context(receiver: Id, _sel: Sel) -> *mut c_void {
     handle_out(receiver)
 }
 
-/// Every `NSOpenGLContext` handed out as a `CGLContextObj`.
-///
-/// A registry rather than a class check, because the CGL calls are also given
-/// handles that are *not* this crate's - on macOS, where the SDL context really
-/// does have a CGL one behind it - and those have to be told apart so they can
-/// go to the framework that made them.
+/// Only handles this implementation published may reach its SDL contexts.
 static HANDLES: std::sync::Mutex<Option<std::collections::HashSet<usize>>> =
     std::sync::Mutex::new(None);
 
@@ -1064,27 +1031,6 @@ fn handle_in(handle: *mut c_void) -> Option<Id> {
     held.as_ref()
         .is_some_and(|live| live.contains(&(handle as usize)))
         .then(|| handle.cast())
-}
-
-/// The host's own CGL entry point of that name, for a handle this crate did not
-/// hand out.
-///
-/// Through SDL's loader for the reason [`current_cgl_context`] gives: CGL is in
-/// `OpenGL.framework`, which this process does not link, and on the host where
-/// there is one SDL has it open already.
-fn host_cgl(name: &std::ffi::CStr) -> Option<*mut c_void> {
-    sdl3::video::gl_proc_address(name)
-}
-
-/// The shape every CGL call below shares: a handle in, a `CGLError` out.
-type CglCall = unsafe extern "C" fn(*mut c_void) -> i32;
-
-/// [`host_cgl`], as a call of that shape.
-fn host_cgl_call(name: &std::ffi::CStr) -> Option<CglCall> {
-    let entry = host_cgl(name)?;
-    // SAFETY: each name this is asked for is declared `CGLError
-    // (CGLContextObj)` in `<OpenGL/CGLCurrent.h>`.
-    Some(unsafe { std::mem::transmute::<*mut c_void, CglCall>(entry) })
 }
 
 mod context_enable {
@@ -1151,17 +1097,19 @@ const kCGLBadEnumeration: i32 = 10010;
 const kCGLBadAddress: i32 = 10014;
 #[allow(non_upper_case_globals)]
 const kCGLBadValue: i32 = 10008;
+#[allow(non_upper_case_globals)]
+const kCGLBadContext: i32 = 10004;
 
 unsafe fn cgl_set(ctx: *mut c_void, pname: u32, _enabled: bool) -> i32 {
     if handle_in(ctx).is_some() {
-        return if context_enable::is_known(pname) {
+        if context_enable::is_known(pname) {
             0
         } else {
             // `kCGLBadEnumeration`.
             kCGLBadEnumeration
-        };
+        }
     } else {
-        kCGLBadAddress
+        kCGLBadContext
     }
 }
 
@@ -1183,7 +1131,10 @@ pub unsafe extern "C" fn CGLDisable(ctx: *mut c_void, pname: u32) -> i32 {
 /// # Safety
 ///
 /// `ctx` is a handle returned by this module
-pub unsafe extern "C" fn CGLSetParameter(_ctx: *mut c_void, pname: u32, params: *const i32) -> i32 {
+pub unsafe extern "C" fn CGLSetParameter(ctx: *mut c_void, pname: u32, params: *const i32) -> i32 {
+    let Some(receiver) = handle_in(ctx) else {
+        return kCGLBadContext;
+    };
     if params.is_null() {
         return kCGLBadAddress;
     }
@@ -1194,10 +1145,7 @@ pub unsafe extern "C" fn CGLSetParameter(_ctx: *mut c_void, pname: u32, params: 
         // SAFETY: this parameter is documented as one `GLint` and the caller
         // promises a readable parameter array.
         let requested = unsafe { *params };
-        let actual = swap_interval().unwrap_or(requested);
-        if !sdl3::video::gl_set_swap_interval(actual) {
-            return kCGLBadValue;
-        }
+        return set_swap_interval(receiver, requested);
     }
     0
 }
@@ -1209,7 +1157,7 @@ pub unsafe extern "C" fn CGLSetParameter(_ctx: *mut c_void, pname: u32, params: 
 ///
 /// # Safety
 ///
-/// `ctx` is null, a handle `-CGLContextObj` returned, or a host `CGLContextObj`.
+/// `ctx` is null or a handle `-CGLContextObj` returned.
 pub unsafe extern "C" fn CGLSetCurrentContext(ctx: *mut c_void) -> i32 {
     if ctx.is_null() {
         // SAFETY: the class method reads neither argument.
@@ -1226,13 +1174,7 @@ pub unsafe extern "C" fn CGLSetCurrentContext(ctx: *mut c_void) -> i32 {
         unsafe { make_current_context(receiver, objc::sel::register(c"makeCurrentContext")) };
         return 0;
     }
-    let Some(f) = host_cgl_call(c"CGLSetCurrentContext") else {
-        // `kCGLBadContext`.
-        return 10004;
-    };
-    // SAFETY: a handle the framework that exports the call made, and that call
-    // is what `host_cgl_call` returned.
-    unsafe { f(ctx) }
+    kCGLBadContext
 }
 
 /// `CGLError CGLFlushDrawable(CGLContextObj ctx)`
@@ -1246,12 +1188,7 @@ pub unsafe extern "C" fn CGLFlushDrawable(ctx: *mut c_void) -> i32 {
         unsafe { flush_buffer(receiver, objc::sel::register(c"flushBuffer")) };
         return 0;
     }
-    let Some(f) = host_cgl_call(c"CGLFlushDrawable") else {
-        return 10004;
-    };
-    // SAFETY: a handle the framework that exports the call made, and that call
-    // is what `host_cgl_call` returned.
-    unsafe { f(ctx) }
+    kCGLBadContext
 }
 
 /// `CGLError CGLClearDrawable(CGLContextObj ctx)`
@@ -1265,12 +1202,7 @@ pub unsafe extern "C" fn CGLClearDrawable(ctx: *mut c_void) -> i32 {
         unsafe { clear_drawable(receiver, objc::sel::register(c"clearDrawable")) };
         return 0;
     }
-    let Some(f) = host_cgl_call(c"CGLClearDrawable") else {
-        return 10004;
-    };
-    // SAFETY: a handle the framework that exports the call made, and that call
-    // is what `host_cgl_call` returned.
-    unsafe { f(ctx) }
+    kCGLBadContext
 }
 
 /// The lock `CGLLockContext` takes, one per context.
@@ -1301,11 +1233,7 @@ static LOCK_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// As [`CGLSetCurrentContext`].
 pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
     if handle_in(ctx).is_none() {
-        let Some(f) = host_cgl_call(c"CGLLockContext") else {
-            return 10004;
-        };
-        // SAFETY: a handle the framework that exports the call made.
-        return unsafe { f(ctx) };
+        return kCGLBadContext;
     }
     let me = std::thread::current().id();
     let mut held = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1335,19 +1263,15 @@ pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
 /// As [`CGLSetCurrentContext`].
 pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
     if handle_in(ctx).is_none() {
-        let Some(f) = host_cgl_call(c"CGLUnlockContext") else {
-            return 10004;
-        };
-        // SAFETY: a handle the framework that exports the call made.
-        return unsafe { f(ctx) };
+        return kCGLBadContext;
     }
     let mut held = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(entry) = held.as_mut().and_then(|all| all.get_mut(&(ctx as usize))) else {
         // `kCGLBadContext`: nothing ever locked it.
-        return 10004;
+        return kCGLBadContext;
     };
     if entry.owner != Some(std::thread::current().id()) || entry.depth == 0 {
-        return 10004;
+        return kCGLBadContext;
     }
     entry.depth -= 1;
     if entry.depth == 0 {
@@ -1372,19 +1296,16 @@ pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
 ///
 /// As [`CGLSetCurrentContext`].
 pub unsafe extern "C" fn CGLGetShareGroup(ctx: *mut c_void) -> *mut c_void {
-    if handle_in(ctx).is_some() {
-        return ctx;
-    }
-    let Some(entry) = host_cgl(c"CGLGetShareGroup") else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: `CGLShareGroupObj CGLGetShareGroup(CGLContextObj)`, and a handle
-    // the framework that exports it made.
-    unsafe {
-        let f = std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut c_void) -> *mut c_void>(
-            entry,
-        );
-        f(ctx)
+    handle_in(ctx).map_or(std::ptr::null_mut(), |receiver| receiver.cast())
+}
+
+/// `CGLContextObj CGLGetCurrentContext(void)`, from the guest's logical binding.
+pub unsafe extern "C" fn CGLGetCurrentContext() -> *mut c_void {
+    let receiver = CURRENT.get();
+    if receiver.is_null() {
+        std::ptr::null_mut()
+    } else {
+        handle_out(receiver)
     }
 }
 
@@ -1442,33 +1363,40 @@ fn swap_interval() -> Option<i32> {
     *SWAP_INTERVAL
 }
 
-/// `-setValues:forParameter:`, of which only the swap interval is honoured.
-///
-/// `NSOpenGLContextParameterSwapInterval` is 222 and is the one a program sets;
-/// the rest describe a surface AppKit composites and SDL does not. Refused by
-/// number rather than ignored, because a program setting a parameter expects it
-/// to take.
-unsafe extern "C" fn set_values(receiver: Id, _sel: Sel, values: *const i32, parameter: isize) {
-    let _ = receiver;
-    const SWAP_INTERVAL: isize = 222;
-    const SURFACE_OPACITY: isize = 236;
-    // SAFETY: the guest passed a readable array of at least one integer, which
-    // every parameter here takes.
-    let value = match values.is_null() {
-        true => 0,
-        false => unsafe { *values },
-    };
-    match parameter {
-        SWAP_INTERVAL => {
-            let actual_value = swap_interval().unwrap_or(value);
-            sdl3::video::gl_set_swap_interval(actual_value);
+/// Store a context's requested interval without binding it on another thread.
+fn set_swap_interval(receiver: Id, requested: i32) -> i32 {
+    let actual = swap_interval().unwrap_or(requested);
+    let cell = shared_of(context_of(receiver));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    if CURRENT.get() == receiver {
+        if !sdl3::video::gl_set_swap_interval(actual) {
+            return kCGLBadValue;
         }
-        // Opacity is the compositor's, and SDL's window is opaque.
-        SURFACE_OPACITY => {}
-        other => objc::fail!(
-            "-[NSOpenGLContext setValues:forParameter:]: parameter {other} is not one this \
-             runtime maps"
-        ),
+        APPLIED_INTERVAL.set((
+            sdl3::video::gl_current_context(),
+            sdl3::video::gl_current_window(),
+            Some(actual),
+        ));
+    }
+    state.swap_interval = Some(actual);
+    0
+}
+
+/// `-setValues:forParameter:`, through the same context state as CGL.
+unsafe extern "C" fn set_values(receiver: Id, _sel: Sel, values: *const i32, parameter: isize) {
+    if !matches!(parameter, 222 | 236) {
+        objc::fail!(
+            "-[NSOpenGLContext setValues:forParameter:]: parameter {parameter} is not one \
+             this runtime maps"
+        );
+    }
+    let zero = 0;
+    let values = if values.is_null() { &zero } else { values };
+    let error = unsafe { CGLSetParameter(handle_out(receiver), parameter as u32, values) };
+    if error != 0 {
+        objc::fail!(
+            "-[NSOpenGLContext setValues:forParameter:]: parameter {parameter} failed: {error}"
+        );
     }
 }
 
@@ -1930,6 +1858,147 @@ mod chrome_blit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_context() -> Id {
+        crate::bootstrap();
+        objc::object::create_instance(objc::class::lookup(c"NSOpenGLContext").unwrap(), 0)
+    }
+
+    #[test]
+    fn cgl_handles_are_stable_without_creating_or_binding_gl() {
+        let receiver = test_context();
+        let before = CURRENT.get();
+        let handle = unsafe { cgl_context(receiver, objc::sel::get("CGLContextObj")) };
+        assert_eq!(handle, unsafe {
+            cgl_context(receiver, objc::sel::get("CGLContextObj"))
+        });
+        assert_eq!(handle_in(handle), Some(receiver));
+        assert!(context_of(receiver).sdl.is_null());
+        assert_eq!(CURRENT.get(), before);
+        assert_eq!(unsafe { CGLGetShareGroup(handle) }, handle);
+    }
+
+    #[test]
+    fn foreign_cgl_handles_are_rejected_without_dereferencing_them() {
+        let mut foreign = 0u64;
+        let handle = (&raw mut foreign).cast();
+        let value = 0;
+        unsafe {
+            assert_eq!(CGLSetCurrentContext(handle), kCGLBadContext);
+            assert_eq!(CGLFlushDrawable(handle), kCGLBadContext);
+            assert_eq!(CGLClearDrawable(handle), kCGLBadContext);
+            assert_eq!(CGLLockContext(handle), kCGLBadContext);
+            assert_eq!(CGLUnlockContext(handle), kCGLBadContext);
+            assert_eq!(
+                CGLEnable(handle, context_enable::RASTERIZATION),
+                kCGLBadContext
+            );
+            assert_eq!(
+                CGLDisable(handle, context_enable::RASTERIZATION),
+                kCGLBadContext
+            );
+            assert_eq!(
+                CGLSetParameter(handle, context_parameter::SWAP_INTERVAL, &value),
+                kCGLBadContext
+            );
+            assert!(CGLGetShareGroup(handle).is_null());
+        }
+    }
+
+    #[test]
+    fn logical_current_queries_ignore_a_lingering_binding() {
+        let receiver = test_context();
+        CURRENT.set(receiver);
+        let handle = unsafe { CGLGetCurrentContext() };
+        assert_eq!(handle_in(handle), Some(receiver));
+        assert_eq!(
+            unsafe { current_context(std::ptr::null_mut(), objc::sel::get("currentContext")) },
+            receiver
+        );
+        // No real SDL binding is needed to exercise the logical clear path.
+        unsafe { CGLSetCurrentContext(std::ptr::null_mut()) };
+        assert_eq!(LINGERING.get(), receiver);
+        assert!(unsafe { CGLGetCurrentContext() }.is_null());
+        assert!(CURRENT.get().is_null());
+        LINGERING.set(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn swap_interval_is_deferred_per_context() {
+        let first = test_context();
+        let second = test_context();
+        let first_handle = handle_out(first);
+        unsafe {
+            assert_eq!(
+                CGLSetParameter(first_handle, context_parameter::SWAP_INTERVAL, &0),
+                0
+            );
+            set_values(second, objc::sel::get("setValues:forParameter:"), &1, 222);
+            assert_eq!(CGLSetParameter(first_handle, 9999, &0), kCGLBadEnumeration);
+            assert_eq!(
+                CGLSetParameter(first_handle, 222, std::ptr::null()),
+                kCGLBadAddress
+            );
+        }
+        assert_eq!(
+            shared_of(context_of(first))
+                .state
+                .lock()
+                .unwrap()
+                .swap_interval,
+            Some(swap_interval().unwrap_or(0))
+        );
+        assert_eq!(
+            shared_of(context_of(second))
+                .state
+                .lock()
+                .unwrap()
+                .swap_interval,
+            Some(swap_interval().unwrap_or(1))
+        );
+        assert!(context_of(first).sdl.is_null());
+        assert!(context_of(second).sdl.is_null());
+    }
+
+    #[test]
+    fn recursive_cgl_locks_exclude_other_threads_until_fully_unlocked() {
+        let handle = handle_out(test_context());
+        unsafe {
+            assert_eq!(CGLLockContext(handle), 0);
+            assert_eq!(CGLLockContext(handle), 0);
+        }
+        let address = handle as usize;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || unsafe {
+            let handle = address as *mut c_void;
+            assert_eq!(CGLUnlockContext(handle), kCGLBadContext);
+            started_tx.send(()).unwrap();
+            assert_eq!(CGLLockContext(handle), 0);
+            locked_tx.send(()).unwrap();
+            assert_eq!(CGLUnlockContext(handle), 0);
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            locked_rx
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err()
+        );
+        unsafe { assert_eq!(CGLUnlockContext(handle), 0) };
+        assert!(
+            locked_rx
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err()
+        );
+        unsafe { assert_eq!(CGLUnlockContext(handle), 0) };
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
+        unsafe { assert_eq!(CGLUnlockContext(handle), kCGLBadContext) };
+    }
 
     #[test]
     fn open_gl_view_storage_precedes_subclass_ivars() {

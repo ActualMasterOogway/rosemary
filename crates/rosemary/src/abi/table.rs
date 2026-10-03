@@ -807,6 +807,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `NSOpenGLContext` is a thin wrapper, and a Unity player written before
     // Metal talks to the layer below it directly.
     sig!("CGLChoosePixelFormat", I32, P, P, P),
+    sig!("CGLClearDrawable", I32, P),
     sig!("CGLCreateContext", I32, P, P, P),
     sig!("CGLDescribePixelFormat", I32, P, I32, U32, P),
     sig!("CGLDescribeRenderer", I32, P, I32, U32, P),
@@ -820,6 +821,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGLGetCurrentContext", P),
     sig!("CGLGetParameter", I32, P, U32, P),
     sig!("CGLGetPixelFormat", P, P),
+    sig!("CGLGetShareGroup", P, P),
     sig!("CGLGetVirtualScreen", I32, P, P),
     sig!("CGLLockContext", I32, P),
     sig!("CGLQueryRendererInfo", I32, U32, P, P),

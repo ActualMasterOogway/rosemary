@@ -236,8 +236,10 @@ fn memory_bytes() -> Option<i32> {
 
 /// With no context: the largest dedicated memory a DRM driver reports, which
 /// amdgpu and xe publish as `mem_info_vram_total`, in bytes.
-#[cfg(target_os = "linux")]
 fn memory_from_sysfs() -> Option<i32> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
     let cards = std::fs::read_dir("/sys/class/drm").ok()?;
     let largest = cards
         .filter_map(Result::ok)
@@ -247,11 +249,6 @@ fn memory_from_sysfs() -> Option<i32> {
         .filter_map(|text| text.trim().parse::<u64>().ok())
         .max()?;
     Some(i32::try_from(largest).unwrap_or(i32::MAX))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn memory_from_sysfs() -> Option<i32> {
-    None
 }
 
 /// The current context's driver, through a vendor extension.
@@ -273,15 +270,16 @@ fn memory_from_driver() -> Option<i32> {
         unsafe { get(name, value.as_mut_ptr()) };
         value[0]
     };
-    let kilobytes = match read(NVX_DEDICATED_VIDMEM) {
-        kb if kb > 0 => kb,
-        // The read failed and left the sentinel, or the driver has neither
-        // extension.
-        _ => match read(ATI_TEXTURE_FREE_MEMORY) {
-            kb if kb > 0 => kb,
-            _ => return None,
-        },
+    let kilobytes = if sdl3::video::gl_extension_supported(c"GL_NVX_gpu_memory_info") {
+        read(NVX_DEDICATED_VIDMEM)
+    } else if sdl3::video::gl_extension_supported(c"GL_ATI_meminfo") {
+        read(ATI_TEXTURE_FREE_MEMORY)
+    } else {
+        return None;
     };
+    if kilobytes <= 0 {
+        return None;
+    }
     Some(i32::try_from(i64::from(kilobytes) * 1024).unwrap_or(i32::MAX))
 }
 

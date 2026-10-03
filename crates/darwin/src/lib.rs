@@ -178,10 +178,6 @@ pub fn host_symbol(name: &str) -> Option<u64> {
 /// guest's whole maths library goes unresolved. One `dlopen` fixes every name
 /// at once.
 ///
-/// GLU is a separate library off Darwin - `gluOrtho2D` is in the OpenGL
-/// framework there and in `libGLU.so.1` here - so it is a second `dlopen` and
-/// not an oversight.
-///
 /// GL itself is deliberately **not** opened here. Its entry points have to come
 /// out of the library SDL made the context against, which is not necessarily
 /// this loader's `libGL.so.1`, and a global one would answer every `gl` name
@@ -191,7 +187,7 @@ fn load_host_libraries() {
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            for soname in [c"libm.so.6", c"libGLU.so.1"] {
+            for soname in [c"libm.so.6"] {
                 // SAFETY: a soname the dynamic loader resolves, opened globally
                 // so its exports join the default search, and never closed.
                 unsafe {
@@ -211,7 +207,7 @@ pub fn symbol(symbol: &str) -> Option<u64> {
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
-    if divergent::contains(name) || strict::enabled() {
+    if divergent::contains(name) || strict::enabled() || !host_fallback_allowed(name) {
         return None;
     }
     host_symbol(name)
@@ -226,7 +222,7 @@ pub fn shim_symbol(symbol: &str) -> Option<u64> {
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
-    if divergent::contains(name) {
+    if divergent::contains(name) || !host_fallback_allowed(name) {
         return None;
     }
     host_symbol(name)
@@ -254,6 +250,24 @@ pub fn refusal(symbol: &str) -> String {
 /// runtime registers itself here at startup and this crate asks.
 static REGISTERED: std::sync::RwLock<Vec<fn(&str) -> Option<u64>>> =
     std::sync::RwLock::new(Vec::new());
+
+/// Guest symbol families owned by a compatibility provider must not fall back
+/// to host libraries when that provider has no implementation.
+static HOST_FILTERS: std::sync::RwLock<Vec<fn(&str) -> bool>> = std::sync::RwLock::new(Vec::new());
+
+/// Register a filter for guest and shim fallback, after implemented symbols.
+/// Explicit internal `host_symbol` lookups are unaffected.
+pub fn register_host_symbol_filter(filter: fn(&str) -> bool) {
+    HOST_FILTERS.write().unwrap().push(filter);
+}
+
+fn host_fallback_allowed(name: &str) -> bool {
+    HOST_FILTERS
+        .read()
+        .unwrap()
+        .iter()
+        .all(|filter| filter(name))
+}
 
 /// Add a source of answers, consulted by [`symbol`] alongside this crate's own.
 ///
