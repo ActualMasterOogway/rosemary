@@ -33,11 +33,26 @@ fn class() -> &'static Class {
 
 /// An autoreleased `NSError`.
 pub fn make(domain: &str, code: i64, description: &str) -> Id {
+    // SAFETY: nil carries no user-info dictionary.
+    unsafe { make_with_user_info(domain, code, description, std::ptr::null_mut()) }
+}
+
+/// An autoreleased error retaining the supplied user-info dictionary.
+///
+/// # Safety
+///
+/// `user_info` is nil or a live dictionary.
+pub(crate) unsafe fn make_with_user_info(
+    domain: &str,
+    code: i64,
+    description: &str,
+    user_info: Id,
+) -> Id {
     objc::arc::autorelease(made(Contents {
         domain: domain.to_string(),
         code,
         description: description.to_string(),
-        user_info: std::ptr::null_mut(),
+        user_info: objc::arc::retain(user_info),
     }))
 }
 

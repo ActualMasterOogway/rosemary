@@ -54,41 +54,109 @@ impl Contents {
         if !self.is_file_url() {
             return None;
         }
-        // `file://<authority>/<path>`; the authority is empty or `localhost`,
-        // and either way the path begins at the slash that ends it.
-        let rest = self.text.strip_prefix("file://")?;
-        let path = match rest.find('/') {
-            Some(slash) => &rest[slash..],
-            None => "/",
+        Some(self.path())
+    }
+
+    /// The encoded path, excluding the authority, query and fragment.
+    pub fn encoded_path(&self) -> &str {
+        &self.text[self.path_range()]
+    }
+
+    fn path_range(&self) -> std::ops::Range<usize> {
+        let start = if self.scheme().is_empty() {
+            0
+        } else {
+            self.text.find(':').unwrap() + 1
         };
-        Some(percent_decode(trim_trailing_slash(path)))
+        let rest = &self.text[start..];
+        let start = match rest.strip_prefix("//") {
+            Some(authority) => {
+                start + 2 + authority.find(['/', '?', '#']).unwrap_or(authority.len())
+            }
+            None => start,
+        };
+        let end = start
+            + self.text[start..]
+                .find(['?', '#'])
+                .unwrap_or(self.text.len() - start);
+        start..end
+    }
+
+    /// The authority, including any user information and port.
+    pub fn authority(&self) -> Option<&str> {
+        let start = if self.scheme().is_empty() {
+            0
+        } else {
+            self.text.find(':')? + 1
+        };
+        let authority = self.text[start..].strip_prefix("//")?;
+        Some(&authority[..authority.find(['/', '?', '#']).unwrap_or(authority.len())])
+    }
+
+    /// The decoded user name. Password, query and fragment stay encoded.
+    pub fn user(&self) -> Option<String> {
+        let (user_info, _) = self.authority()?.rsplit_once('@')?;
+        Some(percent_decode(
+            user_info.split(':').next().unwrap_or_default(),
+            b"",
+        ))
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.authority()?
+            .rsplit_once('@')?
+            .0
+            .split_once(':')
+            .map(|(_, password)| password)
+    }
+
+    pub fn query(&self) -> Option<&str> {
+        self.text
+            .split('#')
+            .next()?
+            .split_once('?')
+            .map(|(_, query)| query)
+    }
+
+    pub fn fragment(&self) -> Option<&str> {
+        self.text.split_once('#').map(|(_, fragment)| fragment)
     }
 
     /// The path component, decoded: everything after the authority and before
     /// the query or fragment.
     pub fn path(&self) -> String {
-        if let Some(path) = self.file_path() {
-            return path;
-        }
-        let after_scheme = match self.text.split_once("://") {
-            Some((_, rest)) => rest,
-            None => return String::new(),
+        // Escaped separators and NUL stay literal, as in Foundation, rather
+        // than naming a different directory or truncating a C path.
+        percent_decode(trim_trailing_slash(self.encoded_path()), b"/\0")
+    }
+
+    /// Delete only the final extension, preserving the other URL components.
+    pub fn deleting_path_extension(&self) -> String {
+        let range = self.path_range();
+        let path = &self.text[range.clone()];
+        let trimmed = path.trim_end_matches('/');
+        let component_start = trimmed.rfind('/').map_or(0, |slash| slash + 1);
+        let component = &trimmed[component_start..];
+        let Some(dot) = component
+            .rfind('.')
+            .filter(|dot| *dot > 0 && *dot + 1 < component.len())
+        else {
+            return self.text.clone();
         };
-        let path = match after_scheme.find('/') {
-            Some(slash) => &after_scheme[slash..],
-            None => return String::new(),
-        };
-        let end = path.find(['?', '#']).unwrap_or(path.len());
-        percent_decode(&path[..end])
+        let dot = range.start + component_start + dot;
+        let end = range.start + trimmed.len();
+        format!("{}{}", &self.text[..dot], &self.text[end..])
     }
 }
 
 /// Drop a trailing slash, except from the root - which is the one path whose
 /// trailing slash is the whole path.
 fn trim_trailing_slash(path: &str) -> &str {
-    match path.len() > 1 {
-        true => path.trim_end_matches('/'),
-        false => path,
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() && path.starts_with('/') {
+        "/"
+    } else {
+        trimmed
     }
 }
 
@@ -113,7 +181,7 @@ fn percent_encode(path: &str) -> String {
 
 /// The reverse. A `%` that is not followed by two hexadecimal digits is a
 /// literal `%`, which is what a path containing one and never encoded produces.
-fn percent_decode(text: &str) -> String {
+fn percent_decode(text: &str, preserving: &[u8]) -> String {
     let bytes = text.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -121,7 +189,9 @@ fn percent_decode(text: &str) -> String {
         let decoded = (bytes[index] == b'%' && index + 2 < bytes.len())
             .then(|| {
                 let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
-                u8::from_str_radix(hex, 16).ok()
+                u8::from_str_radix(hex, 16)
+                    .ok()
+                    .filter(|byte| !preserving.contains(byte))
             })
             .flatten();
         match decoded {
@@ -229,6 +299,24 @@ pub unsafe fn as_url<'a>(url: CFTypeRef) -> Option<&'a Contents> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_urls_separate_suffixes_and_preserve_escaped_separators() {
+        for (text, path) in [
+            ("file:///tmp/a%23b%3Fc?query#fragment", "/tmp/a#b?c"),
+            ("FILE:///tmp/directory/?query", "/tmp/directory"),
+            ("file:/tmp/directory/", "/tmp/directory"),
+            ("file://localhost/tmp/a%2Fb%00c", "/tmp/a%2Fb%00c"),
+            ("file:///", "/"),
+        ] {
+            let url = new(text);
+            // SAFETY: this test owns the live URL.
+            unsafe {
+                assert_eq!(as_url(url).unwrap().file_path().as_deref(), Some(path));
+                crate::api::CFRelease(url);
+            }
+        }
+    }
 
     /// The property a bundle depends on: a path with characters a URL reserves
     /// comes back as the path that went in.

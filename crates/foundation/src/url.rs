@@ -20,6 +20,10 @@ pub unsafe fn text_of(receiver: Id) -> Option<String> {
 /// runtime does not recognise is still a URL, and refusing it would be this
 /// module deciding what the transport is allowed to be asked for.
 unsafe extern "C" fn url_with_string(_class: Id, _sel: Sel, text: Id) -> Id {
+    objc::arc::autorelease(unsafe { make_url_with_string(text) })
+}
+
+unsafe fn make_url_with_string(text: Id) -> Id {
     // SAFETY: an `NSString`, or nil.
     let bytes = unsafe { crate::string::bytes(text) };
     let Ok(text) = std::str::from_utf8(&bytes) else {
@@ -28,24 +32,38 @@ unsafe extern "C" fn url_with_string(_class: Id, _sel: Sel, text: Id) -> Id {
     if text.is_empty() {
         return std::ptr::null_mut();
     }
-    // SAFETY: a URL this call just made.
-    unsafe { corefoundation::api::CFAutorelease(corefoundation::url::new(text)) as Id }
+    corefoundation::url::new(text) as Id
 }
 
-/// `+fileURLWithPath:` and `+fileURLWithPath:isDirectory:`.
-unsafe extern "C" fn file_url_with_path(_class: Id, _sel: Sel, path: Id) -> Id {
-    // SAFETY: an `NSString`, or nil.
+unsafe extern "C" fn init_with_string(receiver: Id, _sel: Sel, text: Id) -> Id {
+    let url = unsafe { make_url_with_string(text) };
+    objc::arc::release(receiver);
+    url
+}
+
+unsafe fn make_file_url(path: Id, directory: Option<bool>) -> Id {
     let bytes = unsafe { crate::string::bytes(path) };
     let Ok(path) = std::str::from_utf8(&bytes) else {
         return std::ptr::null_mut();
     };
-    // Whether it is a directory is asked of the file system, which is what
-    // Apple's single-argument form does too.
-    let directory = std::path::Path::new(path).is_dir();
-    // SAFETY: a URL this call just made.
-    unsafe {
-        corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(path, directory)) as Id
-    }
+    let path = if std::path::Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        let Some(cwd) = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| prefix::ns::to_guest(&cwd))
+        else {
+            return std::ptr::null_mut();
+        };
+        cwd.join(path).to_string_lossy().into_owned()
+    };
+    let directory = directory.unwrap_or_else(|| prefix::ns::host_path(&path).is_dir());
+    corefoundation::url::new_file_url(&path, directory) as Id
+}
+
+/// `+fileURLWithPath:` and `+fileURLWithPath:isDirectory:`.
+unsafe extern "C" fn file_url_with_path(_class: Id, _sel: Sel, path: Id) -> Id {
+    objc::arc::autorelease(unsafe { make_file_url(path, None) })
 }
 
 unsafe extern "C" fn file_url_with_path_is_directory(
@@ -54,16 +72,24 @@ unsafe extern "C" fn file_url_with_path_is_directory(
     path: Id,
     directory: u8,
 ) -> Id {
-    // SAFETY: an `NSString`, or nil.
-    let bytes = unsafe { crate::string::bytes(path) };
-    let Ok(path) = std::str::from_utf8(&bytes) else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: a URL this call just made.
-    unsafe {
-        corefoundation::api::CFAutorelease(corefoundation::url::new_file_url(path, directory != 0))
-            as Id
-    }
+    objc::arc::autorelease(unsafe { make_file_url(path, Some(directory != 0)) })
+}
+
+unsafe extern "C" fn init_file_url_with_path(receiver: Id, _sel: Sel, path: Id) -> Id {
+    let url = unsafe { make_file_url(path, None) };
+    objc::arc::release(receiver);
+    url
+}
+
+unsafe extern "C" fn init_file_url_with_path_is_directory(
+    receiver: Id,
+    _sel: Sel,
+    path: Id,
+    directory: u8,
+) -> Id {
+    let url = unsafe { make_file_url(path, Some(directory != 0)) };
+    objc::arc::release(receiver);
+    url
 }
 
 /// `+fileURLWithPath:relativeToURL:`.
@@ -121,6 +147,63 @@ accessor!(absolute_string, |u| Some(u.text.clone()));
 accessor!(path, |u| Some(u.path()).filter(|p| !p.is_empty()));
 accessor!(scheme, |u| Some(u.scheme()).filter(|s| !s.is_empty()));
 accessor!(host, |u| host_of(&u.text));
+accessor!(user, |u| u.user());
+accessor!(password, |u| u.password().map(str::to_string));
+accessor!(query, |u| u.query().map(str::to_string));
+accessor!(fragment, |u| u.fragment().map(str::to_string));
+accessor!(resource_specifier, |u| Some(if u.scheme().is_empty() {
+    u.text.clone()
+} else {
+    u.text.split_once(':').unwrap().1.to_string()
+}));
+
+unsafe extern "C" fn absolute_url(receiver: Id, _sel: Sel) -> Id {
+    objc::arc::autorelease(objc::arc::retain(receiver))
+}
+
+unsafe extern "C" fn port(receiver: Id, _sel: Sel) -> Id {
+    let port = unsafe { corefoundation::api::CFURLGetPortNumber(receiver as _) };
+    if port < 0 {
+        return std::ptr::null_mut();
+    }
+    let number = corefoundation::collections::new_number(
+        corefoundation::collections::Number::Integer(i64::from(port)),
+    );
+    unsafe { corefoundation::api::CFAutorelease(number) as Id }
+}
+
+unsafe extern "C" fn has_directory_path(receiver: Id, _sel: Sel) -> u8 {
+    unsafe { corefoundation::api::CFURLHasDirectoryPath(receiver as _) }
+}
+
+unsafe extern "C" fn get_file_system_representation(
+    receiver: Id,
+    _sel: Sel,
+    buffer: *mut std::ffi::c_char,
+    length: usize,
+) -> u8 {
+    let Some(url) = (unsafe { corefoundation::url::as_url(receiver as _) }) else {
+        return 0;
+    };
+    let Some(path) = url.file_path() else {
+        return 0;
+    };
+    // Foundation counts a directory's trailing slash when checking capacity,
+    // although it omits that slash from the returned file system spelling.
+    let directory_marker = usize::from(path != "/" && url.encoded_path().ends_with('/'));
+    if buffer.is_null()
+        || path.len().saturating_add(directory_marker) >= length
+        || path.contains('\0')
+    {
+        return 0;
+    }
+    // SAFETY: the caller supplies `length` writable bytes, including the NUL.
+    unsafe {
+        std::ptr::copy_nonoverlapping(path.as_ptr(), buffer.cast(), path.len());
+        buffer.add(path.len()).write(0);
+    }
+    1
+}
 
 /// A URL's host: the authority without its user information or port, and an
 /// IPv6 literal without its brackets. `None` for a URL with no authority.
@@ -320,15 +403,143 @@ unsafe extern "C" fn url_by_deleting_last_path_component(receiver: Id, _sel: Sel
 }
 
 unsafe extern "C" fn last_path_component(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: the receiver is an `NSURL`.
-    let Some(base) = (unsafe { file_path_of(receiver) }) else {
+    let Some(url) = (unsafe { corefoundation::url::as_url(receiver as _) }) else {
         return std::ptr::null_mut();
     };
+    let base = url.path();
     let trimmed = base.trim_end_matches('/');
-    autoreleased(match trimmed.rsplit_once('/') {
-        Some((_, tail)) if !tail.is_empty() => tail,
-        _ => "/",
+    let last = trimmed.rsplit('/').next().unwrap_or_default();
+    autoreleased(if base.starts_with('/') && last.is_empty() {
+        "/"
+    } else {
+        last
     })
+}
+
+unsafe extern "C" fn path_extension(receiver: Id, _sel: Sel) -> Id {
+    let Some(url) = (unsafe { corefoundation::url::as_url(receiver as _) }) else {
+        return std::ptr::null_mut();
+    };
+    let path = url.path();
+    let component = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let extension = component
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or("", |(_, ext)| ext);
+    autoreleased(extension)
+}
+
+unsafe extern "C" fn path_components(receiver: Id, _sel: Sel) -> Id {
+    let Some(url) = (unsafe { corefoundation::url::as_url(receiver as _) }) else {
+        return std::ptr::null_mut();
+    };
+    let path = url.path();
+    let mut parts = Vec::new();
+    if path.starts_with('/') {
+        parts.push(crate::string::from_str("/") as corefoundation::base::CFTypeRef);
+    }
+    parts.extend(
+        path.split('/')
+            .filter(|part| !part.is_empty())
+            .map(|part| crate::string::from_str(part) as corefoundation::base::CFTypeRef),
+    );
+    let array = corefoundation::collections::new_array(
+        &parts,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: the array retained the strings this call owns.
+    unsafe {
+        for part in parts {
+            corefoundation::api::CFRelease(part);
+        }
+        corefoundation::api::CFAutorelease(array) as Id
+    }
+}
+
+unsafe extern "C" fn url_by_deleting_path_extension(receiver: Id, _sel: Sel) -> Id {
+    let url = unsafe {
+        corefoundation::api::CFURLCreateCopyDeletingPathExtension(std::ptr::null(), receiver as _)
+    };
+    unsafe { corefoundation::api::CFAutorelease(url) as Id }
+}
+
+fn reachability_error_code(error: &std::io::Error) -> i64 {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => 260,
+        Some(libc::EACCES | libc::EPERM) => 257,
+        Some(libc::ENAMETOOLONG | libc::EINVAL) => 258,
+        _ if error.kind() == std::io::ErrorKind::InvalidInput => 258,
+        _ => 256,
+    }
+}
+
+/// Reachability concerns the directory entry, including a dangling symlink.
+/// On success Foundation leaves the caller's error word untouched.
+unsafe extern "C" fn check_resource_is_reachable(receiver: Id, _sel: Sel, error: *mut Id) -> u8 {
+    let Some(path) = (unsafe { file_path_of(receiver) }) else {
+        if !error.is_null() {
+            unsafe {
+                *error = crate::error::make(
+                    "NSCocoaErrorDomain",
+                    262,
+                    "The URL does not refer to a file system resource.",
+                )
+            };
+        }
+        return 0;
+    };
+    let Err(cause) = std::fs::symlink_metadata(prefix::ns::host_path(&path)) else {
+        return 1;
+    };
+    if error.is_null() {
+        return 0;
+    }
+    let code = reachability_error_code(&cause);
+    let description = format!("The resource at {path} could not be reached: {cause}");
+    let path_value = crate::string::from_str(&path);
+    let description_value = crate::string::from_str(&description);
+    let mut pairs = vec![
+        (crate::string::from_str("NSFilePath") as _, path_value as _),
+        (crate::string::from_str("NSURL") as _, receiver as _),
+        (
+            crate::string::from_str("NSLocalizedDescription") as _,
+            description_value as _,
+        ),
+    ];
+    if let Some(errno) = cause.raw_os_error() {
+        let underlying = crate::error::make(
+            "NSPOSIXErrorDomain",
+            i64::from(darwin::errno::from_host(errno)),
+            &cause.to_string(),
+        );
+        pairs.push((
+            crate::string::from_str("NSUnderlyingError") as _,
+            underlying as _,
+        ));
+    }
+    let info = corefoundation::collections::new_dictionary(
+        &pairs,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: writable error output; the dictionary retained every entry.
+    unsafe {
+        *error =
+            crate::error::make_with_user_info("NSCocoaErrorDomain", code, &description, info as Id);
+        for (key, _) in &pairs {
+            corefoundation::api::CFRelease(*key);
+        }
+        objc::arc::release(path_value);
+        objc::arc::release(description_value);
+        corefoundation::api::CFRelease(info);
+    }
+    0
 }
 
 /// The value of one `NSURLResourceKey` for `path`, or `None` for a key this
@@ -494,23 +705,41 @@ pub(crate) fn install() {
         "fileURLWithPath:relativeToURL:" => file_url_with_path_relative_to_url,
             c"@32@0:8@16@24";
     });
+    methods!(abstract_class, {
+        "initWithString:" => init_with_string, c"@24@0:8@16";
+        "initFileURLWithPath:" => init_file_url_with_path, c"@24@0:8@16";
+        "initFileURLWithPath:isDirectory:" => init_file_url_with_path_is_directory, c"@28@0:8@16c24";
+    });
     methods!(class, {
         "copy" => url_copy, c"@16@0:8";
         "copyWithZone:" => url_copy_with_zone, c"@24@0:8^v16";
         "absoluteString" => absolute_string, c"@16@0:8";
+        "absoluteURL" => absolute_url, c"@16@0:8";
         "description" => absolute_string, c"@16@0:8";
         "path" => path, c"@16@0:8";
         "scheme" => scheme, c"@16@0:8";
         "host" => host, c"@16@0:8";
+        "user" => user, c"@16@0:8";
+        "password" => password, c"@16@0:8";
+        "port" => port, c"@16@0:8";
+        "query" => query, c"@16@0:8";
+        "fragment" => fragment, c"@16@0:8";
+        "resourceSpecifier" => resource_specifier, c"@16@0:8";
         "isFileURL" => is_file_url, c"c16@0:8";
+        "hasDirectoryPath" => has_directory_path, c"c16@0:8";
         "fileSystemRepresentation" => file_system_representation, c"*16@0:8";
+        "getFileSystemRepresentation:maxLength:" => get_file_system_representation, c"c32@0:8*16Q24";
+        "checkResourceIsReachableAndReturnError:" => check_resource_is_reachable, c"c24@0:8^@16";
         "URLByAppendingPathComponent:" => url_by_appending_path_component, c"@24@0:8@16";
         "URLByAppendingPathComponent:isDirectory:"
             => url_by_appending_path_component_is_directory, c"@28@0:8@16c24";
         "URLByAppendingPathExtension:" => url_by_appending_path_extension, c"@24@0:8@16";
         "URLByDeletingLastPathComponent" => url_by_deleting_last_path_component, c"@16@0:8";
         "URLByStandardizingPath" => url_by_standardizing_path, c"@16@0:8";
+        "URLByDeletingPathExtension" => url_by_deleting_path_extension, c"@16@0:8";
         "lastPathComponent" => last_path_component, c"@16@0:8";
+        "pathExtension" => path_extension, c"@16@0:8";
+        "pathComponents" => path_components, c"@16@0:8";
         "resourceValuesForKeys:error:" => resource_values_for_keys, c"@32@0:8@16^@24";
         "getResourceValue:forKey:error:" => get_resource_value, c"B40@0:8^@16@24^@32";
         "setResourceValue:forKey:error:" => set_resource_value, c"B40@0:8@16@24^@32";
@@ -527,6 +756,24 @@ unsafe extern "C" fn url_copy_with_zone(receiver: Id, sel: Sel, _zone: *const ()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reachability_maps_host_failures_to_cocoa_read_errors() {
+        for (errno, expected) in [
+            (libc::ENOENT, 260),
+            (libc::EACCES, 257),
+            (libc::EPERM, 257),
+            (libc::ENAMETOOLONG, 258),
+            (libc::EINVAL, 258),
+            (libc::ENOTDIR, 256),
+            (libc::EIO, 256),
+        ] {
+            assert_eq!(
+                super::reachability_error_code(&std::io::Error::from_raw_os_error(errno)),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn host_drops_user_information_port_and_brackets() {
         assert_eq!(

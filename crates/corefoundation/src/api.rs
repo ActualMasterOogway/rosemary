@@ -2276,20 +2276,7 @@ pub unsafe extern "C" fn CFURLCreateCopyDeletingPathExtension(
     let Some(url) = (unsafe { crate::url::as_url(url) }) else {
         return std::ptr::null();
     };
-    if let Some(path) = url.file_path() {
-        let mut path = std::path::PathBuf::from(path);
-        path.set_extension("");
-        return path.to_str().map_or(std::ptr::null(), |path| {
-            crate::url::new_file_url(path, false)
-        });
-    }
-    let suffix = url.text.find(['?', '#']).unwrap_or(url.text.len());
-    let (path, tail) = url.text.split_at(suffix);
-    let slash = path.rfind('/').map_or(0, |slash| slash + 1);
-    let Some(dot) = path[slash..].rfind('.').map(|dot| slash + dot) else {
-        return crate::url::new(&url.text);
-    };
-    crate::url::new(&format!("{}{tail}", &path[..dot]))
+    crate::url::new(&url.deleting_path_extension())
 }
 
 /// Add URL percent escapes while preserving the caller-selected exceptions.
