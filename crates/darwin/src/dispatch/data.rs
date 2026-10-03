@@ -58,13 +58,22 @@ pub unsafe extern "C" fn create(
     queue: u64,
     destructor: u64,
 ) -> u64 {
+    let destructor = if destructor != 0 && destructor != destructor_free() {
+        let Some(copied) = super::block::copy(destructor) else { return 0; };
+        copied
+    } else { destructor };
+    let queue = if queue == 0 {
+        unsafe { super::queue::get_global_queue(0, 0) }
+    } else { queue };
+    let size = if buffer.is_null() { 0 } else { size };
+    super::object::retain(queue);
     let copies = destructor == 0;
     let owned = match copies && !buffer.is_null() && size != 0 {
         // SAFETY: the caller states the buffer has `size` readable bytes.
         true => unsafe { std::slice::from_raw_parts(buffer as *const u8, size) }.to_vec(),
         false => Vec::new(),
     };
-    Box::into_raw(Box::new(Data {
+    let mut data = Data {
         header: Header::new(Kind::Data),
         owned,
         borrowed: match copies {
@@ -74,27 +83,28 @@ pub unsafe extern "C" fn create(
         size,
         destructor,
         queue,
-    })) as u64
+    };
+    if size == 0 { data.destroy_buffer(); }
+    Box::into_raw(Box::new(data)) as u64
+}
+
+impl Data {
+    fn destroy_buffer(&mut self) {
+        let destructor = std::mem::take(&mut self.destructor);
+        if destructor == destructor_free() {
+            // The FREE sentinel transfers ownership to the guest allocator.
+            unsafe { crate::heap::free(self.borrowed as *mut c_void) };
+        } else if destructor != 0 {
+            super::queue::async_owned(self.queue, destructor);
+        }
+        self.borrowed = std::ptr::null();
+    }
 }
 
 impl Drop for Data {
-    /// Give the bytes back the way they were taken.
     fn drop(&mut self) {
-        if self.borrowed.is_null() || self.destructor == 0 {
-            return;
-        }
-        let _ = self.queue;
-        if self.destructor == destructor_free() {
-            // SAFETY: `DISPATCH_DATA_DESTRUCTOR_FREE` promises the buffer came
-            // from `malloc` - the *guest's*, which is not this crate's whenever
-            // the program ships an allocator of its own. See [`crate::heap`].
-            unsafe { crate::heap::free(self.borrowed as *mut c_void) };
-            return;
-        }
-        // Any other destructor is a block, which the runtime that copied it owns.
-        // SAFETY: a block the caller handed over with the buffer.
-        unsafe { super::block::invoke(self.destructor) };
-        super::block::release(self.destructor);
+        self.destroy_buffer();
+        unsafe { super::object::release(self.queue) };
     }
 }
 
