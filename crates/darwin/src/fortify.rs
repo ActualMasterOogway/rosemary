@@ -1,5 +1,7 @@
 use std::ffi::{c_char, c_int, c_void};
 
+use libc::size_t;
+
 #[inline(always)]
 fn checked(len: usize, capacity: usize) {
     if len > capacity {
@@ -125,84 +127,8 @@ unsafe extern "C" fn strlcat_chk(
     dst_len + src_len
 }
 
-#[cfg(target_arch = "x86_64")]
-#[repr(C)]
-struct VaList {
-    gp_offset: u32,
-    fp_offset: u32,
-    overflow_arg_area: *mut c_void,
-    reg_save_area: *mut c_void,
-}
-
-#[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
-    fn vsnprintf(dst: *mut c_char, size: usize, format: *const c_char, ap: *mut VaList) -> c_int;
-}
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" fn sprintf_chk_body(
-    dst: *mut c_char,
-    _flag: c_int,
-    capacity: usize,
-    format: *const c_char,
-    ap: *mut VaList,
-) -> c_int {
-    let written = unsafe { vsnprintf(dst, capacity, format, ap) };
-    if written >= 0 && written as usize >= capacity {
-        unsafe { libc::abort() }
-    }
-    written
-}
-
-#[cfg(target_arch = "x86_64")]
-core::arch::global_asm!(
-    ".text",
-    ".globl rosemary_sprintf_chk",
-    ".hidden rosemary_sprintf_chk",
-    ".type rosemary_sprintf_chk, @function",
-    "rosemary_sprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 208",
-    "mov [rsp], rdi",
-    "mov [rsp + 8], rsi",
-    "mov [rsp + 16], rdx",
-    "mov [rsp + 24], rcx",
-    "mov [rsp + 32], r8",
-    "mov [rsp + 40], r9",
-    "movaps [rsp + 48], xmm0",
-    "movaps [rsp + 64], xmm1",
-    "movaps [rsp + 80], xmm2",
-    "movaps [rsp + 96], xmm3",
-    "movaps [rsp + 112], xmm4",
-    "movaps [rsp + 128], xmm5",
-    "movaps [rsp + 144], xmm6",
-    "movaps [rsp + 160], xmm7",
-    "mov dword ptr [rsp + 176], 32",
-    "mov dword ptr [rsp + 180], 48",
-    "lea rax, [rbp + 16]",
-    "mov [rsp + 184], rax",
-    "mov rax, rsp",
-    "mov [rsp + 192], rax",
-    "lea r8, [rsp + 176]",
-    "call {body}",
-    "mov rsp, rbp",
-    "pop rbp",
-    "ret",
-    ".size rosemary_sprintf_chk, . - rosemary_sprintf_chk",
-    body = sym sprintf_chk_body,
-);
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    fn rosemary_sprintf_chk();
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe extern "C" fn rosemary_sprintf_chk() {
-    // Native Darwin supplies its own variadic entry. Other architectures only
-    // reach this address if the emulator failed to intercept the import.
-    unsafe { libc::abort() }
+    fn rosemary_sprintf_chk(s: *mut c_char, flags: c_int, slen: size_t, format: *const c_char, ...);
 }
 
 exports::exports! {

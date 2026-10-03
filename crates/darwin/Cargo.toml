@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version = "1.99"
 license.workspace = true
 
+[build-dependencies]
+cc = "1.0"
+
 [dependencies]
 machish.workspace = true
 exports = { workspace = true, features = ["machish"] }
