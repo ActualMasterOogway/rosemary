@@ -288,168 +288,106 @@ fn registered(name: &str) -> Option<u64> {
         .find_map(|source| source(name))
 }
 
-/// Every module this crate publishes, once.
-///
-/// `provider` and `implemented` are both this list. They used to be two, in two
-/// hand-kept orders, and a module in one and not the other is a name the loader
-/// binds and a `dlsym` answers null for - which is what had happened to
-/// `atomics` and `oslog`.
-///
-/// The order is the publishing order. Nothing here may define a name another
-/// entry defines - see `no_module_defines_a_name_another_one_does`, which is
-/// what makes the order not matter.
-static MODULES: &[exports::Module] = &[
+/// Guest-aware overrides enabled on every host, even with native libc.
+static DEFAULT_MODULES: &[exports::Module] = &[
     idle::MODULE,
     stdio::MODULE,
     errno::MODULE,
     sysctl::MODULE,
     sysinfo::MODULE,
-    mach::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    clock::MODULE,
     commoncrypto::MODULE,
     math::MODULE,
-    #[cfg(not(target_os = "macos"))]
+    spawn::MODULE,
+    icu::MODULE,
+];
+
+/// Builtin libc modules shared by macOS and non-macOS hosts.
+static SHARED_MODULES: &[exports::Module] = &[
     pthread::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    compat::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    fortify::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    env::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    fs::MODULE,
-    #[cfg(not(target_os = "macos"))]
+    clock::MODULE,
     glob::MODULE,
-    #[cfg(not(target_os = "macos"))]
     regex::MODULE,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "macos", target_arch = "x86_64"))]
+    resolv::MODULE,
+    string::MODULE,
+    stat::MODULE,
+    #[cfg(any(target_os = "macos", target_arch = "x86_64"))]
+    stackprobe::MODULE,
+    atomics::MODULE,
+];
+
+/// Builtin modules whose guest exports are not yet ported to macOS.
+#[cfg(not(target_os = "macos"))]
+static NONPORTABLE_MODULES: &[exports::Module] = &[
+    mach::MODULE,
+    compat::MODULE,
+    fortify::MODULE,
+    env::MODULE,
+    fs::MODULE,
     termios::MODULE,
-    #[cfg(not(target_os = "macos"))]
     sched::MODULE,
-    #[cfg(not(target_os = "macos"))]
     random::MODULE,
-    #[cfg(not(target_os = "macos"))]
     ioctl::MODULE,
     ulock::MODULE,
-    spawn::MODULE,
     dispatch::MODULE,
     data::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    atomics::MODULE,
-    #[cfg(not(target_os = "macos"))]
     xlocale::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    stat::MODULE,
-    #[cfg(not(target_os = "macos"))]
     malloc::MODULE,
-    #[cfg(not(target_os = "macos"))]
     vmmap::MODULE,
-    #[cfg(not(target_os = "macos"))]
-    string::MODULE,
-    #[cfg(not(target_os = "macos"))]
     poll::MODULE,
-    #[cfg(not(target_os = "macos"))]
     select::MODULE,
-    #[cfg(not(target_os = "macos"))]
     net::MODULE,
-    #[cfg(not(target_os = "macos"))]
     xattr::MODULE,
-    #[cfg(not(target_os = "macos"))]
     copyfile::MODULE,
-    #[cfg(not(target_os = "macos"))]
     uuid::MODULE,
-    #[cfg(not(target_os = "macos"))]
     signal::entry::MODULE,
-    #[cfg(not(target_os = "macos"))]
     fcntl::entry::MODULE,
-    #[cfg(not(target_os = "macos"))]
     bsd::MODULE,
-    #[cfg(not(target_os = "macos"))]
     callback::MODULE,
-    #[cfg(not(target_os = "macos"))]
     passwd::MODULE,
-    #[cfg(not(target_os = "macos"))]
     audit::MODULE,
-    #[cfg(not(target_os = "macos"))]
     dirent::MODULE,
-    #[cfg(not(target_os = "macos"))]
     rlimit::MODULE,
-    #[cfg(not(target_os = "macos"))]
     shm::MODULE,
-    #[cfg(not(target_os = "macos"))]
     libproc::MODULE,
-    #[cfg(not(target_os = "macos"))]
     oslog::MODULE,
-    #[cfg(not(target_os = "macos"))]
     kqueue::MODULE,
-    #[cfg(not(target_os = "macos"))]
     backtrace::MODULE,
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-    stackprobe::MODULE,
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     printf_l::MODULE,
-    #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-    resolv::MODULE,
-    #[cfg(not(target_os = "macos"))]
     acl::MODULE,
-    #[cfg(not(target_os = "macos"))]
     fmtcheck::MODULE,
-    icu::MODULE,
-    #[cfg(not(target_os = "macos"))]
     fts::MODULE,
-    #[cfg(not(target_os = "macos"))]
     humanize::MODULE,
-    #[cfg(not(target_os = "macos"))]
     attrlist::MODULE,
-    #[cfg(not(target_os = "macos"))]
     langinfo::MODULE,
-    #[cfg(not(target_os = "macos"))]
     modes::MODULE,
-    #[cfg(not(target_os = "macos"))]
     progname::MODULE,
     #[cfg(target_os = "linux")]
     stream::MODULE,
-    #[cfg(not(target_os = "macos"))]
     utmpx::MODULE,
-    #[cfg(not(target_os = "macos"))]
     vis::MODULE,
-    #[cfg(not(target_os = "macos"))]
     wait::MODULE,
 ];
 
-fn implemented(name: &str) -> Option<u64> {
-    registered(name)
-        .or_else(|| exports::Module::resolve(MODULES, name))
-        .or_else(|| exports::Module::resolve(extra_modules(), name))
+#[cfg(target_os = "macos")]
+static NONPORTABLE_MODULES: &[exports::Module] = &[];
+
+/// The same selected modules drive import publication and direct symbol lookup.
+/// Each name belongs to only one module, so publishing order does not matter.
+fn modules() -> impl Iterator<Item = &'static exports::Module> {
+    let builtin = if libc_backend::using_builtin() {
+        SHARED_MODULES
+    } else {
+        &[]
+    };
+    [DEFAULT_MODULES, builtin, NONPORTABLE_MODULES]
+        .into_iter()
+        .flatten()
 }
 
-#[cfg(target_os = "macos")]
-static MAC_BUILTIN_MODULES: &[exports::Module] = &[
-    pthread::MODULE,
-    clock::MODULE,
-    glob::MODULE,
-    regex::MODULE,
-    resolv::MODULE,
-    string::MODULE,
-    stat::MODULE,
-    stackprobe::MODULE,
-    atomics::MODULE,
-];
-
-fn extra_modules() -> &'static [exports::Module] {
-    #[cfg(target_os = "macos")]
-    {
-        if libc_backend::using_builtin() {
-            MAC_BUILTIN_MODULES
-        } else {
-            &[]
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        &[]
-    }
+fn implemented(name: &str) -> Option<u64> {
+    registered(name).or_else(|| modules().find_map(|module| (module.symbol)(name)))
 }
 
 pub fn is_implemented(symbol: &str) -> bool {
@@ -491,26 +429,62 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
         lib.alias(name);
     }
     let out = &mut exports::NonNull(&mut lib);
-    exports::Module::provide_all(MODULES, out);
-    exports::Module::provide_all(extra_modules(), out);
+    for module in modules() {
+        (module.provide)(out);
+    }
     lib
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use machish::fixups::{LibraryRef, SymbolRef};
+    use machish::resolve::SymbolProvider;
 
-    #[cfg(target_os = "macos")]
+    fn published(lib: &machish::resolve::SyntheticDylib, name: &str) -> Option<u64> {
+        lib.resolve(&SymbolRef {
+            name,
+            library: LibraryRef::Flat,
+            weak_import: false,
+        })
+        .map(|resolved| resolved.addr)
+    }
+
     #[test]
     fn libc_mode_child() {
         let Ok(want) = std::env::var("ROSEMARY_LIBC_TEST_CHILD") else {
             return;
         };
         assert_eq!(libc_backend::using_builtin(), want == "builtin");
+        let builtin = want == "builtin";
+        let lib = provider();
+        for (group, enabled) in [
+            (DEFAULT_MODULES, true),
+            (SHARED_MODULES, builtin),
+            (NONPORTABLE_MODULES, true),
+        ] {
+            for module in group {
+                for name in (module.names)() {
+                    let mach_o = format!("_{name}");
+                    let expected = enabled.then(|| (module.symbol)(name).unwrap());
+                    assert_eq!(is_implemented(&mach_o), enabled, "{mach_o}");
+                    assert_eq!(published(&lib, &mach_o), expected, "{mach_o}");
+                    if enabled {
+                        assert_eq!(symbol(&mach_o), expected, "{mach_o}");
+                    }
+                }
+            }
+        }
+        for name in ["_copyfile", "_kevent"] {
+            let enabled = !cfg!(target_os = "macos");
+            assert_eq!(is_implemented(name), enabled, "{name}");
+            assert_eq!(published(&lib, name).is_some(), enabled, "{name}");
+        }
         assert!(is_implemented("_sysctl"));
         for name in [
             "_clock_gettime",
             "_glob",
+            #[cfg(any(target_os = "macos", target_arch = "x86_64"))]
             "_res_9_init",
             "_strerror",
             "_pthread_mutex_lock",
@@ -541,14 +515,18 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn libc_mode_selects_the_same_symbols_for_imports_and_dlsym() {
+        let native = if cfg!(target_os = "macos") {
+            "native"
+        } else {
+            "builtin"
+        };
         for (setting, want, success) in [
-            (None, "native", true),
-            (Some("native"), "native", true),
+            (None, native, true),
+            (Some("native"), native, true),
             (Some("builtin"), "builtin", true),
-            (Some("invalid"), "invalid", false),
+            (Some("invalid"), native, !cfg!(target_os = "macos")),
         ] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command.args(["--exact", "tests::libc_mode_child"]);
@@ -574,7 +552,11 @@ mod tests {
     #[test]
     fn no_module_defines_a_name_another_one_does() {
         let mut seen: Vec<(&str, &str)> = Vec::new();
-        for module in MODULES.iter().chain(extra_modules()) {
+        for module in DEFAULT_MODULES
+            .iter()
+            .chain(SHARED_MODULES)
+            .chain(NONPORTABLE_MODULES)
+        {
             for name in (module.names)() {
                 if let Some((_, first)) = seen.iter().find(|(n, _)| *n == name) {
                     panic!("{name} is defined by both {first} and {}", module.path);
@@ -586,14 +568,13 @@ mod tests {
 
     #[test]
     fn a_published_name_is_the_one_dlsym_answers() {
-        for module in MODULES.iter().chain(extra_modules()) {
+        let lib = provider();
+        for module in modules() {
             for name in (module.names)() {
                 let mach_o = format!("_{name}");
-                assert!(
-                    symbol(&mach_o).is_some(),
-                    "{}: {mach_o} is published and unanswered",
-                    module.path
-                );
+                let expected = (module.symbol)(name).expect("listed symbol");
+                assert_eq!(published(&lib, &mach_o), Some(expected), "{mach_o}");
+                assert_eq!(symbol(&mach_o), Some(expected), "{mach_o}");
             }
         }
     }
@@ -624,7 +605,7 @@ mod tests {
         .collect();
         assert!(
             unreachable.is_empty(),
-            "written but not reachable - is the module in MODULES? {unreachable:?}"
+            "written but not reachable - is the module in a module group? {unreachable:?}"
         );
     }
 
