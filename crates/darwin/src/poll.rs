@@ -109,9 +109,13 @@ fn revents_from_host(host: i16) -> i16 {
 /// # Safety
 ///
 /// `fds` is `nfds` writable `struct pollfd`, or `nfds` is zero.
-unsafe extern "C" fn poll(fds: *mut c_void, nfds: libc::nfds_t, timeout: i32) -> i32 {
+unsafe extern "C" fn poll(fds: *mut c_void, nfds: u32, timeout: i32) -> i32 {
     let count = nfds as usize;
-    if fds.is_null() || count == 0 {
+    if fds.is_null() && count != 0 {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    if count == 0 {
         // A poll of nothing is a sleep, which the host does as well as this can.
         // SAFETY: null with a zero count is what the caller passed.
         return unsafe { libc::poll(core::ptr::null_mut(), 0, timeout) };
@@ -130,7 +134,7 @@ unsafe extern "C" fn poll(fds: *mut c_void, nfds: libc::nfds_t, timeout: i32) ->
         .collect();
 
     // SAFETY: `host` is `count` live `struct pollfd`, which is what `nfds` says.
-    let rc = unsafe { libc::poll(host.as_mut_ptr(), nfds, timeout) };
+    let rc = unsafe { libc::poll(host.as_mut_ptr(), nfds as libc::nfds_t, timeout) };
 
     for (i, entry) in host.iter().enumerate() {
         // SAFETY: as above, writing back only the field the kernel filled in.
