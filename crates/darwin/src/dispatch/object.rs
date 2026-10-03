@@ -132,19 +132,13 @@ pub unsafe fn release(handle: u64) {
     if h.refs.fetch_sub(1, Ordering::AcqRel) != 1 {
         return;
     }
-    // The finalizer runs before the memory goes, and is the guest's own function -
-    // so it must not run with any lock of this module held.
     let (finalizer, context) = (
         h.finalizer.load(Ordering::Acquire),
         h.context.load(Ordering::Acquire),
     );
-    if finalizer != 0 {
-        // SAFETY: a `dispatch_function_t` the guest installed, called with the
-        // context it installed alongside.
-        unsafe {
-            std::mem::transmute::<u64, Function>(finalizer)(context as *mut c_void);
-        }
-    }
+    let target = super::queue::target(handle);
+    let target = if target == 0 { unsafe { super::queue::get_global_queue(0, 0) } } else { target };
+    retain(target);
     let kind = h.kind;
     // SAFETY: the refcount reached zero, so this reference is the only one and the
     // allocation is this module's own. Each arm names the type it was boxed as.
@@ -156,6 +150,11 @@ pub unsafe fn release(handle: u64) {
             Kind::Data => drop(Box::from_raw(handle as *mut super::data::Data)),
         }
     }
+    if finalizer != 0 && context != 0 {
+        unsafe { super::queue::async_f(target, context, finalizer); }
+    }
+    unsafe { release(target); }
+
 }
 
 /// `void dispatch_retain(dispatch_object_t)`.
@@ -199,28 +198,34 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
 
-    static FINALIZED: AtomicU32 = AtomicU32::new(0);
+    fn wait_finalized(value: &AtomicU32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while value.load(Ordering::Acquire) == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
 
     unsafe extern "C" fn finalize(context: *mut c_void) {
-        FINALIZED.store(context as u32, Ordering::Release);
+        unsafe { (*(context as *const AtomicU32)).store(1, Ordering::Release); }
     }
 
     /// The finalizer runs exactly once, at the last release, with the guest's own
     /// context - which is what a guest frees its own state in.
     #[test]
     fn the_last_release_finalizes() {
-        FINALIZED.store(0, Ordering::Release);
+        let finalized = AtomicU32::new(0);
         let queue = super::super::queue::create_serial("finalizer test");
         // SAFETY: a live object of this module's.
         unsafe {
-            set_context(queue, 77 as *mut c_void);
+            set_context(queue, (&finalized as *const AtomicU32).cast_mut().cast());
             set_finalizer_f(queue, finalize as *const () as usize as u64);
             retain(queue);
             release(queue);
-            assert_eq!(FINALIZED.load(Ordering::Acquire), 0, "still referenced");
+            assert_eq!(finalized.load(Ordering::Acquire), 0, "still referenced");
             release(queue);
         }
-        assert_eq!(FINALIZED.load(Ordering::Acquire), 77);
+        wait_finalized(&finalized);
     }
 
     /// ARC reaches these objects - a guest's `dispatch_queue_t` in a strong
@@ -241,19 +246,19 @@ mod tests {
     /// reads, so a queue held by both survives until both let go.
     #[test]
     fn arc_and_dispatch_share_one_count() {
-        FINALIZED.store(0, Ordering::Release);
+        let finalized = AtomicU32::new(0);
         let queue = super::super::queue::create_serial("shared count test");
         // SAFETY: a live object of this module's.
         unsafe {
-            set_context(queue, 91 as *mut c_void);
+            set_context(queue, (&finalized as *const AtomicU32).cast_mut().cast());
             set_finalizer_f(queue, finalize as *const () as usize as u64);
             objc::arc::retain(queue as objc::object::Id);
             assert_eq!(retain_count(queue), 2);
             release(queue);
-            assert_ne!(FINALIZED.load(Ordering::Acquire), 91, "ARC still holds it");
+            assert_eq!(finalized.load(Ordering::Acquire), 0, "ARC still holds it");
             objc::arc::release(queue as objc::object::Id);
         }
-        assert_eq!(FINALIZED.load(Ordering::Acquire), 91);
+        wait_finalized(&finalized);
     }
 
     /// ARC balances `dispatch_get_main_queue()` with an `objc_release` the

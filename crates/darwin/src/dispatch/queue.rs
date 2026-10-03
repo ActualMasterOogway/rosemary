@@ -99,6 +99,7 @@ pub struct Queue {
     label: CString,
     concurrent: bool,
     main: bool,
+    target: u64,
     state: Mutex<State>,
 }
 
@@ -128,6 +129,7 @@ fn new(label: &str, concurrent: bool, main: bool) -> u64 {
         label: CString::new(label).unwrap_or_default(),
         concurrent,
         main,
+        target: 0,
         state: Mutex::new(State {
             pending: VecDeque::new(),
             draining: false,
@@ -288,6 +290,11 @@ fn pool() -> &'static Pool {
 /// Hand `handle` to the pool, keeping it alive until a worker has drained it.
 fn schedule(handle: u64) {
     object::retain(handle);
+    let target = target(handle);
+    if target != 0 {
+        enqueue(target, Work::Function(run_targeted, handle));
+        return;
+    }
     let pool = pool();
     let mut state = pool.state.lock().unwrap_or_else(|e| e.into_inner());
     state.runnable.push_back(handle);
@@ -420,17 +427,27 @@ pub unsafe extern "C" fn queue_create(label: *const c_char, attr: u64) -> u64 {
 /// `dispatch_queue_t dispatch_queue_create_with_target(const char *,
 /// dispatch_queue_attr_t, dispatch_queue_t target)`.
 ///
-/// The target names the queue this one's work is ultimately run by, which is a
-/// priority and exclusion relationship this pool does not model - every queue is
-/// drained by the same workers. Ignoring it costs the relative ordering of two
-/// queues sharing a target, and keeps the ordering *within* each, which is what a
-/// caller of this actually depends on.
 pub unsafe extern "C" fn queue_create_with_target(
-    label: *const c_char,
-    attr: u64,
-    _target: u64,
+    label: *const c_char, attr: u64, target: u64,
 ) -> u64 {
-    unsafe { queue_create(label, attr) }
+    let handle = unsafe { queue_create(label, attr) };
+    object::retain(target);
+    unsafe { (*(handle as *mut Queue)).target = target; }
+    handle
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) { unsafe { object::release(self.target); } }
+}
+
+pub(crate) fn target(handle: u64) -> u64 {
+    unsafe { queue(handle) }.map_or(0, |q| q.target)
+}
+
+unsafe extern "C" fn run_targeted(context: *mut c_void) {
+    let handle = context as u64;
+    run_one(handle);
+    unsafe { object::release(handle); }
 }
 
 /// # Safety
@@ -489,15 +506,17 @@ fn global_queue(qos: i64) -> u64 {
         n if n == QOS_CLASS_USER_INITIATED as i64 => 3,
         n if n == QOS_CLASS_USER_INTERACTIVE as i64 => 4,
         PRIORITY_BACKGROUND => 0,
-        n if n < 0 => 1,
-        n if n > 0 => 3,
-        _ => 2,
+        -2 => 1,
+        2 => 3,
+        0 | 0x15 => 2,
+        _ => return 0,
     };
     globals[index]
 }
 
 /// `dispatch_queue_t dispatch_get_global_queue(long identifier, unsigned long flags)`.
-pub unsafe extern "C" fn get_global_queue(identifier: i64, _flags: u64) -> u64 {
+pub unsafe extern "C" fn get_global_queue(identifier: i64, flags: u64) -> u64 {
+    if flags != 0 { return 0; }
     global_queue(identifier)
 }
 
@@ -520,6 +539,11 @@ pub unsafe extern "C" fn async_(handle: u64, block: u64) {
         return;
     };
     enqueue(handle, Work::Owned(copied));
+}
+
+/// Transfer an already copied block to the queue.
+pub(crate) fn async_owned(handle: u64, block: u64) {
+    enqueue(handle, Work::Owned(block));
 }
 
 /// `void dispatch_async_f(dispatch_queue_t, void *context, dispatch_function_t)`.
