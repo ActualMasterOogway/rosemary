@@ -1,24 +1,8 @@
 use std::ffi::c_int;
 
-use crate::translation::DarwinTranslation;
-
 #[repr(C)]
 pub struct SchedParam {
     pub sched_priority: c_int,
-}
-
-impl DarwinTranslation<libc::sched_param> for SchedParam {
-    fn to_host(&self) -> libc::sched_param {
-        let mut param: libc::sched_param = unsafe { core::mem::zeroed() };
-        param.sched_priority = self.sched_priority;
-        param
-    }
-
-    fn from_host(host: &libc::sched_param) -> Self {
-        Self {
-            sched_priority: host.sched_priority,
-        }
-    }
 }
 
 /// On some operating systems, particularly Windows and some BSDs, inputting a NULL `policy` or `param` is considered invalid and not optional.
@@ -43,7 +27,10 @@ pub unsafe extern "C" fn pthread_getschedparam(
     }
     unsafe {
         if !param.is_null() {
-            *param = SchedParam::from_host(&host_param.assume_init());
+            *param = SchedParam {
+                sched_priority: super::consts::sched_priority_from_host(
+                    host_param.assume_init().sched_priority, host_policy),
+            };
         }
         if !policy.is_null() {
             *policy = super::consts::sched_policy_from_host(host_policy);
@@ -65,7 +52,7 @@ pub unsafe extern "C" fn pthread_setschedparam(
         return super::consts::err::EINVAL;
     }
     // SAFETY: the caller supplied a readable scheduling parameter.
-    let mut host_param = unsafe { (*param).to_host() };
+    let mut host_param: libc::sched_param = unsafe { std::mem::zeroed() };
     let Some(priority) =
         super::consts::sched_priority_to_host(host_param.sched_priority, host_policy)
     else {
