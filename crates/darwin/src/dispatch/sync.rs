@@ -103,7 +103,9 @@ pub unsafe extern "C" fn group_enter(handle: u64) {
     let Some(g) = (unsafe { group(handle) }) else {
         return;
     };
-    g.state.lock().unwrap_or_else(|e| e.into_inner()).count += 1;
+    let mut state = g.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.count == 0 { object::retain(handle); }
+    state.count += 1;
 }
 
 /// `void dispatch_group_leave(dispatch_group_t)`.
@@ -117,10 +119,8 @@ pub unsafe extern "C" fn group_leave(handle: u64) {
     };
     let ready = {
         let mut state = g.state.lock().unwrap_or_else(|e| e.into_inner());
-        // A leave with nothing entered is the guest's bug, and Darwin traps on it.
-        // Clamping instead keeps the count from going negative and never emptying,
-        // which would hang every later waiter rather than the one at fault.
-        state.count = (state.count - 1).max(0);
+        if state.count == 0 { std::process::abort(); }
+        state.count -= 1;
         if state.count != 0 {
             return;
         }
@@ -130,6 +130,7 @@ pub unsafe extern "C" fn group_leave(handle: u64) {
     for notify in ready {
         submit(notify);
     }
+    unsafe { object::release(handle); }
 }
 
 fn submit(notify: Notify) {
