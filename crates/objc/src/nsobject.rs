@@ -444,6 +444,42 @@ mod tests {
         unsafe { f(receiver, sel, argument) }
     }
 
+    thread_local! {
+        static DESTRUCTED: std::cell::RefCell<Vec<&'static str>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    unsafe extern "C" fn destruct_base(_receiver: Id, _sel: Sel) {
+        DESTRUCTED.with(|d| d.borrow_mut().push("base"));
+    }
+
+    unsafe extern "C" fn destruct_derived(_receiver: Id, _sel: Sel) {
+        DESTRUCTED.with(|d| d.borrow_mut().push("derived"));
+    }
+
+    /// ARC releases strong ivars in `.cxx_destruct`; each class's own runs
+    /// once, nearest first, and a class without one is skipped.
+    #[test]
+    fn releasing_the_last_reference_runs_each_cxx_destruct_nearest_first() {
+        crate::bootstrap();
+        let nsobject = crate::class::lookup(c"NSObject").expect("NSObject");
+        let destruct = sel::get(".cxx_destruct");
+        let base = crate::class::allocate_pair(Some(nsobject), c"RosemaryDestructBase", 0)
+            .expect("a fresh name");
+        assert!(base.add_method(destruct, destruct_base as Imp, c"v16@0:8"));
+        crate::class::register_pair(base);
+        let middle = crate::class::allocate_pair(Some(base), c"RosemaryDestructMiddle", 0)
+            .expect("a fresh name");
+        crate::class::register_pair(middle);
+        let derived = crate::class::allocate_pair(Some(middle), c"RosemaryDestructDerived", 0)
+            .expect("a fresh name");
+        assert!(derived.add_method(destruct, destruct_derived as Imp, c"v16@0:8"));
+        crate::class::register_pair(derived);
+
+        crate::arc::release(crate::object::create_instance(derived, 0));
+        assert_eq!(DESTRUCTED.with(|d| d.borrow().clone()), ["derived", "base"]);
+    }
+
     #[test]
     fn method_for_selector_answers_the_installed_imp() {
         let object = instance(c"RosemaryMethodForA");

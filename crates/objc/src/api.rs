@@ -344,6 +344,8 @@ pub unsafe extern "C" fn objc_constructInstance(cls: *const c_void, bytes: *mut 
 
 pub unsafe extern "C" fn objc_destructInstance(object: Id) -> Id {
     crate::debug::validate(object, "objc_destructInstance");
+    // SAFETY: the caller is about to free the object itself.
+    unsafe { crate::object::destruct_instance(object) };
     object
 }
 

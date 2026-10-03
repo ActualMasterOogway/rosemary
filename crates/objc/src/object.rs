@@ -39,6 +39,35 @@ pub fn create_instance(class: &'static Class, extra: usize) -> Id {
     memory
 }
 
+/// Run every `.cxx_destruct` of `object`'s classes, nearest first, as Apple's
+/// `objc_destructInstance` does. ARC compiles the release of a class's strong
+/// ivars into that method, so skipping it leaks whatever they hold.
+///
+/// # Safety
+///
+/// `object` must be null or an intact instance at the end of its `-dealloc`
+/// chain.
+pub unsafe fn destruct_instance(object: Id) {
+    // SAFETY: the caller's obligation.
+    let Some(class) = (unsafe { class_of(object) }) else {
+        return;
+    };
+    let destruct = crate::sel::get(".cxx_destruct");
+    for class in class.chain() {
+        // Only a class's own: an inherited one runs once, for its own class.
+        let Some(method) = class.own_method(destruct) else {
+            continue;
+        };
+        // SAFETY: `.cxx_destruct` is `void (*)(id, SEL)`, compiled for this
+        // class's ivars, which `object` has.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, crate::sel::Sel) =
+                std::mem::transmute(method.implementation());
+            f(object, destruct);
+        }
+    }
+}
+
 /// Free an instance [`create_instance`] returned.
 ///
 /// # Safety
@@ -48,6 +77,8 @@ pub unsafe fn dispose_instance(object: Id) {
     if object.is_null() {
         return;
     }
+    // SAFETY: the caller's obligation; the object is still intact.
+    unsafe { destruct_instance(object) };
     // SAFETY: the object is still readable, which is what names its class.
     unsafe { crate::census::freed(object) };
     if crate::debug::finalized(object) {
