@@ -149,8 +149,7 @@ pub struct Audit {
 
 /// This process's pid.
 pub fn me() -> i32 {
-    // SAFETY: `getpid` has no preconditions.
-    unsafe { libc::getpid() }
+    rustix::process::getpid().as_raw_pid()
 }
 
 pub fn identity(pid: i32) -> Option<Identity> {

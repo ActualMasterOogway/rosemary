@@ -150,8 +150,8 @@ pub fn usage(pid: i32) -> Option<Usage> {
     // counters at zero rather than refusing the whole answer.
     let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default();
     let io_number = |key: &str| status_number(&io, key);
-    let regions = std::fs::read_to_string(format!("/proc/{pid}/maps"))
-        .map_or(0, |maps| maps.lines().count() as u32);
+    let regions = super::procmap::regions(&format!("/proc/{pid}/maps"))
+        .map_or(0, |regions| regions.len() as u32);
     let threads = threads(pid).unwrap_or_default();
     Some(Usage {
         virtual_size,
@@ -249,26 +249,8 @@ pub fn descriptors() -> io::Result<Vec<Descriptor>> {
         .collect())
 }
 
-/// `lo-hi perms offset dev inode path`.
-fn parse_map(line: &str) -> Option<Region> {
-    let mut fields = line.split_whitespace();
-    let (low, high) = fields.next()?.split_once('-')?;
-    let perms = fields.next()?.as_bytes();
-    let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
-    Some(Region {
-        start: u64::from_str_radix(low, 16).ok()?,
-        end: u64::from_str_radix(high, 16).ok()?,
-        read: perms.first() == Some(&b'r'),
-        write: perms.get(1) == Some(&b'w'),
-        execute: perms.get(2) == Some(&b'x'),
-        shared: perms.get(3) == Some(&b's'),
-        offset,
-    })
-}
-
 pub fn regions() -> io::Result<Vec<Region>> {
-    let maps = std::fs::read_to_string("/proc/self/maps")?;
-    Ok(maps.lines().filter_map(parse_map).collect())
+    super::procmap::regions("/proc/self/maps")
 }
 
 pub fn audit() -> Audit {
@@ -377,19 +359,4 @@ pub fn peer(fd: RawFd) -> Option<Peer> {
 
 pub fn fd_path(fd: RawFd) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/proc/self/fd/{fd}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_maps_line_reads_as_its_region() {
-        let region = parse_map("7f00-7f80 r-xs 00001000 08:01 1234   /usr/lib/libc.so.6").unwrap();
-        assert_eq!(
-            (region.start, region.end, region.offset),
-            (0x7f00, 0x7f80, 0x1000)
-        );
-        assert!(region.read && !region.write && region.execute && region.shared);
-    }
 }

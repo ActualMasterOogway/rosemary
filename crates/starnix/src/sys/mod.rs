@@ -20,6 +20,9 @@ pub use macos::*;
 #[cfg(any(target_os = "freebsd", target_os = "macos"))]
 mod sysctl;
 
+#[cfg(target_os = "linux")]
+mod procmap;
+
 #[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
 mod kinfo;
 
