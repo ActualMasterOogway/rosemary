@@ -303,7 +303,10 @@ fn dispatch_data_create(
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
     let destructor = ctx.rcx;
-    if destructor != 0 {
+    if destructor != 0
+        && !(darwin::libc_backend::using_builtin()
+            && destructor == darwin::dispatch::data::destructor_free())
+    {
         substitute_block(symbol, destructor, mem, callbacks)?;
     }
     let host = host_or_refuse(symbol)?;
