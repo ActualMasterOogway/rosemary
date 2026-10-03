@@ -40,7 +40,6 @@ pub mod data;
 pub mod dirent;
 pub mod dispatch;
 pub mod divergent;
-#[cfg(not(target_os = "macos"))]
 pub mod env;
 pub mod errno;
 pub mod fcntl;
@@ -51,7 +50,6 @@ pub mod fs;
 pub mod fts;
 pub mod glob;
 pub mod heap;
-#[cfg(not(target_os = "macos"))]
 pub mod humanize;
 pub mod icu;
 pub mod idle;
@@ -113,21 +111,17 @@ pub mod xlocale;
 
 /// The environment a guest's `main` receives as `envp`, as `NAME=VALUE`.
 ///
-/// Off Darwin that is [`env`]'s block, corrected for the prefix; on Darwin the
-/// guest shares this process's environment.
+/// Builtin libc uses [`env`]'s block, corrected for the prefix. Native libc
+/// shares this process's environment.
 pub fn guest_environment() -> Vec<CString> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        env::entries()
+    if libc_backend::using_builtin() {
+        return env::entries();
     }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        // Bytes, not text: a value is an arbitrary byte string.
-        std::env::vars_os()
-            .filter_map(|(k, v)| CString::new([k.as_bytes(), b"=", v.as_bytes()].concat()).ok())
-            .collect()
-    }
+    use std::os::unix::ffi::OsStrExt;
+    // Bytes, not text: a value is an arbitrary byte string.
+    std::env::vars_os()
+        .filter_map(|(k, v)| CString::new([k.as_bytes(), b"=", v.as_bytes()].concat()).ok())
+        .collect()
 }
 
 /// Strip the leading underscore a Mach-O symbol carries.
@@ -312,6 +306,8 @@ static SHARED_MODULES: &[exports::Module] = &[
     stackprobe::MODULE,
     atomics::MODULE,
     fortify::MODULE,
+    env::MODULE,
+    humanize::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -319,7 +315,6 @@ static SHARED_MODULES: &[exports::Module] = &[
 static NONPORTABLE_MODULES: &[exports::Module] = &[
     mach::MODULE,
     compat::MODULE,
-    env::MODULE,
     fs::MODULE,
     termios::MODULE,
     sched::MODULE,
@@ -355,7 +350,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     acl::MODULE,
     fmtcheck::MODULE,
     fts::MODULE,
-    humanize::MODULE,
     attrlist::MODULE,
     langinfo::MODULE,
     modes::MODULE,
@@ -487,6 +481,11 @@ mod tests {
             "_pthread_attr_init",
             "_pthread_once",
             "_pthread_create",
+            "_getenv",
+            "_setenv",
+            "_unsetenv",
+            "_putenv",
+            "_getbsize",
         ] {
             assert_eq!(is_implemented(name), want == "builtin", "{name}");
         }
@@ -496,6 +495,11 @@ mod tests {
             "pthread_attr_init",
             "pthread_once",
             "pthread_create",
+            "getenv",
+            "setenv",
+            "unsetenv",
+            "putenv",
+            "getbsize",
         ] {
             let addr = symbol(name).expect("native or builtin symbol");
             assert_eq!(
@@ -503,6 +507,8 @@ mod tests {
                 if want == "builtin" {
                     (glob::MODULE.symbol)(name)
                         .or_else(|| (pthread::MODULE.symbol)(name))
+                        .or_else(|| (env::MODULE.symbol)(name))
+                        .or_else(|| (humanize::MODULE.symbol)(name))
                         .unwrap()
                 } else {
                     host_symbol(name).unwrap()

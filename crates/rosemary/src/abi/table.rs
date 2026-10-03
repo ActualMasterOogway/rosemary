@@ -2923,6 +2923,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pthread_threadid_np", I32, U64, P),
     sig!("putc", I32, I32, P),
     sig!("putchar", I32, I32),
+    sig!("putenv", I32, P),
     sig!("puts", I32, P),
     sig!("putwchar", I32, I32),
     sig!("pwrite", I64, I32, P, U64, I64),

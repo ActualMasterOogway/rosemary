@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char, c_int, c_long};
 
 unsafe extern "C" {
@@ -7,7 +5,7 @@ unsafe extern "C" {
 }
 
 /// Report a `getbsize` complaint the way the guest's own `warnx` would.
-fn complain(message: &str) {
+fn complain(message: &[u8]) {
     let Ok(message) = std::ffi::CString::new(message) else {
         return;
     };
@@ -25,48 +23,37 @@ fn blocksize(value: Option<&[u8]>) -> (String, c_long) {
     let Some(p) = value.filter(|p| !p.is_empty()) else {
         return ("512-blocks".to_string(), 512);
     };
-    let text = String::from_utf8_lossy(p);
     let underflow = || {
-        complain("minimum blocksize is 512");
+        complain(b"minimum blocksize is 512");
         ("512-blocks".to_string(), 512)
     };
 
-    // `strtol(p, &ep, 10)`.
-    let trimmed = text.trim_start();
-    let (negative, digits_from) = match trimmed.as_bytes().first() {
-        Some(b'-') => (true, 1),
-        Some(b'+') => (false, 1),
-        _ => (false, 0),
-    };
-    let rest = &trimmed[digits_from..];
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    let (mut n, ep) = match digits {
-        0 => (0, text.as_ref()),
-        _ => {
-            let n = rest[..digits].parse::<c_long>().unwrap_or(c_long::MAX);
-            (if negative { -n } else { n }, &rest[digits..])
-        }
-    };
+    let text = std::ffi::CString::new(p).expect("environment value has no NUL");
+    let mut end = std::ptr::null_mut();
+    // SAFETY: a live C string and writable end pointer. Using C's parser
+    // preserves its byte/locale rules and ERANGE on signed long overflow.
+    let mut n = unsafe { libc::strtol(text.as_ptr(), &mut end, 10) };
+    // SAFETY: strtol leaves end pointing within text, including its NUL.
+    let ep = unsafe { CStr::from_ptr(end) }.to_bytes();
     if n < 0 {
         return underflow();
     }
     if n == 0 {
         n = 1;
     }
-    let ep = ep.as_bytes();
     let (form, max, mul) = match (ep.first(), ep.len() > 1) {
         (Some(b'G' | b'g'), false) => ("G", MAXB / GB, GB),
         (Some(b'K' | b'k'), false) => ("K", MAXB / KB, KB),
         (Some(b'M' | b'm'), false) => ("M", MAXB / MB, MB),
         (None, _) => ("", MAXB, 1),
         _ => {
-            complain(&format!("{text}: unknown blocksize"));
+            complain(&[p, b": unknown blocksize"].concat());
             n = 512;
             ("", MAXB, 1)
         }
     };
     if n > max {
-        complain(&format!("maximum blocksize is {}G", MAXB / GB));
+        complain(b"maximum blocksize is 1G");
         n = max;
     }
     let size = n * mul;

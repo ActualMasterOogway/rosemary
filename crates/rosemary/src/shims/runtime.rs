@@ -65,40 +65,10 @@ pub fn set_executable_path(path: &std::path::Path) {
         spelled.to_string_lossy().into_owned();
 }
 
-/// The address of the *guest's* `environ` variable.
-///
-/// `getenv`/`setenv`/`putenv` work on a block of the guest's own - see
-/// `darwin::env` for why - so a guest reading `environ`, or calling
-/// `_NSGetEnviron` to get at it, which is how Darwin spells taking its address,
-/// must be looking at that same block rather than at this process's.
-///
-/// Darwin does not export `environ` from a dylib at all, only the accessor;
-/// every other host exports the variable and has no accessor. Both are
-/// published, from one address.
-#[cfg(not(target_os = "macos"))]
+/// The environment slot used by the selected guest libc on every host.
 fn guest_environ() -> Option<u64> {
-    Some(darwin::env::environ_slot() as usize as u64)
+    Some(darwin::env::guest_environ_slot() as usize as u64)
 }
-
-/// On macOS the guest runs against a real Darwin root and the host's own block
-/// is the right one, exactly as before.
-#[cfg(target_os = "macos")]
-fn guest_environ() -> Option<u64> {
-    if let Some(f) = crate::host::symbol("_NSGetEnviron") {
-        // SAFETY: `_NSGetEnviron` is `char ***(void)`, a pure accessor for a
-        // libSystem global, so its result is valid for the life of the process.
-        let get: unsafe extern "C" fn() -> *mut *mut *mut c_char =
-            unsafe { core::mem::transmute(f as usize as *const ()) };
-        let addr = unsafe { get() };
-        if !addr.is_null() {
-            return Some(addr as usize as u64);
-        }
-    }
-    crate::host::symbol("environ")
-}
-
-/// Whatever [`guest_environ`] found, resolved once at provider time.
-static ENVIRON: AtomicPtr<*mut *mut c_char> = AtomicPtr::new(std::ptr::null_mut());
 
 /// A stable address inside *this* binary, for glibc's `dso_symbol` argument.
 ///
@@ -149,7 +119,16 @@ unsafe extern "C" fn tlv_atexit(dtor: Option<unsafe extern "C" fn(*mut c_void)>,
 
 /// `char ***_NSGetEnviron(void)`.
 extern "C" fn ns_get_environ() -> *mut *mut *mut c_char {
-    ENVIRON.load(Ordering::Relaxed)
+    darwin::env::guest_environ_slot()
+}
+
+/// Environment symbols must agree for imports and libSystem `dlsym` calls.
+pub fn host_substitute(name: &str) -> Option<u64> {
+    match name {
+        "environ" => guest_environ(),
+        "_NSGetEnviron" => Some(ns_get_environ as *const () as usize as u64),
+        _ => None,
+    }
 }
 
 /// `int _NSGetExecutablePath(char *buf, uint32_t *bufsize)`.
@@ -220,7 +199,6 @@ pub fn provider() -> SyntheticDylib {
     lib.define_fn("__NSGetArgc", ns_get_argc as *const ());
     lib.define_fn("__NSGetArgv", ns_get_argv as *const ());
     if let Some(addr) = guest_environ() {
-        ENVIRON.store(addr as usize as *mut *mut *mut c_char, Ordering::Relaxed);
         lib.define_data("_environ", addr);
         lib.define_fn("__NSGetEnviron", ns_get_environ as *const ());
     }

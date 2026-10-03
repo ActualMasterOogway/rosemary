@@ -118,6 +118,49 @@ fn spawn_fixture() -> Option<String> {
         .clone()
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn child_launches_preserve_the_selected_libcs_environment_and_path() {
+    let Some(emulated) = spawn_fixture() else {
+        skip!("cannot build x86_64 spawn fixtures");
+    };
+    let Some(native) = common::build_native("spawn-native-env", SOURCE) else {
+        skip!("cannot build native spawn fixtures");
+    };
+    for (path, flags) in [
+        (&emulated, &["--emulated"][..]),
+        (&native, &["--native"][..]),
+    ] {
+        let directory = std::path::Path::new(path)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for libc in ["native", "builtin"] {
+            for mode in ["execv", "execvp", "execlp", "spawnp"] {
+                let output = common::driver_command()
+                    .env("ROSEMARY_PREFIX", "off")
+                    .env("ROSEMARY_LIBC", libc)
+                    .env_remove("ROSEMARY_STATS")
+                    .env_remove("ROSEMARY_TRACE_PREFIX")
+                    .arg("run")
+                    .args(flags)
+                    .args([path, mode, directory])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{libc} {mode} {flags:?}: {output:?}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout)
+                        .contains("child arguments, environment and cwd preserved")
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn child_launches_use_rosemary_and_preserve_explicit_emulation() {
     let Some(path) = spawn_fixture() else {

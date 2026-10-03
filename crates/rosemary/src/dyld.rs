@@ -1107,7 +1107,7 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
             return None;
         }
         return Some(remember_native_symbol(
-            found as usize as u64,
+            selected_native_symbol(found as usize as u64, name),
             name,
             Some(path),
         ));
@@ -1155,7 +1155,49 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 /// handle [`crate::frameworks`] registers for `dlopen("/usr/lib/libSystem.B.dylib")`,
 /// which must agree with it.
 pub fn system_symbol(name: &str) -> Option<u64> {
-    crate::shims::openat::host_substitute(name).or_else(|| darwin::symbol(name))
+    crate::shims::runtime::host_substitute(name)
+        .or_else(|| crate::shims::openat::host_substitute(name))
+        .or_else(|| darwin::symbol(name))
+}
+
+fn selected_native_symbol(found: u64, name: &str) -> u64 {
+    // Preserve scoped lookups of symbols a loaded library defines itself.
+    if crate::host::symbol(name) == Some(found)
+        && let Some(addr) = system_symbol(name)
+    {
+        return addr;
+    }
+    found
+}
+
+/// Native framework mode keeps host dylib handles, but builtin libc lookups
+/// must still return the same functions as guest imports.
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn native_libc_dlsym(
+    handle: *mut libc::c_void,
+    name: *const libc::c_char,
+) -> *mut libc::c_void {
+    // SAFETY: the caller supplies a valid dlsym handle and C identifier.
+    let found = unsafe { libc::dlsym(handle, name) };
+    if found.is_null() || name.is_null() {
+        return found;
+    }
+    // SAFETY: the identifier was valid for the host lookup above.
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return found;
+    };
+    selected_native_symbol(found as usize as u64, name) as usize as *mut libc::c_void
+}
+
+pub fn native_libc_provider() -> SyntheticDylib {
+    #[allow(unused_mut)]
+    let mut lib = SyntheticDylib::new("<rosemary native libc lookup>");
+    #[cfg(target_os = "macos")]
+    if darwin::libc_backend::using_builtin() {
+        lib.flat(true)
+            .define_fn("_dlsym", native_libc_dlsym as *const ());
+    }
+    lib
 }
 
 /// Handles the *host's* `dlopen` returned, and the paths they were asked for.

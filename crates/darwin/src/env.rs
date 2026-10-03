@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -8,22 +6,22 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// is published and what `_NSGetEnviron` answers with.
 static ENVIRON: AtomicPtr<*mut c_char> = AtomicPtr::new(std::ptr::null_mut());
 
-/// The entries, as `NAME=VALUE`.
-///
-/// `&'static CStr` rather than a raw pointer so that the block is `Send`: each
-/// one is a leaked `CString`, which is exactly as long-lived as that claims.
-static BLOCK: Mutex<Vec<&'static CStr>> = Mutex::new(Vec::new());
+// Serialize our API calls, but keep the published vector authoritative:
+// guests can replace it, edit its entries, or lend strings through `putenv`.
+// Direct guest edits must not race environment API calls.
+static INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Build the block from this process's environment, once.
 ///
 /// Called by every entry point below rather than from a start-up hook: a guest
 /// can read `environ` before anything else runs, and a block that is empty
 /// until something initialises it is a guest that sees no environment at all.
-fn block() -> std::sync::MutexGuard<'static, Vec<&'static CStr>> {
-    let mut block = BLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if !block.is_empty() {
-        return block;
+fn block() -> std::sync::MutexGuard<'static, bool> {
+    let mut initialized = INITIALIZED.lock().unwrap_or_else(|e| e.into_inner());
+    if *initialized {
+        return initialized;
     }
+    let mut entries = Vec::new();
     let mut has_path = false;
     for (name, value) in std::env::vars_os() {
         use std::os::unix::ffi::OsStrExt;
@@ -43,7 +41,7 @@ fn block() -> std::sync::MutexGuard<'static, Vec<&'static CStr>> {
         // A variable whose name or value holds a NUL cannot be spelled in a
         // block at all, and is dropped rather than truncated.
         if let Ok(entry) = CString::new(entry) {
-            block.push(Box::leak(entry.into_boxed_c_str()));
+            entries.push(entry.into_raw());
         }
     }
     // A prefixed guest has a `PATH` even when this process has none.
@@ -51,10 +49,11 @@ fn block() -> std::sync::MutexGuard<'static, Vec<&'static CStr>> {
         && let Some(path) = corrected(std::ffi::OsStr::new("PATH"))
         && let Ok(entry) = CString::new(format!("PATH={path}"))
     {
-        block.push(Box::leak(entry.into_boxed_c_str()));
+        entries.push(entry.into_raw());
     }
-    publish(&block);
-    block
+    publish(&entries);
+    *initialized = true;
+    initialized
 }
 
 /// A Mac's default `PATH`: `/etc/paths`, in its order.
@@ -99,14 +98,28 @@ fn corrected(name: &std::ffi::OsStr) -> Option<String> {
 ///
 /// The old vector is leaked: a guest that read `environ` into a local still
 /// holds it, and C gives no way to tell it not to.
-fn publish(entries: &[&'static CStr]) {
-    let mut vector: Vec<*mut c_char> = entries
-        .iter()
-        .map(|entry| entry.as_ptr().cast_mut())
-        .collect();
+fn publish(entries: &[*mut c_char]) {
+    let mut vector = entries.to_vec();
     vector.push(std::ptr::null_mut());
     let leaked = Box::leak(vector.into_boxed_slice());
     ENVIRON.store(leaked.as_mut_ptr(), Ordering::Release);
+}
+
+/// Read the live block while the environment lock is held.
+fn pointers() -> Vec<*mut c_char> {
+    let mut entries = Vec::new();
+    let mut at = ENVIRON.load(Ordering::Acquire);
+    if !at.is_null() {
+        // SAFETY: the published block, including guest replacements, must be
+        // null-terminated and live until the next environment mutation.
+        unsafe {
+            while !(*at).is_null() {
+                entries.push(*at);
+                at = at.add(1);
+            }
+        }
+    }
+    entries
 }
 
 /// The address of the guest's `environ` variable.
@@ -116,18 +129,31 @@ pub fn environ_slot() -> *mut *mut *mut c_char {
     std::ptr::addr_of!(ENVIRON) as *mut *mut *mut c_char
 }
 
-/// The guest's environment as `NAME=VALUE` strings: what a new guest's `main`
-/// is handed as `envp`. It has to be this block and not the host's, or a
-/// program that reads `envp` - bash builds its variables from it - sees a
-/// different `PATH` than one that calls `getenv`.
+/// The slot used by the selected guest libc, including native macOS libc.
+pub fn guest_environ_slot() -> *mut *mut *mut c_char {
+    #[cfg(target_os = "macos")]
+    if !crate::libc_backend::using_builtin() {
+        // SAFETY: Darwin's accessor returns a process-lifetime slot.
+        return unsafe { libc::_NSGetEnviron() };
+    }
+    environ_slot()
+}
+
+/// The guest's environment as `NAME=VALUE` strings for its initial `envp`.
 pub fn entries() -> Vec<CString> {
-    block().iter().map(|entry| (*entry).to_owned()).collect()
+    let _guard = block();
+    pointers()
+        .iter()
+        // SAFETY: each live entry is a NUL-terminated string.
+        .map(|&entry| unsafe { CStr::from_ptr(entry) }.to_owned())
+        .collect()
 }
 
 /// The index of `name` in `entries`, comparing up to the `=`.
-fn position(entries: &[&'static CStr], name: &[u8]) -> Option<usize> {
-    entries.iter().position(|entry| {
-        let bytes = entry.to_bytes();
+fn position(entries: &[*mut c_char], name: &[u8]) -> Option<usize> {
+    entries.iter().position(|&entry| {
+        // SAFETY: each live entry is a NUL-terminated string.
+        let bytes = unsafe { CStr::from_ptr(entry) }.to_bytes();
         bytes.len() > name.len() && bytes[name.len()] == b'=' && &bytes[..name.len()] == name
     })
 }
@@ -142,18 +168,18 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
         return std::ptr::null_mut();
     }
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
-    if name.is_empty() || name.contains(&b'=') {
-        return std::ptr::null_mut();
-    }
-    let block = block();
+    // Darwin compares only the part before the first '='.
+    let name = name.split(|&byte| byte == b'=').next().unwrap();
+    let _guard = block();
+    let block = pointers();
     let Some(at) = position(&block, name) else {
         return std::ptr::null_mut();
     };
     // The value, which is the entry past `NAME=` - the pointer C callers expect
     // and are entitled to hold on to.
-    // SAFETY: the entry is at least `name.len() + 1` bytes and is leaked, so
-    // the interior pointer is valid for the life of the process.
-    unsafe { block[at].as_ptr().add(name.len() + 1).cast_mut() }
+    // SAFETY: the entry is at least `name.len() + 1` bytes and is live, so
+    // the interior pointer remains valid while the entry does.
+    unsafe { block[at].add(name.len() + 1) }
 }
 
 /// `int setenv(const char *, const char *, int)`
@@ -176,7 +202,8 @@ pub unsafe extern "C" fn setenv(
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let mut block = block();
+    let _guard = block();
+    let mut block = pointers();
     let at = position(&block, name);
     if at.is_some() && overwrite == 0 {
         return 0;
@@ -188,7 +215,7 @@ pub unsafe extern "C" fn setenv(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    let entry: &'static CStr = Box::leak(entry.into_boxed_c_str());
+    let entry = entry.into_raw();
     match at {
         Some(at) => block[at] = entry,
         None => block.push(entry),
@@ -212,9 +239,14 @@ pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let mut block = block();
-    if let Some(at) = position(&block, name) {
+    let _guard = block();
+    let mut block = pointers();
+    let old_len = block.len();
+    // Darwin removes every occurrence, including duplicates in guest blocks.
+    while let Some(at) = position(&block, name) {
         block.remove(at);
+    }
+    if block.len() != old_len {
         publish(&block);
     }
     0
@@ -222,15 +254,12 @@ pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
 
 /// `int putenv(char *)`
 ///
-/// The string is *copied*, which is where this parts from Darwin: there the
-/// caller's own buffer becomes the entry, and a later write through it changes
-/// the environment. Copying is the safe half of that bargain - a guest that
-/// frees the buffer cannot make this block dangle - and the behaviour a program
-/// relies on is `getenv` seeing what it just put, which is kept.
+/// Darwin retains the caller's buffer; later edits change the environment.
 ///
 /// # Safety
 ///
-/// `entry` is null or a NUL-terminated `NAME=VALUE` string.
+/// `entry` is null or NUL-terminated. On success it must remain live while in
+/// the environment, and edits must not race environment API calls.
 pub unsafe extern "C" fn putenv(entry: *mut c_char) -> c_int {
     if entry.is_null() {
         crate::errno::set(libc::EINVAL);
@@ -238,24 +267,14 @@ pub unsafe extern "C" fn putenv(entry: *mut c_char) -> c_int {
     }
     let text = unsafe { CStr::from_ptr(entry) }.to_bytes();
     let Some(split) = text.iter().position(|b| *b == b'=') else {
-        // No `=` means "remove this name", which is what a Darwin `putenv`
-        // does with one.
-        // SAFETY: the pointer the caller gave, still NUL-terminated.
-        return unsafe { unsetenv(entry) };
-    };
-    if split == 0 {
-        crate::errno::set(libc::EINVAL);
-        return -1;
-    }
-    let Ok(copy) = CString::new(text) else {
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    let copy: &'static CStr = Box::leak(copy.into_boxed_c_str());
-    let mut block = block();
+    let _guard = block();
+    let mut block = pointers();
     match position(&block, &text[..split]) {
-        Some(at) => block[at] = copy,
-        None => block.push(copy),
+        Some(at) => block[at] = entry,
+        None => block.push(entry),
     }
     publish(&block);
     0
@@ -364,16 +383,15 @@ mod tests {
     /// answer about whichever entry happened to come first.
     #[test]
     fn a_name_is_matched_up_to_the_equals() {
-        let entries: Vec<&'static CStr> = vec![
-            Box::leak(CString::new("PATHX=wrong").unwrap().into_boxed_c_str()),
-            Box::leak(CString::new("PATH=right").unwrap().into_boxed_c_str()),
+        let entries: Vec<*mut c_char> = vec![
+            CString::new("PATHX=wrong").unwrap().into_raw(),
+            CString::new("PATH=right").unwrap().into_raw(),
         ];
         assert_eq!(position(&entries, b"PATH"), Some(1));
         assert_eq!(position(&entries, b"PATHX"), Some(0));
         assert_eq!(position(&entries, b"PAT"), None);
         // An entry that is exactly the name with no `=` is not that name.
-        let bare: Vec<&'static CStr> =
-            vec![Box::leak(CString::new("PATH").unwrap().into_boxed_c_str())];
+        let bare: Vec<*mut c_char> = vec![CString::new("PATH").unwrap().into_raw()];
         assert_eq!(position(&bare, b"PATH"), None);
     }
 
@@ -409,18 +427,94 @@ mod tests {
         unsafe { unsetenv(name.as_ptr()) };
     }
 
-    /// `putenv` with no `=` removes the name, which is what Darwin's does.
+    /// Darwin rejects `putenv` without an equals sign and keeps the old value.
     #[test]
-    fn putenv_without_a_value_removes_the_name() {
+    fn putenv_without_an_equals_sign_keeps_the_value() {
         let name = unique("PUT");
         let entry = CString::new(format!("{}=value", name.to_str().unwrap())).expect("no NUL");
-        // SAFETY: NUL-terminated strings this test owns; `putenv` copies.
+        // SAFETY: the entry stays live until `unsetenv` removes it.
         unsafe {
             assert_eq!(putenv(entry.as_ptr().cast_mut()), 0);
             assert_eq!(CStr::from_ptr(getenv(name.as_ptr())), c"value");
-            assert_eq!(putenv(name.as_ptr().cast_mut()), 0);
-            assert!(getenv(name.as_ptr()).is_null());
+            assert_eq!(putenv(name.as_ptr().cast_mut()), -1);
+            assert_eq!(CStr::from_ptr(getenv(name.as_ptr())), c"value");
+            assert_eq!(unsetenv(name.as_ptr()), 0);
         }
+    }
+
+    #[test]
+    fn putenv_buffer_child() {
+        if std::env::var("ROSEMARY_ENV_TEST_CHILD").as_deref() != Ok("borrowed") {
+            return;
+        }
+        let name = unique("BORROWED");
+        let mut entry = format!("{}=first\0", name.to_str().unwrap()).into_bytes();
+        let offset = name.to_bytes().len() + 1;
+        // SAFETY: entry remains NUL-terminated and live until removal.
+        unsafe {
+            assert_eq!(putenv(entry.as_mut_ptr().cast()), 0);
+            assert_eq!(getenv(name.as_ptr()), entry.as_mut_ptr().add(offset).cast());
+            entry[offset..offset + 5].copy_from_slice(b"later");
+            assert_eq!(CStr::from_ptr(getenv(name.as_ptr())), c"later");
+            let with_equals = CString::new(format!("{}=ignored", name.to_str().unwrap())).unwrap();
+            assert_eq!(getenv(with_equals.as_ptr()), getenv(name.as_ptr()));
+            assert_eq!(setenv(name.as_ptr(), c"owned".as_ptr(), 1), 0);
+            entry[offset..offset + 5].copy_from_slice(b"again");
+            assert_eq!(CStr::from_ptr(getenv(name.as_ptr())), c"owned");
+            assert_eq!(unsetenv(name.as_ptr()), 0);
+        }
+    }
+
+    #[test]
+    fn putenv_keeps_the_callers_mutable_buffer() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "env::tests::putenv_buffer_child"])
+            .env("ROSEMARY_ENV_TEST_CHILD", "borrowed")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn environment_replacement_child() {
+        if std::env::var_os("ROSEMARY_ENV_TEST_CHILD").is_none() {
+            return;
+        }
+        let slot = environ_slot();
+        let first = CString::new("DUP=first").unwrap();
+        let second = CString::new("DUP=second").unwrap();
+        let mut replacement = [
+            first.as_ptr().cast_mut(),
+            second.as_ptr().cast_mut(),
+            std::ptr::null_mut(),
+        ];
+        // SAFETY: this isolated process runs one test; the replacement and its
+        // strings outlive all uses of the environment.
+        unsafe {
+            *slot = replacement.as_mut_ptr();
+            assert_eq!(CStr::from_ptr(getenv(c"DUP".as_ptr())), c"first");
+            assert_eq!(entries(), [first.clone(), second.clone()]);
+            assert_eq!(unsetenv(c"DUP".as_ptr()), 0);
+            assert!(getenv(c"DUP".as_ptr()).is_null());
+            assert!(entries().is_empty());
+            assert!((**slot).is_null());
+            assert_eq!(setenv(c"ONLY".as_ptr(), c"one".as_ptr(), 1), 0);
+            assert_eq!(entries(), [c"ONLY=one".to_owned()]);
+            *slot = std::ptr::null_mut();
+            assert!(entries().is_empty());
+            assert_eq!(setenv(c"ONLY".as_ptr(), c"two".as_ptr(), 1), 0);
+            assert_eq!(entries(), [c"ONLY=two".to_owned()]);
+        }
+    }
+
+    #[test]
+    fn guest_replacement_and_empty_blocks_stay_authoritative() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "env::tests::environment_replacement_child"])
+            .env("ROSEMARY_ENV_TEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 
     /// `environ` is null-terminated and holds what the block holds, so a guest

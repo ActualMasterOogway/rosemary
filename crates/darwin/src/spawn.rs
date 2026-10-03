@@ -150,14 +150,10 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
 /// # Safety
 ///
 /// `envp` is null or a null-terminated array of NUL-terminated strings.
-#[cfg(not(target_os = "macos"))]
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
-    unsafe { crate::env::host_spelling(envp) }
-}
-
-// On macOS the guest and host share the environment.
-#[cfg(target_os = "macos")]
-unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
+    if crate::libc_backend::using_builtin() {
+        return unsafe { crate::env::host_spelling(envp) };
+    }
     unsafe { argv_of(envp) }
 }
 
@@ -592,14 +588,15 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
 
 /// The guest's `PATH`, or Darwin's `_PATH_DEFPATH` when it has none.
 fn guest_path_variable() -> String {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "macos")]
+    if !crate::libc_backend::using_builtin() {
+        return std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    }
     // SAFETY: a literal name; the answer is null or the guest's own string.
     let value = unsafe {
         let p = crate::env::getenv(c"PATH".as_ptr());
         (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
     };
-    #[cfg(target_os = "macos")]
-    let value = std::env::var("PATH").ok();
     value.unwrap_or_else(|| "/usr/bin:/bin".to_string())
 }
 
@@ -638,22 +635,10 @@ fn search_path(name: &CStr) -> Result<CString, c_int> {
     Err(error)
 }
 
-/// This process's environment, as the exec family's implicit third argument.
-/// "The current environment", for the `exec` forms that do not take one.
-///
-/// The *guest's*, not this process's: `execv` means "the environment I have",
-/// and what the guest has is [`crate::env`]'s block.
-#[cfg(not(target_os = "macos"))]
+/// The selected guest libc's environment for implicit `exec` arguments.
 fn environ() -> *const *const c_char {
-    // SAFETY: the slot holds a null-terminated vector this runtime published
-    // and never frees.
-    unsafe { *crate::env::environ_slot() as *const *const c_char }
-}
-
-#[cfg(target_os = "macos")]
-fn environ() -> *const *const c_char {
-    // SAFETY: Darwin publishes the live environment through this slot.
-    unsafe { *libc::_NSGetEnviron() as *const *const c_char }
+    // SAFETY: the selected libc publishes a live, null-terminated vector.
+    unsafe { *crate::env::guest_environ_slot() as *const *const c_char }
 }
 
 impl FileActions {

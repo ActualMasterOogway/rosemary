@@ -134,6 +134,7 @@ impl Native {
         let objc = crate::objc::dispatch::provider();
         let frameworks = crate::frameworks::provider();
         let dyld = crate::dyld::provider();
+        let libc_lookup = crate::dyld::native_libc_provider();
         let steam = crate::steam::provider();
         let opengl = crate::opengl::provider();
         let openal = crate::openal::provider();
@@ -149,7 +150,7 @@ impl Native {
                 &opengl,
                 &openal,
             ],
-            false => vec![&eager, &runtime, &platform, &steam],
+            false => vec![&eager, &runtime, &platform, &libc_lookup, &steam],
         };
         match darwin::strict::enabled() {
             true => crate::program::announce_strict(),
