@@ -59,7 +59,7 @@ fn start() -> Result<Engine, String> {
         );
     }
     let api = gtk::api()?;
-    let mode = std::env::var("ROSEMARY_WEBKIT_GPU").unwrap_or_default();
+    let mode = std::env::var("ROSEMARY_WEBKIT_GPU").unwrap_or("gtk".into());
     let composition = match mode.as_str() {
         "0" => Composition::Cpu,
         _ => Composition::Gpu(appkit::backing::importer()),
