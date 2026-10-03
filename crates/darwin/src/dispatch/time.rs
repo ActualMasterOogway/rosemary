@@ -32,8 +32,8 @@ pub unsafe extern "C" fn time(when: u64, delta: i64) -> u64 {
         _ => when,
     };
     match delta >= 0 {
-        true => base.saturating_add(delta as u64),
-        false => base.saturating_sub(delta.unsigned_abs()),
+        true => base.checked_add(delta as u64).filter(|v| *v <= i64::MAX as u64).unwrap_or(FOREVER),
+        false => base.saturating_sub(delta.unsigned_abs()).max(1),
     }
 }
 
@@ -61,7 +61,7 @@ mod tests {
     /// A negative delta larger than the base must not wrap into the distant future.
     #[test]
     fn a_deadline_saturates_rather_than_wrapping() {
-        assert_eq!(unsafe { time(10, -100) }, 0);
+        assert_eq!(unsafe { time(10, -100) }, 1);
         assert_eq!(unsafe { time(u64::MAX - 1, i64::MAX) }, u64::MAX);
     }
 
