@@ -43,6 +43,8 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.lldb
+              # Supply Nix system header paths to clangd, before clang-unwrapped.
+              pkgs.clang-tools
               toolchain
               pkgs.pkg-config
               # Cargo fetches microlift and the Cranelift fork over git.
