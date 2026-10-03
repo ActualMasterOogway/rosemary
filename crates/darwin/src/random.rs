@@ -3,8 +3,8 @@
 unsafe extern "C" fn arc4random() -> u32 {
     let mut bytes = [0; 4];
     if getrandom::fill(&mut bytes).is_err() {
-        crate::errno::set(libc::EIO);
-        return 0;
+        // FIXME (ACCURACY): should we really abort here?
+        std::process::abort();
     }
     u32::from_ne_bytes(bytes)
 }
@@ -13,7 +13,8 @@ unsafe extern "C" fn arc4random_buf(out: *mut u8, len: usize) {
         return;
     }
     if getrandom::fill(unsafe { std::slice::from_raw_parts_mut(out, len) }).is_err() {
-        crate::errno::set(libc::EIO);
+        // FIXME (ACCURACY): should we really abort here?
+        std::process::abort();
     }
 }
 

@@ -5,17 +5,10 @@ use std::ffi::c_char;
 /// `uuid_t`: sixteen bytes, on both platforms.
 const LEN: usize = 16;
 
-/// Sixteen bytes of randomness from the kernel.
-///
-/// Zeroes if the kernel will not answer, which is a UUID that
-/// [`uuid_is_null`] reports as null - a caller checking for that is the only one
-/// that can act on the failure, and there is no other channel to report it on.
+/// UUID generation has no error return; never manufacture a predictable UUID.
 fn random() -> [u8; LEN] {
     let mut bytes = [0u8; LEN];
-    if getrandom::fill(&mut bytes).is_ok() {
-        return bytes;
-    }
-    bytes.fill(0);
+    if getrandom::fill(&mut bytes).is_err() { std::process::abort(); }
     bytes
 }
 
