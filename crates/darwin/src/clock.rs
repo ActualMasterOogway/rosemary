@@ -25,15 +25,6 @@ struct Timezone {
     dst_time: i32,
 }
 
-impl Timezone {
-    /// # Safety
-    ///
-    /// `value` is readable for one Darwin `timezone`.
-    unsafe fn read(value: *const Self) -> Self {
-        unsafe { value.read_unaligned() }
-    }
-}
-
 impl Timeval {
     /// A host value converted to the Darwin representation.
     pub(crate) fn from_host(value: libc::timeval) -> Timeval {
@@ -80,7 +71,7 @@ unsafe extern "C" fn gettimeofday(out: *mut Timeval, tz: *mut c_void) -> i32 {
     };
     let rc = unsafe { libc::gettimeofday(&mut host, tz.cast()) };
     if rc == 0 && !out.is_null() {
-        unsafe { out.write(Timeval::from_host(host)) };
+        unsafe { Timeval::from_host(host).write(out) };
     }
     rc
 }
@@ -129,22 +120,8 @@ unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> 
 }
 
 unsafe extern "C" fn settimeofday(_time: *const Timeval, _timezone: *const Timezone) -> i32 {
-    /*
-    let host_time = (!time.is_null()).then(|| unsafe { Timeval::read(time).host() });
-    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone).host() });
-    unsafe {
-        libc::settimeofday(
-            host_time
-                .as_ref()
-                .map_or(core::ptr::null(), core::ptr::from_ref),
-            host_timezone
-                .as_ref()
-                .map_or(core::ptr::null(), core::ptr::from_ref),
-        )
-    }
-    */
-    // FIXME (ACCURACY): unimplemented because timezone translation isn't implemented in a cross platform way
-    crate::errno::from_host(libc::ENOSYS)
+    crate::errno::set(libc::ENOSYS);
+    -1
 }
 
 /// `clockid_t`, from Darwin's `<time.h>`.
@@ -229,8 +206,7 @@ unsafe extern "C" fn gettime(clock: id::clockid_t, ts: *mut c_void) -> i32 {
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    // SAFETY: the caller's guarantee, and the two layouts agree.
-    unsafe { libc::clock_gettime(host, ts as *mut libc::timespec) }
+    unsafe { libc::clock_gettime(host, ts.cast()) }
 }
 
 /// `int clock_getres(clockid_t, struct timespec *)`.
@@ -250,8 +226,7 @@ unsafe extern "C" fn getres(clock: id::clockid_t, ts: *mut c_void) -> i32 {
 /// `int clock_settime(clockid_t, const struct timespec *)`.
 ///
 /// Darwin's libc sets only the wall clock, through `settimeofday`, so every
-/// other id is `EINVAL` and the nanoseconds are truncated to microseconds. As
-/// with [`settimeofday`], the host's privilege policy decides the rest.
+/// other id is `EINVAL`. The host's privilege policy decides the rest.
 ///
 /// # Safety
 ///
@@ -262,13 +237,16 @@ unsafe extern "C" fn settime(clock: id::clockid_t, ts: *const c_void) -> i32 {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    // SAFETY: the caller's guarantee, and the two layouts agree.
+    if ts.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
     let ts = unsafe { (ts as *const libc::timespec).read_unaligned() };
-    let tv = libc::timeval {
-        tv_sec: ts.tv_sec,
-        tv_usec: ts.tv_nsec / 1000,
-    };
-    unsafe { libc::settimeofday(&tv, core::ptr::null()) }
+    if !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) }
 }
 
 #[cfg(target_os = "macos")]
