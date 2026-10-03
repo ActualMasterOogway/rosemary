@@ -45,7 +45,6 @@ pub mod env;
 pub mod errno;
 pub mod fcntl;
 pub mod fmtcheck;
-#[cfg(not(target_os = "macos"))]
 pub mod fortify;
 pub mod fs;
 #[cfg(not(target_os = "macos"))]
@@ -307,13 +306,12 @@ static SHARED_MODULES: &[exports::Module] = &[
     clock::MODULE,
     glob::MODULE,
     regex::MODULE,
-    #[cfg(any(target_os = "macos", target_arch = "x86_64"))]
     resolv::MODULE,
     string::MODULE,
     stat::MODULE,
-    #[cfg(any(target_os = "macos", target_arch = "x86_64"))]
     stackprobe::MODULE,
     atomics::MODULE,
+    fortify::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -321,7 +319,6 @@ static SHARED_MODULES: &[exports::Module] = &[
 static NONPORTABLE_MODULES: &[exports::Module] = &[
     mach::MODULE,
     compat::MODULE,
-    fortify::MODULE,
     env::MODULE,
     fs::MODULE,
     termios::MODULE,

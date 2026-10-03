@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{c_char, c_int, c_void};
 
 #[inline(always)]

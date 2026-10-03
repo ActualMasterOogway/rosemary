@@ -16,29 +16,6 @@ pub(crate) struct Timeval {
     _pad: i32,
 }
 
-#[cfg(target_os = "macos")]
-impl Timeval {
-    /// A host value converted to the guest's padded Darwin representation.
-    fn from_host(value: libc::timeval) -> Timeval {
-        Timeval {
-            sec: value.tv_sec,
-            usec: value.tv_usec,
-            _pad: 0,
-        }
-    }
-
-    unsafe fn read(value: *const Self) -> Self {
-        unsafe { value.read_unaligned() }
-    }
-
-    fn host(self) -> libc::timeval {
-        libc::timeval {
-            tv_sec: self.sec,
-            tv_usec: self.usec,
-        }
-    }
-}
-
 /// Darwin's obsolete `struct timezone`, whose two `int` fields remain part of
 /// the `settimeofday` ABI.
 #[repr(C)]
@@ -57,7 +34,6 @@ impl Timezone {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 impl Timeval {
     /// A host value converted to the Darwin representation.
     pub(crate) fn from_host(value: libc::timeval) -> Timeval {
@@ -82,7 +58,7 @@ impl Timeval {
     pub(crate) fn host(self) -> libc::timeval {
         libc::timeval {
             tv_sec: self.sec,
-            tv_usec: i64::from(self.usec),
+            tv_usec: self.usec as _,
         }
     }
 
@@ -109,18 +85,6 @@ unsafe extern "C" fn gettimeofday(out: *mut Timeval, tz: *mut c_void) -> i32 {
     rc
 }
 
-#[cfg(not(target_os = "macos"))]
-unsafe extern "C" {
-    #[link_name = "utimes"]
-    fn host_utimes(path: *const c_char, times: *const libc::timeval) -> i32;
-    #[link_name = "futimes"]
-    fn host_futimes(fd: i32, times: *const libc::timeval) -> i32;
-    #[link_name = "lutimes"]
-    fn host_lutimes(path: *const c_char, times: *const libc::timeval) -> i32;
-    #[link_name = "settimeofday"]
-    fn host_settimeofday(time: *const libc::timeval, timezone: *const Timezone) -> i32;
-}
-
 /// Convert the two guest values into host-owned storage. A null pointer keeps
 /// the documented "use the current time" meaning and reaches libc as null.
 unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
@@ -132,59 +96,24 @@ unsafe fn timevals(times: *const Timeval) -> Option<[libc::timeval; 2]> {
     })
 }
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> i32 {
-    let host = unsafe { timevals(times) };
-    let path = unsafe { std::ffi::CStr::from_ptr(path) };
-    let path = prefix::ns::to_host(path);
-    unsafe {
-        libc::utimes(
-            path.as_ptr(),
-            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
-        )
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
-    let host = unsafe { timevals(times) };
-    unsafe { libc::futimes(fd, host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr())) }
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 {
-    let host = unsafe { timevals(times) };
-    let path = unsafe { std::ffi::CStr::from_ptr(path) };
-    let path = prefix::ns::to_host(path);
-    unsafe {
-        libc::lutimes(
-            path.as_ptr(),
-            host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
-        )
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> i32 {
     let host = unsafe { timevals(times) };
     let times = host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
     // The path is the guest's; see [`crate::fs`] for why it is translated.
     crate::stat::with_fallback(path, |path| {
-        let rc = unsafe { host_utimes(path, times) };
+        let rc = unsafe { libc::utimes(path, times) };
         (rc, rc == 0)
     })
 }
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn futimes(fd: i32, times: *const Timeval) -> i32 {
     let host = unsafe { timevals(times) };
-    unsafe { host_futimes(fd, host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr())) }
+    unsafe { libc::futimes(fd, host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr())) }
 }
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> i32 {
     let host = unsafe { timevals(times) };
     let times = host.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
     crate::stat::with_fallback(path, |path| {
-        let rc = unsafe { host_lutimes(path, times) };
+        let rc = unsafe { libc::lutimes(path, times) };
         (rc, rc == 0)
     })
 }
@@ -199,30 +128,10 @@ unsafe extern "C" fn utime(path: *const c_char, times: *const libc::utimbuf) -> 
     })
 }
 
-/// `int settimeofday(const struct timeval *, const struct timezone *)`.
-///
-/// This is bridged rather than denied: changing host time is the host analogue
-/// of the Darwin operation, still subject to the host's privilege policy.
-#[cfg(not(target_os = "macos"))]
-unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezone) -> i32 {
+unsafe extern "C" fn settimeofday(_time: *const Timeval, _timezone: *const Timezone) -> i32 {
+    /*
     let host_time = (!time.is_null()).then(|| unsafe { Timeval::read(time).host() });
-    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone) });
-    unsafe {
-        host_settimeofday(
-            host_time
-                .as_ref()
-                .map_or(core::ptr::null(), core::ptr::from_ref),
-            host_timezone
-                .as_ref()
-                .map_or(core::ptr::null(), core::ptr::from_ref),
-        )
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezone) -> i32 {
-    let host_time = (!time.is_null()).then(|| unsafe { Timeval::read(time).host() });
-    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone) });
+    let host_timezone = (!timezone.is_null()).then(|| unsafe { Timezone::read(timezone).host() });
     unsafe {
         libc::settimeofday(
             host_time
@@ -230,9 +139,12 @@ unsafe extern "C" fn settimeofday(time: *const Timeval, timezone: *const Timezon
                 .map_or(core::ptr::null(), core::ptr::from_ref),
             host_timezone
                 .as_ref()
-                .map_or(core::ptr::null(), |v| core::ptr::from_ref(v).cast()),
+                .map_or(core::ptr::null(), core::ptr::from_ref),
         )
     }
+    */
+    // FIXME (ACCURACY): unimplemented because timezone translation isn't implemented in a cross platform way
+    crate::errno::from_host(libc::ENOSYS)
 }
 
 /// `clockid_t`, from Darwin's `<time.h>`.
