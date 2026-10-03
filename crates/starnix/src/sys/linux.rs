@@ -1,7 +1,7 @@
 //! Linux: `/proc`, `/sys` and `SO_PEERCRED`.
 
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{BorrowedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -335,25 +335,12 @@ pub fn cpu_brand() -> Option<String> {
 }
 
 pub fn peer(fd: RawFd) -> Option<Peer> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `cred` is a `ucred` and `len` says so.
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0).then_some(Peer {
-        pid: Some(cred.pid),
-        uid: cred.uid,
+    // SAFETY: `fd` is expected to be an open file descriptor
+    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    let cred = rustix::net::sockopt::socket_peercred(fd).ok()?;
+    Some(Peer {
+        pid: Some(cred.pid.as_raw_pid()),
+        uid: cred.uid.as_raw(),
     })
 }
 
