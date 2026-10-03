@@ -272,9 +272,10 @@ impl Record {
             {
                 continue;
             }
-            let mut built = false;
-            self.publish(|record| built = init(record, signature));
-            if !built {
+            let built = init(self, signature);
+            if built {
+                self.publish(|_| {});
+            } else {
                 self.word(SIGNATURE).store(signature, Ordering::Release);
             }
             return built;
