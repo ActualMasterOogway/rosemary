@@ -22,10 +22,13 @@ const NOFOLLOW_SRC: u32 = 1 << 18;
 const MOVE: u32 = 1 << 20;
 const UNLINK: u32 = 1 << 21;
 
-/// The opaque `copyfile_state_t`. Nothing is kept in it: no callback or
-/// progress query is supported, so it only has to be a distinct live block.
-const STATE_SIZE: usize = 64;
-static STATE_VALUES: OnceLock<Mutex<HashMap<(usize, u32), usize>>> = OnceLock::new();
+/// State values retain their ABI width and own filename storage.
+enum StateValue {
+    Word(usize),
+    Name(CString),
+}
+const STATE_SIZE: usize = 1;
+static STATE_VALUES: OnceLock<Mutex<HashMap<(usize, u32), StateValue>>> = OnceLock::new();
 
 fn host(path: *const c_char) -> Option<PathBuf> {
     if path.is_null() {
@@ -59,7 +62,14 @@ fn copy_one(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
     if !may_write(to) {
         return Err(std::io::Error::last_os_error());
     }
-    let existing = std::fs::symlink_metadata(to).ok();
+    let existing = match std::fs::symlink_metadata(to) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if std::fs::metadata(to).is_ok_and(|dst| dst.dev() == meta.dev() && dst.ino() == meta.ino()) {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
     if flags & EXCL != 0 && existing.is_some() {
         return Err(std::io::Error::from_raw_os_error(libc::EEXIST));
     }
@@ -80,7 +90,15 @@ fn copy_one(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
             other => other?,
         }
     } else if flags & DATA != 0 {
-        std::fs::copy(from, to)?;
+        let mut source = std::fs::File::open(from)?;
+        let mut destination = std::fs::OpenOptions::new().write(true)
+            .create(true).create_new(flags & EXCL != 0).open(to)?;
+        let dst = destination.metadata()?;
+        if dst.dev() == meta.dev() && dst.ino() == meta.ino() {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        destination.set_len(0)?;
+        std::io::copy(&mut source, &mut destination)?;
     } else if existing.is_none() {
         std::fs::File::create(to)?;
     }
@@ -98,7 +116,9 @@ fn copy_one(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
         ];
         if let Ok(c) = CString::new(to.as_os_str().as_encoded_bytes()) {
             // SAFETY: a NUL-terminated path and two timespecs.
-            unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+            if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
     }
     Ok(())
@@ -108,19 +128,21 @@ fn copy_one(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
 fn copy_tree(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
     // A tree is walked physically, as `copyfile`'s own `fts` walk is: a link
     // inside it is copied as a link.
-    copy_one(from, to, flags | NOFOLLOW_SRC)?;
     if !std::fs::symlink_metadata(from)?.is_dir() {
-        return Ok(());
+        return copy_one(from, to, flags | NOFOLLOW_SRC);
     }
+    copy_one(from, to, (flags | NOFOLLOW_SRC) & !STAT)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         copy_tree(&entry.path(), &to.join(entry.file_name()), flags)?;
     }
+    if flags & STAT != 0 { copy_one(from, to, STAT | NOFOLLOW_SRC)?; }
     Ok(())
 }
 
 fn copy(from: &Path, to: &Path, flags: u32, from_text: &[u8]) -> std::io::Result<()> {
-    let recursive = flags & RECURSIVE != 0 && std::fs::metadata(from)?.is_dir();
+    let meta = if flags & NOFOLLOW_SRC != 0 { std::fs::symlink_metadata(from)? } else { std::fs::metadata(from)? };
+    let recursive = flags & RECURSIVE != 0 && meta.is_dir();
     if !recursive {
         return copy_one(from, to, flags);
     }
@@ -135,16 +157,36 @@ fn copy(from: &Path, to: &Path, flags: u32, from_text: &[u8]) -> std::io::Result
     };
     // The top directory follows a link given as the source, as `fts` does for
     // its root.
-    copy_one(from, &to, flags & !NOFOLLOW_SRC)?;
+    let canonical_source = std::fs::canonicalize(from)?;
+    let mut ancestor = to.as_path();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(path) => {
+                if path.starts_with(&canonical_source) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    copy_one(from, &to, flags & !(NOFOLLOW_SRC | STAT))?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         copy_tree(&entry.path(), &to.join(entry.file_name()), flags)?;
     }
+    if flags & STAT != 0 { copy_one(from, &to, STAT)?; }
     Ok(())
 }
 
 /// Make the independent copy used when the host cannot create an APFS clone.
 pub(crate) fn clonefile(from: &Path, to: &Path, nofollow: bool) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::from_raw_os_error(libc::EEXIST));
+    }
     let flags = ALL | RECURSIVE | EXCL | if nofollow { NOFOLLOW_SRC } else { 0 };
     copy(from, to, flags, from.as_os_str().as_bytes())
 }
@@ -163,16 +205,15 @@ pub unsafe extern "C" fn copyfile(
     _state: *mut c_void,
     flags: u32,
 ) -> c_int {
-    let (Some(source), Some(destination)) = (host(from), host(to)) else {
-        return -1;
-    };
+    let Some(source) = host(from) else { return -1; };
     if flags & CHECK != 0 {
         // What would be copied: everything asked for that there is.
         return match std::fs::symlink_metadata(&source) {
-            Ok(_) => (flags & ALL & !(ACL | XATTR)) as c_int,
+            Ok(_) => 0,
             Err(e) => fail(e),
         };
     }
+    let Some(destination) = host(to) else { return -1; };
     // SAFETY: checked non-null by `host`.
     let text = unsafe { CStr::from_ptr(from) }.to_bytes();
     if let Err(e) = copy(&source, &destination, flags, text) {
@@ -206,6 +247,10 @@ pub unsafe extern "C" fn fcopyfile(
     use std::io::{Seek, SeekFrom};
     use std::os::fd::FromRawFd;
 
+    if from < 0 || to < 0 {
+        crate::errno::set(libc::EBADF);
+        return -1;
+    }
     // Borrowed, not owned: the caller closes them.
     // SAFETY: the caller's open descriptors.
     let mut source = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(from) });
@@ -261,46 +306,55 @@ pub unsafe extern "C" fn copyfile_state_free(state: *mut c_void) -> c_int {
     0
 }
 
-/// Store one opaque state value. The copy engine does not consume Apple's
-/// progress callbacks, but preserving values lets utilities configure them.
+/// Configure a copy state using the flag-specific Darwin argument convention.
 pub unsafe extern "C" fn copyfile_state_set(
-    state: *mut c_void,
-    flag: u32,
-    source: *const c_void,
+    state: *mut c_void, flag: u32, source: *const c_void,
 ) -> c_int {
     if state.is_null() || source.is_null() {
-        crate::errno::set(libc::EINVAL);
+        crate::errno::set(libc::EFAULT);
         return -1;
     }
-    // SAFETY: state values used by the API are pointer-sized or 64-bit words.
-    let value = unsafe { source.cast::<usize>().read_unaligned() };
-    STATE_VALUES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert((state as usize, flag), value);
+    let value = match flag {
+        1 | 3 | 11 | 12 | 13 | 15 | 16 | 18 =>
+            StateValue::Word(unsafe { source.cast::<u32>().read_unaligned() } as usize),
+        2 | 4 => StateValue::Name(unsafe { CStr::from_ptr(source.cast()) }.to_owned()),
+        6 | 7 => StateValue::Word(source as usize),
+        14 => StateValue::Word(unsafe { source.cast::<u8>().read() } as usize),
+        _ => { crate::errno::set(libc::EINVAL); return -1; }
+    };
+    let mut values = STATE_VALUES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if flag == 13 {
+        let StateValue::Word(value) = value else { unreachable!() };
+        values.insert((state as usize, 11), StateValue::Word(value));
+        values.insert((state as usize, 12), StateValue::Word(value));
+    } else {
+        values.insert((state as usize, flag), value);
+    }
     0
 }
 
-/// Read a state value, returning zero for a value that was never set.
 pub unsafe extern "C" fn copyfile_state_get(
-    state: *mut c_void,
-    flag: u32,
-    destination: *mut c_void,
+    state: *mut c_void, flag: u32, destination: *mut c_void,
 ) -> c_int {
     if state.is_null() || destination.is_null() {
-        crate::errno::set(libc::EINVAL);
+        crate::errno::set(libc::EFAULT);
         return -1;
     }
-    let value = STATE_VALUES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(&(state as usize, flag))
-        .copied()
-        .unwrap_or(0);
-    // SAFETY: callers provide storage for the flag's pointer-sized value.
-    unsafe { destination.cast::<usize>().write_unaligned(value) };
+    let values = STATE_VALUES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let value = match values.get(&(state as usize, flag)) {
+        Some(StateValue::Word(value)) => *value,
+        Some(StateValue::Name(name)) => name.as_ptr() as usize,
+        None if matches!(flag, 1 | 3) => (-2i32) as u32 as usize,
+        None => 0,
+    };
+    unsafe {
+        match flag {
+            1 | 3 | 11 | 12 | 15 | 16 | 18 => destination.cast::<u32>().write_unaligned(value as u32),
+            10 | 14 => destination.cast::<u8>().write(value as u8),
+            2 | 4 | 5 | 6 | 7 | 8 | 9 | 17 => destination.cast::<usize>().write_unaligned(value),
+            _ => { crate::errno::set(libc::EINVAL); return -1; }
+        }
+    }
     0
 }
 
