@@ -230,7 +230,7 @@ pub fn home(user: Option<&CStr>) -> Option<CString> {
 /// with a null result.
 fn lookup_r(
     ask: impl Fn(*mut libc::passwd, *mut c_char, usize, *mut *mut libc::passwd) -> c_int,
-) -> Result<Option<[CString; 6]>, c_int> {
+) -> Result<Option<([CString; 6], u32, u32)>, c_int> {
     let mut size = 1024;
     loop {
         let mut buf = vec![0 as c_char; size];
@@ -242,7 +242,7 @@ fn lookup_r(
             0 if result.is_null() => return Ok(None),
             // SAFETY: the host filled `host`, whose strings point into `buf`,
             // which is still alive.
-            0 => return Ok(Some(unsafe { strings_of(&host) })),
+            0 => return Ok(Some((unsafe { strings_of(&host) }, host.pw_uid, host.pw_gid))),
             error => return Err(error),
         }
     }
@@ -255,21 +255,18 @@ fn lookup_r(
 /// `pwd` is a writable Darwin `struct passwd`, `buf` is writable for `size`
 /// bytes, and `result` is writable.
 unsafe fn fill_r(
-    answer: Result<Option<[CString; 6]>, c_int>,
-    host_ids: impl Fn() -> Option<(u32, u32)>,
+    answer: Result<Option<([CString; 6], u32, u32)>, c_int>,
     pwd: *mut Passwd,
     buf: *mut c_char,
     size: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
+    if result.is_null() || pwd.is_null() || buf.is_null() { return libc::EINVAL; }
     unsafe { *result = std::ptr::null_mut() };
-    let strings = match answer {
+    let (strings, uid, gid) = match answer {
         Ok(Some(strings)) => strings,
         Ok(None) => return 0,
-        Err(error) => return error,
-    };
-    let Some((uid, gid)) = host_ids() else {
-        return 0;
+        Err(error) => return crate::errno::from_host(error),
     };
     let needed: usize = strings.iter().map(|s| s.as_bytes_with_nul().len()).sum();
     if needed > size {
@@ -296,13 +293,6 @@ unsafe fn fill_r(
     0
 }
 
-/// The uid and gid of the entry `ask` finds, for [`fill_r`].
-fn ids_of(ask: impl Fn() -> *mut libc::passwd) -> Option<(u32, u32)> {
-    let host = ask();
-    // SAFETY: libc's own entry, read immediately.
-    (!host.is_null()).then(|| unsafe { ((*host).pw_uid, (*host).pw_gid) })
-}
-
 /// `int getpwuid_r(uid_t, struct passwd *, char *, size_t, struct passwd **)`
 ///
 /// The caller's structure is filled in Darwin's layout and its buffer holds
@@ -323,7 +313,6 @@ pub unsafe extern "C" fn getpwuid_r(
     unsafe {
         fill_r(
             answer,
-            || ids_of(|| libc::getpwuid(uid)),
             pwd,
             buf,
             size,
@@ -352,7 +341,6 @@ pub unsafe extern "C" fn getpwnam_r(
     unsafe {
         fill_r(
             answer,
-            || ids_of(|| libc::getpwnam(name)),
             pwd,
             buf,
             size,
