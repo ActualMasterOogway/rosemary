@@ -65,8 +65,9 @@ pub(crate) fn all_mask() -> libc::c_int {
     }
     #[cfg(all(not(target_os = "macos"), target_env = "gnu"))]
     {
-        0x1fbf
+        libc::LC_ALL_MASK
     }
+    // FIXME (ACCURACY): musl doesn't export this..?
     #[cfg(all(not(target_os = "macos"), not(target_env = "gnu")))]
     {
         0x7fff_ffff
