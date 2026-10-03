@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use starnix::process::Identity;
+
 use crate::codec::{self, Malformed};
-use crate::host;
 use crate::location;
 use crate::protocol::{Checkin, Reply, Request, VERSION};
 use crate::registry::Registry;
@@ -141,42 +142,11 @@ fn wait_readable(listener: &UnixListener, timeout: Duration) {
     unsafe { libc::poll(&mut fd, 1, timeout.as_millis() as i32) };
 }
 
-/// The pid and uid of whoever is on the other end of `stream`, where the host
-/// can say.
-#[cfg(target_os = "linux")]
-fn peer(stream: &UnixStream) -> Option<(i32, u32)> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `cred` is a `ucred` and `len` says so.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0).then_some((cred.pid, cred.uid))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn peer(stream: &UnixStream) -> Option<(i32, u32)> {
-    let mut uid = 0;
-    let mut gid = 0;
-    // SAFETY: two writable ids.
-    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    // No pid here: the claimed one is taken, from a peer already known to be
-    // this user.
-    (rc == 0).then_some((0, uid))
-}
-
 fn connection(mut stream: UnixStream, id: u64, shared: &Shared) -> io::Result<()> {
-    let (peer_pid, peer_uid) = peer(&stream).unwrap_or((0, u32::MAX));
+    // A host that cannot name the peer's pid leaves it 0, and the claimed one
+    // is taken from a peer already known to be this user.
+    let (peer_pid, peer_uid) = starnix::socket::peer(&stream)
+        .map_or((0, u32::MAX), |peer| (peer.pid.unwrap_or(0), peer.uid));
     // SAFETY: `getuid` has no preconditions.
     if peer_uid != unsafe { libc::getuid() } {
         // The directory is private, so this is somebody who should not have
@@ -232,7 +202,7 @@ fn answer(
     }
 }
 
-fn admit(checkin: &Checkin, peer_pid: i32) -> Result<host::Identity, String> {
+fn admit(checkin: &Checkin, peer_pid: i32) -> Result<Identity, String> {
     if checkin.version != VERSION {
         return Err(format!(
             "protocol version {} is not this server's {VERSION}",
@@ -245,7 +215,8 @@ fn admit(checkin: &Checkin, peer_pid: i32) -> Result<host::Identity, String> {
             checkin.pid
         ));
     }
-    host::identity(checkin.pid).ok_or_else(|| format!("pid {} is not running", checkin.pid))
+    starnix::process::identity(checkin.pid)
+        .ok_or_else(|| format!("pid {} is not running", checkin.pid))
 }
 
 /// Ask a server already listening at `socket` to exit as soon as it is idle.

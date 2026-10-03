@@ -4,11 +4,12 @@
 //! that did. Liveness is the host's to say, not the connection's: a process
 //! that exits stays a zombie until its parent collects it, and `ps` is meant
 //! to show it until then; one that `exec`s a host program is no longer a guest
-//! although its pid lives on. [`host::alive`] tells both apart.
+//! although its pid lives on. [`starnix::process::alive`] tells both apart.
 
 use std::collections::HashMap;
 
-use crate::host::{self, Identity};
+use starnix::process::{self as host, Identity};
+
 use crate::protocol::{Checkin, Process, Thread, Usage};
 
 /// The pid a guest whose parent is not a guest is given as its parent:

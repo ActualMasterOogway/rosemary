@@ -46,149 +46,21 @@ const _: () = {
     assert!(size_of::<ProcTaskInfo>() == 96);
 };
 
-#[cfg(not(target_os = "freebsd"))]
-fn open_descriptors() -> Vec<ProcFdInfo> {
-    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
-        return Vec::new();
-    };
-    let mut fds: Vec<ProcFdInfo> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let fd = entry.file_name().to_str()?.parse::<i32>().ok()?;
-            let target = std::fs::read_link(entry.path()).unwrap_or_default();
-            let target = target.to_string_lossy();
-            let kind = match () {
-                _ if target.starts_with("socket:") => FDTYPE_SOCKET,
-                _ if target.starts_with("pipe:") => FDTYPE_PIPE,
-                _ if target.contains("[eventpoll]") => FDTYPE_KQUEUE,
-                _ => FDTYPE_VNODE,
-            };
-            Some(ProcFdInfo { fd, kind })
+/// This process's descriptors, as `proc_fdinfo` records.
+fn open_descriptors() -> std::io::Result<Vec<ProcFdInfo>> {
+    use starnix::process::DescriptorKind;
+    Ok(starnix::process::descriptors()?
+        .into_iter()
+        .map(|entry| ProcFdInfo {
+            fd: entry.fd,
+            kind: match entry.kind {
+                DescriptorKind::File => FDTYPE_VNODE,
+                DescriptorKind::Socket => FDTYPE_SOCKET,
+                DescriptorKind::Pipe => FDTYPE_PIPE,
+                DescriptorKind::Queue => FDTYPE_KQUEUE,
+            },
         })
-        .collect();
-    fds.sort_by_key(|entry| entry.fd);
-    fds
-}
-
-#[cfg(target_os = "freebsd")]
-fn open_descriptors() -> Result<Vec<ProcFdInfo>, i32> {
-    let bytes = freebsd_proc_sysctl(libc::KERN_PROC_FILEDESC, unsafe { libc::getpid() })?;
-    parse_freebsd_descriptors(&bytes)
-}
-
-#[cfg(any(test, target_os = "freebsd"))]
-fn parse_freebsd_descriptors(bytes: &[u8]) -> Result<Vec<ProcFdInfo>, i32> {
-    let mut fds = Vec::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let header = bytes.get(offset..offset + 12).ok_or(libc::EINVAL)?;
-        let record_size = i32::from_ne_bytes(header[0..4].try_into().unwrap());
-        let kind = i32::from_ne_bytes(header[4..8].try_into().unwrap());
-        let fd = i32::from_ne_bytes(header[8..12].try_into().unwrap());
-        if record_size < 12 || record_size as usize > bytes.len() - offset {
-            return Err(libc::EINVAL);
-        }
-        // The sysctl also includes pseudo descriptors for cwd, root, etc.
-        if fd >= 0 {
-            // KF_TYPE_* values from FreeBSD's <sys/user.h>.
-            let kind = match kind {
-                2 => FDTYPE_SOCKET,
-                3 | 4 => FDTYPE_PIPE,
-                5 => FDTYPE_KQUEUE,
-                _ => FDTYPE_VNODE,
-            };
-            fds.push(ProcFdInfo { fd, kind });
-        }
-        offset += record_size as usize;
-    }
-    fds.sort_by_key(|entry| entry.fd);
-    Ok(fds)
-}
-
-#[cfg(target_os = "freebsd")]
-fn freebsd_proc_sysctl(flavor: c_int, pid: c_int) -> Result<Vec<u8>, i32> {
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, flavor, pid];
-    let mut needed = 0usize;
-    // SAFETY: the MIB and output length are valid; a null output asks for size.
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as u32,
-            std::ptr::null_mut(),
-            &raw mut needed,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EIO));
-    }
-    // The descriptor table and command line may grow between the two calls.
-    for _ in 0..4 {
-        let mut bytes = vec![0u8; needed.saturating_add(4096)];
-        let mut length = bytes.len();
-        // SAFETY: `bytes` is writable for `length` bytes, and MIB is valid.
-        if unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as u32,
-                bytes.as_mut_ptr().cast(),
-                &raw mut length,
-                std::ptr::null_mut(),
-                0,
-            )
-        } == 0
-        {
-            bytes.truncate(length);
-            return Ok(bytes);
-        }
-        let error = std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EIO);
-        if error != libc::ENOMEM {
-            return Err(error);
-        }
-        needed = length.max(bytes.len().saturating_mul(2));
-    }
-    Err(libc::ENOMEM)
-}
-
-#[cfg(target_os = "freebsd")]
-fn task_info() -> Result<ProcTaskInfo, i32> {
-    let bytes = freebsd_proc_sysctl(libc::KERN_PROC_PID, unsafe { libc::getpid() })?;
-    if bytes.len() < size_of::<libc::kinfo_proc>() {
-        return Err(libc::EINVAL);
-    }
-    // SAFETY: the sysctl returned at least one complete `kinfo_proc`.
-    let proc = unsafe { bytes.as_ptr().cast::<libc::kinfo_proc>().read_unaligned() };
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: `getrusage` writes a complete `rusage` on success.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EIO));
-    }
-    // SAFETY: the call above initialized the structure.
-    let usage = unsafe { usage.assume_init() };
-    let nanos = |time: libc::timeval| {
-        (time.tv_sec as u64).saturating_mul(1_000_000_000)
-            + (time.tv_usec as u64).saturating_mul(1_000)
-    };
-    // SAFETY: `sysconf` reads a static system parameter.
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
-    Ok(ProcTaskInfo {
-        virtual_size: proc.ki_size as u64,
-        resident_size: (proc.ki_rssize as u64).saturating_mul(page_size),
-        total_user: nanos(usage.ru_utime),
-        total_system: nanos(usage.ru_stime),
-        faults: usage.ru_minflt as i32,
-        pageins: usage.ru_majflt as i32,
-        context_switches: (usage.ru_nvcsw + usage.ru_nivcsw) as i32,
-        threadnum: proc.ki_numthreads,
-        ..ProcTaskInfo::default()
-    })
+        .collect())
 }
 
 pub unsafe extern "C" fn proc_pidinfo(
@@ -222,13 +94,10 @@ pub unsafe extern "C" fn proc_pidinfo(
         // SAFETY: the caller's buffer.
         PROC_PIDTBSDINFO => unsafe { other_process_info(pid, flavor, buffer, size) },
         PROC_PIDLISTFDS => {
-            #[cfg(not(target_os = "freebsd"))]
-            let fds = open_descriptors();
-            #[cfg(target_os = "freebsd")]
             let fds = match open_descriptors() {
                 Ok(fds) => fds,
                 Err(error) => {
-                    crate::errno::set(error);
+                    crate::errno::set(error.raw_os_error().unwrap_or(libc::EIO));
                     return 0;
                 }
             };
@@ -253,18 +122,9 @@ pub unsafe extern "C" fn proc_pidinfo(
                 crate::errno::set(libc::ENOMEM);
                 return 0;
             }
-            #[cfg(not(target_os = "freebsd"))]
             let Some(info) = crate::process::usage(pid).map(|usage| task_record(&usage)) else {
                 crate::errno::set(libc::ESRCH);
                 return 0;
-            };
-            #[cfg(target_os = "freebsd")]
-            let info = match task_info() {
-                Ok(info) => info,
-                Err(error) => {
-                    crate::errno::set(error);
-                    return 0;
-                }
             };
             // SAFETY: the caller's buffer has room for the structure.
             unsafe { buffer.cast::<ProcTaskInfo>().write_unaligned(info) };
@@ -283,20 +143,8 @@ pub unsafe extern "C" fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -
         // SAFETY: the caller's buffer.
         return unsafe { copy_name(process.command(), buffer, size) };
     }
-    #[cfg(target_os = "linux")]
-    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-        crate::errno::set(libc::ESRCH);
-        return 0;
-    };
-    #[cfg(target_os = "freebsd")]
-    let cmdline = match freebsd_proc_sysctl(libc::KERN_PROC_ARGS, pid) {
-        Ok(cmdline) => cmdline,
-        Err(error) => {
-            crate::errno::set(error);
-            return 0;
-        }
-    };
-    let Some(name) = process_name(&cmdline) else {
+    let Some(name) = starnix::process::command_line(pid).and_then(|line| process_name(&line))
+    else {
         crate::errno::set(libc::ESRCH);
         return 0;
     };
@@ -343,7 +191,6 @@ fn process_name(cmdline: &[u8]) -> Option<String> {
 }
 
 /// `proc_taskinfo` from what the host measured.
-#[cfg(not(target_os = "freebsd"))]
 fn task_record(usage: &server::protocol::Usage) -> ProcTaskInfo {
     let clamp = |n: u64| n.min(i32::MAX as u64) as i32;
     ProcTaskInfo {
@@ -481,7 +328,6 @@ unsafe fn other_process_info(pid: c_int, flavor: c_int, buffer: *mut c_void, siz
                 0
             }
         },
-        #[cfg(not(target_os = "freebsd"))]
         PROC_PIDTASKINFO => match crate::process::usage(pid) {
             // SAFETY: the caller's buffer.
             Some(usage) => unsafe { copy_record(task_record(&usage), buffer, size) },
@@ -663,26 +509,6 @@ exports::exports! {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn freebsd_descriptor_records_skip_pseudo_fds_and_use_record_lengths() {
-        let mut bytes = Vec::new();
-        for (length, kind, fd) in [(16i32, 1i32, -1i32), (24, 2, 7), (16, 3, 4)] {
-            bytes.extend_from_slice(&length.to_ne_bytes());
-            bytes.extend_from_slice(&kind.to_ne_bytes());
-            bytes.extend_from_slice(&fd.to_ne_bytes());
-            bytes.resize(bytes.len() + length as usize - 12, 0);
-        }
-        let fds = parse_freebsd_descriptors(&bytes).unwrap();
-        assert_eq!(fds.iter().map(|entry| entry.fd).collect::<Vec<_>>(), [4, 7]);
-        assert_eq!(fds[0].kind, FDTYPE_PIPE);
-        assert_eq!(fds[1].kind, FDTYPE_SOCKET);
-        bytes[16..20].copy_from_slice(&100i32.to_ne_bytes());
-        assert!(matches!(
-            parse_freebsd_descriptors(&bytes),
-            Err(libc::EINVAL)
-        ));
-    }
-
     #[test]
     fn a_guest_is_named_for_its_executable_not_the_runtime() {
         assert_eq!(

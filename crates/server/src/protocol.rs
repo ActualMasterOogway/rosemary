@@ -5,6 +5,10 @@
 //! which owns their layouts. The server is not a Darwin kernel; it is the one
 //! place that can see every guest process at once.
 
+/// Process states, usage and threads are the host reader's own types, carried
+/// as they are.
+pub use starnix::process::{State, Thread, Usage};
+
 use crate::codec::{Decoder, Encoder, List, Malformed, Wire};
 use crate::wire_struct;
 
@@ -54,22 +58,16 @@ impl Wire for Checkin {
     }
 }
 
-/// A process's scheduling state, in the coarse terms both kernels share.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[repr(u8)]
-pub enum State {
-    #[default]
-    Running = 1,
-    Sleeping = 2,
-    /// Uninterruptible: waiting on I/O and not answering signals.
-    Waiting = 3,
-    Stopped = 4,
-    Zombie = 5,
-}
-
 impl Wire for State {
     fn put(&self, out: &mut Encoder) {
-        (*self as u8).put(out);
+        let tag: u8 = match self {
+            State::Running => 1,
+            State::Sleeping => 2,
+            State::Waiting => 3,
+            State::Stopped => 4,
+            State::Zombie => 5,
+        };
+        tag.put(out);
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
         Ok(match u8::take(input)? {
@@ -175,31 +173,6 @@ impl Wire for Process {
     }
 }
 
-/// A task's resource use: what `task_info` and `proc_pid_rusage` report.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Usage {
-    pub virtual_size: u64,
-    pub resident_size: u64,
-    pub resident_peak: u64,
-    /// Resident memory shared with another process; what is not shared is
-    /// the closest thing to Mach's `phys_footprint`.
-    pub shared_size: u64,
-    pub user_ns: u64,
-    pub system_ns: u64,
-    pub minor_faults: u64,
-    pub major_faults: u64,
-    pub voluntary_switches: u64,
-    pub involuntary_switches: u64,
-    pub threads: u32,
-    pub running_threads: u32,
-    pub regions: u32,
-    pub read_bytes: u64,
-    pub write_bytes: u64,
-    /// When the process started, on the monotonic clock `mach_absolute_time`
-    /// reads, in nanoseconds.
-    pub start_ns: u64,
-}
-
 wire_struct!(Usage {
     virtual_size,
     resident_size,
@@ -218,18 +191,6 @@ wire_struct!(Usage {
     write_bytes,
     start_ns,
 });
-
-/// One thread of a task.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Thread {
-    pub tid: i32,
-    /// The name the guest gave it, which can be longer than the host keeps.
-    pub name: String,
-    pub user_ns: u64,
-    pub system_ns: u64,
-    pub state: State,
-    pub nice: i32,
-}
 
 wire_struct!(Thread {
     tid,

@@ -316,9 +316,7 @@ pub fn thread_of(name: Name) -> Option<(i32, i32)> {
         }
     }
     let pid = own_pid();
-    std::path::Path::new(&format!("/proc/self/task/{name}"))
-        .exists()
-        .then_some((pid, name as i32))
+    starnix::process::has_thread(name as i32).then_some((pid, name as i32))
 }
 
 /// How many names the space holds, for `mach_port_space_basic_info`.

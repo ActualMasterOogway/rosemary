@@ -311,7 +311,10 @@ pub unsafe extern "C" fn fgetattrlist(
     }
     let st = crate::stat::from_host(&st);
     let answer = pack(&list, options, &st, || {
-        count_entries(&std::ffi::CString::new(format!("/proc/self/fd/{fd}")).unwrap_or_default())
+        let path = starnix::fd::path(fd).unwrap_or_default();
+        count_entries(
+            &std::ffi::CString::new(path.into_os_string().into_encoded_bytes()).unwrap_or_default(),
+        )
     });
     unsafe { copy_out(answer, options, buf, size) }
 }

@@ -263,6 +263,9 @@ pub mod imp {
     /// Called only through an import slot this crate defines; `at` is the guest's own
     /// `pthread_attr_t *`.
     unsafe fn record(at: u64) -> Option<Record> {
+        if at == 0 {
+            return None;
+        }
         let r = unsafe { Record::at(at, Kind::Attr) };
         r.is_ours().then_some(r)
     }
@@ -280,7 +283,11 @@ pub mod imp {
         set(&r, slot::GUARD_SIZE, UNSET);
         set(&r, slot::SCOPE, d.scope as u64);
         set(&r, slot::INHERIT, d.inherit_sched as u64);
-        set(&r, slot::SCHED, d.sched_policy as u32 as u64);
+        set(
+            &r,
+            slot::SCHED,
+            (d.sched_policy as u32 as u64) | ((d.sched_priority as u32 as u64) << 32),
+        );
         // Last, and with release ordering: see `Record::publish`.
         r.slot(0, size::ATTR)
             .store(ours(Kind::Attr), std::sync::atomic::Ordering::Release);
@@ -346,7 +353,11 @@ pub mod imp {
         if !valid(value) {
             return err::EINVAL;
         }
-        set(&r, index, value as u32 as u64);
+        set(
+            &r,
+            index,
+            (get(&r, index) & 0xffff_ffff_0000_0000) | value as u32 as u64,
+        );
         0
     }
 
@@ -373,7 +384,11 @@ pub mod imp {
         match value {
             PTHREAD_SCOPE_PROCESS => err::ENOTSUP,
             PTHREAD_SCOPE_SYSTEM => {
-                set(&r, slot::SCOPE, value as u32 as u64);
+                set(
+                    &r,
+                    slot::SCOPE,
+                    (get(&r, slot::SCOPE) & 0xffff_ffff_0000_0000) | value as u32 as u64,
+                );
                 0
             }
             _ => err::EINVAL,

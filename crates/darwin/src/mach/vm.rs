@@ -2,6 +2,8 @@
 
 use std::ffi::c_void;
 
+use starnix::process::Region;
+
 use super::kern::*;
 use super::space::{MACH_PORT_NULL, Name, TASK_SELF};
 
@@ -70,48 +72,28 @@ const _: () = {
     assert!(size_of::<TopInfo>() == 20);
 };
 
-/// One line of `/proc/self/maps`, as much of it as a region answer needs.
-struct Region {
-    start: u64,
-    end: u64,
-    protection: i32,
-    shared: bool,
-    offset: u64,
-}
-
 /// The first mapping ending above `address`, which is Mach's own search: the
 /// one containing it, or the next one up if there is a hole there.
 fn region_at_or_after(address: u64) -> Option<Region> {
-    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-    maps.lines().find_map(|line| {
-        let region = parse(line)?;
-        (region.end > address).then_some(region)
-    })
+    starnix::process::regions()
+        .ok()?
+        .into_iter()
+        .find(|region| region.end > address)
 }
 
-/// `lo-hi perms offset dev inode path`.
-fn parse(line: &str) -> Option<Region> {
-    let mut fields = line.split_whitespace();
-    let (low, high) = fields.next()?.split_once('-')?;
-    let mut perms = fields.next()?.bytes();
-    let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
+/// A region's `VM_PROT_*` bits.
+fn protection(region: &Region) -> i32 {
     let mut protection = 0;
-    if perms.next() == Some(b'r') {
+    if region.read {
         protection |= VM_PROT_READ;
     }
-    if perms.next() == Some(b'w') {
+    if region.write {
         protection |= VM_PROT_WRITE;
     }
-    if perms.next() == Some(b'x') {
+    if region.execute {
         protection |= VM_PROT_EXECUTE;
     }
-    Some(Region {
-        start: u64::from_str_radix(low, 16).ok()?,
-        end: u64::from_str_radix(high, 16).ok()?,
-        protection,
-        shared: perms.next() == Some(b's'),
-        offset,
-    })
+    protection
 }
 
 /// Say once that a flavour went unanswered, because the alternative is a
@@ -168,10 +150,10 @@ pub unsafe extern "C" fn vm_region_64(
         return KERN_INVALID_ADDRESS;
     };
     let basic = BasicInfo64 {
-        protection: region.protection,
+        protection: protection(&region),
         // Nothing here records what a mapping *could* be made, and reporting
         // less than the current protection would be a contradiction.
-        max_protection: region.protection,
+        max_protection: protection(&region),
         inheritance: match region.shared {
             true => VM_INHERIT_SHARE,
             false => VM_INHERIT_COPY,
@@ -282,8 +264,8 @@ pub unsafe extern "C" fn vm_region_recurse_64(
     };
     let words = capacity.min(V1_WORDS);
     let mut out = vec![0u32; words];
-    out[0] = region.protection as u32;
-    out[1] = region.protection as u32;
+    out[0] = protection(&region) as u32;
+    out[1] = protection(&region) as u32;
     out[2] = match region.shared {
         true => VM_INHERIT_SHARE,
         false => VM_INHERIT_COPY,

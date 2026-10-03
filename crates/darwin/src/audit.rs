@@ -10,9 +10,6 @@
 
 use std::ffi::c_int;
 
-/// Unset, in both Linux's `/proc/self/loginuid` and Darwin's `AU_DEFAUDITID`.
-const UNSET: u32 = u32::MAX;
-
 const AU_IPV4: u32 = 4;
 
 const AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS: u64 = 0x0010;
@@ -43,24 +40,9 @@ const _: () = {
     assert!(std::mem::offset_of!(AuditinfoAddr, flags) == 40);
 };
 
-fn proc_id(path: &str) -> Option<u32> {
-    let id = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
-    (id != UNSET).then_some(id)
-}
-
-/// Whether this process has a controlling terminal: `tty_nr` in
-/// `/proc/self/stat`, after the parenthesised name that may hold spaces.
+/// Whether this process has a controlling terminal.
 fn has_tty() -> bool {
-    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
-        return false;
-    };
-    let Some((_, rest)) = stat.rsplit_once(')') else {
-        return false;
-    };
-    rest.split_whitespace()
-        .nth(4)
-        .and_then(|tty| tty.parse::<i64>().ok())
-        .is_some_and(|tty| tty != 0)
+    starnix::process::process(starnix::process::me()).is_some_and(|me| me.has_tty())
 }
 
 fn session() -> AuditinfoAddr {
@@ -80,16 +62,18 @@ fn session() -> AuditinfoAddr {
     if has_tty() {
         flags |= AU_SESSION_FLAG_HAS_TTY;
     }
+    let audit = starnix::process::audit();
     AuditinfoAddr {
         // Without host audit (containers, audit off) the guest is still a
         // user's app, and Darwin would have given it that user's login.
         // SAFETY: `getuid` takes nothing and cannot fail.
-        auid: proc_id("/proc/self/loginuid").unwrap_or_else(|| unsafe { libc::getuid() }),
+        auid: audit.login_uid.unwrap_or_else(|| unsafe { libc::getuid() }),
         kind: AU_IPV4,
         // Callers compare the id to tell sessions apart, and 0 is Darwin's
         // "no session", so the POSIX session stands in when audit has none.
         // SAFETY: `getsid(0)` asks about this process only.
-        asid: proc_id("/proc/self/sessionid")
+        asid: audit
+            .session
             .map(|id| id as i32)
             .unwrap_or_else(|| unsafe { libc::getsid(0) }),
         flags,
@@ -127,13 +111,16 @@ exports::exports! {
 mod tests {
     use super::*;
 
+    /// Darwin's `AU_DEFAUDITID`: no login uid.
+    const AU_DEFAUDITID: u32 = u32::MAX;
+
     #[test]
     fn getaudit_addr_describes_an_authenticated_session() {
         let mut info = AuditinfoAddr::default();
         // SAFETY: a structure of this test's own, of exactly the size given.
         let rc = unsafe { getaudit_addr(&mut info, size_of::<AuditinfoAddr>() as u32) };
         assert_eq!(rc, 0);
-        assert_ne!(info.auid, UNSET);
+        assert_ne!(info.auid, AU_DEFAUDITID);
         assert_ne!(info.asid, 0);
         assert_eq!(info.kind, AU_IPV4);
         assert_ne!(info.flags & AU_SESSION_FLAG_HAS_AUTHENTICATED, 0);

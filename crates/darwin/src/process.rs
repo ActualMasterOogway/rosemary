@@ -46,7 +46,7 @@ pub fn check_in(path: &str, argv: Vec<Vec<u8>>) {
 
 /// This process, described without the server.
 fn me() -> Option<Process> {
-    let host = server::host::process(pid())?;
+    let host = starnix::process::process(pid())?;
     let (path, argv) = match ME.get() {
         Some(me) => (me.path.clone(), me.argv.clone()),
         // Not started as a guest - a test, or a tool. Its host name is the
@@ -115,14 +115,14 @@ pub fn describe(pid: i32) -> Option<Process> {
 /// common case and needs no round trip.
 pub fn usage(pid: i32) -> Option<Usage> {
     match pid == self::pid() {
-        true => server::host::usage(pid),
+        true => starnix::process::usage(pid),
         false => server::client::usage(pid),
     }
 }
 
 pub fn threads(pid: i32) -> Option<Vec<Thread>> {
     match pid == self::pid() {
-        true => server::host::threads(pid),
+        true => starnix::process::threads(pid),
         false => server::client::threads(pid),
     }
 }

@@ -96,8 +96,13 @@ pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
     // Byte 0 is Darwin's `sa_len`, which the host has no field for; byte 1 is
     // the family, which the host reads as the low half of a sixteen-bit one.
     let host = family_to_host(i32::from(out.bytes[1]))?;
-    out.bytes[0] = (host & 0xff) as u8;
-    out.bytes[1] = ((host >> 8) & 0xff) as u8;
+    #[cfg(target_os = "linux")]
+    out.bytes[..2].copy_from_slice(&(host as u16).to_ne_bytes());
+    #[cfg(not(target_os = "linux"))]
+    {
+        out.bytes[0] = len as u8;
+        out.bytes[1] = host as u8;
+    }
     Some(out)
 }
 
@@ -120,7 +125,10 @@ pub unsafe fn darwin_from_host(addr: *const c_void, len: u32) -> Option<([u8; ST
     let mut out = [0u8; STORAGE];
     // SAFETY: the caller's readable bytes, bounded by `STORAGE`.
     unsafe { core::ptr::copy_nonoverlapping(addr.cast::<u8>(), out.as_mut_ptr(), real) };
-    let family = i32::from(out[0]) | (i32::from(out[1]) << 8);
+    #[cfg(target_os = "linux")]
+    let family = u16::from_ne_bytes([out[0], out[1]]) as i32;
+    #[cfg(not(target_os = "linux"))]
+    let family = out[1] as i32;
     out[0] = real.min(u8::MAX as usize) as u8;
     out[1] = family_from_host(family).unwrap_or(family::UNSPEC) as u8;
     Some((out, real))
@@ -189,8 +197,7 @@ mod tests {
 
         // SAFETY: sixteen readable bytes, and the length says sixteen.
         let host = unsafe { to_host(guest.as_ptr().cast(), 16) }.expect("a known family");
-        assert_eq!(host.bytes[0], libc::AF_INET as u8);
-        assert_eq!(host.bytes[1], 0);
+        assert_eq!(unsafe { (*host.as_ptr()).sa_family } as i32, libc::AF_INET);
         assert_eq!(&host.bytes[2..8], &guest[2..8]);
 
         let mut back = [0u8; 16];
@@ -227,7 +234,9 @@ mod tests {
     #[test]
     fn a_short_buffer_is_truncated_and_the_real_length_reported() {
         let mut host = HostAddr::empty();
-        host.bytes[0] = libc::AF_INET as u8;
+        unsafe {
+            (*host.as_mut_ptr()).sa_family = libc::AF_INET as _;
+        }
         host.len = 16;
 
         let mut back = [0xAAu8; 16];

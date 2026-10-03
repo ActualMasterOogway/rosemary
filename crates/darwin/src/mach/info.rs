@@ -438,9 +438,9 @@ struct VmStatistics64 {
 
 /// `host_cpu_load_info_data_t`: ticks in each of the four CPU states.
 ///
-/// Darwin orders them `USER`, `SYSTEM`, `IDLE`, `NICE`; `/proc/stat` reports
-/// user, **nice**, system, idle. Copying the four in the order they are read is
-/// the collision this structure exists to avoid.
+/// Darwin orders them `USER`, `SYSTEM`, `IDLE`, `NICE`; Linux's `/proc/stat`
+/// reports user, **nice**, system, idle. The fields are named so the order is
+/// never copied across by position.
 #[repr(C, packed(4))]
 #[derive(Clone, Copy, Default)]
 struct HostCpuLoadInfo {
@@ -458,20 +458,6 @@ const _: () = {
     assert!(size_of::<VmStatistics64>() == 152);
 };
 
-/// The value of `key` in `/proc/meminfo`, in pages.
-///
-/// The file reports kilobytes and Mach counts pages, so a machine whose page
-/// size is not 4 KiB converts rather than assuming.
-fn meminfo(text: &str, key: &str) -> u64 {
-    let page = page_size().max(1);
-    text.lines()
-        .find_map(|line| line.strip_prefix(key)?.strip_suffix(" kB"))
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
-        / page
-}
-
 /// The machine's memory, as the page counts Mach reports.
 ///
 /// What this host does not keep a counter for stays zero rather than being
@@ -480,44 +466,32 @@ fn meminfo(text: &str, key: &str) -> u64 {
 /// here means that. The four that *are* answered are the four a caller needs
 /// to work out how much memory is available.
 fn vm_pages() -> VmStatistics64 {
-    let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let memory = starnix::system::memory();
+    // The host counts bytes and Mach counts pages, so a machine whose page
+    // size is not 4 KiB converts rather than assuming.
+    let pages = |bytes: u64| (bytes / page_size().max(1)) as u32;
     VmStatistics64 {
-        free_count: meminfo(&text, "MemFree:") as u32,
-        active_count: meminfo(&text, "Active:") as u32,
-        inactive_count: meminfo(&text, "Inactive:") as u32,
-        // Darwin's "wired" is memory the kernel may not page out, which is
-        // what this host calls unevictable.
-        wire_count: meminfo(&text, "Unevictable:") as u32,
+        free_count: pages(memory.free),
+        active_count: pages(memory.active),
+        inactive_count: pages(memory.inactive),
+        wire_count: pages(memory.wired),
         // File-backed pages, which are the ones macOS calls external and a
         // caller counts as available because they can be evicted.
-        external_page_count: meminfo(&text, "Cached:") as u32,
-        internal_page_count: meminfo(&text, "AnonPages:") as u32,
+        external_page_count: pages(memory.file_backed),
+        internal_page_count: pages(memory.anonymous),
         ..VmStatistics64::default()
     }
 }
 
 /// The machine's CPU ticks, in Darwin's order.
 fn cpu_ticks() -> HostCpuLoadInfo {
-    let Ok(text) = std::fs::read_to_string("/proc/stat") else {
-        return HostCpuLoadInfo::default();
-    };
-    let Some(totals) = text.lines().find_map(|line| line.strip_prefix("cpu ")) else {
-        return HostCpuLoadInfo::default();
-    };
-    let mut fields = totals
-        .split_whitespace()
-        .map(|field| field.parse::<u32>().unwrap_or(0));
-    let (user, nice, system, idle) = (
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-    );
+    let ticks = starnix::system::cpu_ticks();
+    // `natural_t` counters, which wrap on a Mac too.
     HostCpuLoadInfo {
-        user,
-        system,
-        idle,
-        nice,
+        user: ticks.user as u32,
+        system: ticks.system as u32,
+        idle: ticks.idle as u32,
+        nice: ticks.nice as u32,
     }
 }
 
@@ -646,41 +620,15 @@ const _: () = {
     assert!(size_of::<HostPriorityInfo>() == 32);
 };
 
-/// Physical cores, counted as distinct sibling sets in sysfs.
-///
-/// Falls back to the logical count when sysfs is not there to ask, which is
-/// what a machine without SMT would answer anyway.
-fn physical_cores(logical: i32) -> i32 {
-    let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu") else {
-        return logical;
-    };
-    let mut cores = std::collections::BTreeSet::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(index) = name.to_str().and_then(|n| n.strip_prefix("cpu")) else {
-            continue;
-        };
-        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        if let Ok(siblings) =
-            std::fs::read_to_string(entry.path().join("topology/thread_siblings_list"))
-        {
-            cores.insert(siblings.trim().to_string());
-        }
-    }
-    match cores.len() {
-        0 => logical,
-        n => (n as i32).min(logical),
-    }
-}
-
 fn host_basic_info() -> HostBasicInfo {
     let arch = crate::sysctl::guest_arch();
     let logical = crate::sysctl::ncpu() as i32;
     // SAFETY: `sysconf` reads a count and touches no memory of ours.
     let configured = (unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as i32).max(logical);
-    let physical = physical_cores(logical);
+    // A host that cannot tell cores from SMT threads answers what a machine
+    // without SMT would.
+    let physical =
+        starnix::system::physical_cores().map_or(logical, |cores| (cores as i32).min(logical));
     let max_mem = crate::sysctl::memsize();
     HostBasicInfo {
         max_cpus: configured,

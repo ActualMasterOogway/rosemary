@@ -626,18 +626,8 @@ fn host_has(feature: &str) -> bool {
 /// `machdep.cpu.brand_string` - the CPU's marketing name.
 #[cfg(not(target_os = "macos"))]
 fn brand_string() -> String {
-    fn from_cpuinfo() -> Option<String> {
-        let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-        for line in text.lines() {
-            let (key, value) = line.split_once(':')?;
-            if matches!(key.trim(), "model name" | "Model name" | "Processor") {
-                return Some(value.trim().to_string());
-            }
-        }
-        None
-    }
     env_or_else("ROSEMARY_CPU_BRAND", || {
-        from_cpuinfo().unwrap_or_else(|| "Unknown CPU".to_string())
+        starnix::system::cpu_brand().unwrap_or_else(|| "Unknown CPU".to_string())
     })
 }
 
