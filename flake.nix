@@ -1,5 +1,5 @@
 {
-  description = "Rosemary development shell";
+  description = "Rosemary: run macOS applications across architectures";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,13 +14,31 @@
       systems =
         [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
+      pkgsFor = system: import nixpkgs {
+        inherit system;
+        overlays = [ (import rust-overlay) ];
+      };
     in {
+      packages = forAllSystems (system:
+        let
+          pkgs = pkgsFor system;
+          # nixpkgs' rustc can trail the 1.99 this tree needs.
+          toolchain = pkgs.rust-bin.stable.latest.minimal;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+          rosemary = buildType:
+            pkgs.callPackage ./nix/package.nix { inherit rustPlatform buildType; };
+        in {
+          default = rosemary "release";
+          rosemary = rosemary "release";
+          rosemary-debug = rosemary "debug";
+        });
+
       devShells = forAllSystems (system:
         let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ (import rust-overlay) ];
-          };
+          pkgs = pkgsFor system;
           inherit (pkgs) lib;
 
           toolchain = pkgs.rust-bin.stable.latest.default.override {
