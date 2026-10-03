@@ -1,0 +1,9 @@
+[package]
+name = "server"
+description = "The process server: one per prefix, it knows every guest process and thread and answers what one task asks about another."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true

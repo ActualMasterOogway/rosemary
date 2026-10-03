@@ -12,6 +12,7 @@ pub mod msg;
 pub mod space;
 pub mod sync;
 pub mod task;
+pub mod tasks;
 pub mod vm;
 pub mod wire;
 
@@ -107,6 +108,23 @@ exports::exports! {
         "host_get_clock_service" => clock::host_get_clock_service,
         "clock_get_time" => clock::clock_get_time,
         "task_get_special_port" => task::task_get_special_port,
+
+        // Other tasks, by way of the process server. Every flavour of task
+        // port is the same port here; see `tasks::processor_set_tasks_with_flavor`.
+        "task_for_pid"
+            | "task_name_for_pid"
+            | "task_read_for_pid"
+            | "task_inspect_for_pid" => tasks::task_for_pid,
+        "pid_for_task" => tasks::pid_for_task,
+        "host_processor_sets" => tasks::host_processor_sets,
+        "processor_set_default" => tasks::processor_set_default,
+        "host_processor_set_priv" => tasks::host_processor_set_priv,
+        "processor_set_tasks" => tasks::processor_set_tasks,
+        "processor_set_tasks_with_flavor" => tasks::processor_set_tasks_with_flavor,
+        "task_threads" => tasks::task_threads,
+        "thread_info" => tasks::thread_info,
+        "mach_port_space_basic_info" => tasks::mach_port_space_basic_info,
+        "task_policy_get" => tasks::task_policy_get,
         "task_set_special_port" => task::task_set_special_port,
 
         // The exception-port family. `task`, `host` and `thread` are the same
@@ -137,7 +155,8 @@ exports::exports! {
 
         "vm_region_64" => vm::vm_region_64,
         "vm_region_recurse_64" | "mach_vm_region_recurse" => vm::vm_region_recurse_64,
-        "vm_deallocate" => vm::vm_deallocate,
+        "vm_deallocate" | "mach_vm_deallocate" => vm::vm_deallocate,
+        "mach_vm_region" => vm::vm_region_64,
         "vm_read_overwrite" => vm::vm_read_overwrite,
 
         "mach_msg" => msg::mach_msg,
@@ -171,6 +190,9 @@ exports::exports! {
         "_bootstrap_port" => &raw const bootstrap::BOOTSTRAP_PORT as usize as u64,
         "_NDR_record" => (&raw const task::NDR_RECORD).cast::<u8>() as usize as u64,
         "_vm_page_size" => vm_page_size(),
+        // The kernel's page size, which on every host this runs on is the
+        // page size a process sees.
+        "_vm_kernel_page_size" => vm_page_size(),
         "_vm_page_mask" => vm_page_mask(),
         "_vm_page_shift" => vm_page_shift(),
     }

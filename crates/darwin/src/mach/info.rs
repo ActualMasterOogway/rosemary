@@ -4,17 +4,22 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::kern::{KERN_FAILURE, KERN_INVALID_ARGUMENT, KERN_SUCCESS};
-use super::space::{HOST_SELF, Name, TASK_SELF};
+use super::space::{self, HOST_SELF, Name};
+use server::protocol::Usage;
 
+const TASK_ABSOLUTETIME_INFO: i32 = 1;
+const TASK_EVENTS_INFO: i32 = 2;
 const TASK_THREAD_TIMES_INFO: i32 = 3;
 const TASK_BASIC_INFO_64: i32 = 5;
 const MACH_TASK_BASIC_INFO: i32 = 20;
+const TASK_POWER_INFO: i32 = 21;
 const TASK_VM_INFO: i32 = 22;
+const TASK_VM_INFO_PURGEABLE: i32 = 23;
 
 /// `time_value_t`, which is a `timeval` of two `integer_t`.
 #[repr(C, packed(4))]
 #[derive(Clone, Copy, Default)]
-struct TimeValue {
+pub(super) struct TimeValue {
     seconds: i32,
     microseconds: i32,
 }
@@ -43,6 +48,53 @@ struct MachTaskBasicInfo {
     system_time: TimeValue,
     policy: i32,
     suspend_count: i32,
+}
+
+impl TimeValue {
+    pub(super) fn from_ns(ns: u64) -> TimeValue {
+        TimeValue {
+            seconds: (ns / 1_000_000_000) as i32,
+            microseconds: ((ns % 1_000_000_000) / 1_000) as i32,
+        }
+    }
+}
+
+/// `task_absolutetime_info`, in `mach_absolute_time` units - nanoseconds
+/// here, since the timebase is one to one.
+#[repr(C, packed(4))]
+#[derive(Clone, Copy, Default)]
+struct TaskAbsolutetimeInfo {
+    total_user: u64,
+    total_system: u64,
+    threads_user: u64,
+    threads_system: u64,
+}
+
+/// `task_events_info`. The Mach counters - messages, Mach traps - are not
+/// kept by anything and read zero; the rest are the host's.
+#[repr(C, packed(4))]
+#[derive(Clone, Copy, Default)]
+struct TaskEventsInfo {
+    faults: i32,
+    pageins: i32,
+    cow_faults: i32,
+    messages_sent: i32,
+    messages_received: i32,
+    syscalls_mach: i32,
+    syscalls_unix: i32,
+    csw: i32,
+}
+
+/// `task_power_info`. Wakeups are not counted here and read zero.
+#[repr(C, packed(4))]
+#[derive(Clone, Copy, Default)]
+struct TaskPowerInfo {
+    total_user: u64,
+    total_system: u64,
+    task_interrupt_wakeups: u64,
+    task_platform_idle_wakeups: u64,
+    task_timer_wakeups_bin_1: u64,
+    task_timer_wakeups_bin_2: u64,
 }
 
 /// `task_thread_times_info`: the CPU time of the task's *live* threads.
@@ -89,6 +141,9 @@ const _: () = {
     assert!(size_of::<TaskBasicInfo64>() == 40);
     assert!(size_of::<MachTaskBasicInfo>() == 48);
     assert!(size_of::<TaskThreadTimesInfo>() == 16);
+    assert!(size_of::<TaskAbsolutetimeInfo>() == 32);
+    assert!(size_of::<TaskEventsInfo>() == 32);
+    assert!(size_of::<TaskPowerInfo>() == 48);
     assert!(std::mem::offset_of!(TaskVmInfo, phys_footprint) == 144);
 };
 
@@ -113,76 +168,37 @@ pub fn publish_page_size() {
     VM_PAGE_SHIFT.store(size.trailing_zeros(), Ordering::Relaxed);
 }
 
-/// The page counts `/proc/self/statm` reports: total, resident, shared.
-fn statm() -> (u64, u64, u64) {
-    let Ok(text) = std::fs::read_to_string("/proc/self/statm") else {
-        return (0, 0, 0);
-    };
-    let mut fields = text
-        .split_whitespace()
-        .map(|field| field.parse::<u64>().unwrap_or(0));
-    (
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-    )
+/// What `task` has used, or `None` for a name that is not a task this
+/// process can see.
+///
+/// This process's CPU time comes from `getrusage`, which is exact where the
+/// host's per-process accounting rounds to a clock tick.
+fn measure(task: Name) -> Option<Usage> {
+    let pid = space::task_pid(task)?;
+    let mut usage = crate::process::usage(pid)?;
+    // SAFETY: `getpid` has no preconditions.
+    if pid == unsafe { libc::getpid() } {
+        let mut rusage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: `getrusage` fills the `rusage` it is given and nothing else.
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, rusage.as_mut_ptr()) } == 0 {
+            // SAFETY: the call above succeeded, so it is initialised.
+            let rusage = unsafe { rusage.assume_init() };
+            let ns = |t: libc::timeval| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1_000;
+            usage.user_ns = ns(rusage.ru_utime);
+            usage.system_ns = ns(rusage.ru_stime);
+        }
+    }
+    Some(usage)
 }
 
-/// This process's virtual and resident size, in bytes.
-fn footprint() -> (u64, u64) {
-    let (virtual_pages, resident_pages, _) = statm();
-    let page = page_size();
-    (
-        virtual_pages.saturating_mul(page),
-        resident_pages.saturating_mul(page),
-    )
-}
-
-/// Resident memory this process does not share with another, which is the
+/// Resident memory the task does not share with another, which is the
 /// closest thing here to Mach's `phys_footprint`.
 ///
 /// macOS charges a process for its private pages and not for shared or
 /// file-backed ones, and an engine budgets against that figure: reporting the
 /// whole resident size instead tells it that it is out of memory.
-fn private_memory() -> u64 {
-    let (_, resident, shared) = statm();
-    resident.saturating_sub(shared).saturating_mul(page_size())
-}
-
-/// The high-water mark of resident memory, which `mach_task_basic_info`
-/// reports separately.
-fn resident_peak() -> u64 {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return 0;
-    };
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmHWM:"))
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
-}
-
-/// How many mappings this process has, for `task_vm_info`'s region count.
-fn region_count() -> i32 {
-    std::fs::read_to_string("/proc/self/maps").map_or(0, |maps| maps.lines().count() as i32)
-}
-
-/// The CPU time this process has used, as user and system.
-fn cpu_time() -> (TimeValue, TimeValue) {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: `getrusage` fills the `rusage` it is given and nothing else.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return (TimeValue::default(), TimeValue::default());
-    }
-    // SAFETY: the call above succeeded, so it is initialised.
-    let usage = unsafe { usage.assume_init() };
-    let value = |t: libc::timeval| TimeValue {
-        seconds: t.tv_sec as i32,
-        microseconds: t.tv_usec as i32,
-    };
-    (value(usage.ru_utime), value(usage.ru_stime))
+fn private_memory(usage: &Usage) -> u64 {
+    usage.resident_size.saturating_sub(usage.shared_size)
 }
 
 /// Copy `value` into the caller's buffer and say how many words it holds.
@@ -194,7 +210,7 @@ fn cpu_time() -> (TimeValue, TimeValue) {
 /// # Safety
 ///
 /// `out` is writable for `*count` words, and `count` is writable.
-unsafe fn publish<T: Copy>(value: T, out: *mut c_void, count: *mut u32) -> i32 {
+pub(super) unsafe fn publish<T: Copy>(value: T, out: *mut c_void, count: *mut u32) -> i32 {
     // SAFETY: the caller states `count` is readable.
     let available = unsafe { *count } as usize * size_of::<u32>();
     if available < size_of::<T>() {
@@ -212,6 +228,9 @@ unsafe fn publish<T: Copy>(value: T, out: *mut c_void, count: *mut u32) -> i32 {
 /// `kern_return_t task_info(task_name_t, task_flavor_t, task_info_t,
 /// mach_msg_type_number_t *)`
 ///
+/// This task, or another guest's through a port from `task_for_pid`; the
+/// measurements are the host's, by way of the process server.
+///
 /// # Safety
 ///
 /// `out` is writable for `*count` 32-bit words, and `count` is writable.
@@ -224,14 +243,15 @@ pub unsafe extern "C" fn task_info(
     if out.is_null() || count.is_null() {
         return KERN_INVALID_ARGUMENT;
     }
-    // Only this process. Everything below reads `/proc/self`, and answering
-    // about the wrong task with a straight face is the failure this crate
-    // refuses everywhere else.
-    if task != TASK_SELF {
+    // A name that is not a task, or a task that has gone: answering about the
+    // wrong task with a straight face is the failure this crate refuses
+    // everywhere else.
+    let Some(usage) = measure(task) else {
         return KERN_INVALID_ARGUMENT;
-    }
-    let (virtual_size, resident_size) = footprint();
-    let (user_time, system_time) = cpu_time();
+    };
+    let user_time = TimeValue::from_ns(usage.user_ns);
+    let system_time = TimeValue::from_ns(usage.system_ns);
+    let (virtual_size, resident_size) = (usage.virtual_size, usage.resident_size);
     match flavor {
         // SAFETY: the caller's obligation, checked against the flavour's size.
         TASK_BASIC_INFO_64 => unsafe {
@@ -252,7 +272,7 @@ pub unsafe extern "C" fn task_info(
                 MachTaskBasicInfo {
                     virtual_size,
                     resident_size,
-                    resident_size_max: resident_peak().max(resident_size),
+                    resident_size_max: usage.resident_peak.max(resident_size),
                     user_time,
                     system_time,
                     ..MachTaskBasicInfo::default()
@@ -271,7 +291,43 @@ pub unsafe extern "C" fn task_info(
                 count,
             )
         },
-        TASK_VM_INFO => {
+        TASK_ABSOLUTETIME_INFO => unsafe {
+            publish(
+                TaskAbsolutetimeInfo {
+                    total_user: usage.user_ns,
+                    total_system: usage.system_ns,
+                    threads_user: usage.user_ns,
+                    threads_system: usage.system_ns,
+                },
+                out,
+                count,
+            )
+        },
+        TASK_EVENTS_INFO => unsafe {
+            let clamp = |n: u64| n.min(i32::MAX as u64) as i32;
+            publish(
+                TaskEventsInfo {
+                    faults: clamp(usage.minor_faults + usage.major_faults),
+                    pageins: clamp(usage.major_faults),
+                    csw: clamp(usage.voluntary_switches + usage.involuntary_switches),
+                    ..TaskEventsInfo::default()
+                },
+                out,
+                count,
+            )
+        },
+        TASK_POWER_INFO => unsafe {
+            publish(
+                TaskPowerInfo {
+                    total_user: usage.user_ns,
+                    total_system: usage.system_ns,
+                    ..TaskPowerInfo::default()
+                },
+                out,
+                count,
+            )
+        },
+        TASK_VM_INFO | TASK_VM_INFO_PURGEABLE => {
             let available = unsafe { *count } as usize * size_of::<u32>();
             if available < size_of::<TaskVmInfo>() {
                 return KERN_INVALID_ARGUMENT;
@@ -284,11 +340,11 @@ pub unsafe extern "C" fn task_info(
             unsafe { std::ptr::write_bytes(out.cast::<u8>(), 0, available) };
             let info = TaskVmInfo {
                 virtual_size,
-                region_count: region_count(),
+                region_count: usage.regions as i32,
                 page_size: page_size() as i32,
                 resident_size,
-                resident_size_peak: resident_peak().max(resident_size),
-                phys_footprint: private_memory(),
+                resident_size_peak: usage.resident_peak.max(resident_size),
+                phys_footprint: private_memory(&usage),
                 ..TaskVmInfo::default()
             };
             // SAFETY: as above, and the buffer is at least this long.
@@ -735,6 +791,7 @@ pub unsafe extern "C" fn host_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mach::space::TASK_SELF;
 
     /// Read `n` bytes at `offset` out of a buffer `task_info` filled.
     fn word(buffer: &[u8], offset: usize) -> u64 {

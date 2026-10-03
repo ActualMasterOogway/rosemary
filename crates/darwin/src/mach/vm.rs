@@ -9,6 +9,13 @@ use super::space::{MACH_PORT_NULL, Name, TASK_SELF};
 /// promise. The 32-bit `VM_REGION_BASIC_INFO` is a different structure and is
 /// refused rather than filled with this one.
 const VM_REGION_BASIC_INFO_64: i32 = 9;
+/// `VM_REGION_TOP_INFO`, what `top` sorts a task's memory into private and
+/// shared with.
+const VM_REGION_TOP_INFO: i32 = 12;
+
+/// `SM_PRIVATE` and `SM_SHARED`, the two sharing modes a mapping here can be.
+const SM_PRIVATE: u8 = 2;
+const SM_SHARED: u8 = 3;
 
 /// `VM_PROT_*`, which happen to be the same bits as `PROT_*` - stated rather
 /// than relied on, because nothing makes two operating systems agree.
@@ -44,6 +51,23 @@ const _: () = {
     // `VM_REGION_BASIC_INFO_COUNT_64` is this size in 32-bit words, and a
     // caller passes it in as the capacity of its buffer.
     assert!(size_of::<BasicInfo64>() == 40);
+};
+
+/// `struct vm_region_top_info`. Resident page counts are not tracked and read
+/// zero, as in the submap flavour below.
+#[repr(C, packed(4))]
+#[derive(Clone, Copy, Default)]
+struct TopInfo {
+    obj_id: u32,
+    ref_count: u32,
+    private_pages_resident: u32,
+    shared_pages_resident: u32,
+    share_mode: u8,
+}
+
+const _: () = {
+    // `VM_REGION_TOP_INFO_COUNT` is five words, and rounds the last byte up.
+    assert!(size_of::<TopInfo>() == 20);
 };
 
 /// One line of `/proc/self/maps`, as much of it as a region answer needs.
@@ -125,6 +149,10 @@ pub unsafe extern "C" fn vm_region_64(
     if task != TASK_SELF {
         return KERN_INVALID_ARGUMENT;
     }
+    if flavor == VM_REGION_TOP_INFO {
+        // SAFETY: the caller's obligations, as below.
+        return unsafe { top_info(address, size, info, count, object_name) };
+    }
     if flavor != VM_REGION_BASIC_INFO_64 {
         unsupported(flavor);
         return KERN_INVALID_ARGUMENT;
@@ -165,6 +193,47 @@ pub unsafe extern "C" fn vm_region_64(
             // A name for the memory object behind the region. There is no port
             // namespace entry for one, and null is what Mach returns for a
             // region with no pager.
+            *object_name = MACH_PORT_NULL;
+        }
+    }
+    KERN_SUCCESS
+}
+
+/// [`vm_region_64`]'s `VM_REGION_TOP_INFO`.
+///
+/// # Safety
+///
+/// As [`vm_region_64`].
+unsafe fn top_info(
+    address: *mut u64,
+    size: *mut u64,
+    info: *mut c_void,
+    count: *mut u32,
+    object_name: *mut Name,
+) -> i32 {
+    // SAFETY: the caller states `count` is readable.
+    if (unsafe { *count } as usize) * size_of::<u32>() < size_of::<TopInfo>() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller states `address` is readable.
+    let Some(region) = region_at_or_after(unsafe { *address }) else {
+        return KERN_INVALID_ADDRESS;
+    };
+    let top = TopInfo {
+        ref_count: 1,
+        share_mode: match region.shared {
+            true => SM_SHARED,
+            false => SM_PRIVATE,
+        },
+        ..TopInfo::default()
+    };
+    // SAFETY: the caller's obligations, with the capacity checked above.
+    unsafe {
+        *address = region.start;
+        *size = region.end - region.start;
+        info.cast::<TopInfo>().write_unaligned(top);
+        *count = (size_of::<TopInfo>() / size_of::<u32>()) as u32;
+        if !object_name.is_null() {
             *object_name = MACH_PORT_NULL;
         }
     }

@@ -73,6 +73,7 @@ pub mod passwd;
 pub mod poll;
 pub mod printf_l;
 pub mod progname;
+pub mod process;
 pub mod pthread;
 pub mod random;
 pub mod regex;
@@ -358,6 +359,7 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     utmpx::MODULE,
     vis::MODULE,
     wait::MODULE,
+    process::MODULE,
 ];
 
 #[cfg(target_os = "macos")]

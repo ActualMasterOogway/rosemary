@@ -1,7 +1,7 @@
 #![cfg(not(target_os = "macos"))]
 
 use super::kern::*;
-use super::space::{self, BOOTSTRAP, HOST_SELF, MACH_PORT_NULL, Name, Right, TASK_SELF};
+use super::space::{self, BOOTSTRAP, HOST_SELF, MACH_PORT_NULL, Name, TASK_SELF};
 
 /// `mach_port_t mach_task_self_` - the data symbol behind the `mach_task_self()`
 /// macro.
@@ -29,20 +29,14 @@ pub extern "C" fn mach_host_self() -> Name {
 
 /// `thread_t mach_thread_self(void)`
 ///
-/// One name per thread, kept for the life of the thread. A real one is a send
-/// right the caller is expected to deallocate; deallocating this one is
-/// harmless and does not invalidate the name, because the name is the thread's
-/// identity and a thread that asked twice must get the same answer.
+/// One name per thread, as on a real system, and like a real one each call
+/// adds a user reference the caller is expected to deallocate. The name is a
+/// [`Right::Thread`], so `thread_info` on it answers about this thread.
 pub extern "C" fn mach_thread_self() -> Name {
-    thread_local! {
-        static SELF: std::cell::Cell<Name> = const { std::cell::Cell::new(MACH_PORT_NULL) };
-    }
-    SELF.with(|name| {
-        if name.get() == MACH_PORT_NULL {
-            name.set(space::insert(Right::Special));
-        }
-        name.get()
-    })
+    // SAFETY: `getpid` has no preconditions.
+    let pid = unsafe { libc::getpid() };
+    let tid = crate::pthread::id() as i32;
+    space::insert_thread(pid, tid)
 }
 
 /// `TASK_BOOTSTRAP_PORT`, the only special port anything here answers for.

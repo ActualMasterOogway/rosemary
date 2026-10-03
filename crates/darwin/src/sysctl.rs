@@ -105,6 +105,10 @@ pub fn set_is_translated(translated: bool) {
     IS_TRANSLATED.store(translated, Ordering::SeqCst);
 }
 
+pub fn is_translated() -> bool {
+    IS_TRANSLATED.load(Ordering::SeqCst)
+}
+
 /// The guest's architecture, defaulting to this host's when no program said.
 ///
 /// The default matters for the runtime's own start-up, which may ask before a program
@@ -159,6 +163,9 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
         }
         [CTL_HW, HW_OPTIONAL, 144] => Some(Value::U32(u32::from(arch == GuestArch::Arm64))),
         [CTL_HW, HW_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
+        // Without a pid, the asking process's own.
+        #[cfg(not(target_os = "macos"))]
+        [CTL_SYSCTL, SYSCTL_PROC_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
         [CTL_HW, HW_CPUSUBTYPE] => Some(Value::U32(arch.cpu_subtype() as u32)),
         _ => None,
     }
@@ -407,33 +414,68 @@ unsafe fn fallback(
         // SAFETY: the caller's own `oldp`/`oldlenp`.
         Some(value) => unsafe { copy_out(&value, oldp, oldlenp) },
         None => {
-            // Darwin's `kern.proc` selectors return a byte array of
-            // `kinfo_proc` records. The Linux host has no compatible record
-            // layout, so synthesize the running utility's basic `ps` record
-            // and report an empty set for the remaining process selectors.
-            if mib.len() >= 3 && mib[0] == CTL_KERN && mib[1] == 14 {
-                let record = if mib.get(2) == Some(&5)
-                    && mib.get(3).copied() == Some(unsafe { libc::getuid() } as i32)
-                {
-                    let mut record = vec![0u8; 648];
-                    record[32..36].copy_from_slice(&4i32.to_ne_bytes()); // `P_LP64`.
-                    record[36] = 2; // `extern_proc.p_stat = SRUN`.
-                    record[40..44].copy_from_slice(&unsafe { libc::getpid() }.to_ne_bytes());
-                    record[243..246].copy_from_slice(b"ps\0");
-                    let uid = unsafe { libc::getuid() };
-                    record[392..396].copy_from_slice(&uid.to_ne_bytes()); // `e_pcred.p_ruid`.
-                    record[396..400].copy_from_slice(&uid.to_ne_bytes()); // `e_pcred.p_svuid`.
-                    record[420..424].copy_from_slice(&unsafe { libc::getuid() }.to_ne_bytes());
-                    record
-                } else {
-                    Vec::new()
+            if let Some(answer) = process_value(mib) {
+                return match answer {
+                    // SAFETY: the caller's own `oldp`/`oldlenp`.
+                    Ok(bytes) => unsafe { copy_out(&Value::Bytes(bytes), oldp, oldlenp) },
+                    Err(errno) => {
+                        crate::errno::set(errno);
+                        -1
+                    }
                 };
-                return unsafe { copy_out(&Value::Bytes(record), oldp, oldlenp) };
             }
             say_unanswered(&format_args!("mib {mib:?}"));
             crate::errno::set(libc::ENOENT);
             -1
         }
+    }
+}
+
+/// `CTL_KERN` keys that describe processes.
+#[cfg(not(target_os = "macos"))]
+const KERN_PROC: i32 = 14;
+#[cfg(not(target_os = "macos"))]
+const KERN_PROCARGS: i32 = 38;
+#[cfg(not(target_os = "macos"))]
+const KERN_PROCARGS2: i32 = 49;
+
+/// `sysctl.proc_cputype`, a dynamically numbered key on a Mac; this is the
+/// number this module gives it. A pid follows it in the MIB.
+#[cfg(not(target_os = "macos"))]
+const SYSCTL_PROC_CPUTYPE: i32 = 101;
+
+/// Keys answered from the process table: another process's record, its
+/// arguments, its CPU type.
+///
+/// `None` for a key this does not own; `Some(Err(errno))` for one it owns and
+/// refuses - a pid that is not a visible guest is `EINVAL` for the argument
+/// keys, as on a Mac, and an empty list for `KERN_PROC`.
+#[cfg(not(target_os = "macos"))]
+fn process_value(mib: &[i32]) -> Option<Result<Vec<u8>, i32>> {
+    match *mib {
+        [CTL_KERN, KERN_PROC, selector] => {
+            Some(crate::process::select(selector, None).ok_or(libc::EINVAL))
+        }
+        [CTL_KERN, KERN_PROC, selector, argument] => {
+            Some(crate::process::select(selector, Some(argument)).ok_or(libc::EINVAL))
+        }
+        [CTL_KERN, KERN_PROCARGS2, pid] => Some(
+            crate::process::describe(pid)
+                .map(|process| crate::process::procargs2(&process))
+                .ok_or(libc::EINVAL),
+        ),
+        // The older layout is the newer one without the leading `argc`.
+        [CTL_KERN, KERN_PROCARGS, pid] => Some(
+            crate::process::describe(pid)
+                .map(|process| crate::process::procargs2(&process)[4..].to_vec())
+                .ok_or(libc::EINVAL),
+        ),
+        [CTL_SYSCTL, SYSCTL_PROC_CPUTYPE, pid] => Some(
+            crate::process::describe(pid)
+                .map(|process| process.cputype.to_ne_bytes().to_vec())
+                .ok_or(libc::ESRCH),
+        ),
+        _ => None,
     }
 }
 
@@ -455,6 +497,9 @@ const BY_NAME: &[(&str, &[i32])] = &[
         "sysctl.proc_translated",
         &[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED],
     ),
+    // A Mac numbers this one when it boots; off macOS it is this module's.
+    #[cfg(not(target_os = "macos"))]
+    ("sysctl.proc_cputype", &[CTL_SYSCTL, SYSCTL_PROC_CPUTYPE]),
     ("hw.machine", &[CTL_HW, HW_MACHINE]),
     ("hw.machinearch", &[CTL_HW, HW_MACHINE_ARCH]),
     ("hw.model", &[CTL_HW, HW_MODEL]),

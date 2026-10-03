@@ -38,6 +38,11 @@ pub const BOOTSTRAP: Name = 0x303;
 /// every caller asking for the same clock gets the same port on a real system.
 pub const SYSTEM_CLOCK: Name = 0x403;
 pub const CALENDAR_CLOCK: Name = 0x503;
+/// The one processor set there is, by its name port and its control port.
+/// `host_processor_sets` hands out the first and `host_processor_set_priv`
+/// turns it into the second, which is what enumerates tasks.
+pub const PSET_NAME: Name = 0x603;
+pub const PSET_CONTROL: Name = 0x703;
 /// The first name [`allocate`] hands out. Above the fixed ones, and stepped by
 /// four the way a real space's names are, so a caller that assumes a name is
 /// not a small integer is not surprised.
@@ -59,8 +64,14 @@ pub enum Right {
     Dead { refs: u32 },
     /// A Mach semaphore, which is named out of the same space and is not a port.
     Semaphore(Arc<super::sync::Semaphore>),
+    /// A send right to a task: this one under a name other than
+    /// [`TASK_SELF`], or another guest's, from `task_for_pid`. The pid is the
+    /// whole of it - every question about the task goes to the process server.
+    Task { pid: i32, refs: u32 },
+    /// A send right to a thread of some task, by its host thread id.
+    Thread { pid: i32, tid: i32, refs: u32 },
     /// A name this runtime answers for without a port behind it: the task, the
-    /// host, a thread, the bootstrap server, a clock.
+    /// host, the bootstrap server, a clock, the processor set.
     Special,
 }
 
@@ -77,6 +88,7 @@ impl Right {
             // it as a send right because that is what the task and host ports
             // are on a real system.
             Right::Semaphore(_) | Right::Special => type_of(RIGHT_SEND),
+            Right::Task { .. } | Right::Thread { .. } => type_of(RIGHT_SEND),
         }
     }
 }
@@ -95,6 +107,8 @@ fn space() -> &'static RwLock<Space> {
         names.insert(BOOTSTRAP, Right::Special);
         names.insert(SYSTEM_CLOCK, Right::Special);
         names.insert(CALENDAR_CLOCK, Right::Special);
+        names.insert(PSET_NAME, Right::Special);
+        names.insert(PSET_CONTROL, Right::Special);
         RwLock::new(Space {
             names,
             next: FIRST_DYNAMIC,
@@ -221,6 +235,101 @@ pub fn insert_send(address: Address) -> Name {
     })
 }
 
+/// A send right to the task `pid`, reusing the name already held for it.
+///
+/// One name per task for the same reason as [`insert_send`]: `top` compares
+/// what two calls handed back, and a task that answered to two names would be
+/// two tasks. This task is always [`TASK_SELF`].
+pub fn insert_task(pid: i32) -> Name {
+    if pid == own_pid() {
+        return TASK_SELF;
+    }
+    with(|space| {
+        for (name, right) in space.names.iter_mut() {
+            if let Right::Task { pid: held, refs } = right
+                && *held == pid
+            {
+                *refs = refs.saturating_add(1);
+                return *name;
+            }
+        }
+        let name = space.next;
+        space.next = space.next.wrapping_add(4);
+        space.names.insert(name, Right::Task { pid, refs: 1 });
+        name
+    })
+}
+
+/// A send right to thread `tid` of task `pid`, reusing a name already held.
+pub fn insert_thread(pid: i32, tid: i32) -> Name {
+    with(|space| {
+        for (name, right) in space.names.iter_mut() {
+            if let Right::Thread {
+                pid: held_pid,
+                tid: held_tid,
+                refs,
+            } = right
+                && (*held_pid, *held_tid) == (pid, tid)
+            {
+                *refs = refs.saturating_add(1);
+                return *name;
+            }
+        }
+        let name = space.next;
+        space.next = space.next.wrapping_add(4);
+        space
+            .names
+            .insert(name, Right::Thread { pid, tid, refs: 1 });
+        name
+    })
+}
+
+fn own_pid() -> i32 {
+    // SAFETY: `getpid` has no preconditions.
+    unsafe { libc::getpid() }
+}
+
+/// The pid of the task `name` is a right to.
+pub fn task_pid(name: Name) -> Option<i32> {
+    if name == TASK_SELF {
+        return Some(own_pid());
+    }
+    let guard = space().read().unwrap_or_else(|e| e.into_inner());
+    match guard.names.get(&name) {
+        Some(Right::Task { pid, .. }) => Some(*pid),
+        _ => None,
+    }
+}
+
+/// The task and thread `name` is a right to.
+///
+/// `pthread_mach_thread_np` hands out a thread's host id as its port, so a
+/// name the space does not hold that is one of this process's threads is
+/// taken as that thread.
+pub fn thread_of(name: Name) -> Option<(i32, i32)> {
+    {
+        let guard = space().read().unwrap_or_else(|e| e.into_inner());
+        match guard.names.get(&name) {
+            Some(Right::Thread { pid, tid, .. }) => return Some((*pid, *tid)),
+            Some(_) => return None,
+            None => {}
+        }
+    }
+    let pid = own_pid();
+    std::path::Path::new(&format!("/proc/self/task/{name}"))
+        .exists()
+        .then_some((pid, name as i32))
+}
+
+/// How many names the space holds, for `mach_port_space_basic_info`.
+pub fn count() -> usize {
+    space()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .names
+        .len()
+}
+
 /// Add a send-once right, which is never shared with an existing name.
 pub fn insert_send_once(address: Address) -> Name {
     insert(Right::SendOnce { address })
@@ -240,7 +349,10 @@ fn release(space: &mut Space, name: Name) -> i32 {
         return KERN_INVALID_NAME;
     };
     match right {
-        Right::Send { refs, .. } | Right::Dead { refs } => {
+        Right::Send { refs, .. }
+        | Right::Dead { refs }
+        | Right::Task { refs, .. }
+        | Right::Thread { refs, .. } => {
             *refs -= 1;
             if *refs == 0 {
                 space.names.remove(&name);
@@ -334,7 +446,10 @@ pub extern "C" fn mach_port_mod_refs(task: Name, name: Name, right: u32, delta: 
             return KERN_INVALID_RIGHT;
         }
         match held {
-            Right::Send { refs, .. } | Right::Dead { refs } => {
+            Right::Send { refs, .. }
+            | Right::Dead { refs }
+            | Right::Task { refs, .. }
+            | Right::Thread { refs, .. } => {
                 let updated = *refs as i64 + delta as i64;
                 if updated < 0 {
                     return KERN_INVALID_VALUE;

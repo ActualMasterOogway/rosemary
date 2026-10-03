@@ -732,6 +732,7 @@ dependencies = [
  "rc2",
  "rc4",
  "rustix 1.1.5",
+ "server",
  "sha1",
  "sha2 0.11.0",
  "static_init",
@@ -1869,6 +1870,7 @@ dependencies = [
  "prefix",
  "sdl3",
  "security",
+ "server",
  "static_init",
  "webkit",
 ]
@@ -2031,6 +2033,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

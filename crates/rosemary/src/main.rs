@@ -13,6 +13,8 @@ use microlift::core::lift_to_function;
 use mimalloc::MiMalloc;
 
 mod prefix_cli;
+#[cfg(not(target_os = "macos"))]
+mod server_cli;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -64,6 +66,10 @@ fn run(
         },
     };
     rosemary::exec::publish(exec);
+    // After loading, which settles the CPU type the guest is listed with, and
+    // before its first instruction, so it is listed from the start.
+    #[cfg(not(target_os = "macos"))]
+    server_cli::join(guest, &argv);
 
     match startup::run(exec) {
         // `exit` rather than returning the status. Returning goes back through
@@ -162,11 +168,16 @@ fn main() -> ExitCode {
         eprintln!(
             "       rosemary prefix <create|info|verify|repair|reset-system|update|cache> ..."
         );
+        eprintln!("       rosemary server [--directory DIR] [--foreground] [--stop]");
         eprintln!("       rosemary <mach-o path> [--audit] [--ir]");
         return ExitCode::FAILURE;
     };
     if first == "prefix" {
         return prefix_cli::command(args);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if first == "server" {
+        return server_cli::command(args);
     }
     let implicit_bundle = first != "run" && std::path::Path::new(&first).is_dir();
     if first == "run" || implicit_bundle {

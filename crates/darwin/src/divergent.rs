@@ -403,10 +403,12 @@ mod tests {
         // And the families around them are still shut: a member of one that this
         // crate has *not* implemented is refused rather than passed through.
         assert!(contains("dispatch_source_create"));
-        // The half of Mach that is still refused: anything asking the kernel
-        // about a task's memory, or about another process at all.
+        // The half of Mach that is still refused: reading or changing another
+        // task, as opposed to asking the process server about it.
         assert!(contains("mach_vm_read"));
-        assert!(contains("task_for_pid"));
-        assert!(contains("task_threads"));
+        assert!(contains("task_suspend"));
+        for name in ["task_for_pid", "task_threads", "pid_for_task"] {
+            assert!(!contains(name), "{name} is answered by the process server");
+        }
     }
 }

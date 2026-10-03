@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,7 +23,14 @@ const NO_DEVICE: IOReturn = 0xe000_02c0u32 as i32;
 /// Iterator handles are kept separate from the positive SDL instance ids used
 /// as synthetic `io_service_t`s.
 static NEXT_ITERATOR: AtomicU32 = AtomicU32::new(0x8000_0000);
-static ITERATORS: Mutex<BTreeMap<IoObject, VecDeque<IoObject>>> = Mutex::new(BTreeMap::new());
+/// An iterator's services and how far through them it is. Kept whole rather
+/// than consumed, so `IOIteratorReset` can start it over.
+struct Listing {
+    services: Vec<IoObject>,
+    next: usize,
+}
+
+static ITERATORS: Mutex<BTreeMap<IoObject, Listing>> = Mutex::new(BTreeMap::new());
 
 /// `mach_port_t kIOMasterPortDefault` - and `kIOMainPortDefault`, its current
 /// spelling.
@@ -160,10 +167,13 @@ pub unsafe extern "C" fn IOServiceGetMatchingServices(
     if !existing.is_null() {
         let iterator = NEXT_ITERATOR.fetch_add(1, Ordering::Relaxed);
         {
-            ITERATORS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(iterator, services.iter().copied().collect());
+            ITERATORS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                iterator,
+                Listing {
+                    services: services.to_vec(),
+                    next: 0,
+                },
+            );
         }
         crate::trace_hid(format_args!(
             "IOServiceGetMatchingServices -> {} service(s)",
@@ -194,8 +204,23 @@ pub unsafe extern "C" fn IOIteratorNext(iterator: IoObject) -> IoObject {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_mut(&iterator)
-        .and_then(VecDeque::pop_front)
+        .and_then(|listing| {
+            let service = listing.services.get(listing.next).copied()?;
+            listing.next += 1;
+            Some(service)
+        })
         .unwrap_or(0)
+}
+
+/// `void IOIteratorReset(io_iterator_t)`: back to the first service.
+pub unsafe extern "C" fn IOIteratorReset(iterator: IoObject) {
+    if let Some(listing) = ITERATORS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&iterator)
+    {
+        listing.next = 0;
+    }
 }
 
 /// `boolean_t IOIteratorIsValid(io_iterator_t)`.
@@ -670,6 +695,7 @@ exports::exports! {
         "IOServiceGetMatchingService" => IOServiceGetMatchingService,
         "IOIteratorNext" => IOIteratorNext,
         "IOIteratorIsValid" => IOIteratorIsValid,
+        "IOIteratorReset" => IOIteratorReset,
         "IOObjectRelease" => IOObjectRelease,
         "IOObjectRetain" => IOObjectRetain,
         "IOObjectIsEqualTo" => IOObjectIsEqualTo,
@@ -684,7 +710,8 @@ exports::exports! {
         "IOServiceAddMatchingNotification" => IOServiceAddMatchingNotification,
         "IODispatchCalloutFromMessage" => IODispatchCalloutFromMessage,
         "IONotificationPortGetRunLoopSource" => IONotificationPortGetRunLoopSource,
-        "IOMasterPort" => IOMasterPort,
+        // `IOMainPort` is the same call under the name macOS 12 gave it.
+        "IOMasterPort" | "IOMainPort" => IOMasterPort,
         "IOServiceNameMatching" => IOServiceNameMatching,
         "IOBSDNameMatching" => IOBSDNameMatching,
         "IORegistryEntryCreateIterator" => IORegistryEntryCreateIterator,

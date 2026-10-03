@@ -519,6 +519,9 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
         // here so a guest with a descriptive name gets a name rather than an error.
         // SAFETY: the caller states `name` is NUL-terminated.
         let full = unsafe { core::ffi::CStr::from_ptr(name as usize as *const libc::c_char) };
+        // The whole name is kept by the process server, which is where another
+        // task reading this thread's name - `top`, a sampler - asks for it.
+        crate::process::name_thread(&full.to_string_lossy());
         let mut buf = [0u8; 16];
         let bytes = full.to_bytes();
         let n = bytes.len().min(buf.len() - 1);

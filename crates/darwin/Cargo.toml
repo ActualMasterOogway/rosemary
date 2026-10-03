@@ -14,6 +14,7 @@ machish.workspace = true
 exports = { workspace = true, features = ["machish"] }
 objc.workspace = true
 prefix.workspace = true
+server.workspace = true
 libc.workspace = true
 libm.workspace = true
 backtrace.workspace = true

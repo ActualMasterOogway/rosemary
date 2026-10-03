@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 machish = { path = "crates/machish" }
 exports = { path = "crates/exports" }
 darwin = { path = "crates/darwin" }
+server = { path = "crates/server" }
 objc = { path = "crates/objc" }
 prefix = { path = "crates/prefix" }
 corefoundation = { path = "crates/corefoundation" }

@@ -11,6 +11,7 @@ pub const KERN_RESOURCE_SHORTAGE: i32 = 6;
 pub const KERN_NOT_RECEIVER: i32 = 7;
 pub const KERN_INVALID_NAME: i32 = 15;
 pub const KERN_INVALID_TASK: i32 = 16;
+pub const KERN_INVALID_HOST: i32 = 22;
 pub const KERN_INVALID_RIGHT: i32 = 17;
 pub const KERN_INVALID_VALUE: i32 = 18;
 pub const KERN_UREFS_OVERFLOW: i32 = 19;
