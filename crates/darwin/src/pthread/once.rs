@@ -48,7 +48,8 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
                 // A routine that never returns leaves this `RUNNING` forever, which is
                 // what a real `pthread_once` does too.
                 body.take().expect("the routine runs once")();
-                state.store(DONE, Ordering::Release);
+                // Pair with the sleeper registration before deciding whether to wake.
+                state.store(DONE, Ordering::SeqCst);
                 if record.u32(SLEEPERS).load(Ordering::SeqCst) != 0 {
                     // SAFETY: the state word of a live `pthread_once_t`.
                     let _ = unsafe { wait_word::wake_u32(state, WakeCount::All, Scope::Private) };
@@ -58,7 +59,7 @@ pub unsafe fn once<F: FnOnce()>(at: u64, body: F) -> i32 {
             Err(DONE) => return 0,
             Err(_) => {
                 record.u32(SLEEPERS).fetch_add(1, Ordering::SeqCst);
-                if state.load(Ordering::Acquire) == RUNNING {
+                if state.load(Ordering::SeqCst) == RUNNING {
                     let _ = unsafe { wait_word::wait_u32(state, RUNNING, None, Scope::Private) };
                 }
                 record.u32(SLEEPERS).fetch_sub(1, Ordering::Relaxed);
