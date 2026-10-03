@@ -24,7 +24,6 @@ pub fn set_process_args(argc: u64, argv: u64) {
     GUEST_ARGC.store(argc as i32, Ordering::Relaxed);
     GUEST_ARGV.store(argv as usize as *mut *mut c_char, Ordering::Relaxed);
     // And the process's name, which the host's `warn` and `err` print.
-    #[cfg(not(target_os = "macos"))]
     if argc > 0 && argv != 0 {
         // SAFETY: the vector just laid out on the guest's stack, whose first
         // entry is a NUL-terminated string in this address space.

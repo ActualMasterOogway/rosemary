@@ -23,10 +23,7 @@ fn report(message: Option<Vec<u8>>, suffix: Suffix) {
     };
     // SAFETY: the name `getprogname` returns is NUL-terminated and lives for
     // the process.
-    #[cfg(not(target_os = "macos"))]
     let name_ptr = darwin::progname::getprogname();
-    #[cfg(target_os = "macos")]
-    let name_ptr = unsafe { libc::getprogname() };
     let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
     let mut line = name.to_bytes().to_vec();
     line.extend_from_slice(b": ");

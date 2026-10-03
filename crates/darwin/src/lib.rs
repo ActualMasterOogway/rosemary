@@ -74,7 +74,6 @@ pub mod passthrough;
 pub mod passwd;
 pub mod poll;
 pub mod printf_l;
-#[cfg(not(target_os = "macos"))]
 pub mod progname;
 pub mod pthread;
 pub mod random;
@@ -298,6 +297,7 @@ static DEFAULT_MODULES: &[exports::Module] = &[
     math::MODULE,
     spawn::MODULE,
     icu::MODULE,
+    progname::MODULE,
 ];
 
 /// Builtin libc modules shared by macOS and non-macOS hosts.
@@ -359,7 +359,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     attrlist::MODULE,
     langinfo::MODULE,
     modes::MODULE,
-    progname::MODULE,
     #[cfg(target_os = "linux")]
     stream::MODULE,
     utmpx::MODULE,

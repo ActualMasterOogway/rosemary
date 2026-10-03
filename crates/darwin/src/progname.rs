@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -35,7 +33,7 @@ pub fn set(argv0: &CStr) {
         program_invocation_name = full.as_ptr().cast_mut();
         program_invocation_short_name = short.as_ptr().cast_mut();
     }
-    #[cfg(target_os = "freebsd")]
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
     // SAFETY: a string that lives for the rest of the process.
     unsafe {
         libc::setprogname(full.as_ptr())
