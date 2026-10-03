@@ -388,7 +388,7 @@ unsafe fn msghdr_to_host(
     host.msg_namelen = name.as_ref().map_or(0, |a| a.len());
     host.msg_iov = g.iov;
     host.msg_iovlen = g.iovlen.max(0) as _;
-    host.msg_flags = flags_to_host(g.flags);
+    // msg_flags is output-only; callers need not initialize it.
     if !control.is_empty() {
         host.msg_control = control.as_mut_ptr().cast();
         host.msg_controllen = control.len() as _;
@@ -405,6 +405,10 @@ unsafe fn msghdr_to_host(
 unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isize {
     if message.is_null() {
         crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    if unsafe { (*(message as *const MsgHdr)).iovlen } < 0 {
+        crate::errno::set(libc::EINVAL);
         return -1;
     }
     let mut name = None;
@@ -432,6 +436,7 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
         return -1;
     }
     let guest: *mut MsgHdr = message.cast();
+    if unsafe { (*guest).iovlen } < 0 { crate::errno::set(libc::EINVAL); return -1; }
     let mut name = None;
     let mut sent_control = Vec::new();
     let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) })
@@ -564,6 +569,7 @@ unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
 ///
 /// `iov` is `iovcnt` readable `struct iovec`.
 unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> isize {
+    if iovcnt < 0 { crate::errno::set(libc::EINVAL); return -1; }
     if super::sockopt::suppresses_sigpipe(fd) {
         let previous_errno = crate::errno::get();
         // SAFETY: zeroed is a valid `msghdr` - no name, no control - and the
