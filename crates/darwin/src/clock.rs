@@ -268,7 +268,7 @@ unsafe extern "C" fn settime(clock: id::clockid_t, ts: *const c_void) -> i32 {
         tv_sec: ts.tv_sec,
         tv_usec: ts.tv_nsec / 1000,
     };
-    unsafe { host_settimeofday(&tv, core::ptr::null()) }
+    unsafe { libc::settimeofday(&tv, core::ptr::null()) }
 }
 
 #[cfg(target_os = "macos")]
