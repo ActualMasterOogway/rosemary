@@ -181,8 +181,7 @@ unsafe fn make_recursive(mutex: *mut libc::pthread_mutex_t) {
 }
 
 fn pid() -> i32 {
-    // SAFETY: `getpid` has no preconditions.
-    unsafe { libc::getpid() }
+    starnix::process::me()
 }
 
 /// How long a process waits for a server it launched to start listening.

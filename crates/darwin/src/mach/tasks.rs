@@ -408,8 +408,7 @@ pub unsafe extern "C" fn mach_port_space_basic_info(task: Name, out: *mut c_void
     if out.is_null() {
         return KERN_INVALID_ARGUMENT;
     }
-    // SAFETY: `getpid` has no preconditions.
-    if space::task_pid(task) != Some(unsafe { libc::getpid() }) {
+    if space::task_pid(task) != Some(starnix::process::me()) {
         return KERN_INVALID_ARGUMENT;
     }
     let names = space::count() as u32;
@@ -445,7 +444,7 @@ mod tests {
     use crate::mach::space::TASK_SELF;
 
     fn me() -> i32 {
-        unsafe { libc::getpid() }
+        starnix::process::me()
     }
 
     #[test]

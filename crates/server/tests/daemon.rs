@@ -34,7 +34,7 @@ fn start(directory: &Path, linger: Duration) -> std::thread::JoinHandle<Outcome>
 fn checkin(path: &str) -> Request {
     Request::Checkin(Checkin {
         version: VERSION,
-        pid: unsafe { libc::getpid() },
+        pid: starnix::process::me(),
         path: path.into(),
         argv: vec![path.rsplit('/').next().unwrap().as_bytes().to_vec()],
         ..Checkin::default()
@@ -84,7 +84,7 @@ fn a_forked_child_is_listed_under_its_parent_and_dropped_once_collected() {
     assert_eq!(ok, 1, "the child could not check in");
 
     let list = processes(&mut parent);
-    let me = unsafe { libc::getpid() };
+    let me = starnix::process::me();
     let parent_entry = list.iter().find(|p| p.pid == me).expect("parent listed");
     let child_entry = list.iter().find(|p| p.pid == child).expect("child listed");
     assert_eq!(parent_entry.command(), "parent");
@@ -167,7 +167,7 @@ fn a_checkin_for_another_pid_is_refused() {
     assert!(matches!(client.call(&lie).unwrap(), Reply::Refused(_)));
     let stale = Request::Checkin(Checkin {
         version: VERSION + 1,
-        pid: unsafe { libc::getpid() },
+        pid: starnix::process::me(),
         ..Checkin::default()
     });
     assert!(matches!(client.call(&stale).unwrap(), Reply::Refused(_)));

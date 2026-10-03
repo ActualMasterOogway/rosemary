@@ -176,8 +176,7 @@ pub fn publish_page_size() {
 fn measure(task: Name) -> Option<Usage> {
     let pid = space::task_pid(task)?;
     let mut usage = crate::process::usage(pid)?;
-    // SAFETY: `getpid` has no preconditions.
-    if pid == unsafe { libc::getpid() } {
+    if pid == starnix::process::me() {
         let mut rusage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         // SAFETY: `getrusage` fills the `rusage` it is given and nothing else.
         if unsafe { libc::getrusage(libc::RUSAGE_SELF, rusage.as_mut_ptr()) } == 0 {

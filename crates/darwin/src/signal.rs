@@ -1445,7 +1445,7 @@ pub mod entry {
         /// client with, and zero is not a signal number to translate.
         #[test]
         fn signal_zero_probes_existence_rather_than_being_translated() {
-            let self_pid = unsafe { libc::getpid() };
+            let self_pid = starnix::process::me();
             assert_eq!(kill_(self_pid, 0), 0);
             assert_eq!(kill_(self_pid, 99), -1, "not a signal");
         }

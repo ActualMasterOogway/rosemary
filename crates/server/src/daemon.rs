@@ -179,7 +179,7 @@ fn answer(
                 *checked_in = Some(pid);
                 Reply::CheckedIn {
                     // SAFETY: `getpid` has no preconditions.
-                    server_pid: unsafe { libc::getpid() },
+                    server_pid: starnix::process::me(),
                 }
             }
             Err(why) => Reply::Refused(why),

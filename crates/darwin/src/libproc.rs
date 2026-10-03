@@ -70,7 +70,7 @@ pub unsafe extern "C" fn proc_pidinfo(
     buffer: *mut c_void,
     size: c_int,
 ) -> c_int {
-    let me = unsafe { libc::getpid() };
+    let me = starnix::process::me();
     let pid = if pid == 0 { me } else { pid };
     if size < 0 {
         crate::errno::set(libc::EINVAL);

@@ -19,8 +19,7 @@ struct Me {
 static ME: OnceLock<Me> = OnceLock::new();
 
 fn pid() -> i32 {
-    // SAFETY: `getpid` has no preconditions.
-    unsafe { libc::getpid() }
+    starnix::process::me()
 }
 
 /// Record this process as the guest at `path`, and tell the server.

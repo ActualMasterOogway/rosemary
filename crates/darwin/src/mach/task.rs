@@ -33,8 +33,7 @@ pub extern "C" fn mach_host_self() -> Name {
 /// adds a user reference the caller is expected to deallocate. The name is a
 /// [`Right::Thread`], so `thread_info` on it answers about this thread.
 pub extern "C" fn mach_thread_self() -> Name {
-    // SAFETY: `getpid` has no preconditions.
-    let pid = unsafe { libc::getpid() };
+    let pid = starnix::process::me();
     let tid = crate::pthread::id() as i32;
     space::insert_thread(pid, tid)
 }

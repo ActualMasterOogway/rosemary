@@ -169,7 +169,7 @@ mod tests {
 
     fn me() -> i32 {
         // SAFETY: `getpid` has no preconditions.
-        unsafe { libc::getpid() }
+        starnix::process::me()
     }
 
     fn checkin(path: &str) -> Checkin {

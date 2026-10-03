@@ -60,7 +60,7 @@ cipher = "0.5.2"
 des = "0.9.0"
 rc2 = "0.9.0"
 rc4 = "0.2.0"
-rustix = { version = "1.1.5", features = ["time", "thread"] }
+rustix = { version = "1.1.5", features = ["time", "thread", "process"] }
 
 [profile.fullnative]
 inherits = "release"

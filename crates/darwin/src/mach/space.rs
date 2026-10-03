@@ -285,8 +285,7 @@ pub fn insert_thread(pid: i32, tid: i32) -> Name {
 }
 
 fn own_pid() -> i32 {
-    // SAFETY: `getpid` has no preconditions.
-    unsafe { libc::getpid() }
+    starnix::process::me()
 }
 
 /// The pid of the task `name` is a right to.
