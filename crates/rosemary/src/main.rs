@@ -168,7 +168,8 @@ fn main() -> ExitCode {
     if first == "prefix" {
         return prefix_cli::command(args);
     }
-    if first == "run" {
+    let implicit_bundle = first != "run" && std::path::Path::new(&first).is_dir();
+    if first == "run" || implicit_bundle {
         // Before anything can ask which prefix this is, including the paths
         // published below.
         prefix_cli::settle_prefix();
@@ -177,8 +178,9 @@ fn main() -> ExitCode {
         let mut policy = ImportPolicy::FastWhenKnown;
         let mut engine = None;
         let mut objc_debug = false;
-        let mut path = None;
-        for arg in args.by_ref() {
+        let mut path = implicit_bundle.then(|| first.clone());
+        while path.is_none() {
+            let Some(arg) = args.next() else { break };
             match arg.to_str().unwrap_or_default() {
                 "--slow" if path.is_none() => policy = ImportPolicy::AlwaysSlow,
                 "--native" if path.is_none() => engine = Some(Engine::Native),

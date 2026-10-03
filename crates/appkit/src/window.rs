@@ -81,6 +81,7 @@ pub const INSTANCE_SIZE: usize = size_of::<Window>();
 /// happen whether or not the second does yet.
 pub const DID_RESIZE: &str = "NSWindowDidResizeNotification";
 pub const DID_MOVE: &str = "NSWindowDidMoveNotification";
+pub const DID_CHANGE_SCREEN: &str = "NSWindowDidChangeScreenNotification";
 pub const WILL_CLOSE: &str = "NSWindowWillCloseNotification";
 pub const DID_BECOME_KEY: &str = "NSWindowDidBecomeKeyNotification";
 pub const DID_RESIGN_KEY: &str = "NSWindowDidResignKeyNotification";

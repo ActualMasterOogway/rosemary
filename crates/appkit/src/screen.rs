@@ -115,10 +115,19 @@ unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
 /// uses to pick a frame cap. Sixty where SDL has no mode to report, because the
 /// answer is a divisor a caller will use either way.
 unsafe extern "C" fn maximum_frames_per_second(receiver: Id, _sel: Sel) -> isize {
-    match sdl3::video::display_refresh_rate(display_of(receiver)) {
-        Some(rate) => rate.round() as isize,
-        None => 60,
-    }
+    refresh_rate(receiver).round().max(1.0) as isize
+}
+
+fn refresh_rate(receiver: Id) -> f64 {
+    sdl3::video::display_refresh_rate(display_of(receiver))
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .map(f64::from)
+        .unwrap_or(60.0)
+}
+
+/// SDL exposes the current mode's fixed refresh rate, in frames per second.
+unsafe extern "C" fn refresh_interval(receiver: Id, _sel: Sel) -> f64 {
+    1.0 / refresh_rate(receiver)
 }
 
 unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
@@ -876,6 +885,9 @@ pub(crate) fn install() {
         "visibleFrame" => visible_frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "maximumFramesPerSecond" => maximum_frames_per_second, c"q16@0:8";
+        "minimumRefreshInterval" => refresh_interval, c"d16@0:8";
+        "maximumRefreshInterval" => refresh_interval, c"d16@0:8";
+        "displayUpdateGranularity" => refresh_interval, c"d16@0:8";
         "depth" => depth, c"i16@0:8";
         "colorSpace" => color_space, c"@16@0:8";
         "deviceDescription" => device_description, c"@16@0:8";
@@ -885,6 +897,27 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_refresh_intervals_are_available_without_a_display_mode() {
+        crate::bootstrap();
+        let screen = screen_for(0);
+        let class = objc::class::lookup(c"NSScreen").unwrap();
+        for name in [
+            "minimumRefreshInterval",
+            "maximumRefreshInterval",
+            "displayUpdateGranularity",
+        ] {
+            let selector = objc::sel::get(name);
+            let method = class
+                .method(selector)
+                .expect("refresh method is registered");
+            // SAFETY: the registered method returns NSTimeInterval for NSScreen.
+            let call: unsafe extern "C" fn(Id, Sel) -> f64 =
+                unsafe { std::mem::transmute(method.implementation()) };
+            assert_eq!(unsafe { call(screen, selector) }, 1.0 / 60.0);
+        }
+    }
 
     /// One object per display, which is what makes `+mainScreen ==
     /// [window screen]` mean anything.

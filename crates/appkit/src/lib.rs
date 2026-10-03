@@ -324,6 +324,7 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     application::WILL_RESIGN_ACTIVE,
     window::DID_RESIZE,
     window::DID_MOVE,
+    window::DID_CHANGE_SCREEN,
     window::WILL_CLOSE,
     window::DID_BECOME_KEY,
     window::DID_RESIGN_KEY,
@@ -534,6 +535,21 @@ mod tests {
             class.chain().any(|c| c.name_str().contains("String")),
             "{}",
             class.name_str()
+        );
+    }
+
+    #[test]
+    fn the_window_screen_notification_exports_its_name() {
+        let symbols = data_symbols();
+        let (_, cell) = symbols
+            .iter()
+            .find(|(name, _)| name == "_NSWindowDidChangeScreenNotification")
+            .expect("screen notification is published");
+        // SAFETY: the export is a live cell holding this runtime's string.
+        let object = unsafe { *(*cell as *const objc::object::Id) };
+        assert_eq!(
+            unsafe { foundation::string::bytes(object) },
+            window::DID_CHANGE_SCREEN.as_bytes()
         );
     }
 

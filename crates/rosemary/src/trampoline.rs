@@ -56,6 +56,12 @@ pub fn disarm() {
     ARMED.store(false, Ordering::Relaxed);
 }
 
+/// Whether guest calls use the host instruction set and calling convention.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn running_natively() -> bool {
+    !ARMED.load(Ordering::Relaxed)
+}
+
 /// Whether trampolines are in use.
 fn enabled() -> bool {
     #[dynamic]

@@ -155,15 +155,30 @@ const DARWIN_SEM_FAILED: *mut libc::sem_t = usize::MAX as *mut libc::sem_t;
 
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.
 pub(crate) fn provide(lib: &mut SyntheticDylib) {
-    lib.define_fn("_open", open_with_mode as *const ());
-    lib.define_fn("_openat", openat_with_mode as *const ());
-    lib.define_fn("_sem_open", sem_open_with_mode as *const ());
+    for name in ["open", "openat", "sem_open"] {
+        lib.define_fn(
+            &format!("_{name}"),
+            host_substitute(name).unwrap() as *const (),
+        );
+    }
 }
 
 /// The wrapper for a host symbol name, for a `dlsym` that would otherwise hand the
 /// guest the host's variadic copy.
 pub(crate) fn host_substitute(name: &str) -> Option<u64> {
-    match name.strip_prefix('_').unwrap_or(name) {
+    let name = name.strip_prefix('_').unwrap_or(name);
+    // Apple arm64 places variadic arguments on the stack. Native calls must
+    // retain that ABI; the fixed-arity wrappers below serve x86-64 imports.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if crate::trampoline::running_natively() {
+        return match name {
+            "open" => Some(libc::open as *const () as u64),
+            "openat" => Some(libc::openat as *const () as u64),
+            "sem_open" => Some(libc::sem_open as *const () as u64),
+            _ => None,
+        };
+    }
+    match name {
         "open" => Some(open_with_mode as *const () as u64),
         "openat" => Some(openat_with_mode as *const () as u64),
         "sem_open" => Some(sem_open_with_mode as *const () as u64),

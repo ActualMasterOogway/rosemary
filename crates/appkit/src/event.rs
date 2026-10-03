@@ -281,6 +281,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // program that only listens for the moves it makes itself would keep
         // mapping the pointer against the origin it asked for.
         Event::WindowMoved { window } => post(window, window::DID_MOVE),
+        Event::WindowDisplayChanged { window } => post(window, window::DID_CHANGE_SCREEN),
         Event::WindowResized { window, .. } => {
             // The content view follows the window, as it does on
             // `-setContentView:` and for the same reason: a view that kept its
@@ -1087,6 +1088,7 @@ fn delegate_selector(name: &str) -> &'static str {
     match name {
         window::DID_RESIZE => "windowDidResize:",
         window::DID_MOVE => "windowDidMove:",
+        window::DID_CHANGE_SCREEN => "windowDidChangeScreen:",
         window::WILL_CLOSE => "windowWillClose:",
         window::DID_BECOME_KEY => "windowDidBecomeKey:",
         window::DID_RESIGN_KEY => "windowDidResignKey:",

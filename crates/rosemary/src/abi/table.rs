@@ -2739,7 +2739,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("nextafter", F64, F64, F64),
     sig!("nl_langinfo", P, I32),
     sig!("nl_langinfo_l", P, I32, P),
-    // Variadic in their declarations and *fixed* in fact.
+    // Fixed-arity adapters for x86-64 imports. Native Apple arm64 retains
+    // the host's variadic ABI, whose optional arguments are on the stack.
     sig!("open", I32, P, I32, U32),
     sig!("openat", I32, I32, P, I32, U32),
     sig!("opendir", P, P),

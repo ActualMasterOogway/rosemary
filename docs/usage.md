@@ -10,6 +10,9 @@ rosemary run --emulated "/some/My App.app" [args...]
 rosemary run /some/app.app/Contents/MacOS/App [args...]
 ```
 
+A bundle directory can also be launched directly: `rosemary /some/app.app [args...]`.
+Use `run` to select a backend or pass runtime options.
+
 For a bundle, Rosemary reads `Contents/Info.plist` (XML or binary) and runs
 the executable named by `CFBundleExecutable` in `Contents/MacOS`. An empty
 or missing name falls back to `NSExecutable`, then the bundle's name without

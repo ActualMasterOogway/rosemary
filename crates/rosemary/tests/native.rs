@@ -2,6 +2,170 @@ mod common;
 
 use common::{build_native, build_native_with, run_guest_with, run_native};
 
+#[test]
+fn native_variadic_file_and_semaphore_calls_preserve_their_arguments() {
+    let Some(path) = build_native("native_variadic_open", VARIADIC_OPEN_C) else {
+        skip!("cannot build native fixtures")
+    };
+    for backend in ["builtin", "native"] {
+        let output = common::driver_command()
+            .args(["run", "--native", &path])
+            .env("ROSEMARY_LIBC", backend)
+            .output()
+            .expect("run native file fixture");
+        assert!(
+            output.status.success(),
+            "{backend}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+const VARIADIC_OPEN_C: &str = r#"
+#include <assert.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static void check_mode(int fd, mode_t mode) {
+    struct stat st;
+    assert(fd >= 0);
+    assert(fstat(fd, &st) == 0);
+    assert((st.st_mode & 0777) == mode);
+    assert(close(fd) == 0);
+}
+
+int main(void) {
+    char dir[] = "/tmp/rosemary-native-open-XXXXXX";
+    assert(mkdtemp(dir));
+    assert(chdir(dir) == 0);
+    umask(0);
+    check_mode(open("direct", O_CREAT | O_EXCL | O_RDWR, 0640), 0640);
+    int directory = open(".", O_RDONLY);
+    assert(directory >= 0);
+    check_mode(openat(directory, "relative", O_CREAT | O_EXCL | O_RDWR, 0604), 0604);
+    assert(close(open("direct", O_RDONLY)) == 0);
+    assert(close(openat(directory, "relative", O_RDONLY)) == 0);
+    void *handles[] = {RTLD_DEFAULT, dlopen("/usr/lib/libSystem.B.dylib", RTLD_NOW)};
+    assert(handles[1]);
+    for (int i = 0; i < 2; ++i) {
+        int (*opener)(const char *, int, ...) = dlsym(handles[i], "open");
+        int (*relative)(int, const char *, int, ...) = dlsym(handles[i], "openat");
+        sem_t *(*semaphore)(const char *, int, ...) = dlsym(handles[i], "sem_open");
+        assert(opener && relative && semaphore);
+        check_mode(opener("dynamic", O_CREAT | O_EXCL | O_RDWR, 0610), 0610);
+        check_mode(relative(directory, "dynamic-relative", O_CREAT | O_EXCL | O_RDWR, 0620), 0620);
+        char name[32];
+        snprintf(name, sizeof name, "/rosemary-open-%d", getpid());
+        sem_unlink(name);
+        sem_t *sem = semaphore(name, O_CREAT | O_EXCL, 0600, 2);
+        assert(sem != SEM_FAILED);
+        assert(sem_trywait(sem) == 0);
+        assert(sem_trywait(sem) == 0);
+        assert(sem_trywait(sem) == -1 && errno == EAGAIN);
+        sem_t *again = sem_open(name, 0);
+        assert(again != SEM_FAILED);
+        assert(sem_close(again) == 0);
+        assert(sem_close(sem) == 0);
+        assert(sem_unlink(name) == 0);
+        assert(unlink("dynamic") == 0);
+        assert(unlink("dynamic-relative") == 0);
+    }
+    assert(close(directory) == 0);
+    assert(unlink("direct") == 0);
+    assert(unlink("relative") == 0);
+    assert(chdir("/tmp") == 0);
+    assert(rmdir(dir) == 0);
+    return 0;
+}
+"#;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fatal_native_signal_exits_with_an_unresponsive_mach_crash_port() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let Some(path) = build_native(
+        "native_crash_port",
+        r#"
+#include <assert.h>
+#include <mach/mach.h>
+#include <stdlib.h>
+int main(void) {
+    mach_port_t port;
+    assert(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) == KERN_SUCCESS);
+    assert(mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS);
+    assert(task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+        port, EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES, THREAD_STATE_NONE) == KERN_SUCCESS);
+    abort();
+}
+"#,
+    ) else {
+        skip!("cannot build native Mach crash fixture")
+    };
+    let mut child = common::driver_command()
+        .args(["run", "--native", &path])
+        .env("ROSEMARY_LIBC", "builtin")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start fatal signal fixture");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child
+            .try_wait()
+            .expect("check fatal signal fixture")
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("fatal signal hung waiting for the Mach crash server");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child
+        .wait_with_output()
+        .expect("collect fatal signal fixture");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{stderr}");
+    assert!(stderr.contains("rosemary: fault: SIGABRT"), "{stderr}");
+}
+
+#[test]
+fn a_bundle_path_launches_directly_and_forwards_arguments() {
+    let Some(path) = build_native("native_direct_bundle", common::HELLO_C) else {
+        skip!("cannot build native bundle fixture")
+    };
+    let bundle = std::path::PathBuf::from(format!("{path}.app"));
+    let contents = bundle.join("Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::copy(&path, contents.join("MacOS/Guest")).unwrap();
+    std::fs::write(contents.join("Info.plist"),
+        "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Guest</string></dict></plist>")
+        .unwrap();
+    let output = common::driver_command()
+        .arg(bundle)
+        .arg("bundle")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Hello, bundle (6)! 2 1.50"));
+}
+
 /// Run `path` through the driver, letting it choose a backend.
 fn run(path: &str, args: &[&str]) -> (Option<i32>, String, String) {
     run_guest_with(&[], path, args)

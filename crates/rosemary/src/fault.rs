@@ -1061,6 +1061,46 @@ fn restore(signal: i32) {
         saved.mask.get().apply(&mut action);
         action.sa_flags = saved.flags.load(Ordering::SeqCst);
         libc::sigaction(signal, &action, std::ptr::null_mut());
+        // Returning to a synchronous fault raises another Mach exception on
+        // macOS, which a guest crash server may leave unanswered. Deliver the
+        // default disposition as a signal instead of retrying the instruction.
+        #[cfg(target_os = "macos")]
+        if action.sa_sigaction == libc::SIG_DFL {
+            clear_crash_ports();
+            libc::raise(signal);
+        }
+    }
+}
+
+/// Fatal exit must not wait on a guest's Mach crash server after our report.
+#[cfg(target_os = "macos")]
+unsafe fn clear_crash_ports() {
+    unsafe extern "C" {
+        fn task_set_exception_ports(
+            task: u32,
+            mask: u32,
+            port: u32,
+            behavior: i32,
+            flavor: i32,
+        ) -> i32;
+        fn thread_set_exception_ports(
+            thread: u32,
+            mask: u32,
+            port: u32,
+            behavior: i32,
+            flavor: i32,
+        ) -> i32;
+        fn mach_port_deallocate(task: u32, port: u32) -> i32;
+        fn mach_thread_self() -> u32;
+        static mach_task_self_: u32;
+    }
+    const FATAL_EXCEPTIONS: u32 = (1 << 10) | (1 << 13); // EXC_CRASH | EXC_CORPSE_NOTIFY
+    // SAFETY: current task/thread ports; MACH_PORT_NULL removes the server.
+    unsafe {
+        task_set_exception_ports(mach_task_self_, FATAL_EXCEPTIONS, 0, 1, 0);
+        let thread = mach_thread_self();
+        thread_set_exception_ports(thread, FATAL_EXCEPTIONS, 0, 1, 0);
+        mach_port_deallocate(mach_task_self_, thread);
     }
 }
 

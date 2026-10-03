@@ -1488,6 +1488,7 @@ pub mod video {
         pub const WINDOW_FOCUS_LOST: u32 = 0x20f;
         pub const WINDOW_CLOSE_REQUESTED: u32 = 0x210;
         pub const WINDOW_HIT_TEST: u32 = 0x211;
+        pub const WINDOW_DISPLAY_CHANGED: u32 = 0x213;
         pub const WINDOW_DISPLAY_SCALE_CHANGED: u32 = 0x214;
         pub const WINDOW_ENTER_FULLSCREEN: u32 = 0x217;
         pub const WINDOW_LEAVE_FULLSCREEN: u32 = 0x218;
@@ -1629,6 +1630,9 @@ pub mod video {
         WindowMoved {
             window: u32,
         },
+        WindowDisplayChanged {
+            window: u32,
+        },
         WindowResized {
             window: u32,
             width: i32,
@@ -1752,6 +1756,10 @@ pub mod video {
                 event_type::WINDOW_MOVED => {
                     let e: WindowEvent = decode(&raw);
                     Event::WindowMoved { window: e.window }
+                }
+                event_type::WINDOW_DISPLAY_CHANGED => {
+                    let e: WindowEvent = decode(&raw);
+                    Event::WindowDisplayChanged { window: e.window }
                 }
                 event_type::WINDOW_RESIZED => {
                     let e: WindowEvent = decode(&raw);
