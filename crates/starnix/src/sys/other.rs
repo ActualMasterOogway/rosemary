@@ -1,6 +1,8 @@
 //! Any other Unix. A process is known to exist and nothing more, which is
 //! enough for a process list to be right and every measurement to read zero.
 
+pub mod signal;
+
 use std::io;
 use std::os::fd::RawFd;
 use std::path::PathBuf;

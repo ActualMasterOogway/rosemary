@@ -1,5 +1,7 @@
 //! macOS: `libproc`, `sysctl` and the Mach host statistics.
 
+pub mod signal;
+
 use std::ffi::{CStr, c_int, c_void};
 use std::io;
 use std::os::fd::RawFd;

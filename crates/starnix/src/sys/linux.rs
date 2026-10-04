@@ -1,5 +1,7 @@
 //! Linux: `/proc`, `/sys` and `SO_PEERCRED`.
 
+pub mod signal;
+
 use std::io;
 use std::os::fd::{BorrowedFd, RawFd};
 use std::os::unix::fs::MetadataExt;

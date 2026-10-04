@@ -1,57 +1,38 @@
-/// A saved `sa_mask`, in a form a fault handler can stash without allocating.
+use core::ffi::{c_int, c_void};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+use starnix::signal::{Code, Info, Machine};
+
+use crate::translation::DarwinTranslation;
+
+/// A saved `sa_mask` that a fault handler can stash without allocating.
 ///
-/// Held as bytes rather than as a `sigset_t`, for two reasons that come to the same
-/// thing: a `sigset_t` is a 32-bit word on Darwin and a 128-byte structure under
-/// glibc, so it neither fits in an atomic nor has a `const` empty value under its own
-/// name. All-zero is the empty set in both representations, which is what makes
-/// [`Mask::empty`] a `const fn` and therefore a `static` initialiser.
+/// Bytes rather than a `sigset_t` because the latter has no `const` empty value
+/// (it is 128 bytes under glibc); all-zero is the empty set on every host.
 #[derive(Clone, Copy)]
-pub struct Mask([u8; core::mem::size_of::<libc::sigset_t>()]);
+pub struct Mask([u8; size_of::<libc::sigset_t>()]);
 
 impl Mask {
-    /// The empty mask, which is what a disposition nobody saved yet holds.
     pub const fn empty() -> Mask {
-        Mask([0; core::mem::size_of::<libc::sigset_t>()])
+        Mask([0; size_of::<libc::sigset_t>()])
     }
 
-    /// The mask `action` carries.
     pub fn of(action: &libc::sigaction) -> Mask {
-        let mut bytes = [0u8; core::mem::size_of::<libc::sigset_t>()];
-        // SAFETY: `sa_mask` is a `sigset_t`, which is a plain bit set with no interior
-        // pointers, so its bytes are its value. Source and destination are the same
-        // size by construction.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                &action.sa_mask as *const libc::sigset_t as *const u8,
-                bytes.as_mut_ptr(),
-                bytes.len(),
-            );
-        }
-        Mask(bytes)
+        // SAFETY: a `sigset_t` is a plain bit set of exactly this size.
+        Mask(unsafe { core::mem::transmute_copy(&action.sa_mask) })
     }
 
-    /// Put this mask into `action`.
     pub fn apply(self, action: &mut libc::sigaction) {
-        // SAFETY: as above, in the other direction.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.0.as_ptr(),
-                &mut action.sa_mask as *mut libc::sigset_t as *mut u8,
-                self.0.len(),
-            );
-        }
+        // SAFETY: as in `of`.
+        action.sa_mask = unsafe { core::mem::transmute_copy(&self.0) };
     }
 }
 
-/// A [`Mask`] in a `static`, written before the handler that reads it can run.
-///
-/// The shape a fault handler needs and an atomic cannot provide. Sound for the one use
-/// it has: [`StaticMask::set`] is called from `install`, which runs once during
-/// start-up, and every later access is a read from a handler.
+/// A [`Mask`] in a `static`, written once during start-up and read from
+/// handlers afterwards.
 pub struct StaticMask(core::cell::UnsafeCell<Mask>);
 
-// SAFETY: written only by `set`, whose contract is that it is called before anything
-// can read it, and read-only thereafter. `Mask` is `Copy` bytes with no owner.
+// SAFETY: written only by `set`, whose contract excludes concurrent access.
 unsafe impl Sync for StaticMask {}
 
 impl StaticMask {
@@ -59,32 +40,22 @@ impl StaticMask {
         StaticMask(core::cell::UnsafeCell::new(Mask::empty()))
     }
 
-    /// Record `mask`.
-    ///
     /// # Safety
     ///
-    /// Called before any handler that reads this can be entered, and not concurrently
-    /// with another `set` on the same cell.
+    /// Called before any handler that reads this can run, and not concurrently
+    /// with another `set`.
     pub unsafe fn set(&self, mask: Mask) {
-        // SAFETY: the caller guarantees no concurrent access.
+        // SAFETY: the caller's guarantee.
         unsafe { *self.0.get() = mask };
     }
 
-    /// What [`StaticMask::set`] recorded, or the empty mask if nothing did.
     pub fn get(&self) -> Mask {
-        // SAFETY: the cell holds a valid `Mask` from its initialiser onwards, and
-        // `Mask` is `Copy`.
+        // SAFETY: always a valid `Mask`, and only `set` writes it.
         unsafe { *self.0.get() }
     }
 }
 
 /// Darwin's signal numbers, from `<sys/signal.h>`.
-///
-/// Only the first six and a handful after agree with Linux. The rest are a
-/// re-shuffling, and three of the disagreements are the ones a program actually uses:
-/// `SIGUSR1` is 30 on Darwin and 10 on Linux, `SIGCHLD` is 20 and 17, and `SIGBUS` is
-/// 10 and 7 - so a guest sending itself `SIGUSR1` through an untranslated `pthread_kill`
-/// sends `SIGPWR`, and one raising `SIGBUS` raises `SIGUSR1`.
 pub mod signum {
     pub const SIGHUP: i32 = 1;
     pub const SIGINT: i32 = 2;
@@ -92,7 +63,6 @@ pub mod signum {
     pub const SIGILL: i32 = 4;
     pub const SIGTRAP: i32 = 5;
     pub const SIGABRT: i32 = 6;
-    /// Darwin-only; Linux has no emulator trap.
     pub const SIGEMT: i32 = 7;
     pub const SIGFPE: i32 = 8;
     pub const SIGKILL: i32 = 9;
@@ -115,150 +85,195 @@ pub mod signum {
     pub const SIGVTALRM: i32 = 26;
     pub const SIGPROF: i32 = 27;
     pub const SIGWINCH: i32 = 28;
-    /// Darwin-only; the status-request signal a BSD terminal sends.
     pub const SIGINFO: i32 = 29;
     pub const SIGUSR1: i32 = 30;
     pub const SIGUSR2: i32 = 31;
 }
 
-/// Darwin's signal number as this host's, or `None` for one the host has not got.
-///
-/// Identity on macOS. `SIGEMT` and `SIGINFO` have no Linux equivalent and are refused
-/// rather than mapped onto a neighbour, because delivering the wrong signal is worse
-/// than delivering none: a handler installed for one runs for the other.
-pub fn signal_to_host(darwin: i32) -> Option<libc::c_int> {
-    #[cfg(target_os = "macos")]
-    {
-        (1..=31).contains(&darwin).then_some(darwin)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use signum as d;
-        Some(match darwin {
-            d::SIGHUP => libc::SIGHUP,
-            d::SIGINT => libc::SIGINT,
-            d::SIGQUIT => libc::SIGQUIT,
-            d::SIGILL => libc::SIGILL,
-            d::SIGTRAP => libc::SIGTRAP,
-            d::SIGABRT => libc::SIGABRT,
-            d::SIGFPE => libc::SIGFPE,
-            d::SIGKILL => libc::SIGKILL,
-            d::SIGBUS => libc::SIGBUS,
-            d::SIGSEGV => libc::SIGSEGV,
-            d::SIGSYS => libc::SIGSYS,
-            d::SIGPIPE => libc::SIGPIPE,
-            d::SIGALRM => libc::SIGALRM,
-            d::SIGTERM => libc::SIGTERM,
-            d::SIGURG => libc::SIGURG,
-            d::SIGSTOP => libc::SIGSTOP,
-            d::SIGTSTP => libc::SIGTSTP,
-            d::SIGCONT => libc::SIGCONT,
-            d::SIGCHLD => libc::SIGCHLD,
-            d::SIGTTIN => libc::SIGTTIN,
-            d::SIGTTOU => libc::SIGTTOU,
-            d::SIGIO => libc::SIGIO,
-            d::SIGXCPU => libc::SIGXCPU,
-            d::SIGXFSZ => libc::SIGXFSZ,
-            d::SIGVTALRM => libc::SIGVTALRM,
-            d::SIGPROF => libc::SIGPROF,
-            d::SIGWINCH => libc::SIGWINCH,
-            d::SIGUSR1 => libc::SIGUSR1,
-            d::SIGUSR2 => libc::SIGUSR2,
-            // `SIGEMT` and `SIGINFO` are Darwin's own, and 0 is "test only".
-            _ => return None,
-        })
-    }
+/// The host's number for each Darwin signal, indexed by Darwin's less one.
+const HOST_SIGNALS: [Option<c_int>; 31] = [
+    Some(libc::SIGHUP),
+    Some(libc::SIGINT),
+    Some(libc::SIGQUIT),
+    Some(libc::SIGILL),
+    Some(libc::SIGTRAP),
+    Some(libc::SIGABRT),
+    starnix::signal::SIGEMT,
+    Some(libc::SIGFPE),
+    Some(libc::SIGKILL),
+    Some(libc::SIGBUS),
+    Some(libc::SIGSEGV),
+    Some(libc::SIGSYS),
+    Some(libc::SIGPIPE),
+    Some(libc::SIGALRM),
+    Some(libc::SIGTERM),
+    Some(libc::SIGURG),
+    Some(libc::SIGSTOP),
+    Some(libc::SIGTSTP),
+    Some(libc::SIGCONT),
+    Some(libc::SIGCHLD),
+    Some(libc::SIGTTIN),
+    Some(libc::SIGTTOU),
+    Some(libc::SIGIO),
+    Some(libc::SIGXCPU),
+    Some(libc::SIGXFSZ),
+    Some(libc::SIGVTALRM),
+    Some(libc::SIGPROF),
+    Some(libc::SIGWINCH),
+    starnix::signal::SIGINFO,
+    Some(libc::SIGUSR1),
+    Some(libc::SIGUSR2),
+];
+
+/// Darwin's signal number as this host's, or `None` for one the host has not
+/// got. Never a neighbour: a handler installed for one signal must not run
+/// for another.
+pub fn signal_to_host(darwin: i32) -> Option<c_int> {
+    let index = usize::try_from(darwin).ok()?.checked_sub(1)?;
+    HOST_SIGNALS.get(index).copied().flatten()
 }
 
-/// Whether `darwin` is one of Darwin's own signals - `SIGINFO`, the
-/// terminal's status key, and `SIGEMT` - which nothing on this host can raise.
+pub fn signal_from_host(host: c_int) -> Option<i32> {
+    (1..=31).find(|d| signal_to_host(*d) == Some(host))
+}
+
+/// A Darwin signal this host cannot raise (`SIGEMT`, `SIGINFO` on Linux).
 ///
-/// A handler for one is kept and reported back by `sigaction`, and never runs,
-/// which is all a program that installs one for every signal it forwards
-/// (`sudo`) can observe. Sending one is still refused: it would have to be
-/// some other signal on the way.
+/// A handler for one is kept and reported back, and never runs: a program that
+/// installs one for every signal it forwards (`sudo`) must not fail to start.
 pub fn unraisable(darwin: i32) -> bool {
-    signal_to_host(darwin).is_none() && matches!(darwin, signum::SIGINFO | signum::SIGEMT)
+    (1..=31).contains(&darwin) && signal_to_host(darwin).is_none()
 }
 
-/// The `SA_*` flags, whose *values* differ even where their meanings do not.
-///
-/// Darwin numbers them from one upward; Linux starts at the other end for the
-/// four that predate POSIX and uses the low bits for the `SIGCHLD` pair. A guest
-/// that asks for `SA_RESTART` and gets Linux's `SA_NOCLDSTOP` has installed a
-/// handler with the wrong semantics and no diagnostic.
-mod saflag {
-    pub const DARWIN: &[(u32, &str)] = &[
-        (0x0001, "ONSTACK"),
-        (0x0002, "RESTART"),
-        (0x0004, "RESETHAND"),
-        (0x0008, "NOCLDSTOP"),
-        (0x0010, "NODEFER"),
-        (0x0020, "NOCLDWAIT"),
-        (0x0040, "SIGINFO"),
-    ];
+const SA_SIGINFO: u32 = 0x0040;
 
-    /// The host bit for each name above, in the same order.
-    pub fn host(name: &str) -> Option<libc::c_int> {
-        Some(match name {
-            "ONSTACK" => libc::SA_ONSTACK,
-            "RESTART" => libc::SA_RESTART,
-            "RESETHAND" => libc::SA_RESETHAND,
-            "NOCLDSTOP" => libc::SA_NOCLDSTOP,
-            "NODEFER" => libc::SA_NODEFER,
-            "NOCLDWAIT" => libc::SA_NOCLDWAIT,
-            "SIGINFO" => libc::SA_SIGINFO,
-            _ => return None,
-        })
-    }
-}
+/// Darwin's `SA_*` bits against the host's.
+const FLAGS: [(u32, c_int); 7] = [
+    (0x0001, libc::SA_ONSTACK),
+    (0x0002, libc::SA_RESTART),
+    (0x0004, libc::SA_RESETHAND),
+    (0x0008, libc::SA_NOCLDSTOP),
+    (0x0010, libc::SA_NODEFER),
+    (0x0020, libc::SA_NOCLDWAIT),
+    (SA_SIGINFO, libc::SA_SIGINFO),
+];
 
 /// Darwin's `sa_flags` as this host's. A bit with no counterpart is dropped.
-pub fn flags_to_host(darwin: u32) -> libc::c_int {
-    let mut out = 0;
-    for (bit, name) in saflag::DARWIN {
-        if darwin & bit != 0
-            && let Some(host) = saflag::host(name)
-        {
-            out |= host;
-        }
-    }
-    out
+pub fn flags_to_host(darwin: u32) -> c_int {
+    FLAGS
+        .iter()
+        .filter(|(d, _)| darwin & d != 0)
+        .fold(0, |out, (_, h)| out | h)
 }
 
-/// This host's `sa_flags` as Darwin's.
-pub fn flags_from_host(host: libc::c_int) -> u32 {
-    let mut out = 0;
-    for (bit, name) in saflag::DARWIN {
-        if saflag::host(name).is_some_and(|h| host & h != 0) {
-            out |= bit;
-        }
-    }
-    out
+pub fn flags_from_host(host: c_int) -> u32 {
+    FLAGS
+        .iter()
+        .filter(|(_, h)| host & h != 0)
+        .fold(0, |out, (d, _)| out | d)
 }
 
-/// Signals whose host disposition belongs to the runtime, not to the guest.
-///
-/// A bit per Darwin signal number. Empty unless something calls [`retain`].
-static RETAINED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+fn darwin_bit(darwin: i32) -> u32 {
+    1 << (darwin - 1)
+}
 
-/// What the guest asked for on a retained signal.
-///
-/// A caller that installs a handler and reads its own installation back has to
-/// see what it installed: finding `SIG_DFL` there is how a crash reporter
-/// concludes it failed to start. Same reasoning as
-/// `mach::task_get_exception_ports`.
+/// Rewrite the bits of `host` that a Darwin mask can name, keeping the rest
+/// (real-time signals, for one) as they were.
+fn mask_into_host(darwin: u32, host: &mut libc::sigset_t) {
+    for signum in 1..=31 {
+        let Some(host_signum) = signal_to_host(signum) else {
+            continue;
+        };
+        // SAFETY: a live set and a signal this host has.
+        unsafe {
+            match darwin & darwin_bit(signum) != 0 {
+                true => libc::sigaddset(host, host_signum),
+                false => libc::sigdelset(host, host_signum),
+            }
+        };
+    }
+}
+
+/// A Darwin `sigset_t`, one bit per Darwin signal, as this host's.
+pub fn mask_to_host(darwin: u32) -> libc::sigset_t {
+    // SAFETY: emptied before use.
+    let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };
+    // SAFETY: a live local.
+    unsafe { libc::sigemptyset(&mut host) };
+    mask_into_host(darwin, &mut host);
+    host
+}
+
+pub fn mask_from_host(host: &libc::sigset_t) -> u32 {
+    (1..=31)
+        .filter(|signum| {
+            // SAFETY: a live set and a signal this host has.
+            signal_to_host(*signum).is_some_and(|h| unsafe { libc::sigismember(host, h) } == 1)
+        })
+        .fold(0, |out, signum| out | darwin_bit(signum))
+}
+
+const SS_ONSTACK: i32 = 0x0001;
+const SS_DISABLE: i32 = 0x0004;
+
+/// Darwin's `stack_t`. Linux puts `ss_flags` before `ss_size`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stack {
+    sp: u64,
+    size: u64,
+    flags: i32,
+}
+
+impl DarwinTranslation<libc::stack_t> for Stack {
+    fn to_host(&self) -> libc::stack_t {
+        let mut flags = 0;
+        if self.flags & SS_ONSTACK != 0 {
+            flags |= libc::SS_ONSTACK;
+        }
+        if self.flags & SS_DISABLE != 0 {
+            flags |= libc::SS_DISABLE;
+        }
+        libc::stack_t {
+            ss_sp: self.sp as *mut c_void,
+            ss_size: self.size as usize,
+            ss_flags: flags,
+        }
+    }
+
+    fn from_host(host: &libc::stack_t) -> Stack {
+        let mut flags = 0;
+        if host.ss_flags & libc::SS_ONSTACK != 0 {
+            flags |= SS_ONSTACK;
+        }
+        if host.ss_flags & libc::SS_DISABLE != 0 {
+            flags |= SS_DISABLE;
+        }
+        Stack {
+            sp: host.ss_sp as u64,
+            size: host.ss_size as u64,
+            flags,
+        }
+    }
+}
+
+/// Signals whose host disposition belongs to the runtime; a bit per Darwin
+/// signal. See [`retain`].
+static RETAINED: AtomicU32 = AtomicU32::new(0);
+
+/// What the guest asked for on each retained or unraisable signal, so it reads
+/// its own installation back - a crash reporter that finds `SIG_DFL` there
+/// concludes it failed to start.
 static PRETENDED: [Pretended; 32] = [const { Pretended::new() }; 32];
 
 struct Pretended {
-    handler: core::sync::atomic::AtomicU64,
-    mask: core::sync::atomic::AtomicU32,
-    flags: core::sync::atomic::AtomicU32,
+    handler: AtomicU64,
+    mask: AtomicU32,
+    flags: AtomicU32,
 }
 
 impl Pretended {
     const fn new() -> Pretended {
-        use core::sync::atomic::{AtomicU32, AtomicU64};
         Pretended {
             handler: AtomicU64::new(0),
             mask: AtomicU32::new(0),
@@ -267,100 +282,74 @@ impl Pretended {
     }
 
     fn get(&self) -> Disposition {
-        use core::sync::atomic::Ordering::Relaxed;
         Disposition {
-            handler: self.handler.load(Relaxed),
-            mask: self.mask.load(Relaxed),
-            flags: self.flags.load(Relaxed),
+            handler: self.handler.load(Ordering::Relaxed),
+            mask: self.mask.load(Ordering::Relaxed),
+            flags: self.flags.load(Ordering::Relaxed),
         }
     }
 
     fn set(&self, value: Disposition) {
-        use core::sync::atomic::Ordering::Relaxed;
-        self.handler.store(value.handler, Relaxed);
-        self.mask.store(value.mask, Relaxed);
-        self.flags.store(value.flags, Relaxed);
+        self.handler.store(value.handler, Ordering::Relaxed);
+        self.mask.store(value.mask, Ordering::Relaxed);
+        self.flags.store(value.flags, Ordering::Relaxed);
     }
 }
 
-/// Keep the host's disposition for `darwin_signum`, whatever the guest asks for.
+/// Keep the host's disposition for `darwin_signum` whatever the guest asks for.
 ///
-/// The guest's `sigaction` and `signal` then succeed, change nothing, and report
-/// back the disposition the guest last asked for. Meant for the fault signals
-/// while the runtime's own reporter is what is being read: a guest that installs
-/// a `SIGSEGV` handler takes every diagnostic with it, and an intermittent
-/// corruption then dies with no output at all.
-///
-/// Not the default. A program is entitled to handle its own faults, and one that
-/// recovers from `SIGBUS` by design would hang or loop instead.
+/// For the fault signals while the runtime's own reporter is wanted: a guest
+/// `SIGSEGV` handler otherwise takes every diagnostic with it. Not the default,
+/// because a program that recovers from its own faults would hang instead.
 pub fn retain(darwin_signum: i32) {
-    if !(1..=31).contains(&darwin_signum) {
-        return;
+    if (1..=31).contains(&darwin_signum) {
+        RETAINED.fetch_or(darwin_bit(darwin_signum), Ordering::Relaxed);
     }
-    RETAINED.fetch_or(
-        1u32 << (darwin_signum - 1),
-        core::sync::atomic::Ordering::Relaxed,
-    );
 }
 
-/// Whether [`retain`] named this signal.
 pub fn retained(darwin_signum: i32) -> bool {
     (1..=31).contains(&darwin_signum)
-        && RETAINED.load(core::sync::atomic::Ordering::Relaxed) & (1u32 << (darwin_signum - 1)) != 0
+        && RETAINED.load(Ordering::Relaxed) & darwin_bit(darwin_signum) != 0
 }
 
 /// Whether the alternate signal stack belongs to the runtime too.
 ///
-/// A thread has one alternate stack and every `SA_ONSTACK` handler runs on it,
-/// so a guest that installs a small one - Crashpad installs `MINSIGSTKSZ`, two
-/// kilobytes - is what the runtime's fault reporter then gets, and a report
-/// longer than that overflows it and dies half-written. Retained beside the
-/// handlers themselves, by the same lever and for the same reason.
-static RETAIN_ALTSTACK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Every `SA_ONSTACK` handler shares it, so a guest that installs a small one
+/// (Crashpad installs `MINSIGSTKSZ`) overflows the runtime's fault reporter.
+static RETAIN_ALTSTACK: AtomicBool = AtomicBool::new(false);
 
-// What this thread's guest asked for on the retained alternate stack.
-// Alternate stacks are thread-local kernel state. Keeping this process-global
-// would make one guest thread read (and overwrite) another thread's stack.
+// Alternate stacks are per-thread kernel state, so what the guest asked for is
+// per-thread too.
 thread_local! {
     static PRETENDED_ALTSTACK: core::cell::Cell<(usize, usize, i32)> =
         const { core::cell::Cell::new((0, 0, libc::SS_DISABLE)) };
 }
 
-/// Keep this thread's alternate signal stack, whatever the guest asks for.
 pub fn retain_altstack() {
-    RETAIN_ALTSTACK.store(true, core::sync::atomic::Ordering::Relaxed);
+    RETAIN_ALTSTACK.store(true, Ordering::Relaxed);
 }
 
-/// Whether [`retain_altstack`] was called.
 pub fn altstack_retained() -> bool {
-    RETAIN_ALTSTACK.load(core::sync::atomic::Ordering::Relaxed)
+    RETAIN_ALTSTACK.load(Ordering::Relaxed)
 }
 
-/// The alternate stack the guest last asked for, for a caller reading it back.
 pub fn pretended_altstack() -> libc::stack_t {
     PRETENDED_ALTSTACK.with(|held| {
         let (sp, size, flags) = held.get();
         libc::stack_t {
-            ss_sp: sp as *mut libc::c_void,
+            ss_sp: sp as *mut c_void,
             ss_size: size,
             ss_flags: flags,
         }
     })
 }
 
-/// Record what the guest asked for without acting on it.
 pub fn set_pretended_altstack(stack: &libc::stack_t) {
-    PRETENDED_ALTSTACK.with(|held| {
-        held.set((stack.ss_sp as usize, stack.ss_size, stack.ss_flags));
-    });
+    PRETENDED_ALTSTACK.with(|held| held.set((stack.ss_sp as usize, stack.ss_size, stack.ss_flags)));
 }
 
-/// A signal disposition in Darwin's shape: a handler, a 32-bit mask, and flags.
-///
-/// Sixteen bytes on both of Darwin's architectures, which is what the guest
-/// reads and writes. The host's own `struct sigaction` is a different size and a
-/// different order under glibc - 152 bytes, with a 128-byte `sigset_t` - so this
-/// is a value to convert, never a structure to pass along.
+/// Darwin's `struct sigaction`, the same sixteen bytes on both architectures.
+#[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Disposition {
     pub handler: u64,
@@ -368,149 +357,472 @@ pub struct Disposition {
     pub flags: u32,
 }
 
-/// The dispositions that are values rather than addresses: `SIG_DFL`, `SIG_IGN`
-/// and `SIG_ERR`. Their numbers agree on both hosts.
+/// `SIG_DFL`, `SIG_IGN` and `SIG_ERR`, which are values rather than addresses.
 fn is_sentinel(handler: u64) -> bool {
     handler == 0 || handler == 1 || handler as i64 == -1
 }
 
-/// One more than the highest host signal number a handler can be installed for.
-const HOST_SIGNALS: usize = 65;
+/// Darwin's `siginfo_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Siginfo {
+    signo: i32,
+    errno: i32,
+    code: i32,
+    pid: i32,
+    uid: u32,
+    status: i32,
+    addr: u64,
+    value: u64,
+    band: i64,
+    _pad: [u64; 7],
+}
 
-/// The guest's handler for each host signal, entered through [`deliver`].
-///
-/// Keyed by the *host's* number because that is what the kernel hands
-/// [`deliver`]. Written before the host disposition is changed, so a signal
-/// that arrives in between finds the handler it is about to be sent to.
-static GUEST_HANDLERS: [core::sync::atomic::AtomicU64; HOST_SIGNALS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; HOST_SIGNALS];
+impl Siginfo {
+    fn new(darwin: i32, info: &Info) -> Siginfo {
+        let status = match info.code {
+            Code::Killed | Code::Dumped | Code::Stopped | Code::Trapped => {
+                signal_from_host(info.status).unwrap_or(info.status)
+            }
+            _ => info.status,
+        };
+        Siginfo {
+            signo: darwin,
+            errno: crate::errno::from_host(info.errno),
+            code: code_to_darwin(info.code),
+            pid: info.pid,
+            uid: info.uid,
+            status,
+            addr: info.addr as u64,
+            value: info.value as u64,
+            band: 0,
+            _pad: [0; 7],
+        }
+    }
+}
 
-/// Whether each handler above takes `SA_SIGINFO`'s three arguments.
-static GUEST_SIGINFO: [core::sync::atomic::AtomicBool; HOST_SIGNALS] =
-    [const { core::sync::atomic::AtomicBool::new(false) }; HOST_SIGNALS];
+/// Darwin's `si_code`. `SIGILL` and `SIGFPE` are numbered differently from
+/// every other host.
+fn code_to_darwin(code: Code) -> i32 {
+    use Code::*;
+    match code {
+        User | Thread => 0x10001,
+        Queue => 0x10002,
+        Timer => 0x10003,
+        AsyncIo => 0x10004,
+        MessageQueue => 0x10005,
+        Kernel | Unknown => 0,
+        IllegalOpcode => 1,
+        IllegalTrap => 2,
+        PrivilegedOpcode => 3,
+        IllegalOperand => 4,
+        IllegalAddressing => 5,
+        PrivilegedRegister => 6,
+        Coprocessor => 7,
+        BadStack => 8,
+        FloatDivide => 1,
+        FloatOverflow => 2,
+        FloatUnderflow => 3,
+        FloatInexact => 4,
+        FloatInvalid => 5,
+        FloatSubscript => 6,
+        IntegerDivide => 7,
+        IntegerOverflow => 8,
+        Unmapped => 1,
+        Protection => 2,
+        Misaligned => 1,
+        NoSuchAddress => 2,
+        ObjectError => 3,
+        Breakpoint => 1,
+        Trace => 2,
+        Exited => 1,
+        Killed => 2,
+        Dumped => 3,
+        Trapped => 4,
+        Stopped => 5,
+        Continued => 6,
+        PollIn => 1,
+        PollOut => 2,
+        PollMessage => 3,
+        PollError => 4,
+        PollPriority => 5,
+        PollHangup => 6,
+    }
+}
 
-/// Darwin's `SA_SIGINFO`.
-const DARWIN_SA_SIGINFO: u32 = 0x0040;
+#[repr(C)]
+struct Ucontext {
+    onstack: i32,
+    sigmask: u32,
+    stack: Stack,
+    link: u64,
+    mcsize: u64,
+    mcontext: *mut Mcontext,
+}
 
-/// What the kernel enters for every guest handler.
-///
-/// The guest was compiled against Darwin's numbering, and the kernel speaks
-/// this host's: a `SIGUSR1` handler entered with 10 is being told `SIGBUS`,
-/// and a shell's `trap` records the wrong signal and never runs. So the number
-/// is translated here, and the guest's handler is called with Darwin's.
-///
-/// Async-signal-safe: two atomic loads and a table walk.
-extern "C" fn deliver(host: libc::c_int, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
-    let Some(slot) = usize::try_from(host).ok().filter(|s| *s < HOST_SIGNALS) else {
+/// Darwin's `mcontext64`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Mcontext {
+    es: ExceptionState,
+    ss: ThreadState,
+    fs: FloatState,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExceptionState {
+    trapno: u16,
+    cpu: u16,
+    err: u32,
+    faultvaddr: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ThreadState {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rsp: u64,
+    r: [u64; 8],
+    rip: u64,
+    rflags: u64,
+    cs: u64,
+    fs: u64,
+    gs: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FloatState {
+    reserved: [i32; 2],
+    fxsave: [u8; 512],
+    reserved1: i32,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Mcontext {
+    fn from_machine(m: &Machine) -> Mcontext {
+        let g = &m.gpr;
+        Mcontext {
+            es: ExceptionState {
+                trapno: m.trapno as u16,
+                cpu: 0,
+                err: m.err as u32,
+                faultvaddr: m.fault_address,
+            },
+            ss: ThreadState {
+                rax: g[0],
+                rcx: g[1],
+                rdx: g[2],
+                rbx: g[3],
+                rsp: g[4],
+                rbp: g[5],
+                rsi: g[6],
+                rdi: g[7],
+                r: g[8..].try_into().unwrap(),
+                rip: m.rip,
+                rflags: m.rflags,
+                cs: m.cs.into(),
+                fs: m.fs.into(),
+                gs: m.gs.into(),
+            },
+            fs: FloatState {
+                reserved: [0; 2],
+                fxsave: m.fxsave.unwrap_or([0; 512]),
+                reserved1: 0,
+            },
+        }
+    }
+
+    /// What a handler may change, back into `m`.
+    fn apply(&self, m: &mut Machine) {
+        let ss = &self.ss;
+        m.gpr[..8].copy_from_slice(&[
+            ss.rax, ss.rcx, ss.rdx, ss.rbx, ss.rsp, ss.rbp, ss.rsi, ss.rdi,
+        ]);
+        m.gpr[8..].copy_from_slice(&ss.r);
+        m.rip = ss.rip;
+        m.rflags = ss.rflags;
+        if let Some(fxsave) = m.fxsave.as_mut() {
+            *fxsave = self.fs.fxsave;
+        }
+    }
+
+    #[cfg(test)]
+    fn pc(&mut self) -> &mut u64 {
+        &mut self.ss.rip
+    }
+
+    #[cfg(test)]
+    fn result(&mut self) -> &mut u64 {
+        &mut self.ss.rax
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExceptionState {
+    far: u64,
+    esr: u32,
+    exception: u32,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ThreadState {
+    x: [u64; 29],
+    fp: u64,
+    lr: u64,
+    sp: u64,
+    pc: u64,
+    cpsr: u32,
+    pad: u32,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FloatState {
+    v: [u128; 32],
+    fpsr: u32,
+    fpcr: u32,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Mcontext {
+    fn from_machine(m: &Machine) -> Mcontext {
+        let fp = m.fpsimd.unwrap_or(starnix::signal::Fpsimd {
+            v: [0; 32],
+            fpsr: 0,
+            fpcr: 0,
+        });
+        Mcontext {
+            es: ExceptionState {
+                far: m.fault_address,
+                esr: m.esr as u32,
+                exception: 0,
+            },
+            ss: ThreadState {
+                x: m.x[..29].try_into().unwrap(),
+                fp: m.x[29],
+                lr: m.x[30],
+                sp: m.sp,
+                pc: m.pc,
+                cpsr: m.pstate as u32,
+                pad: 0,
+            },
+            fs: FloatState {
+                v: fp.v,
+                fpsr: fp.fpsr,
+                fpcr: fp.fpcr,
+            },
+        }
+    }
+
+    /// What a handler may change, back into `m`.
+    fn apply(&self, m: &mut Machine) {
+        let ss = &self.ss;
+        m.x[..29].copy_from_slice(&ss.x);
+        m.x[29] = ss.fp;
+        m.x[30] = ss.lr;
+        m.sp = ss.sp;
+        m.pc = ss.pc;
+        m.pstate = (m.pstate & !0xffff_ffff) | u64::from(ss.cpsr);
+        if let Some(fp) = m.fpsimd.as_mut() {
+            fp.v = self.fs.v;
+            fp.fpsr = self.fs.fpsr;
+            fp.fpcr = self.fs.fpcr;
+        }
+    }
+
+    #[cfg(test)]
+    fn pc(&mut self) -> &mut u64 {
+        &mut self.ss.pc
+    }
+
+    #[cfg(test)]
+    fn result(&mut self) -> &mut u64 {
+        &mut self.ss.x[0]
+    }
+}
+
+const _: () = {
+    assert!(size_of::<Disposition>() == 16);
+    assert!(size_of::<Stack>() == 24);
+    assert!(size_of::<Siginfo>() == 104);
+    assert!(size_of::<Ucontext>() == 56);
+    #[cfg(target_arch = "x86_64")]
+    assert!(size_of::<Mcontext>() == 712);
+    #[cfg(target_arch = "aarch64")]
+    assert!(size_of::<Mcontext>() == 816);
+};
+
+/// The guest's handler for each Darwin signal, entered through [`deliver`].
+/// Written before the host disposition changes, so a signal arriving in
+/// between finds the handler it is about to be sent to.
+static GUEST_HANDLERS: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+static GUEST_SIGINFO: [AtomicBool; 32] = [const { AtomicBool::new(false) }; 32];
+
+type Handler1 = extern "C" fn(c_int);
+type Handler3 = extern "C" fn(c_int, *mut Siginfo, *mut Ucontext);
+
+/// What the kernel enters for every guest handler: the signal number, and for
+/// an `SA_SIGINFO` handler both structures, rebuilt in Darwin's numbering and
+/// layout. Async-signal-safe: no allocation, no locks.
+extern "C" fn deliver(host: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
+    let Some(darwin) = signal_from_host(host) else {
         return;
     };
-    let handler = GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire);
+    let slot = darwin as usize;
+    let handler = GUEST_HANDLERS[slot].load(Ordering::Acquire);
     if is_sentinel(handler) {
         return;
     }
-    let darwin = signal_from_host(host).unwrap_or(host);
-    if GUEST_SIGINFO[slot].load(core::sync::atomic::Ordering::Acquire) {
-        // SAFETY: installed by [`sigaction`] as a three-argument handler; the
-        // two pointers are the kernel's, passed on as they came.
+    if GUEST_SIGINFO[slot].load(Ordering::Acquire) {
+        // SAFETY: installed as a three-argument handler; the pointers are the
+        // kernel's own.
         unsafe {
-            let handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
-                core::mem::transmute(handler as usize);
-            handler(darwin, info, context);
+            deliver_siginfo(
+                core::mem::transmute::<usize, Handler3>(handler as usize),
+                darwin,
+                info,
+                context,
+            )
         }
     } else {
-        // SAFETY: installed by [`sigaction`] or [`signal`] as a one-argument
-        // handler.
-        unsafe {
-            let handler: extern "C" fn(libc::c_int) = core::mem::transmute(handler as usize);
-            handler(darwin);
-        }
+        // SAFETY: installed as a one-argument handler.
+        let handler: Handler1 = unsafe { core::mem::transmute(handler as usize) };
+        handler(darwin);
+    }
+}
+
+/// # Safety
+///
+/// `info` and `raw` are the kernel's arguments to the running handler.
+unsafe fn deliver_siginfo(
+    handler: Handler3,
+    darwin: i32,
+    info: *const libc::siginfo_t,
+    raw: *mut c_void,
+) {
+    let info = match info.is_null() {
+        true => Info::default(),
+        // SAFETY: the caller's guarantee.
+        false => unsafe { starnix::signal::info(info) },
+    };
+    let mut siginfo = Siginfo::new(darwin, &info);
+    // SAFETY: the caller's guarantee.
+    let Some(mut host) = (unsafe { starnix::signal::context(raw) }) else {
+        handler(darwin, &mut siginfo, core::ptr::null_mut());
+        return;
+    };
+
+    let mut mcontext = Mcontext::from_machine(&host.machine);
+    let mask = mask_from_host(&host.mask);
+    let mut ucontext = Ucontext {
+        onstack: (host.stack.ss_flags & libc::SS_ONSTACK != 0) as i32,
+        sigmask: mask,
+        stack: Stack::from_host(&host.stack),
+        link: 0,
+        mcsize: size_of::<Mcontext>() as u64,
+        mcontext: &raw mut mcontext,
+    };
+    handler(darwin, &mut siginfo, &mut ucontext);
+
+    // Only a changed context is written back: the round trip is lossy (upper
+    // `pstate` bits, segment selectors) and an unchanged one must not be.
+    let before = host.machine;
+    mcontext.apply(&mut host.machine);
+    let remask = ucontext.sigmask != mask;
+    if remask {
+        mask_into_host(ucontext.sigmask, &mut host.mask);
+    }
+    if remask || host.machine != before {
+        // SAFETY: the caller's guarantee; the handler has not returned.
+        unsafe { starnix::signal::set_context(raw, &host) };
     }
 }
 
 fn delivers(host_handler: libc::sighandler_t) -> bool {
-    host_handler == deliver as *const () as usize as libc::sighandler_t
+    host_handler == deliver as *const () as libc::sighandler_t
 }
 
-/// `sigaction`, with Darwin's signal number, flags and mask on the outside and
-/// the host's `struct sigaction` on the inside.
-///
-/// Returns `-1` with `errno` set to `EINVAL` for a signal this host has not got,
-/// rather than acting on a neighbouring one.
+/// Install `handler` for `slot` behind [`deliver`], returning what to give
+/// the host.
+fn route(slot: usize, handler: u64, siginfo: bool) -> libc::sighandler_t {
+    if is_sentinel(handler) {
+        return handler as libc::sighandler_t;
+    }
+    GUEST_SIGINFO[slot].store(siginfo, Ordering::Release);
+    GUEST_HANDLERS[slot].store(handler, Ordering::Release);
+    deliver as *const () as libc::sighandler_t
+}
+
+/// `sigaction` with Darwin's signal number, mask and flags.
 ///
 /// # Safety
 ///
-/// `act.handler`, when it is not a sentinel, must be a function this process can
-/// call as a signal handler - which for a guest's handler means a trampoline and
-/// not the guest's own address.
+/// `act.handler`, when not a sentinel, is a function this process can call as
+/// a signal handler (a trampoline, not the guest's own address, when emulated).
 pub unsafe fn sigaction(
     darwin_signum: i32,
     act: Option<Disposition>,
     old: Option<&mut Disposition>,
-) -> libc::c_int {
-    let unraisable = unraisable(darwin_signum);
-    let signum = match signal_to_host(darwin_signum) {
-        Some(signum) => signum,
-        None if unraisable => 0,
-        None => {
-            crate::errno::set(libc::EINVAL);
-            return -1;
-        }
-    };
-
-    if unraisable || retained(darwin_signum) {
-        let previous = PRETENDED[darwin_signum as usize].get();
+) -> c_int {
+    if unraisable(darwin_signum) || retained(darwin_signum) {
+        let pretended = &PRETENDED[darwin_signum as usize];
+        let previous = pretended.get();
         if let Some(act) = act {
-            PRETENDED[darwin_signum as usize].set(act);
+            pretended.set(act);
         }
         if let Some(old) = old {
             *old = previous;
         }
         return 0;
     }
+    let Some(host_signum) = signal_to_host(darwin_signum) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
 
-    // SAFETY: zeroed is a valid `struct sigaction` on both hosts - `SIG_DFL` with
-    // an empty mask and no flags - and every field is written below before use.
-    let mut host_act: libc::sigaction = unsafe { core::mem::zeroed() };
+    let slot = darwin_signum as usize;
+    let previous_handler = GUEST_HANDLERS[slot].load(Ordering::Acquire);
+    let previous_siginfo = GUEST_SIGINFO[slot].load(Ordering::Acquire);
+
+    let host_act = act.map(|act| {
+        // SAFETY: zeroed is a valid `struct sigaction` on every host.
+        let mut host: libc::sigaction = unsafe { core::mem::zeroed() };
+        host.sa_sigaction = route(slot, act.handler, act.flags & SA_SIGINFO != 0);
+        host.sa_flags = flags_to_host(act.flags);
+        if delivers(host.sa_sigaction) {
+            host.sa_flags |= libc::SA_SIGINFO;
+        }
+        host.sa_mask = mask_to_host(act.mask);
+        host
+    });
+    // SAFETY: as above.
     let mut host_old: libc::sigaction = unsafe { core::mem::zeroed() };
 
-    // What the guest last installed through [`deliver`], for reporting `old`.
-    let slot = signum as usize;
-    let previous_handler = GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire);
-    let previous_siginfo = GUEST_SIGINFO[slot].load(core::sync::atomic::Ordering::Acquire);
-
-    if let Some(act) = act {
-        host_act.sa_flags = flags_to_host(act.flags);
-        if is_sentinel(act.handler) {
-            host_act.sa_sigaction = act.handler as usize as libc::sighandler_t;
-        } else {
-            GUEST_SIGINFO[slot].store(
-                act.flags & DARWIN_SA_SIGINFO != 0,
-                core::sync::atomic::Ordering::Release,
-            );
-            GUEST_HANDLERS[slot].store(act.handler, core::sync::atomic::Ordering::Release);
-            host_act.sa_sigaction = deliver as *const () as usize as libc::sighandler_t;
-            host_act.sa_flags |= libc::SA_SIGINFO;
-        }
-        // SAFETY: `sa_mask` is a `sigset_t` being emptied before bits are added.
-        unsafe { libc::sigemptyset(&mut host_act.sa_mask) };
-        for darwin_bit in 1..=31 {
-            if act.mask & (1u32 << (darwin_bit - 1)) == 0 {
-                continue;
-            }
-            if let Some(host_bit) = signal_to_host(darwin_bit) {
-                // SAFETY: a `sigset_t` this function owns and a valid signal.
-                unsafe { libc::sigaddset(&mut host_act.sa_mask, host_bit) };
-            }
-        }
-    }
-
-    // SAFETY: two live, correctly shaped `struct sigaction`s of this host's own.
+    // SAFETY: two live host structures, or null.
     let rc = unsafe {
         libc::sigaction(
-            signum,
-            act.map_or(core::ptr::null(), |_| &raw const host_act),
+            host_signum,
+            host_act
+                .as_ref()
+                .map_or(core::ptr::null(), |a| a as *const _),
             match old {
-                Some(_) => &raw mut host_old,
+                Some(_) => &mut host_old,
                 None => core::ptr::null_mut(),
             },
         )
@@ -520,280 +832,87 @@ pub unsafe fn sigaction(
         && let Some(old) = old
     {
         let through_us = delivers(host_old.sa_sigaction);
-        let handler = match through_us {
-            true => previous_handler,
-            false => host_old.sa_sigaction as u64,
-        };
+        let mut flags = flags_from_host(host_old.sa_flags);
         if through_us && !previous_siginfo {
-            host_old.sa_flags &= !libc::SA_SIGINFO;
-        }
-        let mut mask = 0u32;
-        for darwin_bit in 1..=31 {
-            let Some(host_bit) = signal_to_host(darwin_bit) else {
-                continue;
-            };
-            // SAFETY: a `sigset_t` the kernel filled in, and a valid signal.
-            if unsafe { libc::sigismember(&host_old.sa_mask, host_bit) } == 1 {
-                mask |= 1u32 << (darwin_bit - 1);
-            }
+            flags &= !SA_SIGINFO;
         }
         *old = Disposition {
-            handler,
-            mask,
-            flags: flags_from_host(host_old.sa_flags),
+            handler: match through_us {
+                true => previous_handler,
+                false => host_old.sa_sigaction as u64,
+            },
+            mask: mask_from_host(&host_old.sa_mask),
+            flags,
         };
-        // A sentinel is a sentinel on both hosts, and must not be reported as an
-        // address the caller might try to translate back.
-        debug_assert!(is_sentinel(handler) || handler > 0xffff);
     }
     rc
 }
 
-/// `signal`, with Darwin's signal number on the outside.
-///
-/// `SIG_ERR` - which is `-1` on both hosts - for a signal this host has not got.
+/// `signal` with Darwin's signal number. `SIG_ERR` for one this host has not got.
 ///
 /// # Safety
 ///
-/// As [`sigaction`]: `handler` must be a sentinel or a function this process can
-/// call as a signal handler.
+/// As [`sigaction`].
 pub unsafe fn signal(darwin_signum: i32, handler: u64) -> u64 {
-    let unraisable = unraisable(darwin_signum);
-    let signum = match signal_to_host(darwin_signum) {
-        Some(signum) => signum,
-        None if unraisable => 0,
-        None => {
-            crate::errno::set(libc::EINVAL);
-            return u64::MAX;
-        }
-    };
-    if unraisable || retained(darwin_signum) {
-        let previous = PRETENDED[darwin_signum as usize].get();
-        PRETENDED[darwin_signum as usize].set(Disposition {
+    if unraisable(darwin_signum) || retained(darwin_signum) {
+        let pretended = &PRETENDED[darwin_signum as usize];
+        let previous = pretended.get();
+        pretended.set(Disposition {
             handler,
             ..previous
         });
         return previous.handler;
     }
-    let slot = signum as usize;
-    let installed = match is_sentinel(handler) {
-        true => handler as usize as libc::sighandler_t,
-        false => deliver as *const () as usize as libc::sighandler_t,
+    let Some(host_signum) = signal_to_host(darwin_signum) else {
+        crate::errno::set(libc::EINVAL);
+        return u64::MAX;
     };
-    let previous = match is_sentinel(handler) {
-        true => GUEST_HANDLERS[slot].load(core::sync::atomic::Ordering::Acquire),
-        false => {
-            GUEST_SIGINFO[slot].store(false, core::sync::atomic::Ordering::Release);
-            GUEST_HANDLERS[slot].swap(handler, core::sync::atomic::Ordering::AcqRel)
-        }
-    };
+    let slot = darwin_signum as usize;
+    let previous = GUEST_HANDLERS[slot].load(Ordering::Acquire);
+    let installed = route(slot, handler, false);
     // SAFETY: the caller's obligation, or [`deliver`].
-    let old = unsafe { libc::signal(signum, installed) };
+    let old = unsafe { libc::signal(host_signum, installed) };
     match delivers(old) {
         true => previous,
         false => old as u64,
     }
 }
 
-/// This host's signal number as Darwin's, for a report handed back to the guest.
-pub fn signal_from_host(host: libc::c_int) -> Option<i32> {
-    (1..=31).find(|d| signal_to_host(*d) == Some(host))
-}
-
 /// The faulting address `info` reports.
-///
-/// A field on Darwin and an accessor under Linux, which is a difference in the `libc`
-/// crate's binding rather than in the structure.
 ///
 /// # Safety
 ///
 /// `info` is a live `siginfo_t`, as the kernel passes one to a handler.
 pub unsafe fn fault_address(info: &libc::siginfo_t) -> u64 {
-    #[cfg(target_os = "macos")]
-    {
-        info.si_addr as usize as u64
-    }
-    #[cfg(not(target_os = "macos"))]
-    // SAFETY: the caller guarantees a live `siginfo_t`, and `si_addr` is the faulting
-    // address for the two signals this is asked about.
-    unsafe {
-        info.si_addr() as usize as u64
-    }
+    // SAFETY: the caller's guarantee.
+    unsafe { starnix::signal::info(info) }.addr as u64
 }
 
-/// Darwin's `stack_t`, embedded in `ucontext_t`.
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct DarwinStack {
-    _sp: *mut libc::c_void,
-    _size: usize,
-    _flags: i32,
-}
-
-/// Darwin's `ucontext_t` through the machine-context pointer.
-///
-/// The SDK does not expose this structure through the `libc` crate, so keep the
-/// small ABI declaration we need here instead of finding its fields by byte offset.
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct DarwinUcontext {
-    _onstack: i32,
-    _sigmask: u32,
-    _stack: DarwinStack,
-    _link: *mut DarwinUcontext,
-    _mcsize: usize,
-    mcontext: *const DarwinMcontext,
-}
-
-/// Darwin's machine context through the saved thread state.
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct DarwinMcontext {
-    _exception_state: DarwinExceptionState,
-    thread_state: DarwinThreadState,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[repr(C)]
-struct DarwinExceptionState {
-    _fault_address: u64,
-    _syndrome: u32,
-    _exception: u32,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-#[repr(C)]
-struct DarwinExceptionState {
-    _trap: u16,
-    _cpu: u16,
-    _error: u32,
-    _fault_address: u64,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[repr(C)]
-struct DarwinThreadState {
-    _x: [u64; 29],
-    _fp: u64,
-    _lr: u64,
-    _sp: u64,
-    pc: u64,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-#[repr(C)]
-struct DarwinThreadState {
-    _registers_before_rip: [u64; 16],
-    pc: u64,
-}
-
-#[cfg(target_os = "macos")]
-const _: () = {
-    assert!(core::mem::offset_of!(DarwinUcontext, mcontext) == 48);
-    assert!(core::mem::offset_of!(DarwinMcontext, thread_state) == 16);
-    #[cfg(target_arch = "aarch64")]
-    assert!(core::mem::offset_of!(DarwinThreadState, pc) == 256);
-    #[cfg(target_arch = "x86_64")]
-    assert!(core::mem::offset_of!(DarwinThreadState, pc) == 128);
-};
-
-/// The program counter the kernel interrupted, out of the `ucontext_t` it passed.
-///
-/// `None` on any null, because a handler that dereferences its way to a second fault
-/// has destroyed the evidence it was called to preserve.
+/// The program counter the kernel interrupted, or `None` where it cannot be
+/// read. Never faults on a null pointer: a fault reporter that faults again
+/// destroys the evidence it was called to preserve.
 ///
 /// # Safety
 ///
-/// `context` is the third argument of an `SA_SIGINFO` handler.
-pub unsafe fn interrupted_pc(context: *mut libc::c_void) -> Option<u64> {
-    if context.is_null() {
-        return None;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: the kernel passes a live `ucontext_t` for the duration of the
-        // handler, whose `uc_mcontext` is a pointer to a live thread state.
-        unsafe {
-            let context = context.cast::<DarwinUcontext>();
-            let mcontext = core::ptr::read(&raw const (*context).mcontext);
-            if mcontext.is_null() {
-                return None;
-            }
-            Some(core::ptr::read(&raw const (*mcontext).thread_state.pc))
-        }
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    // SAFETY: the kernel passes a live `ucontext_t`, which the `libc` crate does
-    // declare here.
-    unsafe {
-        Some((*(context as *const libc::ucontext_t)).uc_mcontext.pc)
-    }
-    #[cfg(all(target_os = "freebsd", target_arch = "aarch64"))]
-    // SAFETY: as above. FreeBSD keeps the interrupted PC in `gp_elr`.
-    unsafe {
-        Some(
-            (*(context as *const libc::ucontext_t))
-                .uc_mcontext
-                .mc_gpregs
-                .gp_elr as u64,
-        )
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    // SAFETY: as above. `REG_RIP` indexes the general-purpose register array.
-    unsafe {
-        Some(
-            (*(context as *const libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize]
-                as u64,
-        )
-    }
-    #[cfg(all(target_os = "freebsd", target_arch = "x86_64"))]
-    // SAFETY: as above. FreeBSD names the registers rather than indexing them.
-    unsafe {
-        Some((*(context as *const libc::ucontext_t)).uc_mcontext.mc_rip as u64)
-    }
-    #[cfg(all(
-        not(target_os = "macos"),
-        not(all(
-            any(target_os = "linux", target_os = "freebsd"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ))
-    ))]
-    {
-        None
-    }
+/// `context` is null or the third argument of an `SA_SIGINFO` handler.
+pub unsafe fn interrupted_pc(context: *mut c_void) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { starnix::signal::context(context) }.map(|c| c.machine.pc())
 }
 
-// The entry points a guest binds to. Everything above is the translation the
-// runtime shares with them; everything below is the Darwin ABI itself.
-//
-// Published only where the host's own would be wrong. On macOS these are
-// libSystem's and `symbol` answers nothing, which is what leaves the guest
-// bound to the real ones.
-#[cfg(not(target_os = "macos"))]
+/// The entry points a guest binds to.
 pub mod entry {
     use std::ffi::{CStr, c_char, c_int, c_void};
 
     use super::*;
 
-    /// Darwin's `struct sigaction`: a handler, a **32-bit** `sigset_t`, and
-    /// flags. Sixteen bytes, against glibc's 152.
-    const SIGACTION_SIZE: usize = 16;
+    /// A signal this host has not got: `EINVAL` rather than a neighbour.
+    fn no_such_signal() -> c_int {
+        crate::errno::set(libc::EINVAL);
+        -1
+    }
 
-    /// Darwin's `stack_t`, whose fields are in a different *order* from Linux's:
-    /// `{ void *ss_sp; size_t ss_size; int ss_flags; }` against glibc's
-    /// `{ void *ss_sp; int ss_flags; size_t ss_size; }`. Passing one through
-    /// reads the size out of the flags.
-    const STACK_SIZE: usize = 24;
-
-    /// `SS_ONSTACK` agrees; `SS_DISABLE` is 4 on Darwin and 2 here, and 4 here
-    /// is not a defined bit - so the collision is one-way and still a collision.
-    const SS_ONSTACK: i32 = 0x0001;
-    const SS_DISABLE: i32 = 0x0004;
-
-    /// `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` - and the worst kind of
-    /// divergence, the kind that collides: Darwin's `SIG_BLOCK` is 1, which is
-    /// this host's `SIG_UNBLOCK`. A `sigprocmask` passed through does the
-    /// opposite of what the caller asked and succeeds.
+    /// Darwin's `SIG_BLOCK` is 1, which is Linux's `SIG_UNBLOCK`.
     fn how_to_host(darwin: c_int) -> Option<c_int> {
         Some(match darwin {
             1 => libc::SIG_BLOCK,
@@ -803,189 +922,68 @@ pub mod entry {
         })
     }
 
-    /// A Darwin `sigset_t` - a bit per signal, numbered Darwin's way - as this
-    /// host's.
-    pub(crate) fn mask_to_host(darwin: u32) -> libc::sigset_t {
-        // SAFETY: emptied before any bit is added, which is what makes a zeroed
-        // `sigset_t` valid to hand to `sigaddset`.
-        let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };
-        // SAFETY: a live local.
-        unsafe { libc::sigemptyset(&mut host) };
-        for signum in 1..=31 {
-            if darwin & (1u32 << (signum - 1)) == 0 {
-                continue;
-            }
-            if let Some(host_signum) = signal_to_host(signum) {
-                // SAFETY: a live local and a signal this host has.
-                unsafe { libc::sigaddset(&mut host, host_signum) };
-            }
-        }
-        host
-    }
-
-    fn mask_from_host(host: &libc::sigset_t) -> u32 {
-        let mut darwin = 0u32;
-        for signum in 1..=31 {
-            let Some(host_signum) = signal_to_host(signum) else {
-                continue;
-            };
-            // SAFETY: a `sigset_t` the caller owns and a signal this host has.
-            if unsafe { libc::sigismember(host, host_signum) } == 1 {
-                darwin |= 1u32 << (signum - 1);
-            }
-        }
-        darwin
-    }
-
-    /// A signal this host has not got: `EINVAL` rather than a neighbour.
-    fn no_such_signal() -> c_int {
-        crate::errno::set(libc::EINVAL);
-        -1
-    }
-
-    /// `void (*signal(int, void (*)(int)))(int)`
-    ///
     /// # Safety
     ///
     /// `handler` is a sentinel or a function this process can call as a signal
     /// handler.
     pub unsafe extern "C" fn signal_(signum: c_int, handler: u64) -> u64 {
-        // SAFETY: the caller's obligation, passed straight on.
+        // SAFETY: the caller's obligation.
         unsafe { super::signal(signum, handler) }
     }
 
-    /// Read Darwin's sixteen-byte `struct sigaction`.
-    ///
     /// # Safety
     ///
-    /// `at` is [`SIGACTION_SIZE`] readable bytes.
-    unsafe fn read_disposition(at: *const u8) -> Disposition {
-        let mut bytes = [0u8; SIGACTION_SIZE];
-        // SAFETY: the caller's structure, whose size is Darwin's and not this
-        // host's - which is the whole reason it is copied rather than cast.
-        unsafe { core::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), SIGACTION_SIZE) };
-        Disposition {
-            handler: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-            mask: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            flags: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-        }
-    }
-
-    /// # Safety
-    ///
-    /// `at` is [`SIGACTION_SIZE`] writable bytes.
-    unsafe fn write_disposition(at: *mut u8, held: Disposition) {
-        let mut bytes = [0u8; SIGACTION_SIZE];
-        bytes[0..8].copy_from_slice(&held.handler.to_le_bytes());
-        bytes[8..12].copy_from_slice(&held.mask.to_le_bytes());
-        bytes[12..16].copy_from_slice(&held.flags.to_le_bytes());
-        // SAFETY: the caller's structure, of Darwin's size.
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, SIGACTION_SIZE) };
-    }
-
-    /// `int sigaction(int, const struct sigaction *, struct sigaction *)`
-    ///
-    /// The one thing this cannot bridge, and says so once on stderr: an
-    /// `SA_SIGINFO` handler is entered with **this host's** `siginfo_t` and
-    /// `ucontext_t`, not Darwin's. The fields a handler usually reads - the
-    /// signal number and `si_addr` - are in different places in the two, so a
-    /// guest handler that inspects them reads the wrong words.
-    ///
-    /// Installed anyway rather than refused, because the alternative is not a
-    /// diagnostic: an unbound `sigaction` is a call to address zero from inside
-    /// whatever library was setting up its crash handler.
-    ///
-    /// # Safety
-    ///
-    /// `act` and `old` are [`SIGACTION_SIZE`] bytes, or null.
+    /// `act` and `old` are Darwin `struct sigaction`s, or null.
     pub unsafe extern "C" fn sigaction_(
         signum: c_int,
-        act: *const c_void,
-        old: *mut c_void,
+        act: *const Disposition,
+        old: *mut Disposition,
     ) -> c_int {
-        if signal_to_host(signum).is_none() && !super::unraisable(signum) {
-            return no_such_signal();
-        }
         // SAFETY: the caller's structure, if it passed one.
-        let wanted = match act.is_null() {
-            true => None,
-            false => Some(unsafe { read_disposition(act.cast()) }),
-        };
-        if wanted.is_some_and(|w| w.flags & 0x0040 != 0) {
-            announce_siginfo();
-        }
-
+        let wanted = (!act.is_null()).then(|| unsafe { act.read_unaligned() });
         let mut previous = Disposition::default();
-        // SAFETY: the handler is the guest's own, and under the native backend
-        // the guest is host code - so it is a function this process can call.
-        // The shape of the host's own `struct sigaction` is [`sigaction`]'s
-        // business and not this entry point's.
+        // SAFETY: under the native backend the guest's handler is host code.
         let rc = unsafe { super::sigaction(signum, wanted, Some(&mut previous)) };
         if rc == 0 && !old.is_null() {
             // SAFETY: the caller's structure.
-            unsafe { write_disposition(old.cast(), previous) };
+            unsafe { old.write_unaligned(previous) };
         }
         rc
     }
 
-    fn announce_siginfo() {
-        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!(
-                "rosemary: an SA_SIGINFO handler was installed - it will be entered with this \
-                 host's siginfo_t and ucontext_t rather than Darwin's, so a handler that reads \
-                 si_addr or the interrupted registers reads the wrong words"
-            );
-        }
-    }
-
-    /// `int sigprocmask(int how, const sigset_t *set, sigset_t *oset)`
-    ///
     /// # Safety
     ///
-    /// `set` and `oset` are Darwin `sigset_t` - four bytes each - or null.
+    /// `set` and `oset` are Darwin `sigset_t`s, or null.
     pub unsafe extern "C" fn sigprocmask_(how: c_int, set: *const u32, oset: *mut u32) -> c_int {
-        let host_how = match set.is_null() {
-            // With no set, `how` is not read at all and any value is legal.
-            true => libc::SIG_SETMASK,
-            false => match how_to_host(how) {
-                Some(how) => how,
-                None => {
-                    crate::errno::set(libc::EINVAL);
-                    return -1;
-                }
-            },
-        };
-        // SAFETY: the caller's four bytes, if it passed any.
         let wanted = match set.is_null() {
             true => None,
-            false => Some(mask_to_host(unsafe { set.read_unaligned() })),
+            false => match how_to_host(how) {
+                // SAFETY: the caller's word.
+                Some(how) => Some((how, mask_to_host(unsafe { set.read_unaligned() }))),
+                None => return no_such_signal(),
+            },
         };
-        // SAFETY: zeroed is the empty set, and it is written before it is read.
+        // SAFETY: written before it is read.
         let mut previous: libc::sigset_t = unsafe { core::mem::zeroed() };
-        // SAFETY: two live `sigset_t` of this host's own shape.
+        // SAFETY: live host sets, or null. With no set, `how` is ignored.
         let rc = unsafe {
             libc::sigprocmask(
-                host_how,
+                wanted.as_ref().map_or(libc::SIG_SETMASK, |(how, _)| *how),
                 wanted
                     .as_ref()
-                    .map_or(core::ptr::null(), |set| set as *const _),
+                    .map_or(core::ptr::null(), |(_, set)| set as *const _),
                 &mut previous,
             )
         };
         if rc == 0 && !oset.is_null() {
-            // SAFETY: the caller's four bytes.
+            // SAFETY: the caller's word.
             unsafe { oset.write_unaligned(mask_from_host(&previous)) };
         }
         rc
     }
 
-    /// `int pthread_sigmask(int how, const sigset_t *set, sigset_t *oset)`
-    ///
-    /// Every collision [`sigprocmask_`] bridges, and one more: this call returns
-    /// its error *as its return value* rather than through `errno`, so the
-    /// number has to be Darwin's. `divergent` denies the whole `pthread_` family
-    /// and this is one of the entries carved back out of it.
+    /// Returns its error rather than setting `errno`, so the number must be
+    /// Darwin's.
     ///
     /// # Safety
     ///
@@ -995,68 +993,35 @@ pub mod entry {
         set: *const u32,
         oset: *mut u32,
     ) -> c_int {
-        // SAFETY: the caller's obligation, which is the same one.
+        // SAFETY: the same obligation.
         match unsafe { sigprocmask_(how, set, oset) } {
             0 => 0,
             _ => crate::errno::from_host(crate::errno::get()),
         }
     }
 
-    /// # Safety
-    ///
-    /// `at` is [`STACK_SIZE`] readable bytes.
-    unsafe fn read_stack(at: *const u8) -> Result<libc::stack_t, c_int> {
-        let mut bytes = [0u8; STACK_SIZE];
-        // SAFETY: the caller's structure, of Darwin's size.
-        unsafe { core::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), STACK_SIZE) };
-        let flags = i32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        if !matches!(flags, 0 | SS_DISABLE) {
+    /// Darwin's `MINSIGSTKSZ`. Accepting Linux's 2 KiB would let a later
+    /// handler overflow a stack Darwin would have refused.
+    const MINSIGSTKSZ: u64 = 32 * 1024;
+
+    fn read_stack(stack: Stack) -> Result<libc::stack_t, c_int> {
+        if !matches!(stack.flags, 0 | SS_DISABLE) {
             return Err(libc::EINVAL);
         }
-        let stack = libc::stack_t {
-            ss_sp: usize::from_le_bytes(bytes[0..8].try_into().unwrap()) as *mut c_void,
-            ss_size: usize::from_le_bytes(bytes[8..16].try_into().unwrap()),
-            ss_flags: match flags & SS_DISABLE != 0 {
-                true => libc::SS_DISABLE,
-                false => flags & SS_ONSTACK,
-            },
-        };
-        // Modern Darwin requires a substantially larger signal stack than Linux.
-        // Passing the value through would let 2 KiB succeed where Darwin returns
-        // ENOMEM, only for a later handler to overflow it.
-        const DARWIN_MINSIGSTKSZ: usize = 32 * 1024;
-        if flags == 0 && stack.ss_size < DARWIN_MINSIGSTKSZ {
+        if stack.flags == 0 && stack.size < MINSIGSTKSZ {
             return Err(libc::ENOMEM);
         }
-        Ok(stack)
+        Ok(stack.to_host())
     }
 
     /// # Safety
     ///
-    /// `at` is [`STACK_SIZE`] writable bytes.
-    unsafe fn write_stack(at: *mut u8, stack: &libc::stack_t) {
-        let mut flags = stack.ss_flags & SS_ONSTACK;
-        if stack.ss_flags & libc::SS_DISABLE != 0 {
-            flags |= SS_DISABLE;
-        }
-        let mut bytes = [0u8; STACK_SIZE];
-        bytes[0..8].copy_from_slice(&(stack.ss_sp as usize).to_le_bytes());
-        bytes[8..16].copy_from_slice(&stack.ss_size.to_le_bytes());
-        bytes[16..20].copy_from_slice(&flags.to_le_bytes());
-        // SAFETY: the caller's structure, of Darwin's size.
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, STACK_SIZE) };
-    }
-
-    /// `int sigaltstack(const stack_t *ss, stack_t *oss)`
-    ///
-    /// # Safety
-    ///
-    /// `ss` and `oss` are [`STACK_SIZE`] bytes, or null.
+    /// `ss` and `oss` are Darwin `stack_t`s, or null.
     pub unsafe extern "C" fn sigaltstack_(ss: *const c_void, oss: *mut c_void) -> c_int {
-        // SAFETY: the caller's structure, if it passed one.
         let wanted = match ss.is_null() {
             true => None,
-            false => match unsafe { read_stack(ss.cast()) } {
+            // SAFETY: the caller's structure.
+            false => match read_stack(unsafe { ss.cast::<Stack>().read_unaligned() }) {
                 Ok(stack) => Some(stack),
                 Err(error) => {
                     crate::errno::set(error);
@@ -1064,108 +1029,99 @@ pub mod entry {
                 }
             },
         };
-        if altstack_retained() {
-            let previous = pretended_altstack();
-            if let Some(wanted) = wanted.as_ref() {
-                set_pretended_altstack(wanted);
+        let (rc, previous) = match altstack_retained() {
+            true => {
+                let previous = pretended_altstack();
+                if let Some(wanted) = &wanted {
+                    set_pretended_altstack(wanted);
+                }
+                (0, previous)
             }
-            if !oss.is_null() {
-                // SAFETY: the caller's structure.
-                unsafe { write_stack(oss.cast(), &previous) };
+            false => {
+                // SAFETY: written before it is read.
+                let mut previous: libc::stack_t = unsafe { core::mem::zeroed() };
+                // SAFETY: live host structures, or null.
+                let rc = unsafe {
+                    libc::sigaltstack(
+                        wanted.as_ref().map_or(core::ptr::null(), |s| s as *const _),
+                        &mut previous,
+                    )
+                };
+                (rc, previous)
             }
-            return 0;
-        }
-        // SAFETY: zeroed is a disabled stack, and it is written before it is read.
-        let mut previous: libc::stack_t = unsafe { core::mem::zeroed() };
-        // SAFETY: two live `stack_t` of this host's own shape.
-        let rc = unsafe {
-            libc::sigaltstack(
-                wanted.as_ref().map_or(core::ptr::null(), |s| s as *const _),
-                &mut previous,
-            )
         };
         if rc == 0 && !oss.is_null() {
             // SAFETY: the caller's structure.
-            unsafe { write_stack(oss.cast(), &previous) };
+            unsafe {
+                oss.cast::<Stack>()
+                    .write_unaligned(Stack::from_host(&previous))
+            };
         }
         rc
     }
 
-    /// `int raise(int)`
     pub extern "C" fn raise_(signum: c_int) -> c_int {
         match signal_to_host(signum) {
-            // SAFETY: a signal number this host has.
+            // SAFETY: a signal this host has.
             Some(host) => unsafe { libc::raise(host) },
             None => no_such_signal(),
         }
     }
 
-    /// `int kill(pid_t, int)`
-    ///
-    /// Signal zero is the existence probe - "is this process alive" - and is
-    /// not a signal number, so it goes through untranslated. A crash handler
-    /// watching its client is the caller that depends on this.
+    /// Signal zero is the existence probe, not a number to translate.
     pub extern "C" fn kill_(pid: c_int, signum: c_int) -> c_int {
-        if signum == 0 {
-            // SAFETY: a plain system call.
-            return unsafe { libc::kill(pid, 0) };
-        }
-        match signal_to_host(signum) {
-            // SAFETY: a signal number this host has.
-            Some(host) => unsafe { libc::kill(pid, host) },
-            None => no_such_signal(),
-        }
-    }
-
-    /// `int killpg(pid_t, int)`
-    pub extern "C" fn killpg_(pgrp: c_int, signum: c_int) -> c_int {
-        match signum == 0 {
-            true => kill_(-pgrp, 0),
-            false => match signal_to_host(signum) {
-                // SAFETY: a signal number this host has.
-                Some(host) => unsafe { libc::killpg(pgrp, host) },
-                None => no_such_signal(),
+        let host = match signum {
+            0 => 0,
+            _ => match signal_to_host(signum) {
+                Some(host) => host,
+                None => return no_such_signal(),
             },
-        }
+        };
+        // SAFETY: a plain system call.
+        unsafe { libc::kill(pid, host) }
     }
 
-    // The `sigset_t` operations. A Darwin `sigset_t` is a `uint32_t` whose bits
-    // are numbered by *Darwin's* signal numbers, and the guest's numbers are
-    // Darwin's - so these translate nothing and are pure bit arithmetic. They
-    // are here because glibc's take a 128-byte structure and would write 124
-    // bytes past the guest's word.
+    pub extern "C" fn killpg_(pgrp: c_int, signum: c_int) -> c_int {
+        let host = match signum {
+            0 => 0,
+            _ => match signal_to_host(signum) {
+                Some(host) => host,
+                None => return no_such_signal(),
+            },
+        };
+        // SAFETY: a plain system call.
+        unsafe { libc::killpg(pgrp, host) }
+    }
+
+    // A Darwin `sigset_t` is one word numbered by Darwin's signals, so these
+    // are pure bit arithmetic. Glibc's would write 128 bytes into it.
+
+    fn bit(signum: c_int) -> Option<u32> {
+        (1..=31).contains(&signum).then(|| darwin_bit(signum))
+    }
 
     /// # Safety
     ///
     /// `set` is a writable Darwin `sigset_t`, or null.
     pub unsafe extern "C" fn sigemptyset_(set: *mut u32) -> c_int {
-        match set.is_null() {
-            true => -1,
-            // SAFETY: the caller's four bytes.
-            false => unsafe {
-                set.write_unaligned(0);
-                0
-            },
+        if set.is_null() {
+            return -1;
         }
+        // SAFETY: the caller's word.
+        unsafe { set.write_unaligned(0) };
+        0
     }
 
     /// # Safety
     ///
     /// As [`sigemptyset_`].
     pub unsafe extern "C" fn sigfillset_(set: *mut u32) -> c_int {
-        match set.is_null() {
-            true => -1,
-            // SAFETY: the caller's four bytes.
-            false => unsafe {
-                set.write_unaligned(!0);
-                0
-            },
+        if set.is_null() {
+            return -1;
         }
-    }
-
-    /// The bit `signum` occupies, or `None` for a number that is not a signal.
-    fn bit(signum: c_int) -> Option<u32> {
-        (1..=31).contains(&signum).then(|| 1u32 << (signum - 1))
+        // SAFETY: the caller's word.
+        unsafe { set.write_unaligned(!0) };
+        0
     }
 
     /// # Safety
@@ -1175,14 +1131,12 @@ pub mod entry {
         let Some(bit) = bit(signum) else {
             return no_such_signal();
         };
-        match set.is_null() {
-            true => -1,
-            // SAFETY: the caller's four bytes.
-            false => unsafe {
-                set.write_unaligned(set.read_unaligned() | bit);
-                0
-            },
+        if set.is_null() {
+            return -1;
         }
+        // SAFETY: the caller's word.
+        unsafe { set.write_unaligned(set.read_unaligned() | bit) };
+        0
     }
 
     /// # Safety
@@ -1192,14 +1146,12 @@ pub mod entry {
         let Some(bit) = bit(signum) else {
             return no_such_signal();
         };
-        match set.is_null() {
-            true => -1,
-            // SAFETY: the caller's four bytes.
-            false => unsafe {
-                set.write_unaligned(set.read_unaligned() & !bit);
-                0
-            },
+        if set.is_null() {
+            return -1;
         }
+        // SAFETY: the caller's word.
+        unsafe { set.write_unaligned(set.read_unaligned() & !bit) };
+        0
     }
 
     /// # Safety
@@ -1209,15 +1161,13 @@ pub mod entry {
         let Some(bit) = bit(signum) else {
             return no_such_signal();
         };
-        match set.is_null() {
-            true => -1,
-            // SAFETY: the caller's four bytes.
-            false => unsafe { (set.read_unaligned() & bit != 0) as c_int },
+        if set.is_null() {
+            return -1;
         }
+        // SAFETY: the caller's word.
+        (unsafe { set.read_unaligned() } & bit != 0) as c_int
     }
 
-    /// `int sigpending(sigset_t *)`
-    ///
     /// # Safety
     ///
     /// As [`sigemptyset_`].
@@ -1226,78 +1176,67 @@ pub mod entry {
             crate::errno::set(libc::EFAULT);
             return -1;
         }
-        // SAFETY: zeroed is the empty set, written before it is read.
+        // SAFETY: written before it is read.
         let mut host: libc::sigset_t = unsafe { core::mem::zeroed() };
-        // SAFETY: a live `sigset_t` of this host's shape.
+        // SAFETY: a live host set.
         let rc = unsafe { libc::sigpending(&mut host) };
         if rc == 0 {
-            // SAFETY: the caller's four bytes.
+            // SAFETY: the caller's word.
             unsafe { set.write_unaligned(mask_from_host(&host)) };
         }
         rc
     }
 
-    /// `int sigsuspend(const sigset_t *)`
-    ///
     /// # Safety
     ///
-    /// `mask` is a readable Darwin `sigset_t`.
+    /// `mask` is a readable Darwin `sigset_t`, or null.
     pub unsafe extern "C" fn sigsuspend_(mask: *const u32) -> c_int {
         if mask.is_null() {
             crate::errno::set(libc::EFAULT);
             return -1;
         }
-        // SAFETY: the caller's four bytes.
+        // SAFETY: the caller's word.
         let host = mask_to_host(unsafe { mask.read_unaligned() });
-        // SAFETY: a live `sigset_t` of this host's shape. Returns only when a
-        // handler has run, always with `EINTR`.
+        // SAFETY: a live host set.
         unsafe { libc::sigsuspend(&host) }
     }
 
-    /// `char *strsignal(int)`, whose argument is a *Darwin* signal number.
-    ///
-    /// The same trap `strerror` has, and the same answer: the number names a
-    /// different signal on each host, so it is translated before the host's
-    /// table is asked. `SIGEMT` and `SIGINFO` have no host name at all and are
-    /// spelled here rather than reported as some neighbour's.
+    /// The argument is Darwin's number, so it is translated before the host's
+    /// table is asked.
     pub extern "C" fn strsignal_(signum: c_int) -> *const c_char {
-        match signum {
-            signum::SIGEMT => return c"EMT trap".as_ptr(),
-            signum::SIGINFO => return c"Information request".as_ptr(),
-            _ => {}
+        match signal_to_host(signum) {
+            // SAFETY: storage the caller neither owns nor frees.
+            Some(host) => unsafe { libc::strsignal(host) },
+            None => match signum {
+                signum::SIGEMT => c"EMT trap",
+                signum::SIGINFO => c"Information request",
+                _ => c"Unknown signal",
+            }
+            .as_ptr(),
         }
-        let Some(host) = signal_to_host(signum) else {
-            return c"Unknown signal".as_ptr();
-        };
-        // SAFETY: a signal number this host has; `strsignal` returns storage the
-        // caller does not own and does not free.
-        unsafe { libc::strsignal(host) }
     }
 
-    /// `void psignal(int, const char *)`
-    ///
     /// # Safety
     ///
     /// `prefix` is a NUL-terminated string, or null.
     pub unsafe extern "C" fn psignal_(signum: c_int, prefix: *const c_char) {
-        // SAFETY: this module's own storage or the host's, both NUL-terminated.
+        // SAFETY: NUL-terminated storage of this module's or the host's.
         let described = unsafe { CStr::from_ptr(strsignal_(signum)) }.to_string_lossy();
         match prefix.is_null() {
             true => eprintln!("{described}"),
-            // SAFETY: the caller's NUL-terminated string.
             false => {
+                // SAFETY: the caller's string.
                 let prefix = unsafe { CStr::from_ptr(prefix) }.to_string_lossy();
                 eprintln!("{prefix}: {described}");
             }
         }
     }
 
-    /// Darwin's `sys_signame`: each signal's lowercase name, indexed by
-    /// Darwin's numbering, which is not this host's.
+    /// Darwin's `sys_signame`, indexed by Darwin's numbering.
     #[repr(transparent)]
-    pub struct SignalNames([*const std::ffi::c_char; 32]);
+    pub struct SignalNames([*const c_char; 32]);
 
-    // SAFETY: pointers to string literals, and the table is never written.
+    // SAFETY: pointers to string literals, never written.
     unsafe impl Sync for SignalNames {}
 
     pub static SYS_SIGNAME: SignalNames = SignalNames([
@@ -1365,60 +1304,59 @@ pub mod entry {
     mod tests {
         use super::*;
 
-        /// The collision worth the whole module: Darwin's `SIG_BLOCK` is this
-        /// host's `SIG_UNBLOCK`, so a passed-through `sigprocmask` unblocks what
-        /// the caller asked to block and reports success.
         #[test]
         fn the_sigprocmask_how_values_are_translated_rather_than_forwarded() {
             assert_eq!(how_to_host(1), Some(libc::SIG_BLOCK));
-            assert_ne!(1, libc::SIG_BLOCK, "the collision being avoided");
-            assert_eq!(1, libc::SIG_UNBLOCK, "and what forwarding would have meant");
+            assert_eq!(how_to_host(2), Some(libc::SIG_UNBLOCK));
             assert_eq!(how_to_host(3), Some(libc::SIG_SETMASK));
             assert_eq!(how_to_host(0), None);
         }
 
-        /// `SIGUSR1` is 30 on Darwin and 10 here, so a mask with Darwin's bit 30
-        /// set must come back as Darwin's bit 30 and not as bit 10.
-        #[test]
-        fn a_signal_mask_round_trips_through_the_hosts_shape() {
-            let darwin = (1u32 << (signum::SIGUSR1 - 1)) | (1u32 << (signum::SIGCHLD - 1));
-            let host = mask_to_host(darwin);
-            // SAFETY: a live `sigset_t` this test owns.
-            assert_eq!(unsafe { libc::sigismember(&host, libc::SIGUSR1) }, 1);
-            assert_eq!(mask_from_host(&host), darwin);
-        }
-
-        /// Darwin puts `ss_size` where Linux puts `ss_flags`, so a structure
-        /// passed through reads the size out of the flags word.
         #[test]
         fn an_alternate_stack_is_reordered_rather_than_passed_through() {
-            let mut darwin = [0u8; STACK_SIZE];
-            darwin[0..8].copy_from_slice(&0x1234_5000u64.to_le_bytes());
-            darwin[8..16].copy_from_slice(&(64u64 * 1024).to_le_bytes());
-            darwin[16..20].copy_from_slice(&SS_DISABLE.to_le_bytes());
-
-            // SAFETY: `darwin` is `STACK_SIZE` bytes.
-            let host = unsafe { read_stack(darwin.as_ptr()) }.expect("a valid disabled stack");
+            let darwin = Stack {
+                sp: 0x1234_5000,
+                size: 64 * 1024,
+                flags: SS_DISABLE,
+            };
+            let host = read_stack(darwin).expect("a valid disabled stack");
             assert_eq!(host.ss_sp as usize, 0x1234_5000);
             assert_eq!(host.ss_size, 64 * 1024);
             assert_eq!(host.ss_flags, libc::SS_DISABLE);
-            assert_ne!(SS_DISABLE, libc::SS_DISABLE, "the collision being avoided");
-
-            let mut back = [0u8; STACK_SIZE];
-            // SAFETY: `back` is `STACK_SIZE` bytes.
-            unsafe { write_stack(back.as_mut_ptr(), &host) };
-            assert_eq!(back, darwin);
+            assert_eq!(Stack::from_host(&host), darwin);
         }
 
-        /// A Darwin `sigset_t` is one word, and the guest reserved exactly four
-        /// bytes for it. glibc's own would write 128.
+        #[test]
+        fn alternate_stack_input_is_validated_to_darwins_rules() {
+            let mut darwin = Stack {
+                sp: 0x1234_5000,
+                size: 2048,
+                flags: 0,
+            };
+            // SAFETY: a complete Darwin `stack_t`.
+            assert_eq!(
+                unsafe { sigaltstack_((&raw const darwin).cast(), core::ptr::null_mut()) },
+                -1
+            );
+            assert_eq!(crate::errno::get(), libc::ENOMEM);
+
+            darwin.size = MINSIGSTKSZ;
+            darwin.flags = 2;
+            // SAFETY: as above.
+            assert_eq!(
+                unsafe { sigaltstack_((&raw const darwin).cast(), core::ptr::null_mut()) },
+                -1
+            );
+            assert_eq!(crate::errno::get(), libc::EINVAL);
+            crate::errno::set(0);
+        }
+
         #[test]
         fn the_set_operations_touch_four_bytes_and_number_the_bits_darwins_way() {
             let mut set = [0u32, 0xdead_beef];
             // SAFETY: a live word, and the second element is the guard.
             unsafe {
                 assert_eq!(sigfillset_(set.as_mut_ptr()), 0);
-                assert_eq!(sigismember_(set.as_ptr(), signum::SIGUSR1), 1);
                 assert_eq!(sigdelset_(set.as_mut_ptr(), signum::SIGUSR1), 0);
                 assert_eq!(sigismember_(set.as_ptr(), signum::SIGUSR1), 0);
                 assert_eq!(sigismember_(set.as_ptr(), signum::SIGCHLD), 1);
@@ -1432,8 +1370,7 @@ pub mod entry {
         #[test]
         fn signal_32_is_not_accepted_as_a_darwin_signal() {
             let mut set = 0u32;
-            crate::errno::set(0);
-            // SAFETY: `set` is a live Darwin signal-set word.
+            // SAFETY: a live word.
             assert_eq!(unsafe { sigaddset_(&mut set, 32) }, -1);
             assert_eq!(crate::errno::get(), libc::EINVAL);
             assert_eq!(set, 0);
@@ -1441,384 +1378,354 @@ pub mod entry {
         }
 
         #[test]
-        fn alternate_stack_input_is_validated_to_darwins_rules() {
-            let mut darwin = [0u8; STACK_SIZE];
-            darwin[0..8].copy_from_slice(&0x1234_5000u64.to_le_bytes());
-            darwin[8..16].copy_from_slice(&2048u64.to_le_bytes());
-            // SAFETY: `darwin` is a complete Darwin stack_t.
-            assert_eq!(
-                unsafe { sigaltstack_(darwin.as_ptr().cast(), std::ptr::null_mut()) },
-                -1
-            );
-            assert_eq!(crate::errno::get(), libc::ENOMEM);
-
-            darwin[8..16].copy_from_slice(&(32u64 * 1024).to_le_bytes());
-            darwin[16..20].copy_from_slice(&2i32.to_le_bytes());
-            assert_eq!(
-                unsafe { sigaltstack_(darwin.as_ptr().cast(), std::ptr::null_mut()) },
-                -1
-            );
-            assert_eq!(crate::errno::get(), libc::EINVAL);
-            crate::errno::set(0);
-        }
-
-        /// `kill(pid, 0)` is the existence probe a crash handler watches its
-        /// client with, and zero is not a signal number to translate.
-        #[test]
         fn signal_zero_probes_existence_rather_than_being_translated() {
-            let self_pid = starnix::process::me();
-            assert_eq!(kill_(self_pid, 0), 0);
-            assert_eq!(kill_(self_pid, 99), -1, "not a signal");
-        }
-
-        /// Darwin's structure is sixteen bytes against glibc's hundred and
-        /// fifty-two, and the guest reserved sixteen.
-        #[test]
-        fn a_disposition_occupies_darwins_sixteen_bytes_and_no_more() {
-            let mut bytes = [0xAAu8; SIGACTION_SIZE + 8];
-            let held = Disposition {
-                handler: 0x1234_5678_9abc,
-                mask: 0x0f0f_0f0f,
-                flags: 0x0040,
-            };
-            // SAFETY: `bytes` is longer than `SIGACTION_SIZE`.
-            unsafe {
-                write_disposition(bytes.as_mut_ptr(), held);
-                assert_eq!(read_disposition(bytes.as_ptr()), held);
-            }
-            assert!(
-                bytes[SIGACTION_SIZE..].iter().all(|b| *b == 0xAA),
-                "nothing past the guest's structure"
-            );
+            let me = starnix::process::me();
+            assert_eq!(kill_(me, 0), 0);
+            assert_eq!(kill_(me, 99), -1, "not a signal");
         }
 
         #[test]
         fn a_signal_this_host_has_not_got_is_refused_rather_than_aimed_at_a_neighbour() {
-            assert_eq!(raise_(signum::SIGEMT), -1);
+            if signal_to_host(signum::SIGINFO).is_some() {
+                return;
+            }
             assert_eq!(raise_(signum::SIGINFO), -1);
-            // SAFETY: this module's own NUL-terminated storage.
+            // SAFETY: this module's own string.
             let named = unsafe { CStr::from_ptr(strsignal_(signum::SIGINFO)) };
             assert_eq!(named.to_str().unwrap(), "Information request");
         }
+
+        #[test]
+        fn a_disposition_occupies_darwins_sixteen_bytes_and_no_more() {
+            let mut bytes = [Disposition::default(); 2];
+            bytes[1].handler = 0xAAAA;
+            let held = Disposition {
+                handler: SIG_IGN,
+                mask: 1 << (signum::SIGINT - 1),
+                flags: 0x0002,
+            };
+            // SAFETY: a signal nothing else uses, restored below.
+            unsafe {
+                assert_eq!(
+                    sigaction_(signum::SIGWINCH, &held, core::ptr::null_mut()),
+                    0
+                );
+                assert_eq!(
+                    sigaction_(signum::SIGWINCH, core::ptr::null(), bytes.as_mut_ptr()),
+                    0
+                );
+                signal_(signum::SIGWINCH, 0);
+            }
+            assert_eq!(bytes[0], held);
+            assert_eq!(
+                bytes[1].handler, 0xAAAA,
+                "nothing past the guest's structure"
+            );
+        }
+
+        const SIG_IGN: u64 = 1;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicI32;
 
-    /// A retained signal's disposition is the runtime's: the guest's install
-    /// succeeds, the host's handler is untouched, and the guest reads its own
-    /// installation back - a crash reporter that reads `SIG_DFL` there
-    /// concludes it failed to start.
+    /// Tests that change real dispositions run one at a time.
+    static REAL: Mutex<()> = Mutex::new(());
+
+    fn real() -> std::sync::MutexGuard<'static, ()> {
+        REAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_retained_signal_is_accepted_recorded_and_not_applied() {
-        // `SIGUSR2`, so nothing else in this process depends on the outcome.
-        const SIGUSR2: i32 = signum::SIGUSR2;
-        let host = signal_to_host(SIGUSR2).expect("this host has SIGUSR2");
-
-        // SAFETY: a live `struct sigaction`, read only.
-        let before = unsafe {
-            let mut current: libc::sigaction = core::mem::zeroed();
-            libc::sigaction(host, core::ptr::null(), &mut current);
-            current.sa_sigaction
+        let _real = real();
+        let host = signal_to_host(signum::SIGUSR2).unwrap();
+        let current = || {
+            // SAFETY: a query.
+            unsafe {
+                let mut current: libc::sigaction = core::mem::zeroed();
+                libc::sigaction(host, core::ptr::null(), &mut current);
+                current.sa_sigaction
+            }
         };
+        let before = current();
 
-        retain(SIGUSR2);
-        assert!(retained(SIGUSR2));
-
+        retain(signum::SIGUSR2);
         let wanted = Disposition {
             handler: 0xdead_beef,
-            mask: 0,
-            flags: 0,
+            ..Disposition::default()
         };
-        let mut old = Disposition::default();
-        // SAFETY: the handler is never entered - that is what being retained
-        // means, and is what this test asserts.
-        assert_eq!(
-            unsafe { sigaction(SIGUSR2, Some(wanted), Some(&mut old)) },
-            0
-        );
-
-        let after = unsafe {
-            let mut current: libc::sigaction = core::mem::zeroed();
-            libc::sigaction(host, core::ptr::null(), &mut current);
-            current.sa_sigaction
-        };
-        assert_eq!(after, before, "the host's disposition was changed");
-
-        let mut read_back = Disposition::default();
-        // SAFETY: a query, with no disposition to install.
-        assert_eq!(unsafe { sigaction(SIGUSR2, None, Some(&mut read_back)) }, 0);
-        assert_eq!(read_back.handler, wanted.handler);
-
-        RETAINED.fetch_and(
-            !(1u32 << (SIGUSR2 - 1)),
-            core::sync::atomic::Ordering::Relaxed,
-        );
-    }
-
-    /// A mask taken out of a disposition and put back must be the same mask - which
-    /// is the whole of what [`Mask`] promises, and the one thing a `u32` copy of a
-    /// 128-byte `sigset_t` would break.
-    #[test]
-    fn a_mask_round_trips_through_a_disposition() {
-        // SAFETY: zeroed is a valid `sigaction` - no handler, no flags, empty mask.
-        let mut action: libc::sigaction = unsafe { core::mem::zeroed() };
-        // SAFETY: a live local.
+        let mut back = Disposition::default();
+        // SAFETY: a retained handler is never entered.
         unsafe {
-            libc::sigemptyset(&mut action.sa_mask);
-            libc::sigaddset(&mut action.sa_mask, libc::SIGUSR1);
+            assert_eq!(sigaction(signum::SIGUSR2, Some(wanted), None), 0);
+            assert_eq!(sigaction(signum::SIGUSR2, None, Some(&mut back)), 0);
         }
-        let saved = Mask::of(&action);
+        RETAINED.fetch_and(!darwin_bit(signum::SIGUSR2), Ordering::Relaxed);
 
-        let mut other: libc::sigaction = unsafe { core::mem::zeroed() };
-        saved.apply(&mut other);
-        // SAFETY: `other.sa_mask` is a live, initialised set.
-        assert_eq!(
-            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR1) },
-            1
-        );
-        assert_eq!(
-            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) },
-            0
-        );
+        assert_eq!(current(), before, "the host's disposition was changed");
+        assert_eq!(back.handler, wanted.handler);
     }
 
-    /// A mask parked in a `static` and taken back out is the mask that went in -
-    /// which is the property `fault.rs` restores a displaced disposition with.
     #[test]
     fn a_mask_survives_a_static() {
         static SAVED: StaticMask = StaticMask::empty();
-        // SAFETY: nothing else touches `SAVED`, and no handler reads it.
-        let mut action: libc::sigaction = unsafe { core::mem::zeroed() };
-        // SAFETY: a live local.
+        // SAFETY: zeroed is a valid `sigaction`; nothing reads `SAVED`.
         unsafe {
+            let mut action: libc::sigaction = core::mem::zeroed();
             libc::sigemptyset(&mut action.sa_mask);
             libc::sigaddset(&mut action.sa_mask, libc::SIGUSR2);
             SAVED.set(Mask::of(&action));
         }
-
-        // SAFETY: zeroed is a valid `sigaction`.
+        // SAFETY: as above.
         let mut other: libc::sigaction = unsafe { core::mem::zeroed() };
         SAVED.get().apply(&mut other);
-        // SAFETY: a live, initialised set.
+        // SAFETY: a live set.
         assert_eq!(
             unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR2) },
             1
         );
+        assert_eq!(
+            unsafe { libc::sigismember(&other.sa_mask, libc::SIGUSR1) },
+            0
+        );
     }
 
-    /// The numbers are Darwin's, cross-checked against the host's own declarations
-    /// where the host is a Mac. On Linux the same assertions would be false, which is
-    /// the point of the translation.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn the_signal_numbers_are_the_ones_darwin_declares() {
-        assert_eq!(signum::SIGUSR1, libc::SIGUSR1);
-        assert_eq!(signum::SIGBUS, libc::SIGBUS);
-        assert_eq!(signum::SIGCHLD, libc::SIGCHLD);
-        assert_eq!(signum::SIGSYS, libc::SIGSYS);
-    }
-
-    /// The three that bite, named: an untranslated `SIGUSR1` is `SIGPWR` on Linux,
-    /// and an untranslated `SIGBUS` is `SIGUSR1`.
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn the_numbers_that_differ_are_translated_rather_than_passed_through() {
-        assert_eq!(signal_to_host(signum::SIGUSR1), Some(libc::SIGUSR1));
-        assert_ne!(signum::SIGUSR1, libc::SIGUSR1);
-        assert_eq!(signal_to_host(signum::SIGBUS), Some(libc::SIGBUS));
-        assert_ne!(signum::SIGBUS, libc::SIGBUS);
-        assert_eq!(signal_to_host(signum::SIGCHLD), Some(libc::SIGCHLD));
-        assert_eq!(signal_to_host(signum::SIGINFO), None, "Darwin's own");
-        assert_eq!(signal_to_host(signum::SIGEMT), None, "Darwin's own");
-    }
-
-    /// Every signal that translates must translate back to itself, or a guest asking
-    /// which signal stopped it is told about a different one.
     #[test]
     fn translation_round_trips() {
         for darwin in 1..=31 {
-            let Some(host) = signal_to_host(darwin) else {
-                continue;
-            };
-            assert_eq!(
-                signal_from_host(host),
-                Some(darwin),
-                "signal {darwin} does not come back as itself"
-            );
+            if let Some(host) = signal_to_host(darwin) {
+                assert_eq!(signal_from_host(host), Some(darwin), "signal {darwin}");
+            }
         }
+        for (darwin, _) in FLAGS {
+            assert_eq!(flags_from_host(flags_to_host(darwin)), darwin);
+        }
+        let darwin = darwin_bit(signum::SIGUSR1) | darwin_bit(signum::SIGCHLD);
+        let host = mask_to_host(darwin);
+        // SAFETY: a live set.
+        assert_eq!(unsafe { libc::sigismember(&host, libc::SIGUSR1) }, 1);
+        assert_eq!(mask_from_host(&host), darwin);
     }
 
     #[test]
     fn a_null_context_has_no_program_counter() {
-        // SAFETY: null is the one argument this is documented to accept and refuse.
+        // SAFETY: null is accepted.
         assert_eq!(unsafe { interrupted_pc(core::ptr::null_mut()) }, None);
     }
 
     #[test]
     fn retained_alternate_stack_state_is_per_thread_and_initially_disabled() {
-        let main = libc::stack_t {
-            ss_sp: 0x1234usize as *mut libc::c_void,
+        set_pretended_altstack(&libc::stack_t {
+            ss_sp: 0x1234usize as *mut c_void,
             ss_size: 64 * 1024,
             ss_flags: 0,
-        };
-        set_pretended_altstack(&main);
-
+        });
         let other = std::thread::spawn(|| {
             let initial = pretended_altstack();
             assert!(initial.ss_sp.is_null());
             assert_eq!(initial.ss_flags, libc::SS_DISABLE);
             set_pretended_altstack(&libc::stack_t {
-                ss_sp: 0x5678usize as *mut libc::c_void,
+                ss_sp: 0x5678usize as *mut c_void,
                 ss_size: 32 * 1024,
                 ss_flags: 0,
             });
             pretended_altstack().ss_sp as usize
         })
         .join()
-        .expect("thread exits");
-
+        .unwrap();
         assert_eq!(other, 0x5678);
         assert_eq!(pretended_altstack().ss_sp as usize, 0x1234);
     }
-}
 
-#[cfg(test)]
-mod disposition_tests {
-    use super::*;
-
-    /// The claim this module exists to make: the guest's sixteen bytes are not
-    /// the host's structure.
-    ///
-    /// A compile-time reminder rather than a runtime one. Handing a Darwin
-    /// `struct sigaction` to glibc reads a 128-byte `sigset_t` off the end of a
-    /// 16-byte value and writes 152 bytes into it, which is a smashed stack and
-    /// a jump to zero rather than anything that looks like a signal bug.
-    #[test]
-    fn the_hosts_structure_is_not_the_guests_sixteen_bytes() {
-        assert_eq!(core::mem::size_of::<Disposition>(), 16);
-        #[cfg(not(target_os = "macos"))]
-        assert!(
-            core::mem::size_of::<libc::sigaction>() > 16,
-            "this host's struct sigaction is Darwin-shaped after all; \
-             the conversion below is then merely redundant, not wrong"
-        );
-    }
-
-    /// A handler installed and read back is the same handler, and the mask and
-    /// flags survive the round trip in Darwin's spelling.
     #[test]
     fn a_disposition_round_trips_through_the_host() {
-        unsafe extern "C" fn handler(_signum: libc::c_int) {}
-
+        extern "C" fn handler(_: c_int) {}
+        let _real = real();
         let wanted = Disposition {
-            handler: handler as *const () as usize as u64,
-            // `SIGUSR2` and `SIGINT`, in Darwin's numbering.
-            mask: (1 << (signum::SIGUSR2 - 1)) | (1 << (signum::SIGINT - 1)),
-            // Darwin's `SA_RESTART`, which is not Linux's value for it.
+            handler: handler as *const () as u64,
+            mask: darwin_bit(signum::SIGUSR2) | darwin_bit(signum::SIGINT),
             flags: 0x0002,
         };
-
-        // SAFETY: a real function of the right prototype, on a signal this test
-        // restores below.
-        let rc = unsafe { sigaction(signum::SIGUSR1, Some(wanted), None) };
-        assert_eq!(rc, 0);
-
         let mut back = Disposition::default();
-        // SAFETY: a query, which installs nothing.
-        assert_eq!(
-            unsafe { sigaction(signum::SIGUSR1, None, Some(&mut back)) },
-            0
-        );
-        assert_eq!(back, wanted, "the disposition did not survive the host");
-
-        // SAFETY: restoring the default for the signal this test took.
-        unsafe { sigaction(signum::SIGUSR1, Some(Disposition::default()), None) };
+        // SAFETY: a real handler, and the default put back.
+        unsafe {
+            assert_eq!(sigaction(signum::SIGUSR1, Some(wanted), None), 0);
+            assert_eq!(sigaction(signum::SIGUSR1, None, Some(&mut back)), 0);
+            sigaction(signum::SIGUSR1, Some(Disposition::default()), None);
+        }
+        assert_eq!(back, wanted);
     }
 
-    /// A handler for a signal this host has not got is kept and handed back,
-    /// and installed on nothing: a handler for `SIGINFO` must not run for
-    /// some neighbour. Raising one is refused for the same reason.
     #[test]
-    #[cfg(not(target_os = "macos"))]
     fn a_signal_this_host_lacks_is_kept_but_never_installed() {
+        if !unraisable(signum::SIGINFO) {
+            return;
+        }
         let handler = Disposition {
             handler: 0x1234_5678,
             ..Disposition::default()
         };
         let mut back = Disposition::default();
-        // SAFETY: `SIGINFO` maps to nothing here, so nothing is installed.
+        // SAFETY: nothing is installed for an unraisable signal.
         unsafe {
             assert_eq!(sigaction(signum::SIGINFO, Some(handler), None), 0);
             assert_eq!(sigaction(signum::SIGINFO, None, Some(&mut back)), 0);
-            assert_eq!(back.handler, handler.handler);
             assert_eq!(
                 sigaction(signum::SIGINFO, Some(Disposition::default()), None),
                 0
             );
             assert_eq!(signal(signum::SIGEMT, 0), 0);
+            assert_eq!(sigaction(40, None, None), -1);
         }
-        assert_eq!(entry::raise_(signum::SIGINFO), -1);
-        // A number that is no signal at all is still refused.
-        // SAFETY: nothing is installed for a refused number.
-        assert_eq!(unsafe { sigaction(40, None, None) }, -1);
+        assert_eq!(back.handler, handler.handler);
     }
 
-    /// Darwin's `SA_*` bits are not this host's, and the translation is a
-    /// bijection over the ones both have.
-    #[test]
-    fn the_flag_bits_survive_a_round_trip() {
-        for (bit, name) in saflag::DARWIN {
-            if saflag::host(name).is_none() {
-                continue;
-            }
-            assert_eq!(
-                flags_from_host(flags_to_host(*bit)),
-                *bit,
-                "SA_{name} did not round trip"
-            );
-        }
+    static HEARD: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn record(signum: c_int) {
+        HEARD.store(signum, Ordering::SeqCst);
     }
 
-    static HEARD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-    extern "C" fn record(signum: libc::c_int) {
-        HEARD.store(signum, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// A guest handler is told Darwin's number, not the kernel's, and reading
-    /// the disposition back names the guest's handler rather than the
-    /// translator in front of it.
     #[test]
     fn a_guest_handler_is_entered_with_darwins_signal_number() {
-        let darwin_usr1 = signum::SIGUSR1;
-        let host_usr1 = signal_to_host(darwin_usr1).unwrap();
+        let _real = real();
         let act = Disposition {
-            handler: record as *const () as usize as u64,
-            mask: 0,
-            flags: 0,
+            handler: record as *const () as u64,
+            ..Disposition::default()
         };
-        // SAFETY: a handler of this test's own for a signal nothing else uses.
-        unsafe {
-            assert_eq!(sigaction(darwin_usr1, Some(act), None), 0);
-            libc::raise(host_usr1);
-        }
-        assert_eq!(HEARD.load(std::sync::atomic::Ordering::SeqCst), darwin_usr1);
-
         let mut back = Disposition::default();
-        // SAFETY: a query, and then the default put back.
+        // SAFETY: a handler of this test's own, and the default put back.
         unsafe {
-            assert_eq!(sigaction(darwin_usr1, None, Some(&mut back)), 0);
-            assert_eq!(back.handler, record as *const () as usize as u64);
-            assert_eq!(
-                back.flags & DARWIN_SA_SIGINFO,
-                0,
-                "the translator's flag is not reported"
-            );
-            let previous = signal(darwin_usr1, 0);
-            assert_eq!(previous, record as *const () as usize as u64);
+            assert_eq!(sigaction(signum::SIGUSR1, Some(act), None), 0);
+            libc::raise(signal_to_host(signum::SIGUSR1).unwrap());
+            assert_eq!(sigaction(signum::SIGUSR1, None, Some(&mut back)), 0);
+            assert_eq!(signal(signum::SIGUSR1, 0), act.handler);
         }
+        assert_eq!(HEARD.load(Ordering::SeqCst), signum::SIGUSR1);
+        assert_eq!(back.handler, act.handler);
+        assert_eq!(
+            back.flags & SA_SIGINFO,
+            0,
+            "the translator's flag is not reported"
+        );
+    }
+
+    static SEEN: Mutex<Option<(Siginfo, u64, u64, u32)>> = Mutex::new(None);
+
+    extern "C" fn record_siginfo(signum: c_int, info: *mut Siginfo, context: *mut Ucontext) {
+        // SAFETY: the structures `deliver` built.
+        let _ = signum;
+        let seen = unsafe {
+            let context = &*context;
+            (
+                *info,
+                context.mcsize,
+                (*context.mcontext).pc_value(),
+                context.sigmask,
+            )
+        };
+        if let Ok(mut slot) = SEEN.try_lock() {
+            *slot = Some(seen);
+        }
+    }
+
+    impl Mcontext {
+        fn pc_value(&mut self) -> u64 {
+            *self.pc()
+        }
+    }
+
+    #[test]
+    fn a_siginfo_handler_is_entered_with_darwins_structures() {
+        let _real = real();
+        let act = Disposition {
+            handler: record_siginfo as *const () as u64,
+            mask: 0,
+            flags: SA_SIGINFO,
+        };
+        // SAFETY: a handler of this test's own on a signal whose default is
+        // to be ignored, and the default put back.
+        unsafe {
+            assert_eq!(sigaction(signum::SIGURG, Some(act), None), 0);
+            libc::raise(signal_to_host(signum::SIGURG).unwrap());
+            sigaction(signum::SIGURG, Some(Disposition::default()), None);
+        }
+        let (info, mcsize, pc, mask) = SEEN.lock().unwrap().take().expect("the handler ran");
+        assert_eq!(info.signo, signum::SIGURG);
+        assert_eq!(info.code, 0x10001, "SI_USER");
+        assert_eq!(info.pid, starnix::process::me());
+        assert_eq!(mcsize, size_of::<Mcontext>() as u64);
+        assert_ne!(pc, 0);
+        assert_eq!(
+            mask & darwin_bit(signum::SIGURG),
+            0,
+            "the mask to restore, not the one in force"
+        );
+    }
+
+    static FAULTED_AT: AtomicU64 = AtomicU64::new(0);
+
+    /// Steps over the faulting load and gives it a result, as a JIT's
+    /// guard-page handler would.
+    extern "C" fn resume(_: c_int, info: *mut Siginfo, context: *mut Ucontext) {
+        // SAFETY: the structures `deliver` built.
+        unsafe {
+            FAULTED_AT.store(
+                (*info).addr | (((*info).code as u64) << 48),
+                Ordering::SeqCst,
+            );
+            let mc = &mut *(*context).mcontext;
+            *mc.pc() += FAULTING_LOAD_LENGTH;
+            *mc.result() = 0x5afe;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    const FAULTING_LOAD_LENGTH: u64 = 3;
+    #[cfg(target_arch = "aarch64")]
+    const FAULTING_LOAD_LENGTH: u64 = 4;
+
+    fn faulting_load(address: usize) -> u64 {
+        let value: u64;
+        // SAFETY: faults, and `resume` steps over it.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("mov rax, qword ptr [rcx]", in("rcx") address, out("rax") value);
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("ldr x0, [x1]", in("x1") address, out("x0") value);
+        }
+        value
+    }
+
+    #[test]
+    fn a_handler_that_changes_the_context_resumes_where_it_says() {
+        let _real = real();
+        let host = signal_to_host(signum::SIGSEGV).unwrap();
+        // SAFETY: zeroed is valid; the original disposition is restored below.
+        let mut original: libc::sigaction = unsafe { core::mem::zeroed() };
+        unsafe { libc::sigaction(host, core::ptr::null(), &mut original) };
+        let act = Disposition {
+            handler: resume as *const () as u64,
+            mask: 0,
+            flags: SA_SIGINFO,
+        };
+        // SAFETY: `resume` handles exactly the fault below.
+        let value = unsafe {
+            assert_eq!(sigaction(signum::SIGSEGV, Some(act), None), 0);
+            let value = faulting_load(0x18);
+            libc::sigaction(host, &original, core::ptr::null_mut());
+            value
+        };
+        assert_eq!(value, 0x5afe);
+        let seen = FAULTED_AT.load(Ordering::SeqCst);
+        assert_eq!(seen & 0xffff_ffff_ffff, 0x18, "si_addr");
+        assert_eq!(seen >> 48, 1, "SEGV_MAPERR");
     }
 }

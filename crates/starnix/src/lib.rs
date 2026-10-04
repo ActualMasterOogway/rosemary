@@ -14,9 +14,11 @@
 //! * [`system`] - the machine: memory, CPU ticks, cores, the CPU's name.
 //! * [`socket`] - who is on the other end of a Unix socket.
 //! * [`fd`] - a path that reaches what a descriptor has open.
+//! * [`signal`] - what the kernel hands a signal handler.
 
 pub mod fd;
 pub mod process;
+pub mod signal;
 pub mod socket;
 pub mod system;
 

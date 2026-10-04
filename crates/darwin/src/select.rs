@@ -57,7 +57,7 @@ unsafe extern "C" fn pselect(
     // SAFETY: the caller's guarantee; one readable 32-bit word when non-null.
     let mut mask = match sigmask.is_null() {
         true => None,
-        false => Some(crate::signal::entry::mask_to_host(unsafe {
+        false => Some(crate::signal::mask_to_host(unsafe {
             sigmask.read_unaligned()
         })),
     };

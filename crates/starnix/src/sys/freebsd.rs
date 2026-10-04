@@ -1,5 +1,7 @@
 //! FreeBSD: `sysctl(KERN_PROC)` and friends, and `LOCAL_PEERCRED`.
 
+pub mod signal;
+
 use std::ffi::{CStr, c_char};
 use std::io;
 use std::os::fd::RawFd;

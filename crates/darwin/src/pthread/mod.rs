@@ -1633,15 +1633,14 @@ mod tests {
         // SAFETY: signal zero delivers nothing; the thread is this one.
         assert_eq!(unsafe { kill(this_thread(), 0) }, 0);
 
-        // `SIGINFO` is Darwin's own. On a Mac it is a real signal and translates to
-        // itself; anywhere else there is nothing to translate it to, and delivering
-        // whatever occupies 29 instead would run a handler installed for something
-        // else.
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            unsafe { kill(this_thread(), crate::signal::signum::SIGINFO as u64) },
-            err::EINVAL
-        );
+        // Where the host has no `SIGINFO`, delivering whatever occupies 29 instead
+        // would run a handler installed for something else.
+        if crate::signal::unraisable(crate::signal::signum::SIGINFO) {
+            assert_eq!(
+                unsafe { kill(this_thread(), crate::signal::signum::SIGINFO as u64) },
+                err::EINVAL
+            );
+        }
 
         // A number that is not a signal on either host.
         // SAFETY: refused before anything is delivered.

@@ -319,6 +319,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     fortify::MODULE,
     env::MODULE,
     humanize::MODULE,
+    signal::entry::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -343,7 +344,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     xattr::MODULE,
     copyfile::MODULE,
     uuid::MODULE,
-    signal::entry::MODULE,
     fcntl::entry::MODULE,
     bsd::MODULE,
     callback::MODULE,
