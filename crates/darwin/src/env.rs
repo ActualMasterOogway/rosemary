@@ -106,10 +106,10 @@ fn corrected(name: &std::ffi::OsStr) -> Option<String> {
     match name.to_str()? {
         // Where the guest's files go, and the reason this module exists.
         "HOME" => Some(handed_off("HOME").unwrap_or_else(|| prefix::ns::home().to_string())),
-        // A login shell the prefix has; see `crate::accounts::guest_shell`.
+        // A login shell the prefix has; see `guest_shell`.
         "SHELL" => Some(handed_off("SHELL").unwrap_or_else(|| {
             let host = std::env::var_os("SHELL").unwrap_or_default();
-            let guest = crate::accounts::guest_shell(host.as_encoded_bytes());
+            let guest = guest_shell(host.as_encoded_bytes());
             String::from_utf8_lossy(&guest).into_owned()
         })),
         // Darwin's is per-session and ends in a separator, which a program that
@@ -122,6 +122,29 @@ fn corrected(name: &std::ffi::OsStr) -> Option<String> {
         "PWD" => prefix::ns::to_guest(&std::env::current_dir().ok()?)
             .map(|path| path.to_string_lossy().into_owned()),
         _ => None,
+    }
+}
+
+/// The guest's spelling of a host account's login shell.
+///
+/// The host's is a host program - often somewhere a Mac has nothing, like
+/// `/run/current-system/sw/bin/zsh` - and a guest that runs it (`su`, `sudo -s`,
+/// `login`) would leave the prefix for a shell that is not Darwin's. A Mac's
+/// account names `/bin/zsh` or `/bin/bash`, so the same shell in the prefix's
+/// `/bin` is the answer, and `/bin/sh` when the prefix has none of that name.
+/// Outside a prefix the host's path is the guest's, and is left alone.
+pub fn guest_shell(host: &[u8]) -> Vec<u8> {
+    if prefix::ns::current().is_none() || host.is_empty() {
+        return host.to_vec();
+    }
+    let name = host.rsplit(|b| *b == b'/').next().unwrap_or(host);
+    let candidate = [b"/bin/".as_slice(), name].concat();
+    let present = std::str::from_utf8(&candidate)
+        .ok()
+        .is_some_and(|guest| prefix::ns::host_path(guest).is_file());
+    match present {
+        true => candidate,
+        false => b"/bin/sh".to_vec(),
     }
 }
 

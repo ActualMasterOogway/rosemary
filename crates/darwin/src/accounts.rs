@@ -188,28 +188,7 @@ fn host_group_name(gid: u32) -> Option<CString> {
     }
 }
 
-/// The guest's spelling of a host account's login shell.
-///
-/// The host's is a host program - often somewhere a Mac has nothing, like
-/// `/run/current-system/sw/bin/zsh` - and a guest that runs it (`su`, `sudo -s`,
-/// `login`) would leave the prefix for a shell that is not Darwin's. A Mac's
-/// account names `/bin/zsh` or `/bin/bash`, so the same shell in the prefix's
-/// `/bin` is the answer, and `/bin/sh` when the prefix has none of that name.
-/// Outside a prefix the host's path is the guest's, and is left alone.
-pub fn guest_shell(host: &[u8]) -> Vec<u8> {
-    if prefix::ns::current().is_none() || host.is_empty() {
-        return host.to_vec();
-    }
-    let name = host.rsplit(|b| *b == b'/').next().unwrap_or(host);
-    let candidate = [b"/bin/".as_slice(), name].concat();
-    let present = std::str::from_utf8(&candidate)
-        .ok()
-        .is_some_and(|guest| prefix::ns::host_path(guest).is_file());
-    match present {
-        true => candidate,
-        false => b"/bin/sh".to_vec(),
-    }
-}
+pub use crate::env::guest_shell;
 
 /// Whether `user` has to give a password to prove who they are.
 ///
