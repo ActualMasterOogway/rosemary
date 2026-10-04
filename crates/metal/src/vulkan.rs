@@ -1,3 +1,4 @@
+use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
 
 use ash::{Entry, Instance, vk};
@@ -42,6 +43,7 @@ impl Adapter {
 
 struct State {
     instance: Instance,
+    library: Option<CString>,
     /// `VK_KHR_surface`, present only where the instance could be created
     /// with the extension - a headless host has no surface extension at all,
     /// and presentation falls back to the readback path there.
@@ -71,7 +73,7 @@ pub fn adapters() -> Result<&'static [Adapter], &'static str> {
 }
 
 fn initialize() -> Result<State, String> {
-    let entry = load_entry()?;
+    let (entry, library) = load_entry()?;
     // A loader predating Vulkan 1.1 returns `None`; this runtime's descriptor
     // ABI cannot operate against it.
     let loader_version = unsafe { entry.try_enumerate_instance_version() }
@@ -87,12 +89,16 @@ fn initialize() -> Result<State, String> {
         .engine_name(c"metal_translate")
         .engine_version(1)
         .api_version(instance_version);
-    let surface_extensions = surface_extensions(&entry);
+    // SAFETY: the entry owns a loaded Vulkan library.
+    let available = unsafe { entry.enumerate_instance_extension_properties(None) }
+        .map_err(|error| format!("vkEnumerateInstanceExtensionProperties failed: {error:?}"))?;
+    let (surface_extensions, flags) = instance_extensions(&available);
     let enabled = surface_extensions
         .iter()
         .map(|name| name.as_ptr())
         .collect::<Vec<_>>();
     let create_info = vk::InstanceCreateInfo::default()
+        .flags(flags)
         .application_info(&application)
         .enabled_extension_names(&enabled);
     // SAFETY: the create info, its application info and the extension name
@@ -183,6 +189,7 @@ fn initialize() -> Result<State, String> {
     ));
     Ok(State {
         instance,
+        library,
         surface_api,
         surface_maintenance1,
         _entry: entry,
@@ -235,8 +242,7 @@ fn recommended_working_set(
     if budget == 0 { capacity } else { budget }
 }
 
-/// The surface extensions to create the instance with: `VK_KHR_surface` and
-/// every window-system one the loader advertises.
+/// Surface extensions and portability enumeration advertised by the loader.
 ///
 /// Presentation needs these enabled on the *instance*, and the instance is
 /// created when a guest first asks for the adapter list - which is before it
@@ -245,22 +251,21 @@ fn recommended_working_set(
 /// question entirely: enabling an extension the loader reports is harmless,
 /// the list is a superset of whatever SDL will need, and it costs nothing on
 /// a host which has none of them.
-fn surface_extensions(entry: &Entry) -> Vec<&'static std::ffi::CStr> {
-    // SAFETY: the entry owns a loaded Vulkan library.
-    let Ok(available) = (unsafe { entry.enumerate_instance_extension_properties(None) }) else {
-        return Vec::new();
-    };
-    let has = |name: &std::ffi::CStr| {
-        available.iter().any(|property| {
-            property
-                .extension_name_as_c_str()
-                .is_ok_and(|found| found == name)
-        })
-    };
-    if !has(ash::khr::surface::NAME) {
-        return Vec::new();
+fn instance_extensions(
+    available: &[vk::ExtensionProperties],
+) -> (Vec<&'static CStr>, vk::InstanceCreateFlags) {
+    let has = |name: &CStr| has_extension(available, name);
+    let mut wanted = Vec::new();
+    let mut flags = vk::InstanceCreateFlags::empty();
+    // A Vulkan loader hides portability devices unless enumeration is opted in.
+    if has(ash::khr::portability_enumeration::NAME) {
+        wanted.push(ash::khr::portability_enumeration::NAME);
+        flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
     }
-    let mut wanted = vec![ash::khr::surface::NAME];
+    if !has(ash::khr::surface::NAME) {
+        return (wanted, flags);
+    }
+    wanted.push(ash::khr::surface::NAME);
     for name in [
         ash::khr::xlib_surface::NAME,
         ash::khr::xcb_surface::NAME,
@@ -278,7 +283,7 @@ fn surface_extensions(entry: &Entry) -> Vec<&'static std::ffi::CStr> {
         wanted.push(ash::khr::get_surface_capabilities2::NAME);
         wanted.push(ash::ext::surface_maintenance1::NAME);
     }
-    wanted
+    (wanted, flags)
 }
 
 /// Whether the instance enabled `VK_EXT_surface_maintenance1`.
@@ -305,19 +310,47 @@ pub fn instance_handle() -> Option<u64> {
     Some(STATE.get()?.as_ref().ok()?.instance.handle().as_raw())
 }
 
-fn load_entry() -> Result<Entry, String> {
+/// SDL must load the same implementation that owns our instance.
+pub(crate) fn library() -> Option<&'static CStr> {
+    STATE.get()?.as_ref().ok()?.library.as_deref()
+}
+
+fn load_entry() -> Result<(Entry, Option<CString>), String> {
     if let Some(path) = std::env::var_os("ROSEMARY_VULKAN_LIBRARY") {
-        // SAFETY: the entry and its library remain owned by the process-wide state.
-        return unsafe { Entry::load_from(&path) }.map_err(|error| {
-            format!(
-                "the Vulkan loader at {:?} could not be opened: {error}",
-                path
-            )
-        });
+        return load_library(&path).map(|(entry, path)| (entry, Some(path)));
     }
+    #[cfg(target_os = "macos")]
+    {
+        // Homebrew's dylibs are outside dyld's default search path on Apple Silicon.
+        let candidates = [
+            "libvulkan.dylib",
+            "libvulkan.1.dylib",
+            "libMoltenVK.dylib",
+            "/opt/homebrew/opt/molten-vk/lib/libMoltenVK.dylib",
+            "/usr/local/opt/molten-vk/lib/libMoltenVK.dylib",
+        ];
+        for path in candidates {
+            if let Ok((entry, library)) = load_library(std::ffi::OsStr::new(path)) {
+                trace(format!("loaded Vulkan library {path}"));
+                return Ok((entry, Some(library)));
+            }
+        }
+        Err("no Vulkan library found; install MoltenVK with `brew install molten-vk` or set ROSEMARY_VULKAN_LIBRARY".into())
+    }
+    #[cfg(not(target_os = "macos"))]
     // SAFETY: the entry and its library remain owned by the process-wide state.
     unsafe { Entry::load() }
+        .map(|entry| (entry, None))
         .map_err(|error| format!("the Vulkan loader could not be opened: {error}"))
+}
+
+fn load_library(path: &std::ffi::OsStr) -> Result<(Entry, CString), String> {
+    let library = CString::new(path.as_encoded_bytes())
+        .map_err(|_| "the Vulkan library path contains a NUL byte".to_string())?;
+    // SAFETY: the entry and its library remain owned by the process-wide state.
+    let entry = unsafe { Entry::load_from(path) }
+        .map_err(|error| format!("the Vulkan library at {path:?} could not be opened: {error}"))?;
+    Ok((entry, library))
 }
 
 fn has_extension(extensions: &[vk::ExtensionProperties], name: &std::ffi::CStr) -> bool {
@@ -520,6 +553,51 @@ fn trace(message: impl std::fmt::Display) {
 mod tests {
     use super::*;
 
+    fn extension(name: &CStr) -> vk::ExtensionProperties {
+        let mut property = vk::ExtensionProperties::default();
+        for (output, byte) in property
+            .extension_name
+            .iter_mut()
+            .zip(name.to_bytes_with_nul())
+        {
+            *output = *byte as std::ffi::c_char;
+        }
+        property
+    }
+
+    #[test]
+    fn portability_enumeration_is_enabled_without_a_window_system() {
+        let (extensions, flags) =
+            instance_extensions(&[extension(ash::khr::portability_enumeration::NAME)]);
+        assert_eq!(extensions, [ash::khr::portability_enumeration::NAME]);
+        assert_eq!(flags, vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+    }
+
+    #[test]
+    fn metal_surfaces_and_portability_can_share_an_instance() {
+        let (extensions, flags) = instance_extensions(&[
+            extension(ash::khr::surface::NAME),
+            extension(ash::ext::metal_surface::NAME),
+            extension(ash::khr::portability_enumeration::NAME),
+        ]);
+        assert_eq!(
+            extensions,
+            [
+                ash::khr::portability_enumeration::NAME,
+                ash::khr::surface::NAME,
+                ash::ext::metal_surface::NAME,
+            ]
+        );
+        assert!(flags.contains(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR));
+    }
+
+    #[test]
+    fn conformant_loader_needs_no_portability_flag() {
+        let (extensions, flags) = instance_extensions(&[extension(ash::khr::surface::NAME)]);
+        assert_eq!(extensions, [ash::khr::surface::NAME]);
+        assert!(flags.is_empty());
+    }
+
     #[test]
     fn ash_vulkan_version_is_exact() {
         assert_eq!(vk::API_VERSION_1_1, 0x0040_1000);
@@ -604,5 +682,6 @@ mod tests {
         assert!(!adapters.is_empty());
         assert!(adapters[0].target.vulkan_version >= (1, 1));
         assert!(adapters[0].target.max_bound_descriptor_sets >= 4);
+        adapters[0].gpu().expect("configured Vulkan logical device");
     }
 }

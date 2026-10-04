@@ -20,6 +20,16 @@ fn gpu_device() -> Option<Id> {
     bootstrap();
     // SAFETY: called through the same entry point a guest uses.
     let device = unsafe { MTLCreateSystemDefaultDevice() };
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_some() {
+        assert!(
+            !device.is_null(),
+            "the configured runtime must provide a Metal device"
+        );
+        assert!(
+            gpu_of(device).is_some(),
+            "the configured runtime must create a GPU"
+        );
+    }
     (!device.is_null() && gpu_of(device).is_some()).then_some(device)
 }
 

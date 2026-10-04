@@ -345,8 +345,9 @@ impl Swapchain {
             return Err("the window belongs to OpenGL, which cannot share it".into());
         }
         let instance = crate::vulkan::instance_handle().ok_or("the Vulkan instance is gone")?;
-        let surface = sdl3::video::vulkan::create_surface(window, instance)
-            .ok_or_else(|| format!("SDL_Vulkan_CreateSurface failed: {}", sdl3::error()))?;
+        let surface =
+            sdl3::video::vulkan::create_surface(window, instance, crate::vulkan::library())
+                .ok_or_else(|| format!("SDL_Vulkan_CreateSurface failed: {}", sdl3::error()))?;
         let surface = vk::SurfaceKHR::from_raw(surface);
         // Until the `Swapchain` exists there is no `Drop` to undo any of this,
         // so each piece is guarded and the guards are taken together once the

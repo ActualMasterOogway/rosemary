@@ -1419,6 +1419,7 @@ pub mod video {
     pub mod flags {
         pub const FULLSCREEN: u64 = 0x0000_0001;
         pub const OPENGL: u64 = 0x0000_0002;
+        pub const METAL: u64 = 0x2000_0000;
         pub const HIDDEN: u64 = 0x0000_0008;
         pub const BORDERLESS: u64 = 0x0000_0010;
         pub const RESIZABLE: u64 = 0x0000_0020;
@@ -1920,10 +1921,7 @@ pub mod video {
 
     /// Vulkan surfaces for a window SDL already owns.
     ///
-    /// A window here is created with `SDL_WINDOW_OPENGL`, long before anything
-    /// knows whether the guest will draw with Metal. That used to settle the
-    /// question: SDL refused a surface for a window it had not been told at
-    /// creation would be a Vulkan one. Since SDL 3.4.0 it does not -
+    /// Since SDL 3.4.0 a window need not be created as a Vulkan one:
     /// `SDL_Vulkan_CreateSurface` converts the window in place, clearing
     /// `SDL_WINDOW_OPENGL`, unloading the GL library and loading the Vulkan
     /// one - so the flags a window was made with no longer decide how it is
@@ -1934,23 +1932,30 @@ pub mod video {
     /// drawing into with OpenGL.
     pub mod vulkan {
         use super::Window;
-        use std::ffi::c_void;
+        use std::ffi::{CStr, c_void};
 
         /// A Vulkan surface for `window`, as a raw `VkSurfaceKHR`.
         ///
         /// `instance` is a raw `VkInstance`, which must have been created with
         /// `VK_KHR_surface` and the platform's own surface extension enabled;
         /// SDL asks the same loader for the entry points, so the handle it
-        /// returns belongs to that instance.
-        pub fn create_surface(window: Window, instance: u64) -> Option<u64> {
+        /// returns belongs to that instance. `library` selects the implementation
+        /// which owns `instance`, or SDL's default when it is `None`.
+        pub fn create_surface(
+            window: Window,
+            instance: u64,
+            library: Option<&CStr>,
+        ) -> Option<u64> {
             let api = super::api()?;
             let create = api.SDL_Vulkan_CreateSurface?;
             if let Some(load) = api.SDL_Vulkan_LoadLibrary {
                 // SDL loads the loader itself inside `CreateSurface`, but
                 // doing it here separates "no Vulkan on this host" from "this
                 // window cannot have a surface" in the error a caller reports.
-                // SAFETY: a null path asks SDL for its own default.
-                unsafe { load(std::ptr::null()) };
+                // SAFETY: the path lives across the call; null asks for SDL's default.
+                if !unsafe { load(library.map_or(std::ptr::null(), CStr::as_ptr)) } {
+                    return None;
+                }
             }
             let mut surface = 0u64;
             // SAFETY: a window this crate created, a live instance handle from

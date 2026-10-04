@@ -29,6 +29,7 @@ const ROBUSTNESS_2_KHR: &std::ffi::CStr = c"VK_KHR_robustness2";
 
 #[derive(Clone, Copy)]
 struct DeviceCapabilities {
+    portability_subset: bool,
     null_descriptors: bool,
     vertex_attribute_divisor: bool,
     swapchain_maintenance1: bool,
@@ -282,6 +283,13 @@ fn create_device(
         .queue_create_infos(queues)
         .enabled_features(features)
         .enabled_extension_names(extensions);
+    let mut portability = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
+    if capabilities.portability_subset {
+        let mut queried = vk::PhysicalDeviceFeatures2::default().push_next(&mut portability);
+        // SAFETY: the extension is advertised and both structures live across the query.
+        unsafe { instance.get_physical_device_features2(physical, &mut queried) };
+        create_info = create_info.push_next(&mut portability);
+    }
     if target.vulkan_version >= (1, 2) {
         create_info = create_info.push_next(&mut v11).push_next(&mut v12);
         if target.vulkan_version >= (1, 3) {
@@ -413,6 +421,11 @@ impl Gpu {
             })
         };
         let mut enabled: Vec<*const std::ffi::c_char> = Vec::new();
+        // Portability implementations require this extension and explicit feature enablement.
+        let portability_subset = has(ash::khr::portability_subset::NAME);
+        if portability_subset {
+            enabled.push(ash::khr::portability_subset::NAME.as_ptr());
+        }
         let presents = has(ash::khr::swapchain::NAME);
         if presents {
             enabled.push(ash::khr::swapchain::NAME.as_ptr());
@@ -600,6 +613,7 @@ impl Gpu {
             &enabled,
             target,
             DeviceCapabilities {
+                portability_subset,
                 null_descriptors,
                 vertex_attribute_divisor: max_vertex_attribute_divisor != 0,
                 swapchain_maintenance1,

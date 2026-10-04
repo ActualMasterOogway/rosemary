@@ -20,6 +20,10 @@ fn mailbox_presentation_is_preferred_when_available() {
 /// is skipped where there is no such host. `ROSEMARY_TEST_VULKAN=1` asks
 /// for it, the same switch the adapter test uses.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn a_window_is_presented_to_through_its_swapchain() {
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
@@ -152,6 +156,10 @@ fn a_window_is_presented_to_through_its_swapchain() {
 /// Two layers in one window, the second of them a rectangle inside it,
 /// which is the path that needs the composite image.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn two_layers_in_a_window_are_composited_into_one_image() {
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
@@ -241,6 +249,10 @@ fn two_layers_in_a_window_are_composited_into_one_image() {
 /// A window made with room for rounded corners is presented through the
 /// corners pass, on a surface that shows its alpha, whatever size it is.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn a_transparent_window_is_presented_through_the_corners_pass() {
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
@@ -330,6 +342,10 @@ fn a_transparent_window_is_presented_through_the_corners_pass() {
 /// exists` and closes the connection. Presentation must refuse such a
 /// window and fall back to the readback rather than convert it.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn an_opengl_window_is_refused_rather_than_converted() {
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
@@ -407,6 +423,10 @@ fn an_opengl_window_is_refused_rather_than_converted() {
 /// mistake in the flags `-initWithContentRect:` chooses - and that is
 /// exactly what once left every real window unable to have a swapchain.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return;
@@ -570,6 +590,10 @@ fn a_frame_off_the_edge_of_its_window_is_clipped_to_it() {
 /// `CAMetalLayer` owns keeps what that layer last presented there, and the
 /// rest of the store still reaches the window.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "Cocoa needs the main thread; use rosemary's Metal guest tests"
+)]
 fn the_store_is_presented_around_a_layers_rectangle() {
     let whole = Region {
         x: 0,

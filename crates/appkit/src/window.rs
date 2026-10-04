@@ -697,8 +697,8 @@ pub unsafe fn init_with_content_rect_for_tests(window: Id, rect: NSRect) -> bool
 
 /// The SDL flags for a window of `style_mask`, drawn with `api`.
 ///
-/// A window is created with **no** graphics API by default, which is the
-/// whole of how this runtime avoids having to guess which one a guest wants.
+/// Windows start without OpenGL or Vulkan. On Cocoa, the Metal flag prevents
+/// SDL's default OpenGL backend from claiming the window.
 /// SDL commits a window to an API at creation and mostly cannot change its
 /// mind afterwards: it will convert an OpenGL window into a Vulkan one in
 /// place, but it converts the flags and the loaded libraries and not the
@@ -718,6 +718,12 @@ fn creation_flags(style_mask: usize, api: Api) -> u64 {
     let mut flags = sdl3::video::flags::HIDDEN | sdl3::video::flags::HIGH_PIXEL_DENSITY;
     if matches!(api, Api::OpenGl) {
         flags |= sdl3::video::flags::OPENGL;
+    }
+    // Cocoa defaults a window with no graphics flag to OpenGL. Opt into Metal
+    // so SDL can later give MoltenVK a surface without claiming it for GL.
+    #[cfg(target_os = "macos")]
+    if matches!(api, Api::Undecided) {
+        flags |= sdl3::video::flags::METAL;
     }
     if style_mask & style::RESIZABLE != 0 {
         flags |= sdl3::video::flags::RESIZABLE;
@@ -2668,7 +2674,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_claims_no_graphics_api_until_one_is_asked_for() {
+    fn a_window_can_be_given_a_vulkan_surface_until_opengl_is_requested() {
         use sdl3::video::flags;
 
         // The default. A window with neither flag has no `EGLSurface`, so
@@ -2677,12 +2683,14 @@ mod tests {
         let plain = creation_flags(style::TITLED | style::RESIZABLE, Api::Undecided);
         assert_eq!(plain & flags::OPENGL, 0);
         assert_eq!(plain & flags::VULKAN, 0);
+        assert_eq!(plain & flags::METAL != 0, cfg!(target_os = "macos"));
 
         // A guest that asks for an `NSOpenGLContext` gets the window rebuilt
         // as this, because SDL will not convert to OpenGL.
         let gl = creation_flags(style::TITLED | style::RESIZABLE, Api::OpenGl);
         assert_ne!(gl & flags::OPENGL, 0);
         assert_eq!(gl & flags::VULKAN, 0);
+        assert_eq!(gl & flags::METAL, 0);
 
         // Never both, whatever the style: SDL refuses such a window, and the
         // whole point is that at most one driver owns the surface.
