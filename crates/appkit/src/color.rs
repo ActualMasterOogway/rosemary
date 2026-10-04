@@ -87,11 +87,8 @@ fn singleton(name: &str, red: f64, green: f64, blue: f64, alpha: f64) -> Id {
 ///
 /// The first group is the device colours, whose values are their names. The
 /// second is the semantic ones - `+textColor` and its relatives - whose value
-/// depends on the appearance, and which are answered with the light appearance's
-/// because this runtime has one appearance and it is that one. A program that
-/// draws with `+textColor` on a dark background gets black text, which is what
-/// it would get from AppKit in light mode; a program that switched appearance
-/// would not be followed, and there is no appearance here to switch.
+/// depends on the appearance. These are the light values; the semantic roles
+/// below resolve against the current drawing appearance when requested.
 static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("textColor", 0.0, 0.0, 0.0, 1.0),
     ("labelColor", 0.0, 0.0, 0.0, 1.0),
@@ -189,6 +186,34 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
     // SAFETY: a registered selector is a NUL-terminated interned name.
     let name = unsafe { std::ffi::CStr::from_ptr(sel) };
     let name = name.to_string_lossy();
+    let dark = match name.as_ref() {
+        "textColor"
+        | "labelColor"
+        | "controlTextColor"
+        | "selectedTextColor"
+        | "windowFrameTextColor"
+        | "headerTextColor"
+        | "selectedControlTextColor"
+        | "unemphasizedSelectedTextColor" => Some((1.0, 1.0)),
+        "secondaryLabelColor" => Some((1.0, 0.5)),
+        "tertiaryLabelColor" => Some((1.0, 0.26)),
+        "quaternaryLabelColor" => Some((1.0, 0.1)),
+        "placeholderTextColor" => Some((1.0, 0.25)),
+        "separatorColor" => Some((1.0, 0.1)),
+        "windowBackgroundColor" | "controlColor" | "headerColor" => Some((0.18, 1.0)),
+        "controlBackgroundColor" | "textBackgroundColor" => Some((0.12, 1.0)),
+        "unemphasizedSelectedContentBackgroundColor"
+        | "unemphasizedSelectedTextBackgroundColor" => Some((0.30, 1.0)),
+        "gridColor" => Some((0.30, 1.0)),
+        "underPageBackgroundColor" => Some((0.10, 1.0)),
+        "alternatingContentBackgroundColor" => Some((0.16, 1.0)),
+        _ => None,
+    };
+    if let Some((gray, alpha)) = dark
+        && crate::appearance::is_dark()
+    {
+        return singleton(&format!("{name}:dark"), gray, gray, gray, alpha);
+    }
     match NAMED.iter().find(|(n, ..)| *n == name) {
         Some((_, r, g, b, a)) => singleton(&name, *r, *g, *b, *a),
         // Unreachable through dispatch - the selector was installed from this
@@ -208,7 +233,7 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
     NAMED
         .iter()
         .find(|(n, ..)| *n == name)
-        .map(|(_, r, g, b, a)| singleton(name, *r, *g, *b, *a))
+        .map(|_| unsafe { named(std::ptr::null_mut(), objc::sel::get(name)) })
 }
 
 /// `+controlAlternatingRowBackgroundColors`, an `NSArray` of **two** colours.
@@ -222,13 +247,15 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
 /// Kept rather than autoreleased, for [`singleton`]'s reason: this is a named
 /// constant a caller may put straight into a `static`.
 unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
-    static COLORS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
-    let mut kept = COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    static COLORS: std::sync::Mutex<[usize; 2]> = std::sync::Mutex::new([0; 2]);
+    let dark = crate::appearance::is_dark() as usize;
+    let mut colors = COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    let kept = &mut colors[dark];
     if *kept != 0 {
         return *kept as Id;
     }
-    let even = singleton("controlBackgroundColor", 1.0, 1.0, 1.0, 1.0);
-    let odd = singleton("alternatingContentBackgroundColor", 0.96, 0.96, 0.96, 1.0);
+    let even = named_color("controlBackgroundColor").expect("a named color");
+    let odd = named_color("alternatingContentBackgroundColor").expect("a named color");
     let array = corefoundation::collections::new_array(
         &[
             even as corefoundation::base::CFTypeRef,

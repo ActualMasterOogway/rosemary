@@ -9,6 +9,7 @@ use crate::define::methods;
 #[repr(C)]
 pub struct View {
     isa: *const c_void,
+    appearance: Id,
     /// Unretained, as AppKit's is: a view's window owns the view.
     window: Id,
     superview: Id,
@@ -1557,6 +1558,10 @@ unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {
 /// otherwise walk its ancestors into freed memory.
 unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     let view = view_of(receiver);
+    objc::arc::release(std::mem::replace(
+        &mut view.appearance,
+        std::ptr::null_mut(),
+    ));
     let subviews = std::mem::replace(&mut view.subviews, std::ptr::null_mut());
     // SAFETY: an array this module made, or null.
     if let Some(array) = unsafe { corefoundation::collections::array(subviews as *const c_void) } {
@@ -1791,9 +1796,38 @@ unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
     scale(receiver)
 }
 
+unsafe extern "C" fn appearance(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const View)).appearance }
+}
+
+unsafe extern "C" fn set_appearance(receiver: Id, _sel: Sel, appearance: Id) {
+    let appearance = objc::arc::retain(appearance);
+    let old = unsafe { std::mem::replace(&mut (*(receiver as *mut View)).appearance, appearance) };
+    objc::arc::release(old);
+}
+
+unsafe extern "C" fn effective_appearance(receiver: Id, sel: Sel) -> Id {
+    let own = unsafe { appearance(receiver, sel) };
+    if !own.is_null() {
+        return own;
+    }
+    let view = view_of(receiver);
+    let source = if !view.superview.is_null() {
+        view.superview
+    } else if !view.window.is_null() {
+        view.window
+    } else {
+        crate::application::shared()
+    };
+    crate::appearance::effective_of(source)
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSView").expect("declared before its methods");
     methods!(class, {
+        "appearance" => appearance, c"@16@0:8";
+        "setAppearance:" => set_appearance, c"v24@0:8@16";
+        "effectiveAppearance" => effective_appearance, c"@16@0:8";
         "initWithFrame:" => init_with_frame, c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "frame" => frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "setFrame:" => set_frame, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";

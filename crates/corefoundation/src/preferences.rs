@@ -6,6 +6,17 @@ use std::sync::Mutex;
 
 use crate::base::CFTypeRef;
 
+pub const INTERFACE_STYLE: &str = "AppleInterfaceStyle";
+
+/// macOS omits this preference in light mode. Query SDL each time so a theme
+/// change is visible without restarting the guest or persisting a host setting.
+pub fn interface_style() -> Option<&'static str> {
+    // SDL has no system theme until the video driver is initialized, even if
+    // the application is asking before creating its first window.
+    sdl3::video::init_video();
+    (sdl3::video::system_theme() == sdl3::video::SystemTheme::Dark).then_some("Dark")
+}
+
 /// One domain's keys, each holding a retained object as an address.
 ///
 /// Keyed by text rather than by object, because a caller builds the key string
@@ -118,6 +129,11 @@ pub unsafe extern "C" fn CFPreferencesCopyAppValue(
     let (Some(key), domain) = (unsafe { text(key) }, unsafe { domain_of(application) }) else {
         return std::ptr::null();
     };
+    if key == INTERFACE_STYLE {
+        return interface_style().map_or(std::ptr::null(), |value| {
+            crate::string::from_bytes(value.as_bytes(), false)
+        });
+    }
     let store = store().lock().unwrap_or_else(|e| e.into_inner());
     let Some(value) = store.get(&domain).and_then(|d| d.get(&key)).copied() else {
         return std::ptr::null();
@@ -262,16 +278,28 @@ pub unsafe extern "C" fn CFPreferencesCopyKeyList(
 ) -> CFTypeRef {
     let domain = unsafe { domain_of(application) };
     let store = store().lock().unwrap_or_else(|e| e.into_inner());
-    let keys: Vec<CFTypeRef> = match store.get(&domain) {
-        Some(keys) if !keys.is_empty() => keys
-            .keys()
-            .map(|k| crate::string::from_bytes(k.as_bytes(), false))
-            .collect(),
-        // Absent *and* present-but-empty are both "nothing to list": a domain
-        // left empty by removing its last key is not a domain a Mac would still
-        // report keys for.
-        _ => return std::ptr::null(),
-    };
+    let mut names: Vec<String> = store
+        .get(&domain)
+        .into_iter()
+        .flat_map(|d| d.keys())
+        .filter(|k| k.as_str() != INTERFACE_STYLE)
+        .cloned()
+        .collect();
+    drop(store);
+    if matches!(
+        domain.as_str(),
+        ANY | "NSGlobalDomain" | ".GlobalPreferences"
+    ) && interface_style().is_some()
+    {
+        names.push(INTERFACE_STYLE.to_owned());
+    }
+    if names.is_empty() {
+        return std::ptr::null();
+    }
+    let keys: Vec<CFTypeRef> = names
+        .iter()
+        .map(|k| crate::string::from_bytes(k.as_bytes(), false))
+        .collect();
     let array = crate::collections::new_array(
         &keys,
         crate::callbacks::Policy::from_type_callbacks(),
@@ -284,6 +312,48 @@ pub unsafe extern "C" fn CFPreferencesCopyKeyList(
         unsafe { crate::api::CFRelease(key) };
     }
     array
+}
+
+/// `CFDictionaryRef CFPreferencesCopyMultiple(CFArrayRef, CFStringRef,
+/// CFStringRef, CFStringRef)`. A null key list requests the entire domain.
+///
+/// # Safety
+///
+/// Arguments are null or objects of their declared types from this runtime.
+pub unsafe extern "C" fn CFPreferencesCopyMultiple(
+    keys: CFTypeRef,
+    application: CFTypeRef,
+    user: CFTypeRef,
+    host: CFTypeRef,
+) -> CFTypeRef {
+    let owned_keys = if keys.is_null() {
+        unsafe { CFPreferencesCopyKeyList(application, user, host) }
+    } else {
+        std::ptr::null()
+    };
+    let keys = if keys.is_null() { owned_keys } else { keys };
+    let mut pairs = Vec::new();
+    if let Some(keys) = unsafe { crate::collections::array(keys) } {
+        for &key in &keys.values {
+            let value = unsafe { CFPreferencesCopyValue(key, application, user, host) };
+            if !value.is_null() {
+                pairs.push((key, value));
+            }
+        }
+    }
+    let result = crate::collections::new_dictionary(
+        &pairs,
+        crate::callbacks::Policy::from_key_callbacks(),
+        crate::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for (_, value) in pairs {
+        unsafe { crate::api::CFRelease(value) };
+    }
+    if !owned_keys.is_null() {
+        unsafe { crate::api::CFRelease(owned_keys) };
+    }
+    result
 }
 
 /// `void CFPreferencesSetMultiple(CFDictionaryRef keysToSet, CFArrayRef
@@ -346,6 +416,7 @@ exports::exports! {
         "CFPreferencesGetAppBooleanValue" => CFPreferencesGetAppBooleanValue,
         "CFPreferencesGetAppIntegerValue" => CFPreferencesGetAppIntegerValue,
         "CFPreferencesCopyKeyList" => CFPreferencesCopyKeyList,
+        "CFPreferencesCopyMultiple" => CFPreferencesCopyMultiple,
         "CFPreferencesSetMultiple" => CFPreferencesSetMultiple,
         "CFPreferencesAppSynchronize" => CFPreferencesAppSynchronize,
         "CFPreferencesSynchronize" => CFPreferencesSynchronize,

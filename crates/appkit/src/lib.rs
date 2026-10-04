@@ -420,6 +420,35 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSParagraphStyleAttributeName", "NSParagraphStyle"),
     ("_NSObliquenessAttributeName", "NSObliqueness"),
     ("_NSAppearanceNameAqua", "NSAppearanceNameAqua"),
+    ("_NSAppearanceNameDarkAqua", appearance::DARK_AQUA),
+    (
+        "_NSAppearanceNameLightContent",
+        "NSAppearanceNameLightContent",
+    ),
+    (
+        "_NSAppearanceNameVibrantLight",
+        "NSAppearanceNameVibrantLight",
+    ),
+    (
+        "_NSAppearanceNameVibrantDark",
+        "NSAppearanceNameVibrantDark",
+    ),
+    (
+        "_NSAppearanceNameAccessibilityHighContrastAqua",
+        "NSAppearanceNameAccessibilityHighContrastAqua",
+    ),
+    (
+        "_NSAppearanceNameAccessibilityHighContrastDarkAqua",
+        "NSAppearanceNameAccessibilityHighContrastDarkAqua",
+    ),
+    (
+        "_NSAppearanceNameAccessibilityHighContrastVibrantLight",
+        "NSAppearanceNameAccessibilityHighContrastVibrantLight",
+    ),
+    (
+        "_NSAppearanceNameAccessibilityHighContrastVibrantDark",
+        "NSAppearanceNameAccessibilityHighContrastVibrantDark",
+    ),
     ("_NSDeviceSize", "NSDeviceSize"),
     ("_NSModalPanelRunLoopMode", "NSModalPanelRunLoopMode"),
     // The pasteboard's plain-text type, under both its spellings: the modern one

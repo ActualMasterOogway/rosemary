@@ -76,7 +76,11 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSEvent", None, crate::nsevent::INSTANCE_SIZE),
     ("NSCursor", None, crate::cursor::CURSOR_INSTANCE_SIZE),
     ("NSColor", None, crate::color::INSTANCE_SIZE),
-    ("NSAppearance", None, size_of::<usize>()),
+    (
+        "NSAppearance",
+        None,
+        size_of::<crate::appearance::Appearance>(),
+    ),
     ("NSImage", None, crate::image::INSTANCE_SIZE),
     ("NSGraphicsContext", None, 0),
     ("NSColorSpace", None, 0),

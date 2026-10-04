@@ -48,6 +48,9 @@ static ADDED_SUITES: Mutex<BTreeMap<usize, Vec<String>>> = Mutex::new(BTreeMap::
 
 unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
     let key = unsafe { key_text(key) }?;
+    if key == corefoundation::preferences::INTERFACE_STYLE {
+        return corefoundation::preferences::interface_style().map(str::to_owned);
+    }
     argument_values().remove(&key).or_else(|| {
         let values = values();
         values
@@ -267,10 +270,7 @@ unsafe extern "C" fn remove_object_for_key(receiver: Id, _sel: Sel, key: Id) {
 /// agree with the `-boolForKey:` that would read it.
 fn number_for(receiver: Id, key: Id) -> i64 {
     // SAFETY: as [`object_for_key`].
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return 0;
-    };
-    let Some(value) = values().get(&key).cloned() else {
+    let Some(value) = (unsafe { value_for_key(receiver, key) }) else {
         return 0;
     };
     match value.trim().to_ascii_lowercase().as_str() {
@@ -290,11 +290,8 @@ unsafe extern "C" fn integer_for_key(receiver: Id, _sel: Sel, key: Id) -> i64 {
 
 unsafe extern "C" fn double_for_key(receiver: Id, _sel: Sel, key: Id) -> f64 {
     // SAFETY: as [`object_for_key`].
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return 0.0;
-    };
-    values()
-        .get(&key)
+    unsafe { value_for_key(receiver, key) }
+        .as_deref()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0.0)
 }
@@ -398,14 +395,30 @@ unsafe extern "C" fn volatile_domain_for_name(_receiver: Id, _sel: Sel, name: Id
     }
 }
 
-/// Persistent domain enumeration is not implemented.
-unsafe extern "C" fn domain_for_name(_receiver: Id, _sel: Sel, _name: Id) -> Id {
-    empty_dictionary()
+/// Expose the system preference in the global persistent domain.
+unsafe extern "C" fn domain_for_name(_receiver: Id, _sel: Sel, name: Id) -> Id {
+    let mut domain = BTreeMap::new();
+    if unsafe { key_text(name) }.as_deref() == Some("NSGlobalDomain") {
+        add_interface_style(&mut domain);
+    }
+    dictionary_from_values(&domain)
 }
 
 /// `-dictionaryRepresentation`, which is every key this store has.
 unsafe extern "C" fn dictionary_representation(_receiver: Id, _sel: Sel) -> Id {
-    dictionary_from_values(&values())
+    let mut domain = values().clone();
+    add_interface_style(&mut domain);
+    dictionary_from_values(&domain)
+}
+
+fn add_interface_style(values: &mut BTreeMap<String, String>) {
+    values.remove(corefoundation::preferences::INTERFACE_STYLE);
+    if let Some(style) = corefoundation::preferences::interface_style() {
+        values.insert(
+            corefoundation::preferences::INTERFACE_STYLE.to_owned(),
+            style.to_owned(),
+        );
+    }
 }
 
 fn dictionary_from_values(values: &BTreeMap<String, String>) -> Id {
@@ -452,6 +465,8 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "objectForKey:" => object_for_key, c"@24@0:8@16";
+        "valueForKey:" => object_for_key, c"@24@0:8@16";
+        "valueForKeyPath:" => object_for_key, c"@24@0:8@16";
         "stringForKey:" => string_for_key, c"@24@0:8@16";
         "stringArrayForKey:" => string_array_for_key, c"@24@0:8@16";
         "arrayForKey:" => string_array_for_key, c"@24@0:8@16";

@@ -338,6 +338,7 @@ fn zeroed<T>() -> u64 {
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSLocalizedDescriptionKey", "NSLocalizedDescription"),
     ("_NSArgumentDomain", "NSArgumentDomain"),
+    ("_NSGlobalDomain", "NSGlobalDomain"),
     ("_NSFilePosixPermissions", "NSFilePosixPermissions"),
     ("_NSFileSystemFreeSize", "NSFileSystemFreeSize"),
     ("_NSFileSystemSize", "NSFileSystemSize"),

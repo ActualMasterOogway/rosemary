@@ -522,6 +522,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // out-parameter, which the guest may pass as null and which the host writes
     // through directly.
     sig!("CFPreferencesCopyAppValue", P, P, P),
+    sig!("CFPreferencesCopyValue", P, P, P, P, P),
+    sig!("CFPreferencesCopyKeyList", P, P, P, P),
+    sig!("CFPreferencesCopyMultiple", P, P, P, P, P),
     sig!("CFPreferencesGetAppBooleanValue", U8, P, P, P),
     sig!("CFPreferencesGetAppIntegerValue", I64, P, P, P),
     sig!("CFReadStreamCopyError", P, P),

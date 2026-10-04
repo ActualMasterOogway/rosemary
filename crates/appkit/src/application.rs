@@ -12,6 +12,7 @@ use crate::define::{class_methods, methods};
 #[repr(C)]
 pub struct Application {
     isa: *const c_void,
+    appearance: Id,
     delegate: Id,
     main_menu: Id,
     icon: Id,
@@ -190,15 +191,6 @@ unsafe extern "C" fn is_running(receiver: Id, _sel: Sel) -> u8 {
 unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
     // SAFETY: an application.
     unsafe { ((*(receiver as *const Application)).running != 0) as u8 }
-}
-
-/// `-effectiveAppearance`, the light appearance this runtime renders with.
-///
-/// Semantic AppKit colours are Aqua throughout this runtime, so reporting the
-/// same appearance keeps an application choosing assets by appearance in step
-/// with the colours it receives.
-unsafe extern "C" fn effective_appearance(_receiver: Id, _sel: Sel) -> Id {
-    crate::appearance::aqua()
 }
 
 /// `-finishLaunching`: the two notifications, in the order Apple sends them,
@@ -906,12 +898,37 @@ pub unsafe extern "C" fn NSApplicationMain(_argc: i32, _argv: *const *const c_ch
     0
 }
 
+unsafe extern "C" fn appearance(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Application)).appearance }
+}
+
+unsafe extern "C" fn set_appearance(receiver: Id, _sel: Sel, appearance: Id) {
+    let appearance = objc::arc::retain(appearance);
+    let old = unsafe {
+        std::mem::replace(
+            &mut (*(receiver as *mut Application)).appearance,
+            appearance,
+        )
+    };
+    objc::arc::release(old);
+}
+
+unsafe extern "C" fn effective_appearance(receiver: Id, sel: Sel) -> Id {
+    let own = unsafe { appearance(receiver, sel) };
+    if !own.is_null() {
+        return own;
+    }
+    crate::appearance::system()
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSApplication").expect("declared before its methods");
     class_methods!(class, {
         "sharedApplication" => shared_application, c"@16@0:8";
     });
     methods!(class, {
+        "appearance" => appearance, c"@16@0:8";
+        "setAppearance:" => set_appearance, c"v24@0:8@16";
         "delegate" => delegate, c"@16@0:8";
         "setDelegate:" => set_delegate, c"v24@0:8@16";
         "mainMenu" => main_menu, c"@16@0:8";
@@ -1136,17 +1153,15 @@ mod tests {
     }
 
     #[test]
-    fn effective_appearance_is_the_named_aqua_appearance() {
+    fn effective_appearance_follows_the_system() {
         crate::bootstrap();
         let class = objc::class::lookup(c"NSApplication").expect("NSApplication");
         let app = objc::object::create_instance(class, 0);
         let appearance =
             unsafe { effective_appearance(app, objc::sel::get("effectiveAppearance")) };
         let name = unsafe { crate::appearance::name(appearance, objc::sel::get("name")) };
-        assert_eq!(
-            unsafe { foundation::string::bytes(name) },
-            b"NSAppearanceNameAqua"
-        );
+        assert_eq!(appearance, crate::appearance::system());
+        assert!(!name.is_null());
     }
 
     #[test]

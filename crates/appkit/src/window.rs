@@ -9,6 +9,7 @@ use crate::define::{class_methods, methods};
 #[repr(C)]
 pub struct Window {
     isa: *const c_void,
+    appearance: Id,
     /// The SDL window, or null until `-initWithContentRect:` has run.
     sdl: sdl3::Window,
     content_view: Id,
@@ -1366,6 +1367,10 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
 /// be keyed by it, and that table is not this crate's to clear.
 unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
     let window = window_of(receiver);
+    objc::arc::release(std::mem::replace(
+        &mut window.appearance,
+        std::ptr::null_mut(),
+    ));
     let content = std::mem::replace(&mut window.content_view, std::ptr::null_mut());
     // SAFETY: null or an object this runtime allocated.
     unsafe { crate::view::detach_window(content, receiver) };
@@ -2189,6 +2194,25 @@ unsafe extern "C" fn views_need_display(receiver: Id, _sel: Sel) -> u8 {
 /// pump runs on every turn anyway; clearing it is what that pass does.
 unsafe extern "C" fn set_views_need_display(_receiver: Id, _sel: Sel, _flag: u8) {}
 
+unsafe extern "C" fn appearance(receiver: Id, _sel: Sel) -> Id {
+    unsafe { (*(receiver as *const Window)).appearance }
+}
+
+unsafe extern "C" fn set_appearance(receiver: Id, _sel: Sel, appearance: Id) {
+    let appearance = objc::arc::retain(appearance);
+    let old =
+        unsafe { std::mem::replace(&mut (*(receiver as *mut Window)).appearance, appearance) };
+    objc::arc::release(old);
+}
+
+unsafe extern "C" fn effective_appearance(receiver: Id, sel: Sel) -> Id {
+    let own = unsafe { appearance(receiver, sel) };
+    if !own.is_null() {
+        return own;
+    }
+    crate::appearance::effective_of(crate::application::shared())
+}
+
 pub(crate) fn install() {
     let responder = objc::class::lookup(c"NSResponder").expect("declared before its methods");
     methods!(responder, {
@@ -2210,6 +2234,9 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
     });
     methods!(class, {
+        "appearance" => appearance, c"@16@0:8";
+        "setAppearance:" => set_appearance, c"v24@0:8@16";
+        "effectiveAppearance" => effective_appearance, c"@16@0:8";
         "initWithContentRect:styleMask:backing:defer:" => init_with_content_rect,
             c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48Q56c64";
         "initWithContentRect:styleMask:backing:defer:screen:" => init_with_content_rect_screen,

@@ -440,6 +440,7 @@ dependencies = [
  "libc",
  "objc",
  "prefix",
+ "sdl3",
  "static_init",
 ]
 
