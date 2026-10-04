@@ -20,9 +20,12 @@ const DIRECTORIES: &[&str] = &[
     "/usr/lib",
     "/private",
     "/private/tmp",
+    "/private/var",
+    // Root's home, which `su -` and `sudo -i` change into.
+    "/private/var/root",
     "/Volumes",
 ];
-const SYMLINKS: &[(&str, &str)] = &[("/tmp", "private/tmp")];
+const SYMLINKS: &[(&str, &str)] = &[("/tmp", "private/tmp"), ("/var", "private/var")];
 const USER_DIRECTORIES: &[&str] = &[
     "Library",
     "Library/Application Support",

@@ -170,6 +170,17 @@ pub fn signal_to_host(darwin: i32) -> Option<libc::c_int> {
     }
 }
 
+/// Whether `darwin` is one of Darwin's own signals - `SIGINFO`, the
+/// terminal's status key, and `SIGEMT` - which nothing on this host can raise.
+///
+/// A handler for one is kept and reported back by `sigaction`, and never runs,
+/// which is all a program that installs one for every signal it forwards
+/// (`sudo`) can observe. Sending one is still refused: it would have to be
+/// some other signal on the way.
+pub fn unraisable(darwin: i32) -> bool {
+    signal_to_host(darwin).is_none() && matches!(darwin, signum::SIGINFO | signum::SIGEMT)
+}
+
 /// The `SA_*` flags, whose *values* differ even where their meanings do not.
 ///
 /// Darwin numbers them from one upward; Linux starts at the other end for the
@@ -436,12 +447,17 @@ pub unsafe fn sigaction(
     act: Option<Disposition>,
     old: Option<&mut Disposition>,
 ) -> libc::c_int {
-    let Some(signum) = signal_to_host(darwin_signum) else {
-        crate::errno::set(libc::EINVAL);
-        return -1;
+    let unraisable = unraisable(darwin_signum);
+    let signum = match signal_to_host(darwin_signum) {
+        Some(signum) => signum,
+        None if unraisable => 0,
+        None => {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
     };
 
-    if retained(darwin_signum) {
+    if unraisable || retained(darwin_signum) {
         let previous = PRETENDED[darwin_signum as usize].get();
         if let Some(act) = act {
             PRETENDED[darwin_signum as usize].set(act);
@@ -542,11 +558,16 @@ pub unsafe fn sigaction(
 /// As [`sigaction`]: `handler` must be a sentinel or a function this process can
 /// call as a signal handler.
 pub unsafe fn signal(darwin_signum: i32, handler: u64) -> u64 {
-    let Some(signum) = signal_to_host(darwin_signum) else {
-        crate::errno::set(libc::EINVAL);
-        return u64::MAX;
+    let unraisable = unraisable(darwin_signum);
+    let signum = match signal_to_host(darwin_signum) {
+        Some(signum) => signum,
+        None if unraisable => 0,
+        None => {
+            crate::errno::set(libc::EINVAL);
+            return u64::MAX;
+        }
     };
-    if retained(darwin_signum) {
+    if unraisable || retained(darwin_signum) {
         let previous = PRETENDED[darwin_signum as usize].get();
         PRETENDED[darwin_signum as usize].set(Disposition {
             handler,
@@ -882,7 +903,7 @@ pub mod entry {
         act: *const c_void,
         old: *mut c_void,
     ) -> c_int {
-        if signal_to_host(signum).is_none() {
+        if signal_to_host(signum).is_none() && !super::unraisable(signum) {
             return no_such_signal();
         }
         // SAFETY: the caller's structure, if it passed one.
@@ -1717,15 +1738,32 @@ mod disposition_tests {
         unsafe { sigaction(signum::SIGUSR1, Some(Disposition::default()), None) };
     }
 
-    /// A signal this host has not got is refused rather than aimed at a
-    /// neighbour: a handler installed for `SIGINFO` must not run for something
-    /// else.
+    /// A handler for a signal this host has not got is kept and handed back,
+    /// and installed on nothing: a handler for `SIGINFO` must not run for
+    /// some neighbour. Raising one is refused for the same reason.
     #[test]
     #[cfg(not(target_os = "macos"))]
-    fn a_signal_this_host_lacks_is_refused() {
+    fn a_signal_this_host_lacks_is_kept_but_never_installed() {
+        let handler = Disposition {
+            handler: 0x1234_5678,
+            ..Disposition::default()
+        };
+        let mut back = Disposition::default();
         // SAFETY: `SIGINFO` maps to nothing here, so nothing is installed.
-        assert_eq!(unsafe { sigaction(signum::SIGINFO, None, None) }, -1);
-        assert_eq!(unsafe { signal(signum::SIGEMT, 0) }, u64::MAX);
+        unsafe {
+            assert_eq!(sigaction(signum::SIGINFO, Some(handler), None), 0);
+            assert_eq!(sigaction(signum::SIGINFO, None, Some(&mut back)), 0);
+            assert_eq!(back.handler, handler.handler);
+            assert_eq!(
+                sigaction(signum::SIGINFO, Some(Disposition::default()), None),
+                0
+            );
+            assert_eq!(signal(signum::SIGEMT, 0), 0);
+        }
+        assert_eq!(entry::raise_(signum::SIGINFO), -1);
+        // A number that is no signal at all is still refused.
+        // SAFETY: nothing is installed for a refused number.
+        assert_eq!(unsafe { sigaction(40, None, None) }, -1);
     }
 
     /// Darwin's `SA_*` bits are not this host's, and the translation is a

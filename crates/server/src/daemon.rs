@@ -1,10 +1,3 @@
-//! The server itself.
-//!
-//! A thread per connection over one shared table. Connections are few - one
-//! per guest process - and each spends nearly all its life blocked in a read,
-//! so a thread each is simpler than multiplexing and costs nothing that
-//! matters.
-
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,23 +13,16 @@ use crate::location;
 use crate::protocol::{Checkin, Reply, Request, VERSION};
 use crate::registry::Registry;
 
-/// How long a server outlives its last client by default. Long enough that a
-/// shell running one short guest after another keeps one server, short enough
-/// that nothing lingers once the user is done.
 pub const DEFAULT_LINGER: Duration = Duration::from_secs(5);
 
 pub struct Options {
-    /// The directory holding the socket and the lock: one per prefix.
     pub directory: PathBuf,
     pub linger: Duration,
 }
 
-/// Why [`run`] returned without serving.
 #[derive(Debug)]
 pub enum Outcome {
-    /// Served until idle.
     Finished,
-    /// Another server already holds this prefix.
     AlreadyRunning,
 }
 
@@ -147,7 +133,6 @@ fn connection(mut stream: UnixStream, id: u64, shared: &Shared) -> io::Result<()
     // is taken from a peer already known to be this user.
     let (peer_pid, peer_uid) = starnix::socket::peer(&stream)
         .map_or((0, u32::MAX), |peer| (peer.pid.unwrap_or(0), peer.uid));
-    // SAFETY: `getuid` has no preconditions.
     if peer_uid != unsafe { libc::getuid() } {
         // The directory is private, so this is somebody who should not have
         // got this far.
@@ -175,11 +160,11 @@ fn answer(
         Request::Checkin(checkin) => match admit(&checkin, peer_pid) {
             Ok(identity) => {
                 let pid = checkin.pid;
-                shared.registry().checkin(pid, id, checkin, identity);
+                let credentials = shared.registry().checkin(pid, id, checkin, identity);
                 *checked_in = Some(pid);
                 Reply::CheckedIn {
-                    // SAFETY: `getpid` has no preconditions.
                     server_pid: starnix::process::me(),
+                    credentials,
                 }
             }
             Err(why) => Reply::Refused(why),
@@ -194,6 +179,10 @@ fn answer(
                 Reply::Done
             }
             None => Reply::Refused("a thread is named by its own process".into()),
+        },
+        Request::Credentials(change) => match checked_in {
+            Some(pid) => Reply::Credentials(shared.registry().change(*pid, &change)),
+            None => Reply::Refused("ids are changed by their own process".into()),
         },
         Request::Shutdown => {
             shared.shutdown.store(true, Ordering::Relaxed);

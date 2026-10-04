@@ -23,6 +23,8 @@
 use std::ffi::CString;
 
 #[cfg(not(target_os = "macos"))]
+pub mod accounts;
+#[cfg(not(target_os = "macos"))]
 pub mod acl;
 mod atomics;
 pub mod attrlist;
@@ -36,6 +38,8 @@ pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod copyfile;
+#[cfg(not(target_os = "macos"))]
+pub mod credentials;
 pub mod data;
 pub mod dirent;
 pub mod dispatch;
@@ -48,6 +52,8 @@ pub mod fortify;
 pub mod fs;
 #[cfg(not(target_os = "macos"))]
 pub mod fts;
+#[cfg(target_os = "linux")]
+pub mod getopt;
 pub mod glob;
 pub mod heap;
 pub mod humanize;
@@ -68,6 +74,8 @@ pub mod math;
 pub mod modes;
 pub mod net;
 mod oslog;
+#[cfg(not(target_os = "macos"))]
+pub mod pam;
 pub mod passthrough;
 pub mod passwd;
 pub mod poll;
@@ -83,6 +91,8 @@ pub mod sched;
 pub mod select;
 pub mod shm;
 pub mod signal;
+#[cfg(not(target_os = "macos"))]
+pub mod sip;
 pub mod spawn;
 pub mod stackprobe;
 pub mod stat;
@@ -360,6 +370,11 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     vis::MODULE,
     wait::MODULE,
     process::MODULE,
+    credentials::MODULE,
+    pam::MODULE,
+    sip::MODULE,
+    #[cfg(target_os = "linux")]
+    getopt::MODULE,
 ];
 
 #[cfg(target_os = "macos")]
@@ -399,6 +414,11 @@ pub const LIBRARY_NAMES: &[&str] = &[
     "/usr/lib/libdbm.dylib",
     "/usr/lib/librpcsvc.dylib",
     "/usr/lib/libgcc_s.1.dylib",
+    // OpenPAM, which `crate::pam` is on hosts without a Darwin one.
+    #[cfg(not(target_os = "macos"))]
+    "/usr/lib/libpam.2.dylib",
+    #[cfg(not(target_os = "macos"))]
+    "/usr/lib/libpam.dylib",
     "/usr/lib/system/libcompiler_rt.dylib",
     "/usr/lib/system/libmacho.dylib",
     "/usr/lib/system/libsystem_blocks.dylib",

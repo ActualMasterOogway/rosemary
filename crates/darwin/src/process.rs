@@ -22,25 +22,32 @@ fn pid() -> i32 {
     starnix::process::me()
 }
 
-/// Record this process as the guest at `path`, and tell the server.
+/// Record this process as the guest at `path`, tell the server if there is
+/// one, and settle who the process is - which may be somebody else than the
+/// user who ran it, if the image is set-id.
 ///
 /// `path` is the guest's spelling. Called once, by the runtime, before the
 /// program's first instruction.
 pub fn check_in(path: &str, argv: Vec<Vec<u8>>) {
     let arch = crate::sysctl::guest_arch();
+    let setid = crate::credentials::setid_of(&prefix::ns::host_path(path));
     let checkin = Checkin {
         path: path.to_owned(),
         argv: argv.clone(),
         cputype: arch.cpu_type(),
         cpusubtype: arch.cpu_subtype(),
         translated: crate::sysctl::is_translated(),
+        credentials: crate::credentials::offered(),
+        fresh: true,
+        setid,
         ..Checkin::default()
     };
     let _ = ME.set(Me {
         path: path.to_owned(),
         argv,
     });
-    server::client::check_in(checkin);
+    let checked_in = server::client::check_in(checkin);
+    crate::credentials::start(checked_in, setid);
 }
 
 /// This process, described without the server.
@@ -61,6 +68,7 @@ fn me() -> Option<Process> {
         }
     };
     let arch = crate::sysctl::guest_arch();
+    let credentials = crate::credentials::current();
     Some(Process {
         pid: pid(),
         // Without the server there is no telling whether the parent is a
@@ -71,12 +79,13 @@ fn me() -> Option<Process> {
         tty_major: host.tty_major,
         tty_minor: host.tty_minor,
         tpgid: host.tpgid,
-        uid: host.uid,
-        euid: host.euid,
-        suid: host.suid,
-        gid: host.gid,
-        egid: host.egid,
-        sgid: host.sgid,
+        uid: credentials.ruid,
+        euid: credentials.euid,
+        suid: credentials.svuid,
+        gid: credentials.rgid,
+        egid: credentials.egid,
+        sgid: credentials.svgid,
+        groups: credentials.groups,
         state: host.state,
         nice: host.nice,
         start_sec: host.start_sec,
@@ -370,8 +379,22 @@ pub fn kinfo_proc(process: &Process) -> Vec<u8> {
     eproc.e_pcred.p_svgid = process.sgid;
     eproc.e_ucred.cr_ref = 1;
     eproc.e_ucred.cr_uid = process.euid;
-    eproc.e_ucred.cr_ngroups = 1;
-    eproc.e_ucred.cr_groups[0] = process.egid;
+    // `cr_groups[0]` is the effective group, as XNU keeps it.
+    let groups = std::iter::once(process.egid)
+        .chain(
+            process
+                .groups
+                .iter()
+                .copied()
+                .filter(|gid| *gid != process.egid),
+        )
+        .take(eproc.e_ucred.cr_groups.len());
+    let mut count = 0;
+    for (slot, gid) in eproc.e_ucred.cr_groups.iter_mut().zip(groups) {
+        *slot = gid;
+        count += 1;
+    }
+    eproc.e_ucred.cr_ngroups = count;
     eproc.e_ppid = process.ppid;
     eproc.e_pgid = process.pgid;
     eproc.e_tdev = terminal(process);

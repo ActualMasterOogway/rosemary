@@ -190,14 +190,39 @@ unsafe extern "C" fn tcsetattr(fd: c_int, action: c_int, input: *const Termios) 
         libc::cfsetispeed(&mut host, speed_to_host(input.c_ispeed));
         libc::cfsetospeed(&mut host, speed_to_host(input.c_ospeed));
     }
-    let host_action = match action {
+    // BSD's `TCSASOFT`: leave the hardware alone - the control flags and the
+    // speeds stay what the terminal has. `sudo` and `stty` ask for it, and
+    // this host has no such bit, so it is done here and not passed on.
+    if action & TCSASOFT != 0 {
+        let mut current = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: the caller's descriptor, and a structure to fill.
+        if unsafe { libc::tcgetattr(fd, current.as_mut_ptr()) } != 0 {
+            return -1;
+        }
+        // SAFETY: filled by the host just now.
+        let current = unsafe { current.assume_init() };
+        host.c_cflag = current.c_cflag;
+        // SAFETY: two structures this frame owns.
+        unsafe {
+            libc::cfsetispeed(&mut host, libc::cfgetispeed(&current));
+            libc::cfsetospeed(&mut host, libc::cfgetospeed(&current));
+        }
+    }
+    let host_action = match action & !TCSASOFT {
         0 => libc::TCSANOW,
         1 => libc::TCSADRAIN,
         2 => libc::TCSAFLUSH,
-        _ => action,
+        _ => {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
     };
     unsafe { libc::tcsetattr(fd, host_action, &host) }
 }
+
+/// Darwin's `TCSASOFT`, a flag on `tcsetattr`'s action.
+#[cfg(target_os = "linux")]
+const TCSASOFT: c_int = 0x10;
 
 // The remaining non-Darwin hosts are the BSDs, where none of the tables above
 // is needed: every input, output, control and local flag, every `c_cc` index
@@ -295,8 +320,73 @@ unsafe extern "C" fn cfsetspeed(t: *mut Termios, speed: u64) -> c_int {
     0
 }
 
+/// `void cfmakeraw(struct termios *)`, as Darwin's Libc has it.
+///
+/// Arithmetic on the guest's own structure, in Darwin's bit positions: the
+/// host's would clear its own bits in a structure laid out differently -
+/// Linux's `ICRNL` happens to be Darwin's too, and nothing else is - and a
+/// terminal "made raw" that way still echoes and still takes Control-D as
+/// end of file.
+///
+/// # Safety
+///
+/// `term` is a writable Darwin `struct termios`.
+unsafe extern "C" fn cfmakeraw(term: *mut Termios) {
+    const IGNBRK: u64 = 0x1;
+    const BRKINT: u64 = 0x2;
+    const IGNPAR: u64 = 0x4;
+    const PARMRK: u64 = 0x8;
+    const INPCK: u64 = 0x10;
+    const ISTRIP: u64 = 0x20;
+    const INLCR: u64 = 0x40;
+    const IGNCR: u64 = 0x80;
+    const ICRNL: u64 = 0x100;
+    const IXON: u64 = 0x200;
+    const IXOFF: u64 = 0x400;
+    const IMAXBEL: u64 = 0x2000;
+    const OPOST: u64 = 0x1;
+    const ECHOE: u64 = 0x2;
+    const ECHOK: u64 = 0x4;
+    const ECHO: u64 = 0x8;
+    const ECHONL: u64 = 0x10;
+    const ISIG: u64 = 0x80;
+    const ICANON: u64 = 0x100;
+    const IEXTEN: u64 = 0x400;
+    const TOSTOP: u64 = 0x0040_0000;
+    const PENDIN: u64 = 0x2000_0000;
+    const NOFLSH: u64 = 0x8000_0000;
+    const CSIZE: u64 = 0x300;
+    const CS8: u64 = 0x300;
+    const CREAD: u64 = 0x800;
+    const PARENB: u64 = 0x1000;
+    const VMIN: usize = 16;
+    const VTIME: usize = 17;
+    // SAFETY: the caller's structure.
+    let term = unsafe { &mut *term };
+    term.c_iflag &= !(IMAXBEL
+        | IXOFF
+        | INPCK
+        | BRKINT
+        | PARMRK
+        | ISTRIP
+        | INLCR
+        | IGNCR
+        | ICRNL
+        | IXON
+        | IGNPAR);
+    term.c_iflag |= IGNBRK;
+    term.c_oflag &= !OPOST;
+    term.c_lflag &=
+        !(ECHO | ECHOE | ECHOK | ECHONL | ICANON | ISIG | IEXTEN | NOFLSH | TOSTOP | PENDIN);
+    term.c_cflag &= !(CSIZE | PARENB);
+    term.c_cflag |= CS8 | CREAD;
+    term.c_cc[VMIN] = 1;
+    term.c_cc[VTIME] = 0;
+}
+
 exports::exports! {
     functions {
+        "cfmakeraw" => cfmakeraw,
         "tcgetattr" => tcgetattr,
         "tcsetattr" => tcsetattr,
         "cfgetispeed" => cfgetispeed,
@@ -314,6 +404,7 @@ mod tests {
     #[test]
     fn every_terminal_entry_is_published() {
         for name in [
+            "cfmakeraw",
             "tcgetattr",
             "tcsetattr",
             "cfgetispeed",
@@ -323,6 +414,45 @@ mod tests {
             "cfsetspeed",
         ] {
             assert!(symbol(name).is_some(), "{name}");
+        }
+    }
+
+    /// What `sudo` does to the user's terminal: `cfmakeraw` on what
+    /// `tcgetattr` said, set back with `TCSADRAIN | TCSASOFT`. The terminal it
+    /// reads back must be raw by Darwin's bits.
+    #[test]
+    fn a_terminal_made_raw_reads_back_raw() {
+        const ECHO: u64 = 0x8;
+        const ICANON: u64 = 0x100;
+        const OPOST: u64 = 0x1;
+        const TCSADRAIN_SOFT: c_int = 0x11;
+        let (mut leader, mut follower) = (0, 0);
+        // SAFETY: two slots for the descriptors, and no name, terminal
+        // settings or window size asked for.
+        let made = unsafe {
+            libc::openpty(
+                &mut leader,
+                &mut follower,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(made, 0, "no pty to test with");
+        // SAFETY: an all-zero Darwin `struct termios`, then the follower's.
+        let mut term: Termios = unsafe { std::mem::zeroed() };
+        unsafe {
+            assert_eq!(tcgetattr(follower, &mut term), 0);
+            assert_ne!(term.c_lflag & ICANON, 0, "a fresh pty is canonical");
+            cfmakeraw(&mut term);
+            assert_eq!(tcsetattr(follower, TCSADRAIN_SOFT, &term), 0);
+            let mut back: Termios = std::mem::zeroed();
+            assert_eq!(tcgetattr(follower, &mut back), 0);
+            assert_eq!(back.c_lflag & (ICANON | ECHO), 0);
+            assert_eq!(back.c_oflag & OPOST, 0);
+            assert_eq!((back.c_cc[16], back.c_cc[17]), (1, 0), "VMIN and VTIME");
+            libc::close(leader);
+            libc::close(follower);
         }
     }
 

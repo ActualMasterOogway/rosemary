@@ -181,7 +181,11 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int
     // case-insensitive reading of a name that does not exist yet would answer
     // about a different directory.
     // SAFETY: a NUL-terminated path.
-    unsafe { libc::mkdir(path.as_ptr(), mode) }
+    let rc = unsafe { libc::mkdir(path.as_ptr(), mode) };
+    if rc == 0 && crate::credentials::creates_as_another() {
+        crate::credentials::created(libc::AT_FDCWD, &path);
+    }
+    rc
 }
 
 /// `int chmod(const char *, mode_t)`
@@ -199,6 +203,68 @@ pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int
     })
 }
 
+/// `chown` as the guest's ids have it, on the file at `found`.
+///
+/// On the prefix's drive the host is not asked at all: who may give a file to
+/// whom is decided by the guest's ids, by Darwin's rule - root may give
+/// anything to anybody, an owner may change the group to one they are in - and
+/// the new owner is recorded on the file, where `stat` finds it (see
+/// `prefix::ownership`). That is `fakeroot`'s `chown`.
+///
+/// Off the drive the host's `chown` stands, except that a guest that is root
+/// is told a refusal worked: there is nowhere to record it, and a program that
+/// is root does not expect `chown` to fail.
+///
+/// # Safety
+///
+/// `found` names a file by a NUL-terminated path, or a descriptor.
+unsafe fn chown_as_guest(
+    found: crate::stat::Found<'_>,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    host_chown: impl FnOnce() -> c_int,
+) -> c_int {
+    use crate::stat::Found;
+    let mut host: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        match found {
+            Found::Fd(fd) => libc::fstat(fd, &mut host),
+            Found::Path(path, true) => libc::stat(path.as_ptr(), &mut host),
+            Found::Path(path, false) => libc::lstat(path.as_ptr(), &mut host),
+            Found::At(dirfd, path, follow) => libc::fstatat(
+                dirfd,
+                path.as_ptr(),
+                &mut host,
+                if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW },
+            ),
+        }
+    };
+    if rc != 0 {
+        return -1;
+    }
+    let me = crate::credentials::current();
+    if !prefix::ownership::inside(found, host.st_dev as u64) {
+        let rc = host_chown();
+        if rc != 0 && crate::errno::get() == libc::EPERM && me.is_root() {
+            return 0;
+        }
+        return rc;
+    }
+    let seen = crate::stat::as_seen(&host, found);
+    let uid = if uid == u32::MAX { seen.uid } else { uid };
+    let gid = if gid == u32::MAX { seen.gid } else { gid };
+    let allowed = me.is_root() || (me.euid == seen.uid && uid == seen.uid && me.in_group(gid));
+    if !allowed {
+        crate::errno::set(libc::EPERM);
+        return -1;
+    }
+    // FIXME (ACCURACY): a filesystem that keeps no user attributes, and a
+    // symlink on Linux, which may not carry one, cannot hold the record; the
+    // change is reported as made and the old owner stays.
+    let _ = prefix::ownership::record(found, host.st_dev as u64, Some((uid, gid)));
+    0
+}
+
 /// `int chown(const char *, uid_t, gid_t)`
 ///
 /// # Safety
@@ -206,7 +272,58 @@ pub unsafe extern "C" fn chmod(path: *const c_char, mode: libc::mode_t) -> c_int
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn chown(path: *const c_char, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
     with_fallback(path, |path| {
-        let rc = unsafe { libc::chown(path, uid, gid) };
+        // SAFETY: a NUL-terminated host path.
+        let found = crate::stat::Found::Path(unsafe { CStr::from_ptr(path) }, true);
+        let rc = unsafe { chown_as_guest(found, uid, gid, || libc::chown(path, uid, gid)) };
+        (rc, rc == 0)
+    })
+}
+
+/// `int fchown(int, uid_t, gid_t)`
+pub extern "C" fn fchown(fd: c_int, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
+    // SAFETY: the caller's descriptor.
+    unsafe {
+        chown_as_guest(crate::stat::Found::Fd(fd), uid, gid, || {
+            libc::fchown(fd, uid, gid)
+        })
+    }
+}
+
+/// `int fchownat(int fd, const char *path, uid_t, gid_t, int flag)`
+///
+/// Darwin spells `AT_FDCWD` and `AT_SYMLINK_NOFOLLOW` its own way; any other
+/// flag has no meaning here and is refused.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `dirfd` a directory descriptor or
+/// Darwin's `AT_FDCWD`.
+pub unsafe extern "C" fn fchownat(
+    dirfd: c_int,
+    path: *const c_char,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    flag: c_int,
+) -> c_int {
+    const DARWIN_AT_SYMLINK_NOFOLLOW: c_int = 0x20;
+    if flag & !DARWIN_AT_SYMLINK_NOFOLLOW != 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let follow = flag & DARWIN_AT_SYMLINK_NOFOLLOW == 0;
+    let dirfd = match dirfd {
+        crate::stat::DARWIN_AT_FDCWD => libc::AT_FDCWD,
+        fd => fd,
+    };
+    let host_flag = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    crate::stat::with_fallback_at(dirfd, path, |path| {
+        // SAFETY: a NUL-terminated host path.
+        let found = crate::stat::Found::At(dirfd, unsafe { CStr::from_ptr(path) }, follow);
+        let rc = unsafe {
+            chown_as_guest(found, uid, gid, || {
+                libc::fchownat(dirfd, path, uid, gid, host_flag)
+            })
+        };
         (rc, rc == 0)
     })
 }
@@ -218,7 +335,9 @@ pub unsafe extern "C" fn chown(path: *const c_char, uid: libc::uid_t, gid: libc:
 /// `path` is a NUL-terminated string.
 pub unsafe extern "C" fn lchown(path: *const c_char, uid: libc::uid_t, gid: libc::gid_t) -> c_int {
     with_fallback(path, |path| {
-        let rc = unsafe { libc::lchown(path, uid, gid) };
+        // SAFETY: a NUL-terminated host path.
+        let found = crate::stat::Found::Path(unsafe { CStr::from_ptr(path) }, false);
+        let rc = unsafe { chown_as_guest(found, uid, gid, || libc::lchown(path, uid, gid)) };
         (rc, rc == 0)
     })
 }
@@ -429,7 +548,10 @@ pub unsafe extern "C" fn freopen(
     // freopen closes the old stream even on failure, so it cannot be retried.
     let translated = host(path);
     let folded = translated.as_ref().and_then(|path| prefix::ns::fold(path));
-    let path = folded.as_ref().or(translated.as_ref()).map_or(path, |p| p.as_ptr());
+    let path = folded
+        .as_ref()
+        .or(translated.as_ref())
+        .map_or(path, |p| p.as_ptr());
     if writing && !path.is_null() && !may_write(path) {
         return std::ptr::null_mut();
     }
@@ -455,6 +577,11 @@ pub unsafe extern "C" fn mkstemp(template: *mut c_char) -> c_int {
     let fd = unsafe { libc::mkstemp(host_template.as_mut_ptr().cast::<c_char>()) };
     if fd < 0 {
         return fd;
+    }
+    if crate::credentials::creates_as_another()
+        && let Ok(made) = CStr::from_bytes_until_nul(&host_template)
+    {
+        crate::credentials::created(libc::AT_FDCWD, made);
     }
     // SAFETY: `mkstemp` rewrote the template in place, NUL-terminated.
     if !unsafe { write_back(template, &host_template, room) } {
@@ -483,6 +610,11 @@ pub unsafe extern "C" fn mkdtemp(template: *mut c_char) -> *mut c_char {
     if unsafe { libc::mkdtemp(host_template.as_mut_ptr().cast::<c_char>()) }.is_null() {
         return std::ptr::null_mut();
     }
+    if crate::credentials::creates_as_another()
+        && let Ok(made) = CStr::from_bytes_until_nul(&host_template)
+    {
+        crate::credentials::created(libc::AT_FDCWD, made);
+    }
     // SAFETY: `mkdtemp` rewrote the template in place, NUL-terminated.
     if !unsafe { write_back(template, &host_template, room) } {
         // SAFETY: a directory this call just made and nothing has entered.
@@ -491,6 +623,61 @@ pub unsafe extern "C" fn mkdtemp(template: *mut c_char) -> *mut c_char {
     }
     // Darwin answers with the caller's own buffer.
     template
+}
+
+/// `char *mkdtempat_np(int dfd, char *path)`: [`mkdtemp`] with a template
+/// relative to a directory descriptor.
+///
+/// The host has no such call, so the name is made here: each trailing `X` is
+/// replaced from the host's random source and `mkdirat` tried, until a name is
+/// free. The template is changed in place, as `mkdtemp` changes it.
+///
+/// # Safety
+///
+/// `path` is a writable NUL-terminated template.
+pub unsafe extern "C" fn mkdtempat_np(dfd: c_int, path: *mut c_char) -> *mut c_char {
+    if path.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller's string.
+    let relative = unsafe { *path } as u8 != b'/';
+    if dfd == crate::stat::DARWIN_AT_FDCWD || !relative {
+        // SAFETY: the caller's template.
+        return unsafe { mkdtemp(path) };
+    }
+    // SAFETY: the caller's NUL-terminated, writable template.
+    let template = unsafe { std::slice::from_raw_parts_mut(path.cast::<u8>(), libc::strlen(path)) };
+    let xs = template.iter().rev().take_while(|b| **b == b'X').count();
+    if xs == 0 {
+        crate::errno::set(libc::EINVAL);
+        return std::ptr::null_mut();
+    }
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let start = template.len() - xs;
+    for _ in 0..1000 {
+        let mut random = vec![0u8; xs];
+        // SAFETY: a buffer of the length given.
+        if unsafe { libc::getrandom(random.as_mut_ptr().cast(), xs, 0) } != xs as isize {
+            return std::ptr::null_mut();
+        }
+        for (slot, byte) in template[start..].iter_mut().zip(random) {
+            *slot = ALPHABET[byte as usize % ALPHABET.len()];
+        }
+        // SAFETY: the template, rewritten in place and still NUL-terminated.
+        if unsafe { libc::mkdirat(dfd, path, 0o700) } == 0 {
+            if crate::credentials::creates_as_another() {
+                // SAFETY: the template, NUL-terminated.
+                crate::credentials::created(dfd, unsafe { CStr::from_ptr(path) });
+            }
+            return path;
+        }
+        if crate::errno::get() != libc::EEXIST {
+            return std::ptr::null_mut();
+        }
+    }
+    crate::errno::set(libc::EEXIST);
+    std::ptr::null_mut()
 }
 
 /// The host spelling of a `XXXXXX` template, and how many bytes the caller's
@@ -552,6 +739,8 @@ exports::exports! {
         "chmod" => chmod,
         "chown" => chown,
         "lchown" => lchown,
+        "fchown" => fchown,
+        "fchownat" => fchownat,
         "lchflags" => lchflags,
         "undelete" => undelete,
         "truncate" => truncate,
@@ -562,5 +751,6 @@ exports::exports! {
         "freopen" => freopen,
         "mkstemp" => mkstemp,
         "mkdtemp" => mkdtemp,
+        "mkdtempat_np" => mkdtempat_np,
     }
 }

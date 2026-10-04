@@ -303,14 +303,6 @@ pub unsafe extern "C" fn strtonum(
     if error.is_some() { 0 } else { value }
 }
 
-pub extern "C" fn issetugid() -> c_int {
-    #[cfg(target_os = "linux")]
-    let secure = unsafe { libc::getauxval(libc::AT_SECURE) } != 0;
-    #[cfg(not(target_os = "linux"))]
-    let secure = unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() };
-    secure as c_int
-}
-
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     /// glibc's and musl's real name for `sigsetjmp`, which their headers make a
@@ -393,7 +385,6 @@ exports::exports! {
         "memset_s" => memset_s,
         "reallocf" => reallocf,
         "strtonum" => strtonum,
-        "issetugid" => issetugid,
         "sys_icache_invalidate" => sys_icache_invalidate,
     }
 }
@@ -512,7 +503,7 @@ mod tests {
             assert!(!p.is_null());
             libc::free(p);
         }
-        assert_eq!(issetugid(), 0);
+        assert_eq!(crate::credentials::issetugid(), 0);
     }
 
     /// Seeding twice from the kernel gives two different sequences, which is the

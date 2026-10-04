@@ -1,24 +1,16 @@
-//! The process table.
-//!
-//! A record exists for every process that checked in and is still the process
-//! that did. Liveness is the host's to say, not the connection's: a process
-//! that exits stays a zombie until its parent collects it, and `ps` is meant
-//! to show it until then; one that `exec`s a host program is no longer a guest
-//! although its pid lives on. [`starnix::process::alive`] tells both apart.
-
 use std::collections::HashMap;
 
 use starnix::process::{self as host, Identity};
 
+use crate::credentials::{Change, Credentials, Denied};
 use crate::protocol::{Checkin, Process, Thread, Usage};
 
-/// The pid a guest whose parent is not a guest is given as its parent:
-/// launchd's, so that walking up from any process ends where it does on a Mac.
 pub const LAUNCHD: i32 = 1;
 
 struct Record {
     identity: Identity,
     checkin: Checkin,
+    credentials: Credentials,
     /// The connection the process checked in on, while it is open.
     connection: Option<u64>,
     /// Names the guest gave its threads, which the host may have truncated.
@@ -35,19 +27,50 @@ impl Registry {
         Self::default()
     }
 
-    /// Record `pid` as the process described by `checkin`, replacing whatever
-    /// was recorded for the pid before - a process that `exec`s another guest
-    /// checks in again as itself.
-    pub fn checkin(&mut self, pid: i32, connection: u64, checkin: Checkin, identity: Identity) {
+    pub fn checkin(
+        &mut self,
+        pid: i32,
+        connection: u64,
+        checkin: Checkin,
+        identity: Identity,
+    ) -> Credentials {
+        let credentials = match checkin.fresh {
+            true => self
+                .inherited(pid)
+                .unwrap_or_else(|| checkin.credentials.clone())
+                .exec(checkin.setid),
+            false => checkin.credentials.clone(),
+        };
         self.records.insert(
             pid,
             Record {
                 identity,
                 checkin,
+                credentials: credentials.clone(),
                 connection: Some(connection),
                 thread_names: HashMap::new(),
             },
         );
+        credentials
+    }
+
+    /// The ids a new image at `pid` starts from: the image it replaced, or
+    /// else the guest that started it. `None` when it was started from
+    /// outside, by a host process, which is its own user.
+    fn inherited(&mut self, pid: i32) -> Option<Credentials> {
+        if let Some(previous) = self.live(pid) {
+            return Some(previous.credentials.clone());
+        }
+        let parent = host::process(pid)?.ppid;
+        self.live(parent).map(|record| record.credentials.clone())
+    }
+
+    /// Change `pid`'s ids, if the rules allow it.
+    pub fn change(&mut self, pid: i32, change: &Change) -> Result<Credentials, Denied> {
+        let record = self.live(pid).ok_or(Denied::Permission)?;
+        let next = record.credentials.changed(change)?;
+        record.credentials = next.clone();
+        Ok(next)
     }
 
     /// The connection `connection` closed. Its process may still be alive
@@ -110,12 +133,13 @@ impl Registry {
             tty_major: host.tty_major,
             tty_minor: host.tty_minor,
             tpgid: host.tpgid,
-            uid: host.uid,
-            euid: host.euid,
-            suid: host.suid,
-            gid: host.gid,
-            egid: host.egid,
-            sgid: host.sgid,
+            uid: record.credentials.ruid,
+            euid: record.credentials.euid,
+            suid: record.credentials.svuid,
+            gid: record.credentials.rgid,
+            egid: record.credentials.egid,
+            sgid: record.credentials.svgid,
+            groups: record.credentials.groups.clone(),
             state: host.state,
             nice: host.nice,
             start_sec: host.start_sec,
@@ -166,6 +190,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::SetId;
 
     fn me() -> i32 {
         // SAFETY: `getpid` has no preconditions.
@@ -178,6 +203,70 @@ mod tests {
             argv: vec![path.as_bytes().to_vec()],
             ..Checkin::default()
         }
+    }
+
+    const USER: u32 = 501;
+
+    fn fresh(path: &str, setid: SetId) -> Checkin {
+        Checkin {
+            credentials: Credentials::of(USER, 20, vec![20]),
+            fresh: true,
+            setid,
+            ..checkin(path)
+        }
+    }
+
+    const SETUID_ROOT: SetId = SetId {
+        uid: Some(0),
+        gid: None,
+    };
+
+    #[test]
+    fn a_set_user_id_image_runs_as_its_owner_and_is_listed_so() {
+        let mut registry = Registry::new();
+        let identity = host::identity(me()).unwrap();
+        let creds = registry.checkin(me(), 1, fresh("/usr/bin/sudo", SETUID_ROOT), identity);
+        assert_eq!((creds.ruid, creds.euid), (USER, 0));
+        let listed = registry.process(me()).unwrap();
+        assert_eq!((listed.uid, listed.euid, listed.suid), (USER, 0, 0));
+    }
+
+    #[test]
+    fn an_exec_inherits_the_ids_of_the_image_it_replaces() {
+        let mut registry = Registry::new();
+        let identity = host::identity(me()).unwrap();
+        registry.checkin(me(), 1, fresh("/usr/bin/sudo", SETUID_ROOT), identity);
+        registry
+            .change(me(), &Change::SetUid(0))
+            .expect("root may become root wholly");
+        // The image sudo runs is not set-id, and is root all the same.
+        let creds = registry.checkin(me(), 2, fresh("/bin/sh", SetId::default()), identity);
+        assert_eq!((creds.ruid, creds.euid, creds.svuid), (0, 0, 0));
+        assert!(!creds.tainted);
+    }
+
+    #[test]
+    fn a_process_that_checks_in_again_keeps_the_ids_it_sends() {
+        let mut registry = Registry::new();
+        let identity = host::identity(me()).unwrap();
+        let mine = Credentials::of(0, 0, vec![0]);
+        let again = Checkin {
+            credentials: mine.clone(),
+            ..checkin("/bin/sh")
+        };
+        assert_eq!(registry.checkin(me(), 1, again, identity), mine);
+    }
+
+    #[test]
+    fn an_unprivileged_change_is_refused_and_leaves_the_record_alone() {
+        let mut registry = Registry::new();
+        let identity = host::identity(me()).unwrap();
+        registry.checkin(me(), 1, fresh("/bin/sh", SetId::default()), identity);
+        assert_eq!(
+            registry.change(me(), &Change::SetUid(0)),
+            Err(Denied::Permission)
+        );
+        assert_eq!(registry.process(me()).unwrap().euid, USER);
     }
 
     #[test]

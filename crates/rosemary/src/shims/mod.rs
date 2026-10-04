@@ -152,6 +152,8 @@ pub fn dispatch(
         // has.
         "vswprintf" => printf::vswprintf,
         "vasprintf" => printf::vasprintf,
+        "asprintf" => printf::asprintf,
+        "syslog" | "syslog$DARWIN_EXTSN" => printf::syslog,
         "__vsnprintf_chk" => printf::vsnprintf_chk,
         "sscanf" => sscanf::sscanf,
         // The locale-aware and `va_list` spellings, which are the same parser

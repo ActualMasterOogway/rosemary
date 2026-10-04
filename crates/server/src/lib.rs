@@ -7,6 +7,8 @@
 //! started on demand by the first guest and gone a few seconds after the last.
 //!
 //! * [`client`] is a guest's side: check in once, then ask.
+//! * [`credentials`] are a guest's user and group ids, which the server
+//!   holds for every guest and which change by XNU's rules.
 //! * [`daemon`] is the server: a process table ([`registry`]) kept honest by
 //!   the host kernel (through `starnix`), answered over a private Unix socket
 //!   ([`location`], [`protocol`], [`codec`]).
@@ -15,6 +17,7 @@
 
 pub mod client;
 pub mod codec;
+pub mod credentials;
 pub mod daemon;
 pub mod location;
 pub mod protocol;

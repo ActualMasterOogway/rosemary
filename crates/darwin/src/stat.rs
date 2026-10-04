@@ -139,6 +139,24 @@ pub(crate) fn from_host(host: &libc::stat) -> Stat {
     }
 }
 
+pub(crate) use prefix::ownership::Found;
+
+/// What the guest is told about the file the host described as `host`: Darwin's
+/// layout, with the owner and mode the prefix reports for it - root for the
+/// base's files, whoever a guest recorded, and set-id bits for its set-id
+/// programs. See `prefix::ownership`.
+pub(crate) fn as_seen(host: &libc::stat, found: Found<'_>) -> Stat {
+    let mut stat = from_host(host);
+    if let Some(owner) = prefix::ownership::of(found, host.st_dev as u64, host.st_ino as u64) {
+        stat.uid = owner.uid;
+        stat.gid = owner.gid;
+        if let Some(mode) = owner.mode {
+            stat.mode = (stat.mode & !0o7777) | mode as u16;
+        }
+    }
+    stat
+}
+
 /// Run `ask` on the host path `path` names, and again on the case-insensitive
 /// reading of it if the first attempt says the file is not there.
 ///
@@ -242,8 +260,9 @@ pub(crate) unsafe fn at_path(path: *const c_char, out: *mut Stat, symlink: bool)
             }
         };
         if rc == 0 && !out.is_null() {
-            // SAFETY: the caller states `out` is writable for a Darwin `stat`.
-            unsafe { *out = from_host(&host) };
+            // SAFETY: `path` is the host path just stat'ed, and the caller
+            // states `out` is writable for a Darwin `stat`.
+            unsafe { *out = as_seen(&host, Found::Path(CStr::from_ptr(path), !symlink)) };
         }
         (rc, rc == 0)
     })
@@ -261,7 +280,7 @@ pub unsafe extern "C" fn fstat(fd: c_int, out: *mut Stat) -> c_int {
     let rc = unsafe { libc::fstat(fd, &mut host) };
     if rc == 0 && !out.is_null() {
         // SAFETY: the caller states `out` is writable.
-        unsafe { *out = from_host(&host) };
+        unsafe { *out = as_seen(&host, Found::Fd(fd)) };
     }
     rc
 }
@@ -396,6 +415,40 @@ pub unsafe extern "C" fn readlink(
     copied as libc::ssize_t
 }
 
+/// Whether creating a file now has to be recorded as made by somebody the host
+/// would not name - see `crate::credentials::created` - and, if so, whether
+/// the file is there already, in which case nothing is created.
+///
+/// `None` when there is nothing to record.
+fn creation(create: bool, exclusive: bool, dirfd: c_int, path: *const c_char) -> Option<bool> {
+    #[cfg(not(target_os = "macos"))]
+    if create && crate::credentials::creates_as_another() {
+        if exclusive {
+            return Some(false);
+        }
+        let saved = crate::errno::get();
+        // SAFETY: a zeroed `struct stat` for the host to fill, and the
+        // caller's NUL-terminated path.
+        let mut host: libc::stat = unsafe { std::mem::zeroed() };
+        let there =
+            unsafe { libc::fstatat(dirfd, path, &mut host, libc::AT_SYMLINK_NOFOLLOW) } == 0;
+        crate::errno::set(saved);
+        return Some(there);
+    }
+    let _ = (create, exclusive, dirfd, path);
+    None
+}
+
+/// Record what [`creation`] said was about to be made, if it was.
+fn created(existed: Option<bool>, made: bool, dirfd: c_int, path: *const c_char) {
+    #[cfg(not(target_os = "macos"))]
+    if made && existed == Some(false) {
+        // SAFETY: the caller's NUL-terminated path.
+        crate::credentials::created(dirfd, unsafe { CStr::from_ptr(path) });
+    }
+    let _ = (existed, made, dirfd, path);
+}
+
 /// The guest spelling of a host path this crate is about to hand back.
 ///
 /// `None` for one no mount reaches, which the caller reports as `ENOENT`.
@@ -416,7 +469,17 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
         if writing && !may_write(path) {
             return (std::ptr::null_mut(), false);
         }
+        // `w` and `a` create; `x` is C11's exclusive.
+        // SAFETY: the caller's NUL-terminated mode.
+        let creates = writing
+            && unsafe { CStr::from_ptr(mode) }
+                .to_bytes()
+                .iter()
+                .any(|b| matches!(b, b'w' | b'a'));
+        let exclusive = unsafe { CStr::from_ptr(mode) }.to_bytes().contains(&b'x');
+        let existed = creation(creates, exclusive, libc::AT_FDCWD, path);
         let file = unsafe { libc::fopen(path, mode) };
+        created(existed, !file.is_null(), libc::AT_FDCWD, path);
         (file, !file.is_null())
     })
 }
@@ -443,7 +506,14 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c
         if writes(host_flags) && !may_write(path) {
             return (-1, false);
         }
+        let existed = creation(
+            host_flags & libc::O_CREAT != 0,
+            host_flags & libc::O_EXCL != 0,
+            libc::AT_FDCWD,
+            path,
+        );
         let fd = unsafe { libc::open(path, host_flags, mode) };
+        created(existed, fd >= 0, libc::AT_FDCWD, path);
         (fd, fd >= 0)
     })
 }
@@ -476,11 +546,18 @@ pub unsafe extern "C" fn openat(
         if writes(host_flags) && !may_write_at(dirfd, path) {
             return (-1, false);
         }
+        let existed = creation(
+            host_flags & libc::O_CREAT != 0,
+            host_flags & libc::O_EXCL != 0,
+            dirfd,
+            path,
+        );
         let fd = match resolve_beneath {
             // SAFETY: the caller's descriptor, and a translated path.
             true => unsafe { beneath::open(dirfd, path, host_flags, mode) },
             false => unsafe { libc::openat(dirfd, path, host_flags, mode) },
         };
+        created(existed, fd >= 0, dirfd, path);
         (fd, fd >= 0)
     })
 }
@@ -598,7 +675,13 @@ pub unsafe extern "C" fn fstatat(
         let mut host = MaybeUninit::<libc::stat>::uninit();
         let rc = unsafe { libc::fstatat(dirfd, path, host.as_mut_ptr(), host_flag) };
         if rc == 0 && !out.is_null() {
-            unsafe { *out = from_host(&host.assume_init()) };
+            // SAFETY: filled by the host, and `path` is the one it was given.
+            unsafe {
+                *out = as_seen(
+                    &host.assume_init(),
+                    Found::At(dirfd, CStr::from_ptr(path), !nofollow),
+                )
+            };
         }
         (rc, rc == 0)
     })
@@ -608,8 +691,8 @@ pub unsafe extern "C" fn fstatat(
 /// directory it starts from, by `..`, an absolute path or a symlink. Safe
 /// archive extraction (`unzip`) relies on it, so it is kept rather than dropped.
 mod beneath {
-    use super::{Stat, from_host};
-    use std::ffi::{c_char, c_int};
+    use super::{Found, Stat, as_seen};
+    use std::ffi::{CStr, c_char, c_int};
 
     /// The `AT_` flag where the host can honour it, and no bits elsewhere, so
     /// the caller's check refuses it by `EINVAL` there.
@@ -684,14 +767,15 @@ mod beneath {
         // SAFETY: an `O_PATH` descriptor this call owns; an empty path asks
         // about the descriptor itself, which is the symlink under `O_NOFOLLOW`.
         let rc = unsafe { libc::fstatat(fd, c"".as_ptr(), &mut host, libc::AT_EMPTY_PATH) };
+        if rc == 0 && !out.is_null() {
+            // SAFETY: the caller states `out` is writable, and `path` was
+            // found beneath `dirfd`.
+            unsafe { *out = as_seen(&host, Found::At(dirfd, CStr::from_ptr(path), !nofollow)) };
+        }
         let saved = crate::errno::get();
         // SAFETY: closed exactly once.
         unsafe { libc::close(fd) };
         crate::errno::set(saved);
-        if rc == 0 && !out.is_null() {
-            // SAFETY: the caller states `out` is writable.
-            unsafe { *out = from_host(&host) };
-        }
         rc
     }
 

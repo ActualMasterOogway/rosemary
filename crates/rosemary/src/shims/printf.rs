@@ -913,6 +913,34 @@ pub fn vsnprintf_chk(
 /// `vasprintf(char **ret, const char *fmt, va_list ap)`.
 pub fn vasprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
+    store_allocated(symbol, ctx, mem, out)
+}
+
+/// `void syslog(int priority, const char *fmt, ...)`, rendered here and handed
+/// to the host's logger whole. The priorities and facilities are the same
+/// numbers on both.
+pub fn syslog(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from(symbol, ctx, &*mem, ctx.rsi, 2)?;
+    let text = std::ffi::CString::new(out).unwrap_or_default();
+    // SAFETY: a constant format consuming the one NUL-terminated string.
+    unsafe { libc::syslog(ctx.rdi as i32, c"%s".as_ptr(), text.as_ptr()) };
+    Ok(())
+}
+
+/// `int asprintf(char **ret, const char *fmt, ...)`
+pub fn asprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let out = format_from(symbol, ctx, &*mem, ctx.rsi, 2)?;
+    store_allocated(symbol, ctx, mem, out)
+}
+
+/// Put `out` in a fresh allocation and its address in `*ret` (`rdi`), as the
+/// `asprintf` pair answers.
+fn store_allocated(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    out: Vec<u8>,
+) -> Result<()> {
     // SAFETY: an ordinary allocation of a known size, checked for null before
     // anything is written through it.
     let buf = unsafe { libc::malloc(out.len() + 1) };

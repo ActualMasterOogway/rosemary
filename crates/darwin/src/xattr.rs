@@ -438,7 +438,7 @@ unsafe extern "C" fn listxattr(
         return -1;
     };
     let mut out: Vec<u8> = Vec::new();
-    for name in names {
+    for name in names.into_iter().filter(|name| !reserved(name)) {
         out.extend_from_slice(&name);
         out.push(0);
     }
@@ -464,7 +464,20 @@ unsafe fn host_name(name: *const c_char) -> Option<CString> {
     if name.is_null() {
         return None;
     }
-    host::name(unsafe { CStr::from_ptr(name) })
+    let name = unsafe { CStr::from_ptr(name) };
+    if reserved(name.to_bytes()) {
+        return None;
+    }
+    host::name(name)
+}
+
+/// Whether `name`, as the guest spells it, is the runtime's own record of who
+/// owns a file (`prefix::ownership::RECORD`), which a guest neither sees nor
+/// writes: it would be a `chown` that no permission check saw.
+fn reserved(name: &[u8]) -> bool {
+    let record = prefix::ownership::RECORD.to_bytes();
+    let bare = record.strip_prefix(b"user.").unwrap_or(record);
+    name == record || name == bare
 }
 
 /// The host path the guest's `path` names.

@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::codec;
+use crate::credentials::{Change, Credentials, Denied};
 use crate::location;
 use crate::protocol::{Checkin, Process, Reply, Request, Thread, Usage, VERSION};
 
@@ -234,7 +235,14 @@ fn ensure(session: &mut Session, launch: bool) -> Option<()> {
         if let Some(checkin) = &mut session.checkin {
             checkin.pid = pid();
             match client.call(&Request::Checkin(checkin.clone()))? {
-                Reply::CheckedIn { .. } => {}
+                // From now on this process is who the server says, and a later
+                // checkin - a `fork` child's, or one after the server restarted
+                // - says so rather than inheriting afresh.
+                Reply::CheckedIn { credentials, .. } => {
+                    checkin.credentials = credentials;
+                    checkin.fresh = false;
+                    checkin.setid = Default::default();
+                }
                 Reply::Refused(why) => return Err(io::Error::other(why)),
                 _ => return Err(io::Error::other("unexpected reply to a checkin")),
             }
@@ -280,9 +288,12 @@ pub fn call(request: &Request) -> Option<Reply> {
 }
 
 /// Introduce this process to the server; it is listed from now on.
-pub fn check_in(mut checkin: Checkin) -> bool {
+///
+/// Returns who the process is, as the server decided from what it inherits,
+/// or `None` without a server - and then the caller decides by the same rules.
+pub fn check_in(mut checkin: Checkin) -> Option<Credentials> {
     if !configured() {
-        return false;
+        return None;
     }
     checkin.version = VERSION;
     checkin.pid = pid();
@@ -291,7 +302,36 @@ pub fn check_in(mut checkin: Checkin) -> bool {
     // A connection opened before the checkin carried none; start over so the
     // server hears it on the connection that will stay open.
     session.client = None;
-    ensure(&mut session, true).is_some()
+    ensure(&mut session, true)?;
+    let checkin = session.checkin.as_ref()?;
+    (!checkin.fresh).then(|| checkin.credentials.clone())
+}
+
+/// Change this process's ids. `None` means there is no server to ask, and the
+/// caller applies the change itself and tells [`remember`].
+pub fn change_credentials(change: Change) -> Option<Result<Credentials, Denied>> {
+    let reply = call(&Request::Credentials(change))?;
+    let Reply::Credentials(result) = reply else {
+        return None;
+    };
+    if let Ok(credentials) = &result {
+        remember(credentials.clone());
+    }
+    Some(result)
+}
+
+/// Record this process's ids for its next checkin: a `fork` child's, or one
+/// after the server went away and came back.
+pub fn remember(credentials: Credentials) {
+    if !configured() {
+        return;
+    }
+    let mut session = SESSION.lock();
+    if let Some(checkin) = &mut session.checkin {
+        checkin.credentials = credentials;
+        checkin.fresh = false;
+        checkin.setid = Default::default();
+    }
 }
 
 /// Called in a guest's `fork` child: check in as the new process straight

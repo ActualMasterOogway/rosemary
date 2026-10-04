@@ -67,7 +67,8 @@ unsafe fn strings_of(host: &libc::passwd) -> [CString; 6] {
         CString::default(),
         text(host.pw_gecos),
         home_of(host),
-        text(host.pw_shell),
+        CString::new(crate::accounts::guest_shell(text(host.pw_shell).as_bytes()))
+            .unwrap_or_default(),
     ]
 }
 
@@ -94,8 +95,38 @@ fn entry(host: &libc::passwd, at: impl Fn(usize) -> *mut c_char) -> Passwd {
 /// `host` is a live `struct passwd` this process's libc returned.
 unsafe fn publish(host: *const libc::passwd) -> *mut Passwd {
     let host = unsafe { &*host };
+    // A host account a system one hides is not there at all.
+    // SAFETY: libc's own NUL-terminated name.
+    if !host.pw_name.is_null()
+        && crate::accounts::shadows_user(unsafe { CStr::from_ptr(host.pw_name) }.to_bytes())
+    {
+        return std::ptr::null_mut();
+    }
     let strings = unsafe { strings_of(host) };
-    let guest = entry(host, |i| strings[i].as_ptr().cast_mut());
+    publish_strings(strings, host.pw_uid, host.pw_gid)
+}
+
+/// A system account's strings, in [`Passwd`]'s order.
+fn system_strings(user: &crate::accounts::User) -> [CString; 6] {
+    let text = |s: &str| CString::new(s).unwrap_or_default();
+    [
+        text(&user.name),
+        // Darwin's own placeholder: the password is not in this database.
+        text("********"),
+        CString::default(),
+        text(&user.gecos),
+        text(&user.home),
+        text(&user.shell),
+    ]
+}
+
+/// An entry made of `strings`, in this thread's storage.
+fn publish_strings(strings: [CString; 6], uid: u32, gid: u32) -> *mut Passwd {
+    // SAFETY: a zeroed host entry carries only the ids `entry` reads.
+    let mut ids: libc::passwd = unsafe { std::mem::zeroed() };
+    ids.pw_uid = uid;
+    ids.pw_gid = gid;
+    let guest = entry(&ids, |i| strings[i].as_ptr().cast_mut());
     let answer = Box::new(Entry {
         guest,
         _strings: strings.into(),
@@ -162,6 +193,9 @@ pub unsafe extern "C" fn getpwuid(uid: u32) -> *mut Passwd {
     // A null return means "no such user" *or* an error, and the two are told
     // apart by `errno` - which the caller only trusts if it was cleared first.
     crate::errno::set(0);
+    if let Some(user) = crate::accounts::system_user_by_uid(uid) {
+        return publish_strings(system_strings(&user), user.uid, user.gid);
+    }
     // SAFETY: takes a scalar and returns libc's own storage or null.
     let host = unsafe { libc::getpwuid(uid) };
     if host.is_null() {
@@ -182,6 +216,12 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
         return std::ptr::null_mut();
     }
     crate::errno::set(0);
+    // SAFETY: the caller's NUL-terminated string.
+    if let Some(user) =
+        crate::accounts::system_user_by_name(unsafe { CStr::from_ptr(name) }.to_bytes())
+    {
+        return publish_strings(system_strings(&user), user.uid, user.gid);
+    }
     // SAFETY: the caller's string.
     let host = unsafe { libc::getpwnam(name) };
     if host.is_null() {
@@ -200,6 +240,10 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
 /// have the guest building two sets of paths.
 pub fn home(user: Option<&CStr>) -> Option<CString> {
     crate::errno::set(0);
+    if let Some(user) = user.and_then(|name| crate::accounts::system_user_by_name(name.to_bytes()))
+    {
+        return CString::new(user.home).ok();
+    }
     // SAFETY: a scalar, or the caller's NUL-terminated name; both return libc's
     // own storage or null.
     let host = unsafe {
@@ -242,7 +286,13 @@ fn lookup_r(
             0 if result.is_null() => return Ok(None),
             // SAFETY: the host filled `host`, whose strings point into `buf`,
             // which is still alive.
-            0 => return Ok(Some((unsafe { strings_of(&host) }, host.pw_uid, host.pw_gid))),
+            0 => {
+                let strings = unsafe { strings_of(&host) };
+                if crate::accounts::shadows_user(strings[0].as_bytes()) {
+                    return Ok(None);
+                }
+                return Ok(Some((strings, host.pw_uid, host.pw_gid)));
+            }
             error => return Err(error),
         }
     }
@@ -261,7 +311,9 @@ unsafe fn fill_r(
     size: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
-    if result.is_null() || pwd.is_null() || buf.is_null() { return libc::EINVAL; }
+    if result.is_null() || pwd.is_null() || buf.is_null() {
+        return libc::EINVAL;
+    }
     unsafe { *result = std::ptr::null_mut() };
     let (strings, uid, gid) = match answer {
         Ok(Some(strings)) => strings,
@@ -308,17 +360,12 @@ pub unsafe extern "C" fn getpwuid_r(
     size: usize,
     result: *mut *mut Passwd,
 ) -> c_int {
-    // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
-    let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwuid_r(uid, h, b, n, r) });
-    unsafe {
-        fill_r(
-            answer,
-            pwd,
-            buf,
-            size,
-            result,
-        )
-    }
+    let answer = match crate::accounts::system_user_by_uid(uid) {
+        Some(user) => Ok(Some((system_strings(&user), user.uid, user.gid))),
+        // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
+        None => lookup_r(|h, b, n, r| unsafe { libc::getpwuid_r(uid, h, b, n, r) }),
+    };
+    unsafe { fill_r(answer, pwd, buf, size, result) }
 }
 
 /// `int getpwnam_r(const char *, struct passwd *, char *, size_t, struct passwd **)`
@@ -336,17 +383,14 @@ pub unsafe extern "C" fn getpwnam_r(
     if name.is_null() {
         return libc::EINVAL;
     }
-    // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
-    let answer = lookup_r(|h, b, n, r| unsafe { libc::getpwnam_r(name, h, b, n, r) });
-    unsafe {
-        fill_r(
-            answer,
-            pwd,
-            buf,
-            size,
-            result,
-        )
-    }
+    // SAFETY: the caller's NUL-terminated string.
+    let answer =
+        match crate::accounts::system_user_by_name(unsafe { CStr::from_ptr(name) }.to_bytes()) {
+            Some(user) => Ok(Some((system_strings(&user), user.uid, user.gid))),
+            // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
+            None => lookup_r(|h, b, n, r| unsafe { libc::getpwnam_r(name, h, b, n, r) }),
+        };
+    unsafe { fill_r(answer, pwd, buf, size, result) }
 }
 
 /// Names by id, kept for the life of the process: `user_from_uid` hands out a
@@ -399,6 +443,9 @@ fn cached_number(id: u32) -> *const c_char {
 /// `const char *user_from_uid(uid_t uid, int nouser)`
 pub extern "C" fn user_from_uid(uid: u32, nouser: c_int) -> *const c_char {
     let name = cached_name(false, uid, || {
+        if let Some(user) = crate::accounts::system_user_by_uid(uid) {
+            return CString::new(user.name).ok();
+        }
         // SAFETY: a scalar, answered with libc's own entry or null.
         let host = unsafe { libc::getpwuid(uid) };
         // SAFETY: libc's own NUL-terminated name.
@@ -416,10 +463,15 @@ pub extern "C" fn user_from_uid(uid: u32, nouser: c_int) -> *const c_char {
 /// here anyway.
 pub extern "C" fn group_from_gid(gid: u32, nogroup: c_int) -> *const c_char {
     let name = cached_name(true, gid, || {
+        if let Some(group) = crate::accounts::system_group_by_gid(gid) {
+            return CString::new(group.name).ok();
+        }
         // SAFETY: a scalar, answered with libc's own entry or null.
         let host = unsafe { libc::getgrgid(gid) };
         // SAFETY: libc's own NUL-terminated name.
-        (!host.is_null()).then(|| unsafe { CString::from(CStr::from_ptr((*host).gr_name)) })
+        let name =
+            (!host.is_null()).then(|| unsafe { CString::from(CStr::from_ptr((*host).gr_name)) })?;
+        (!crate::accounts::shadows_group(name.as_bytes())).then_some(name)
     });
     match name {
         Some(name) => name.as_ptr(),
@@ -444,26 +496,8 @@ pub unsafe extern "C" fn getgrouplist_2(
     if name.is_null() || groups.is_null() {
         return -1;
     }
-    let mut host: Vec<u32> = Vec::new();
-    let mut count: c_int = 32;
-    loop {
-        host.resize(count as usize, 0);
-        let offered = count;
-        // SAFETY: `host` holds `count` slots, and glibc writes no more.
-        if unsafe { libc::getgrouplist(name, basegid, host.as_mut_ptr(), &mut count) } >= 0 {
-            host.truncate(count as usize);
-            break;
-        }
-        // glibc reports the size it needed; grow regardless, in case the
-        // group database changed between the two calls.
-        count = count.max(offered.saturating_mul(2));
-    }
-    let mut merged = vec![basegid];
-    for gid in host {
-        if !merged.contains(&gid) {
-            merged.push(gid);
-        }
-    }
+    // SAFETY: the caller's NUL-terminated name.
+    let merged = crate::accounts::groups_of(unsafe { CStr::from_ptr(name) }, basegid);
     // SAFETY: a block of exactly `merged`'s bytes, filled immediately.
     let list = unsafe { crate::heap::malloc(size_of_val(merged.as_slice())) }.cast::<u32>();
     if list.is_null() {
@@ -478,9 +512,335 @@ pub unsafe extern "C" fn getgrouplist_2(
     merged.len() as i32
 }
 
+/// The user and primary group ids of the account `name`, by the same
+/// accounts `getpwnam` answers from - without touching the storage its answer
+/// lives in, which the guest may still be holding a pointer into. For this
+/// runtime's own callers: PAM asks while `su` holds `getpwnam`'s answer.
+pub(crate) fn user_ids(name: &CStr) -> Option<(u32, u32)> {
+    if let Some(user) = crate::accounts::system_user_by_name(name.to_bytes()) {
+        return Some((user.uid, user.gid));
+    }
+    // SAFETY: the host's reentrant lookup into buffers `lookup_r` owns.
+    match lookup_r(|h, b, n, r| unsafe { libc::getpwnam_r(name.as_ptr(), h, b, n, r) }) {
+        Ok(Some((_, uid, gid))) => Some((uid, gid)),
+        _ => None,
+    }
+}
+
+/// The id of the group `name`, as [`user_ids`] answers for users.
+pub(crate) fn group_id(name: &CStr) -> Option<u32> {
+    if let Some(group) = crate::accounts::system_group_by_name(name.to_bytes()) {
+        return Some(group.gid);
+    }
+    if crate::accounts::shadows_group(name.to_bytes()) {
+        return None;
+    }
+    let mut buffer = vec![0 as c_char; 4096];
+    loop {
+        // SAFETY: a zeroed `struct group` and a buffer, both this function's.
+        let mut host: libc::group = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                &mut host,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        match rc {
+            libc::ERANGE if buffer.len() < 1 << 20 => buffer.resize(buffer.len() * 4, 0),
+            0 if !result.is_null() => return Some(host.gr_gid),
+            _ => return None,
+        }
+    }
+}
+
+/// `struct group`, which Darwin and this host lay out alike.
+#[repr(C)]
+pub struct GroupEntry {
+    name: *mut c_char,
+    passwd: *mut c_char,
+    gid: u32,
+    members: *mut *mut c_char,
+}
+
+const _: () = {
+    assert!(size_of::<GroupEntry>() == size_of::<libc::group>());
+    assert!(std::mem::offset_of!(GroupEntry, members) == std::mem::offset_of!(libc::group, gr_mem));
+};
+
+struct SystemGroupAnswer {
+    entry: GroupEntry,
+    _strings: Vec<CString>,
+    _members: Vec<*mut c_char>,
+}
+
+thread_local! {
+    static GROUP: RefCell<Option<Box<SystemGroupAnswer>>> = const { RefCell::new(None) };
+}
+
+/// A system group in this thread's storage, overwritten by the next call.
+fn publish_group(group: &crate::accounts::Group) -> *mut GroupEntry {
+    let mut strings = vec![
+        CString::new(group.name.as_str()).unwrap_or_default(),
+        CString::new("*").unwrap_or_default(),
+    ];
+    strings.extend(
+        group
+            .members
+            .iter()
+            .map(|member| CString::new(member.as_str()).unwrap_or_default()),
+    );
+    let mut members: Vec<*mut c_char> =
+        strings[2..].iter().map(|s| s.as_ptr().cast_mut()).collect();
+    members.push(std::ptr::null_mut());
+    let mut answer = Box::new(SystemGroupAnswer {
+        entry: GroupEntry {
+            name: strings[0].as_ptr().cast_mut(),
+            passwd: strings[1].as_ptr().cast_mut(),
+            gid: group.gid,
+            members: std::ptr::null_mut(),
+        },
+        _strings: strings,
+        _members: members,
+    });
+    answer.entry.members = answer._members.as_mut_ptr();
+    let mut answer = Some(answer);
+    let published = GROUP.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        *slot = answer.take();
+        slot.as_mut()
+            .map_or(std::ptr::null_mut(), |a| &raw mut a.entry)
+    });
+    published.unwrap_or_else(|_| {
+        let leaked = Box::leak(answer.take().expect("not consumed by try_with"));
+        &raw mut leaked.entry
+    })
+}
+
+/// A host group, unless a system one hides it.
+fn host_group(host: *mut libc::group) -> *mut GroupEntry {
+    // SAFETY: libc's own entry, or null.
+    if host.is_null()
+        || crate::accounts::shadows_group(unsafe { CStr::from_ptr((*host).gr_name) }.to_bytes())
+    {
+        return std::ptr::null_mut();
+    }
+    host.cast()
+}
+
+/// `struct group *getgrgid(gid_t)`
+pub extern "C" fn getgrgid(gid: u32) -> *mut GroupEntry {
+    crate::errno::set(0);
+    if let Some(group) = crate::accounts::system_group_by_gid(gid) {
+        return publish_group(&group);
+    }
+    // SAFETY: a scalar; the answer is libc's own entry or null.
+    host_group(unsafe { libc::getgrgid(gid) })
+}
+
+/// `struct group *getgrnam(const char *)`
+///
+/// # Safety
+///
+/// `name` is a NUL-terminated string.
+pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut GroupEntry {
+    if name.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return std::ptr::null_mut();
+    }
+    crate::errno::set(0);
+    // SAFETY: the caller's string.
+    if let Some(group) =
+        crate::accounts::system_group_by_name(unsafe { CStr::from_ptr(name) }.to_bytes())
+    {
+        return publish_group(&group);
+    }
+    // SAFETY: the caller's string; the answer is libc's own entry or null.
+    host_group(unsafe { libc::getgrnam(name) })
+}
+
+/// Pack a system group into the caller's `grp` and `buf`.
+///
+/// # Safety
+///
+/// `grp` is a writable `struct group`, `buf` is writable for `size` bytes,
+/// and `result` is writable.
+unsafe fn fill_group_r(
+    group: &crate::accounts::Group,
+    grp: *mut GroupEntry,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut GroupEntry,
+) -> c_int {
+    let pointer = size_of::<*mut c_char>();
+    // The member list first, where `buf` is as aligned as it will ever be.
+    let skew = (buf as usize).next_multiple_of(pointer) - buf as usize;
+    let list = skew + pointer * (group.members.len() + 1);
+    let strings: Vec<&str> = [group.name.as_str(), "*"]
+        .into_iter()
+        .chain(group.members.iter().map(String::as_str))
+        .collect();
+    let needed = list + strings.iter().map(|s| s.len() + 1).sum::<usize>();
+    if needed > size {
+        return libc::ERANGE;
+    }
+    let mut at = list;
+    let mut placed = Vec::with_capacity(strings.len());
+    for text in &strings {
+        // SAFETY: `needed <= size`, so every copy lands inside `buf`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr().cast(), buf.add(at), text.len());
+            *buf.add(at + text.len()) = 0;
+            placed.push(buf.add(at));
+        }
+        at += text.len() + 1;
+    }
+    // SAFETY: inside `buf`, aligned, and room for every member and a null.
+    unsafe {
+        let members = buf.add(skew).cast::<*mut c_char>();
+        for (i, member) in placed[2..].iter().enumerate() {
+            *members.add(i) = *member;
+        }
+        *members.add(group.members.len()) = std::ptr::null_mut();
+        *grp = GroupEntry {
+            name: placed[0],
+            passwd: placed[1],
+            gid: group.gid,
+            members,
+        };
+        *result = grp;
+    }
+    0
+}
+
+/// A host reentrant answer, unless a system group hides it.
+///
+/// # Safety
+///
+/// `result` is writable and, after a successful lookup, null or `grp`.
+unsafe fn host_group_r(rc: c_int, result: *mut *mut GroupEntry) -> c_int {
+    // SAFETY: the caller's obligation.
+    unsafe {
+        if rc == 0
+            && !(*result).is_null()
+            && crate::accounts::shadows_group(CStr::from_ptr((**result).name).to_bytes())
+        {
+            *result = std::ptr::null_mut();
+        }
+    }
+    crate::errno::from_host(rc)
+}
+
+/// `int getgrgid_r(gid_t, struct group *, char *, size_t, struct group **)`
+///
+/// # Safety
+///
+/// As [`fill_group_r`].
+pub unsafe extern "C" fn getgrgid_r(
+    gid: u32,
+    grp: *mut GroupEntry,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut GroupEntry,
+) -> c_int {
+    if result.is_null() || grp.is_null() || buf.is_null() {
+        return libc::EINVAL;
+    }
+    unsafe { *result = std::ptr::null_mut() };
+    if let Some(group) = crate::accounts::system_group_by_gid(gid) {
+        return unsafe { fill_group_r(&group, grp, buf, size, result) };
+    }
+    // SAFETY: the layouts agree, and the buffers are the caller's.
+    let rc = unsafe { libc::getgrgid_r(gid, grp.cast(), buf, size, result.cast()) };
+    unsafe { host_group_r(rc, result) }
+}
+
+/// `int getgrnam_r(const char *, struct group *, char *, size_t, struct group **)`
+///
+/// # Safety
+///
+/// `name` is NUL-terminated, and as [`fill_group_r`].
+pub unsafe extern "C" fn getgrnam_r(
+    name: *const c_char,
+    grp: *mut GroupEntry,
+    buf: *mut c_char,
+    size: usize,
+    result: *mut *mut GroupEntry,
+) -> c_int {
+    if name.is_null() || result.is_null() || grp.is_null() || buf.is_null() {
+        return libc::EINVAL;
+    }
+    unsafe { *result = std::ptr::null_mut() };
+    // SAFETY: the caller's string.
+    if let Some(group) =
+        crate::accounts::system_group_by_name(unsafe { CStr::from_ptr(name) }.to_bytes())
+    {
+        return unsafe { fill_group_r(&group, grp, buf, size, result) };
+    }
+    // SAFETY: the layouts agree, and the buffers are the caller's.
+    let rc = unsafe { libc::getgrnam_r(name, grp.cast(), buf, size, result.cast()) };
+    unsafe { host_group_r(rc, result) }
+}
+
+/// `int getgrouplist(const char *name, int basegid, int *groups, int *ngroups)`
+///
+/// As many as fit, and -1 with the full count in `ngroups` if that was not all.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated, `ngroups` is writable, and `groups` is writable
+/// for `*ngroups` entries.
+pub unsafe extern "C" fn getgrouplist(
+    name: *const c_char,
+    basegid: c_int,
+    groups: *mut c_int,
+    ngroups: *mut c_int,
+) -> c_int {
+    if name.is_null() || ngroups.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's string.
+    let list = crate::accounts::groups_of(unsafe { CStr::from_ptr(name) }, basegid as u32);
+    // SAFETY: the caller's obligations.
+    unsafe {
+        let room = (*ngroups).max(0) as usize;
+        for (i, gid) in list.iter().take(room).enumerate() {
+            *groups.add(i) = *gid as c_int;
+        }
+        *ngroups = list.len() as c_int;
+        if list.len() > room { -1 } else { 0 }
+    }
+}
+
+/// `int setgroupent(int stayopen)` - BSD's `setgrent` that may keep the
+/// database open. Nothing here is a file to keep open.
+pub extern "C" fn setgroupent(_stayopen: c_int) -> c_int {
+    // SAFETY: no arguments.
+    unsafe { libc::setgrent() };
+    1
+}
+
+/// `int setpassent(int stayopen)`, as [`setgroupent`] for users.
+pub extern "C" fn setpassent(_stayopen: c_int) -> c_int {
+    // SAFETY: no arguments.
+    unsafe { libc::setpwent() };
+    1
+}
+
 exports::exports! {
     functions {
         "getgrouplist_2" => getgrouplist_2,
+        "getgrouplist" => getgrouplist,
+        "getgrgid" => getgrgid,
+        "getgrnam" => getgrnam,
+        "getgrgid_r" => getgrgid_r,
+        "getgrnam_r" => getgrnam_r,
+        "setgroupent" => setgroupent,
+        "setpassent" => setpassent,
         "getpwuid" => getpwuid,
         "getpwnam" => getpwnam,
         "getpwuid_r" => getpwuid_r,

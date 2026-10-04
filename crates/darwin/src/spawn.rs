@@ -151,10 +151,43 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
 ///
 /// `envp` is null or a null-terminated array of NUL-terminated strings.
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
-    if crate::libc_backend::using_builtin() {
-        return unsafe { crate::env::host_spelling(envp) };
+    let mut out = match crate::libc_backend::using_builtin() {
+        true => unsafe { crate::env::host_spelling(envp) },
+        false => unsafe { argv_of(envp) },
+    };
+    keep_runtime_settings(&mut out);
+    out
+}
+
+/// Put back what this runtime was started with if the guest dropped it.
+///
+/// A guest that scrubs its environment before an `exec` - `sudo`'s
+/// `env_reset`, `env -i`, `login` - means to scrub *its* variables, and has no
+/// idea the program it runs is this runtime again. Without its `ROSEMARY_*`
+/// settings the child would pick its own prefix, and without
+/// `XDG_RUNTIME_DIR` it would look for a different process server - one that
+/// knows nothing of who its parent was, so a `sudo`'d command would run as the
+/// user again. What the guest set itself, it keeps.
+fn keep_runtime_settings(out: &mut Vec<CString>) {
+    use std::os::unix::ffi::OsStrExt;
+    for (name, value) in std::env::vars_os() {
+        let name = name.as_bytes();
+        // The guest's own `PATH`, `HOME` and `SHELL` travel as variables of
+        // their own, made from what the guest has now; the ones this process
+        // was given are its parent's.
+        let handed_off = std::str::from_utf8(name).is_ok_and(crate::env::is_hand_off);
+        let ours = (name.starts_with(b"ROSEMARY_") || name == b"XDG_RUNTIME_DIR") && !handed_off;
+        let kept = out.iter().any(|entry| {
+            let entry = entry.as_bytes();
+            entry.starts_with(name) && entry.get(name.len()) == Some(&b'=')
+        });
+        if ours
+            && !kept
+            && let Ok(entry) = CString::new([name, b"=", value.as_bytes()].concat())
+        {
+            out.push(entry);
+        }
     }
-    unsafe { argv_of(envp) }
 }
 
 /// The host path an exec of the guest's `given` opens.

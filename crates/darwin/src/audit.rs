@@ -101,9 +101,66 @@ pub unsafe extern "C" fn getaudit_addr(out: *mut AuditinfoAddr, length: u32) -> 
     0
 }
 
+/// `int getauid(au_id_t *)`: the login user the session was audited as.
+///
+/// # Safety
+///
+/// `out` is writable.
+pub unsafe extern "C" fn getauid(out: *mut u32) -> c_int {
+    if out.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's obligation.
+    unsafe { out.write_unaligned(session().auid) };
+    0
+}
+
+/// `int setaudit_addr(const struct auditinfo_addr *, u_int length)`
+///
+/// What `su` and `login` call to put the new user's session on record. Root's
+/// to do on a Mac, and only root's here - by the guest's ids, see
+/// `crate::credentials`.
+///
+/// FIXME (ACCURACY): nothing records the new session, so a later
+/// `getaudit_addr` still describes the one the host gave this process. No host
+/// audit trail would hold it, and the guest's only reader is itself.
+///
+/// # Safety
+///
+/// `info` is readable for `length` bytes.
+pub unsafe extern "C" fn setaudit_addr(info: *const AuditinfoAddr, length: u32) -> c_int {
+    if (length as usize) < size_of::<AuditinfoAddr>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    if info.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    if !crate::credentials::current().is_root() {
+        crate::errno::set(libc::EPERM);
+        return -1;
+    }
+    0
+}
+
+/// `int audit_submit(short au_event, au_id_t auid, char status, int reterr,
+/// const char *fmt, ...)`: a BSM record of an event like a `su`.
+///
+/// Accepted and dropped: this host keeps no BSM trail for a guest to write to,
+/// and the callers treat the record as a side effect, not a step that must
+/// succeed.
+pub extern "C" fn audit_submit(_event: i16, _auid: u32, _status: i8, _error: c_int) -> c_int {
+    0
+}
+
 exports::exports! {
     functions {
         "getaudit_addr" => getaudit_addr,
+        "getauid" => getauid,
+        "setaudit_addr" => setaudit_addr,
+        "audit_submit" => audit_submit,
     }
 }
 

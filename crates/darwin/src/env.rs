@@ -27,7 +27,7 @@ fn block() -> std::sync::MutexGuard<'static, bool> {
         use std::os::unix::ffi::OsStrExt;
         // The hand-off from a parent guest, which is this runtime's and not
         // the guest's; see [`host_spelling`].
-        if name == GUEST_PATH_VAR {
+        if name.to_str().is_some_and(is_hand_off) {
             continue;
         }
         has_path |= name == "PATH";
@@ -67,6 +67,31 @@ pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 /// becomes the child guest's `PATH` in place of [`DEFAULT_PATH`].
 pub const GUEST_PATH_VAR: &str = "ROSEMARY_GUEST_PATH";
 
+/// The corrected variables whose guest value a parent guest hands to a child it
+/// execs, each as `ROSEMARY_GUEST_<NAME>` - [`GUEST_PATH_VAR`] is `PATH`'s.
+///
+/// [`host_spelling`] gives the child runtime this machine's value back, which
+/// is right for the runtime and the host libraries in it, and the child then
+/// corrects it again for its guest. Without the hand-off what a guest set
+/// itself would stop at the `exec`: `su -`'s `HOME=/var/root` and the
+/// `SHELL` it names would become the user's again in every child.
+const HANDED_OFF: &[&str] = &["PATH", "HOME", "SHELL"];
+
+fn hand_off_var(name: &str) -> String {
+    format!("ROSEMARY_GUEST_{name}")
+}
+
+/// Whether `name` is one of the hand-offs, which belong to this runtime.
+pub fn is_hand_off(name: &str) -> bool {
+    name.strip_prefix("ROSEMARY_GUEST_")
+        .is_some_and(|rest| HANDED_OFF.contains(&rest))
+}
+
+/// What a parent guest handed over for `name`, if it did.
+fn handed_off(name: &str) -> Option<String> {
+    std::env::var(hand_off_var(name)).ok()
+}
+
 /// The `PATH` a prefixed guest starts with: its parent's, if it has one.
 fn guest_path(inherited: Option<String>) -> String {
     inherited.unwrap_or_else(|| DEFAULT_PATH.to_string())
@@ -80,7 +105,13 @@ fn corrected(name: &std::ffi::OsStr) -> Option<String> {
     prefix::ns::current()?;
     match name.to_str()? {
         // Where the guest's files go, and the reason this module exists.
-        "HOME" => Some(prefix::ns::home().to_string()),
+        "HOME" => Some(handed_off("HOME").unwrap_or_else(|| prefix::ns::home().to_string())),
+        // A login shell the prefix has; see `crate::accounts::guest_shell`.
+        "SHELL" => Some(handed_off("SHELL").unwrap_or_else(|| {
+            let host = std::env::var_os("SHELL").unwrap_or_default();
+            let guest = crate::accounts::guest_shell(host.as_encoded_bytes());
+            String::from_utf8_lossy(&guest).into_owned()
+        })),
         // Darwin's is per-session and ends in a separator, which a program that
         // concatenates rather than joining depends on.
         "TMPDIR" => Some("/tmp/".to_string()),
@@ -312,13 +343,14 @@ pub unsafe fn host_spelling(envp: *const *const c_char) -> Vec<CString> {
             Some(split) => &bytes[..split],
             None => bytes,
         };
-        if name == b"PATH"
+        if let Ok(text) = std::str::from_utf8(name)
+            && HANDED_OFF.contains(&text)
             && prefix::ns::current().is_some()
-            && let Some(value) = bytes.get(b"PATH=".len()..)
-            && let Ok(entry) = CString::new([GUEST_PATH_VAR.as_bytes(), b"=", value].concat())
+            && let Some(value) = bytes.get(name.len() + 1..)
+            && let Ok(entry) = CString::new([hand_off_var(text).as_bytes(), b"=", value].concat())
         {
-            // The guest's own `PATH`, for the child to take back; see
-            // [`GUEST_PATH_VAR`].
+            // The guest's own value, for the child to take back; see
+            // [`HANDED_OFF`].
             out.push(entry);
         }
         let restored = std::str::from_utf8(name)
@@ -346,6 +378,7 @@ fn host_value(name: &str) -> Option<String> {
         "HOME" => Some(prefix::ns::host_home_directory()),
         "TMPDIR" => std::env::var("TMPDIR").ok(),
         "PATH" => std::env::var("PATH").ok(),
+        "SHELL" => std::env::var("SHELL").ok(),
         "PWD" => std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().into_owned()),

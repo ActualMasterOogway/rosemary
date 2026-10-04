@@ -1,21 +1,11 @@
-//! What a client may ask and what the server answers.
-//!
-//! Everything here is in host-neutral terms - nanoseconds, bytes, plain ids -
-//! and Darwin's structures are built from it on the client side, by `darwin`,
-//! which owns their layouts. The server is not a Darwin kernel; it is the one
-//! place that can see every guest process at once.
-
-/// Process states, usage and threads are the host reader's own types, carried
-/// as they are.
 pub use starnix::process::{State, Thread, Usage};
 
 use crate::codec::{Decoder, Encoder, List, Malformed, Wire};
+use crate::credentials::{Change, Credentials, Denied, SetId};
 use crate::wire_struct;
 
-/// Bumped on any change to a message's shape. Client and server are the same
-/// binary in practice; a mismatch means a server left over from another build
-/// is still lingering, and it is refused rather than misread.
-pub const VERSION: u32 = 1;
+// TODO: make this automatic based on source hashes like `metal_translate`
+pub const VERSION: u32 = 2;
 
 /// What a process tells the server about itself.
 ///
@@ -33,6 +23,16 @@ pub struct Checkin {
     pub cpusubtype: i32,
     /// Whether the guest runs through the translator, `sysctl.proc_translated`.
     pub translated: bool,
+    /// Who the process is. A fresh image does not know yet - it is whoever
+    /// ran it - and sends the host's user here, for the server to replace with
+    /// what it inherits; see [`Checkin::fresh`].
+    pub credentials: Credentials,
+    /// Whether this is a new image, which inherits its ids from the image it
+    /// replaced or the guest that started it and then applies `setid`. A
+    /// `fork` child, or a process checking in again on a new connection, is
+    /// not, and `credentials` are its own.
+    pub fresh: bool,
+    pub setid: SetId,
 }
 
 impl Wire for Checkin {
@@ -43,7 +43,10 @@ impl Wire for Checkin {
             .put(&List(self.argv.clone()))
             .put(&self.cputype)
             .put(&self.cpusubtype)
-            .put(&self.translated);
+            .put(&self.translated)
+            .put(&self.credentials)
+            .put(&self.fresh)
+            .put(&self.setid);
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
         Ok(Self {
@@ -54,6 +57,9 @@ impl Wire for Checkin {
             cputype: input.take()?,
             cpusubtype: input.take()?,
             translated: input.take()?,
+            credentials: input.take()?,
+            fresh: input.take()?,
+            setid: input.take()?,
         })
     }
 }
@@ -101,6 +107,8 @@ pub struct Process {
     pub gid: u32,
     pub egid: u32,
     pub sgid: u32,
+    /// The group access list, `cr_groups`.
+    pub groups: Vec<u32>,
     pub state: State,
     pub nice: i32,
     /// Wall-clock start time.
@@ -135,6 +143,7 @@ impl Wire for Process {
             .put(&self.gid)
             .put(&self.egid)
             .put(&self.sgid)
+            .put(&List(self.groups.clone()))
             .put(&self.state)
             .put(&self.nice)
             .put(&self.start_sec)
@@ -160,6 +169,7 @@ impl Wire for Process {
             gid: input.take()?,
             egid: input.take()?,
             sgid: input.take()?,
+            groups: input.take::<List<u32>>()?.0,
             state: input.take()?,
             nice: input.take()?,
             start_sec: input.take()?,
@@ -223,6 +233,8 @@ pub enum Request {
     },
     /// Ask the server to exit once this connection closes, rather than linger.
     Shutdown,
+    /// Change the caller's own ids, by the rules in [`crate::credentials`].
+    Credentials(Change),
 }
 
 #[derive(Clone, Debug)]
@@ -233,12 +245,17 @@ pub enum Reply {
     Refused(String),
     CheckedIn {
         server_pid: i32,
+        /// Who the process is, inherited and with its image's set-id applied.
+        credentials: Credentials,
     },
     Processes(Vec<Process>),
     /// `None` for a pid that is not a live guest process.
     Process(Option<Process>),
     Usage(Option<Usage>),
     Threads(Option<Vec<Thread>>),
+    /// The caller's ids after a [`Request::Credentials`], or why they did not
+    /// change.
+    Credentials(Result<Credentials, Denied>),
 }
 
 impl Wire for Request {
@@ -251,6 +268,7 @@ impl Wire for Request {
             Request::Threads { pid } => out.put(&5u8).put(pid),
             Request::ThreadName { tid, name } => out.put(&6u8).put(tid).put(name),
             Request::Shutdown => out.put(&7u8),
+            Request::Credentials(change) => out.put(&8u8).put(change),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -265,6 +283,7 @@ impl Wire for Request {
                 name: input.take()?,
             },
             7 => Request::Shutdown,
+            8 => Request::Credentials(input.take()?),
             _ => return Err(Malformed),
         })
     }
@@ -275,13 +294,18 @@ impl Wire for Reply {
         match self {
             Reply::Done => out.put(&1u8),
             Reply::Refused(why) => out.put(&2u8).put(why),
-            Reply::CheckedIn { server_pid } => out.put(&3u8).put(server_pid),
+            Reply::CheckedIn {
+                server_pid,
+                credentials,
+            } => out.put(&3u8).put(server_pid).put(credentials),
             Reply::Processes(list) => out.put(&4u8).put(&List(list.clone())),
             Reply::Process(process) => out.put(&5u8).put(process),
             Reply::Usage(usage) => out.put(&6u8).put(usage),
             Reply::Threads(threads) => out
                 .put(&7u8)
                 .put(&threads.as_ref().map(|list| List(list.clone()))),
+            Reply::Credentials(Ok(credentials)) => out.put(&8u8).put(credentials),
+            Reply::Credentials(Err(denied)) => out.put(&9u8).put(denied),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -290,11 +314,14 @@ impl Wire for Reply {
             2 => Reply::Refused(input.take()?),
             3 => Reply::CheckedIn {
                 server_pid: input.take()?,
+                credentials: input.take()?,
             },
             4 => Reply::Processes(input.take::<List<Process>>()?.0),
             5 => Reply::Process(input.take()?),
             6 => Reply::Usage(input.take()?),
             7 => Reply::Threads(input.take::<Option<List<Thread>>>()?.map(|list| list.0)),
+            8 => Reply::Credentials(Ok(input.take()?)),
+            9 => Reply::Credentials(Err(input.take()?)),
             _ => return Err(Malformed),
         })
     }
