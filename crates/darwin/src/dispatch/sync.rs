@@ -104,7 +104,9 @@ pub unsafe extern "C" fn group_enter(handle: u64) {
         return;
     };
     let mut state = g.state.lock().unwrap_or_else(|e| e.into_inner());
-    if state.count == 0 { object::retain(handle); }
+    if state.count == 0 {
+        object::retain(handle);
+    }
     state.count += 1;
 }
 
@@ -119,7 +121,9 @@ pub unsafe extern "C" fn group_leave(handle: u64) {
     };
     let ready = {
         let mut state = g.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.count == 0 { std::process::abort(); }
+        if state.count == 0 {
+            std::process::abort();
+        }
         state.count -= 1;
         if state.count != 0 {
             return;
@@ -130,7 +134,9 @@ pub unsafe extern "C" fn group_leave(handle: u64) {
     for notify in ready {
         submit(notify);
     }
-    unsafe { object::release(handle); }
+    unsafe {
+        object::release(handle);
+    }
 }
 
 fn submit(notify: Notify) {

@@ -309,9 +309,7 @@ fn opendirectory(handle: &Handle, primitive: Primitive, _: &[String]) -> c_int {
         return PAM_USER_UNKNOWN;
     };
     match primitive {
-        Primitive::Authenticate if crate::accounts::password_required(&name) => {
-            PAM_AUTH_ERR
-        }
+        Primitive::Authenticate if crate::accounts::password_required(&name) => PAM_AUTH_ERR,
         Primitive::ChAuthTok => PAM_AUTHTOK_ERR,
         _ => PAM_SUCCESS,
     }

@@ -91,8 +91,11 @@ fn copy_one(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
         }
     } else if flags & DATA != 0 {
         let mut source = std::fs::File::open(from)?;
-        let mut destination = std::fs::OpenOptions::new().write(true)
-            .create(true).create_new(flags & EXCL != 0).open(to)?;
+        let mut destination = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .create_new(flags & EXCL != 0)
+            .open(to)?;
         let dst = destination.metadata()?;
         if dst.dev() == meta.dev() && dst.ino() == meta.ino() {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
@@ -136,12 +139,18 @@ fn copy_tree(from: &Path, to: &Path, flags: u32) -> std::io::Result<()> {
         let entry = entry?;
         copy_tree(&entry.path(), &to.join(entry.file_name()), flags)?;
     }
-    if flags & STAT != 0 { copy_one(from, to, STAT | NOFOLLOW_SRC)?; }
+    if flags & STAT != 0 {
+        copy_one(from, to, STAT | NOFOLLOW_SRC)?;
+    }
     Ok(())
 }
 
 fn copy(from: &Path, to: &Path, flags: u32, from_text: &[u8]) -> std::io::Result<()> {
-    let meta = if flags & NOFOLLOW_SRC != 0 { std::fs::symlink_metadata(from)? } else { std::fs::metadata(from)? };
+    let meta = if flags & NOFOLLOW_SRC != 0 {
+        std::fs::symlink_metadata(from)?
+    } else {
+        std::fs::metadata(from)?
+    };
     let recursive = flags & RECURSIVE != 0 && meta.is_dir();
     if !recursive {
         return copy_one(from, to, flags);
@@ -168,7 +177,10 @@ fn copy(from: &Path, to: &Path, flags: u32, from_text: &[u8]) -> std::io::Result
                 break;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                ancestor = ancestor.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                ancestor = ancestor
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
             }
             Err(e) => return Err(e),
         }
@@ -178,7 +190,9 @@ fn copy(from: &Path, to: &Path, flags: u32, from_text: &[u8]) -> std::io::Result
         let entry = entry?;
         copy_tree(&entry.path(), &to.join(entry.file_name()), flags)?;
     }
-    if flags & STAT != 0 { copy_one(from, &to, STAT)?; }
+    if flags & STAT != 0 {
+        copy_one(from, &to, STAT)?;
+    }
     Ok(())
 }
 
@@ -205,7 +219,9 @@ pub unsafe extern "C" fn copyfile(
     _state: *mut c_void,
     flags: u32,
 ) -> c_int {
-    let Some(source) = host(from) else { return -1; };
+    let Some(source) = host(from) else {
+        return -1;
+    };
     if flags & CHECK != 0 {
         // What would be copied: everything asked for that there is.
         return match std::fs::symlink_metadata(&source) {
@@ -213,7 +229,9 @@ pub unsafe extern "C" fn copyfile(
             Err(e) => fail(e),
         };
     }
-    let Some(destination) = host(to) else { return -1; };
+    let Some(destination) = host(to) else {
+        return -1;
+    };
     // SAFETY: checked non-null by `host`.
     let text = unsafe { CStr::from_ptr(from) }.to_bytes();
     if let Err(e) = copy(&source, &destination, flags, text) {
@@ -308,23 +326,34 @@ pub unsafe extern "C" fn copyfile_state_free(state: *mut c_void) -> c_int {
 
 /// Configure a copy state using the flag-specific Darwin argument convention.
 pub unsafe extern "C" fn copyfile_state_set(
-    state: *mut c_void, flag: u32, source: *const c_void,
+    state: *mut c_void,
+    flag: u32,
+    source: *const c_void,
 ) -> c_int {
     if state.is_null() || source.is_null() {
         crate::errno::set(libc::EFAULT);
         return -1;
     }
     let value = match flag {
-        1 | 3 | 11 | 12 | 13 | 15 | 16 | 18 =>
-            StateValue::Word(unsafe { source.cast::<u32>().read_unaligned() } as usize),
+        1 | 3 | 11 | 12 | 13 | 15 | 16 | 18 => {
+            StateValue::Word(unsafe { source.cast::<u32>().read_unaligned() } as usize)
+        }
         2 | 4 => StateValue::Name(unsafe { CStr::from_ptr(source.cast()) }.to_owned()),
         6 | 7 => StateValue::Word(source as usize),
         14 => StateValue::Word(unsafe { source.cast::<u8>().read() } as usize),
-        _ => { crate::errno::set(libc::EINVAL); return -1; }
+        _ => {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
     };
-    let mut values = STATE_VALUES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let mut values = STATE_VALUES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if flag == 13 {
-        let StateValue::Word(value) = value else { unreachable!() };
+        let StateValue::Word(value) = value else {
+            unreachable!()
+        };
         values.insert((state as usize, 11), StateValue::Word(value));
         values.insert((state as usize, 12), StateValue::Word(value));
     } else {
@@ -334,13 +363,18 @@ pub unsafe extern "C" fn copyfile_state_set(
 }
 
 pub unsafe extern "C" fn copyfile_state_get(
-    state: *mut c_void, flag: u32, destination: *mut c_void,
+    state: *mut c_void,
+    flag: u32,
+    destination: *mut c_void,
 ) -> c_int {
     if state.is_null() || destination.is_null() {
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    let values = STATE_VALUES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let values = STATE_VALUES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let value = match values.get(&(state as usize, flag)) {
         Some(StateValue::Word(value)) => *value,
         Some(StateValue::Name(name)) => name.as_ptr() as usize,
@@ -349,10 +383,15 @@ pub unsafe extern "C" fn copyfile_state_get(
     };
     unsafe {
         match flag {
-            1 | 3 | 11 | 12 | 15 | 16 | 18 => destination.cast::<u32>().write_unaligned(value as u32),
+            1 | 3 | 11 | 12 | 15 | 16 | 18 => {
+                destination.cast::<u32>().write_unaligned(value as u32)
+            }
             10 | 14 => destination.cast::<u8>().write(value as u8),
             2 | 4 | 5 | 6 | 7 | 8 | 9 | 17 => destination.cast::<usize>().write_unaligned(value),
-            _ => { crate::errno::set(libc::EINVAL); return -1; }
+            _ => {
+                crate::errno::set(libc::EINVAL);
+                return -1;
+            }
         }
     }
     0

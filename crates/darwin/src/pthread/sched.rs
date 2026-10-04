@@ -29,7 +29,9 @@ pub unsafe extern "C" fn pthread_getschedparam(
         if !param.is_null() {
             *param = SchedParam {
                 sched_priority: super::consts::sched_priority_from_host(
-                    host_param.assume_init().sched_priority, host_policy),
+                    host_param.assume_init().sched_priority,
+                    host_policy,
+                ),
             };
         }
         if !policy.is_null() {

@@ -59,12 +59,18 @@ pub unsafe extern "C" fn create(
     destructor: u64,
 ) -> u64 {
     let destructor = if destructor != 0 && destructor != destructor_free() {
-        let Some(copied) = super::block::copy(destructor) else { return 0; };
+        let Some(copied) = super::block::copy(destructor) else {
+            return 0;
+        };
         copied
-    } else { destructor };
+    } else {
+        destructor
+    };
     let queue = if queue == 0 {
         unsafe { super::queue::get_global_queue(0, 0) }
-    } else { queue };
+    } else {
+        queue
+    };
     let size = if buffer.is_null() { 0 } else { size };
     super::object::retain(queue);
     let copies = destructor == 0;
@@ -84,7 +90,9 @@ pub unsafe extern "C" fn create(
         destructor,
         queue,
     };
-    if size == 0 { data.destroy_buffer(); }
+    if size == 0 {
+        data.destroy_buffer();
+    }
     Box::into_raw(Box::new(data)) as u64
 }
 

@@ -436,7 +436,10 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
         return -1;
     }
     let guest: *mut MsgHdr = message.cast();
-    if unsafe { (*guest).iovlen } < 0 { crate::errno::set(libc::EINVAL); return -1; }
+    if unsafe { (*guest).iovlen } < 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
     let mut name = None;
     let mut sent_control = Vec::new();
     let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) })
@@ -569,7 +572,10 @@ unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
 ///
 /// `iov` is `iovcnt` readable `struct iovec`.
 unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> isize {
-    if iovcnt < 0 { crate::errno::set(libc::EINVAL); return -1; }
+    if iovcnt < 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
     if super::sockopt::suppresses_sigpipe(fd) {
         let previous_errno = crate::errno::get();
         // SAFETY: zeroed is a valid `msghdr` - no name, no control - and the

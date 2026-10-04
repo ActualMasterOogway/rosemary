@@ -8,7 +8,9 @@ const LEN: usize = 16;
 /// UUID generation has no error return; never manufacture a predictable UUID.
 fn random() -> [u8; LEN] {
     let mut bytes = [0u8; LEN];
-    if getrandom::fill(&mut bytes).is_err() { std::process::abort(); }
+    if getrandom::fill(&mut bytes).is_err() {
+        std::process::abort();
+    }
     bytes
 }
 

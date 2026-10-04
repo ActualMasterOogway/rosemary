@@ -428,16 +428,24 @@ pub unsafe extern "C" fn queue_create(label: *const c_char, attr: u64) -> u64 {
 /// dispatch_queue_attr_t, dispatch_queue_t target)`.
 ///
 pub unsafe extern "C" fn queue_create_with_target(
-    label: *const c_char, attr: u64, target: u64,
+    label: *const c_char,
+    attr: u64,
+    target: u64,
 ) -> u64 {
     let handle = unsafe { queue_create(label, attr) };
     object::retain(target);
-    unsafe { (*(handle as *mut Queue)).target = target; }
+    unsafe {
+        (*(handle as *mut Queue)).target = target;
+    }
     handle
 }
 
 impl Drop for Queue {
-    fn drop(&mut self) { unsafe { object::release(self.target); } }
+    fn drop(&mut self) {
+        unsafe {
+            object::release(self.target);
+        }
+    }
 }
 
 pub(crate) fn target(handle: u64) -> u64 {
@@ -447,7 +455,9 @@ pub(crate) fn target(handle: u64) -> u64 {
 unsafe extern "C" fn run_targeted(context: *mut c_void) {
     let handle = context as u64;
     run_one(handle);
-    unsafe { object::release(handle); }
+    unsafe {
+        object::release(handle);
+    }
 }
 
 /// # Safety
@@ -516,7 +526,9 @@ fn global_queue(qos: i64) -> u64 {
 
 /// `dispatch_queue_t dispatch_get_global_queue(long identifier, unsigned long flags)`.
 pub unsafe extern "C" fn get_global_queue(identifier: i64, flags: u64) -> u64 {
-    if flags != 0 { return 0; }
+    if flags != 0 {
+        return 0;
+    }
     global_queue(identifier)
 }
 

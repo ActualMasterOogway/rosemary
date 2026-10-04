@@ -32,7 +32,10 @@ pub unsafe extern "C" fn time(when: u64, delta: i64) -> u64 {
         _ => when,
     };
     match delta >= 0 {
-        true => base.checked_add(delta as u64).filter(|v| *v <= i64::MAX as u64).unwrap_or(FOREVER),
+        true => base
+            .checked_add(delta as u64)
+            .filter(|v| *v <= i64::MAX as u64)
+            .unwrap_or(FOREVER),
         false => base.saturating_sub(delta.unsigned_abs()).max(1),
     }
 }

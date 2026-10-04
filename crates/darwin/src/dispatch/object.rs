@@ -137,7 +137,11 @@ pub unsafe fn release(handle: u64) {
         h.context.load(Ordering::Acquire),
     );
     let target = super::queue::target(handle);
-    let target = if target == 0 { unsafe { super::queue::get_global_queue(0, 0) } } else { target };
+    let target = if target == 0 {
+        unsafe { super::queue::get_global_queue(0, 0) }
+    } else {
+        target
+    };
     retain(target);
     let kind = h.kind;
     // SAFETY: the refcount reached zero, so this reference is the only one and the
@@ -151,10 +155,13 @@ pub unsafe fn release(handle: u64) {
         }
     }
     if finalizer != 0 && context != 0 {
-        unsafe { super::queue::async_f(target, context, finalizer); }
+        unsafe {
+            super::queue::async_f(target, context, finalizer);
+        }
     }
-    unsafe { release(target); }
-
+    unsafe {
+        release(target);
+    }
 }
 
 /// `void dispatch_retain(dispatch_object_t)`.
@@ -207,7 +214,9 @@ mod tests {
     }
 
     unsafe extern "C" fn finalize(context: *mut c_void) {
-        unsafe { (*(context as *const AtomicU32)).store(1, Ordering::Release); }
+        unsafe {
+            (*(context as *const AtomicU32)).store(1, Ordering::Release);
+        }
     }
 
     /// The finalizer runs exactly once, at the last release, with the guest's own
