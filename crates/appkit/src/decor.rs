@@ -364,6 +364,10 @@ fn zoom(sdl: sdl3::Window) {
 pub(crate) fn hit_test_pressed(id: u32) {
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
+    // FIXME: only wayland supports this for now
+    if !sdl3::video::is_wayland() {
+        return;
+    }
     let window = crate::event::object_for(id);
     let Some((x, y, _)) = sdl3::video::mouse_state() else {
         return;

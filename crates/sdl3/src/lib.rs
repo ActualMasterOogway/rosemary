@@ -1654,8 +1654,8 @@ pub mod video {
             window: u32,
             entered: bool,
         },
-        /// A press the hit test gave to the window manager. Only X11 reports
-        /// it; Wayland's is seen through [`crate::wayland`].
+        /// A press the hit test gave to the window manager.
+        /// FIXME: X11 reports it, but incorrectly
         WindowHitTest {
             window: u32,
         },
@@ -3081,13 +3081,23 @@ pub mod video {
     /// Whether SDL's video driver is Wayland's. False until video has
     /// started, as SDL has no driver to name before then.
     pub fn is_wayland() -> bool {
+        is_video_driver(c"wayland")
+    }
+
+    /// Whether SDL's video driver is X11's. Its window hit-test events
+    /// report left-button presses rather than arbitrary hit tests.
+    pub fn is_x11() -> bool {
+        is_video_driver(c"x11")
+    }
+
+    fn is_video_driver(expected: &CStr) -> bool {
         let Some(f) = api().and_then(|a| a.SDL_GetCurrentVideoDriver) else {
             return false;
         };
         // SAFETY: takes nothing; the answer is null or a static string.
         let name = unsafe { f() };
         // SAFETY: a NUL-terminated string SDL keeps for the process.
-        !name.is_null() && unsafe { CStr::from_ptr(name) } == c"wayland"
+        !name.is_null() && unsafe { CStr::from_ptr(name) } == expected
     }
 
     /// A window's `wl_display` and `wl_surface`, on Wayland.
