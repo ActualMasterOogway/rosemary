@@ -382,8 +382,36 @@ pub fn set_main_bundle(executable: &std::path::Path) {
     }
 }
 
+/// Whether `ROSEMARY_NO_FOREIGN` forbids the host's own frameworks on macOS: neither
+/// opened by a `dlopen` nor answering an import.
+pub fn no_host_frameworks() -> bool {
+    #[static_init::dynamic]
+    static ON: bool =
+        cfg!(target_os = "macos") && std::env::var_os("ROSEMARY_NO_FOREIGN").is_some();
+    *ON
+}
+
+/// Whether `path` names a library inside a host framework directory.
+pub fn is_host_framework_path(path: &str) -> bool {
+    const DIRS: [&str; 3] = [
+        "/System/Library/Frameworks/",
+        "/System/Library/PrivateFrameworks/",
+        "/Library/Frameworks/",
+    ];
+    DIRS.iter().any(|d| path.starts_with(d)) || path.contains(".framework/")
+}
+
 pub fn deny_host_frameworks(provider: &mut NativeDylibProvider) {
     install();
+    if no_host_frameworks() {
+        for dir in [
+            "/System/Library/Frameworks/",
+            "/System/Library/PrivateFrameworks/",
+            "/Library/Frameworks/",
+        ] {
+            provider.deny_library_prefix(dir);
+        }
+    }
     if !using_builtin() {
         return;
     }

@@ -1214,6 +1214,9 @@ static NATIVE_SYMBOL_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// `RTLD_GLOBAL` and never closed, for the reason the native provider's own fallback
 /// is: closing it would dangle every pointer already written into a guest slot.
 fn open_native(path: &str) -> Option<u64> {
+    if crate::frameworks::no_host_frameworks() && crate::frameworks::is_host_framework_path(path) {
+        return None;
+    }
     let c = CString::new(path).ok()?;
     // SAFETY: a null-terminated path and the host's own loader. The handle is
     // kept for the process; see the note above on why it is never closed.

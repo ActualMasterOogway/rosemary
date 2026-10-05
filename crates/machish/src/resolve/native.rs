@@ -81,6 +81,8 @@ pub struct NativeDylibProvider {
     flat: bool,
     deny_exact: BTreeSet<String>,
     deny_prefixes: Vec<String>,
+    /// Install-name prefixes whose libraries are never opened nor answered for.
+    deny_library_prefixes: Vec<String>,
     /// Whether to `dlopen` a two-level import's library when the symbol is not
     /// already loaded. See [`autoload`](Self::autoload).
     autoload: bool,
@@ -124,6 +126,7 @@ impl NativeDylibProvider {
             flat: true,
             deny_exact: DENY_EXACT.iter().map(|s| s.to_string()).collect(),
             deny_prefixes: DENY_PREFIXES.iter().map(|s| s.to_string()).collect(),
+            deny_library_prefixes: Vec::new(),
             autoload: true,
             attempted: RefCell::new(BTreeSet::new()),
             cache: RefCell::new(BTreeMap::new()),
@@ -187,6 +190,21 @@ impl NativeDylibProvider {
         self
     }
 
+    /// Refuse every import of a library whose install name starts with
+    /// `prefix`, and never `dlopen` one. Unlike [`deny_prefix`](Self::deny_prefix)
+    /// this is about where a symbol is imported *from*, so a host framework can
+    /// be kept out wholesale.
+    pub fn deny_library_prefix(&mut self, prefix: &str) -> &mut Self {
+        self.deny_library_prefixes.push(prefix.to_string());
+        self
+    }
+
+    fn library_denied(&self, install_name: &str) -> bool {
+        self.deny_library_prefixes
+            .iter()
+            .any(|p| install_name.starts_with(p.as_str()))
+    }
+
     /// Drop the default denylist.
     ///
     /// Only correct when an earlier provider in the chain already claims every
@@ -222,7 +240,9 @@ impl NativeDylibProvider {
     /// Returns whether this call is the one that attempted it, so the caller
     /// knows whether retrying the `dlsym` could possibly help.
     fn autoload_library(&self, install_name: &str) -> bool {
-        if !self.autoload || !self.attempted.borrow_mut().insert(install_name.to_string()) {
+        if !self.autoload
+            || self.library_denied(install_name)
+            || !self.attempted.borrow_mut().insert(install_name.to_string()) {
             return false;
         }
         let Ok(c) = std::ffi::CString::new(install_name) else {
@@ -286,6 +306,13 @@ impl SymbolProvider for NativeDylibProvider {
         // guest used would let `_select$DARWIN_EXTSN` through a list that
         // denies `_select`, which is the whole failure the list exists to stop.
         if self.is_denied(sym.name) || variant_base(sym.name).is_some_and(|b| self.is_denied(b)) {
+            return None;
+        }
+        if sym
+            .library
+            .install_name()
+            .is_some_and(|n| self.library_denied(n))
+        {
             return None;
         }
         if let Some(hit) = self.cache.borrow().get(sym.name) {
