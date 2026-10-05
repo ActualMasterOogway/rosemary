@@ -1,9 +1,7 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::c_int;
 use std::sync::Mutex;
 
-/// A port's address: the abstract socket name is derived from it and nothing
+/// A port's address: the socket name is derived from it and nothing
 /// else, so this is the whole of a send right's contents.
 pub type Address = u64;
 
@@ -50,9 +48,7 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 /// A fresh, unused port address.
 pub fn fresh_address() -> Address {
     let mut bytes = [0u8; 8];
-    // SAFETY: eight writable bytes, and the length matches.
-    let read = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
-    if read == bytes.len() as isize {
+    if getrandom::fill(&mut bytes).is_ok() {
         // Never zero: zero is `MACH_PORT_NULL`'s address and a null send right
         // must not be indistinguishable from a real one.
         let id = u64::from_ne_bytes(bytes);
@@ -73,7 +69,8 @@ pub fn fresh_address() -> Address {
 ///
 /// The uid is in the name only so that two users' ports are visibly separate in
 /// `ss -x`; the random address is what actually keeps them apart.
-fn sockaddr(address: Address) -> (libc::sockaddr_un, libc::socklen_t) {
+#[cfg(target_os = "linux")]
+fn sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let uid = unsafe { libc::getuid() };
@@ -85,7 +82,31 @@ fn sockaddr(address: Address) -> (libc::sockaddr_un, libc::socklen_t) {
         *slot = *byte as _;
     }
     let len = core::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len();
-    (addr, len as libc::socklen_t)
+    Ok((addr, len as libc::socklen_t))
+}
+
+/// BSD hosts bind a filesystem socket in Rosemary's private runtime directory.
+#[cfg(not(target_os = "linux"))]
+fn socket_path(address: Address) -> std::path::PathBuf {
+    server::location::runtime_directory().join(format!("mach/{address:016x}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket_path(address);
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as _;
+    }
+    let len = core::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    addr.sun_len = len as u8;
+    Ok((addr, len as libc::socklen_t))
 }
 
 /// Whether anything still holds the receive right for `address`.
@@ -95,8 +116,10 @@ fn sockaddr(address: Address) -> (libc::sockaddr_un, libc::socklen_t) {
 /// cheap way to find out: it fails with `ECONNREFUSED` when nothing is bound
 /// and sends nothing when it succeeds, so a live holder never sees it.
 pub fn is_bound(address: Address) -> bool {
+    let Ok((addr, len)) = sockaddr(address) else {
+        return false;
+    };
     let Ok(fd) = socket() else { return false };
-    let (addr, len) = sockaddr(address);
     // SAFETY: a socket this call just opened, and an address whose length is
     // computed from the name written into it.
     let rc = unsafe { libc::connect(fd, (&raw const addr).cast(), len) };
@@ -123,19 +146,23 @@ impl Drop for Receiver {
         // SAFETY: this type's own descriptor, not shared with any other value:
         // a `Receiver` is only ever reached through an `Arc`.
         unsafe { libc::close(self.fd) };
+        #[cfg(not(target_os = "linux"))]
+        let _ = std::fs::remove_file(socket_path(self.address));
     }
 }
 
 impl Receiver {
     /// Bind a new port. The address it answers on is fresh and unused.
     pub fn bind() -> std::io::Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        server::location::prepare(&server::location::runtime_directory().join("mach"))?;
         // Retried because two processes can draw the same address, however
         // unlikely - and the failure mode of not retrying is one run receiving
         // another's messages, which no caller could diagnose.
         for _ in 0..8 {
             let address = fresh_address();
+            let (addr, len) = sockaddr(address)?;
             let fd = socket()?;
-            let (addr, len) = sockaddr(address);
             // SAFETY: a socket this call just opened, and an address whose
             // length is computed from the name written into it.
             let rc = unsafe { libc::bind(fd, (&raw const addr).cast(), len) };
@@ -230,7 +257,17 @@ impl Receiver {
 /// inherit every port this process holds.
 fn socket() -> std::io::Result<c_int> {
     // SAFETY: a plain socket call with constant arguments.
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    #[cfg(not(target_os = "macos"))]
+    let kind = libc::SOCK_DGRAM | libc::SOCK_CLOEXEC;
+    #[cfg(target_os = "macos")]
+    let kind = libc::SOCK_DGRAM;
+    let fd = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+    #[cfg(target_os = "macos")]
+    if fd >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
     match fd < 0 {
         true => Err(std::io::Error::last_os_error()),
         false => Ok(fd),
@@ -327,7 +364,7 @@ pub fn send(destination: Address, bytes: &[u8], fds: &[c_int]) -> std::io::Resul
         return Err(std::io::Error::from_raw_os_error(libc::EMSGSIZE));
     }
 
-    let (addr, addr_len) = sockaddr(destination);
+    let (addr, addr_len) = sockaddr(destination)?;
     let mut iov = libc::iovec {
         iov_base: bytes.as_ptr() as *mut _,
         iov_len: bytes.len(),
@@ -393,7 +430,11 @@ fn receive_from(fd: c_int) -> std::io::Result<Option<Datagram>> {
     let received = loop {
         // SAFETY: `msg` describes `bytes` and `control`, both live and of the
         // lengths recorded in it.
-        let rc = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_CMSG_CLOEXEC) };
+        #[cfg(not(target_os = "macos"))]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(target_os = "macos")]
+        let flags = 0;
+        let rc = unsafe { libc::recvmsg(fd, &mut msg, flags) };
         if rc >= 0 {
             break rc as usize;
         }
@@ -423,6 +464,16 @@ fn receive_from(fd: c_int) -> std::io::Result<Option<Datagram>> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    for &fd in &fds {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let error = std::io::Error::last_os_error();
+            for fd in fds {
+                unsafe { libc::close(fd) };
+            }
+            return Err(error);
+        }
+    }
     bytes.truncate(received);
     Ok(Some(Datagram { bytes, fds }))
 }
@@ -446,7 +497,10 @@ mod tests {
     #[test]
     fn a_send_to_an_address_nobody_holds_fails() {
         let error = send(fresh_address(), b"x", &[]).expect_err("no such port");
-        assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED));
+        assert!(matches!(
+            error.raw_os_error(),
+            Some(libc::ECONNREFUSED | libc::ENOENT)
+        ));
     }
 
     #[test]

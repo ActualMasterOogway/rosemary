@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! `copyfile(3)`, which has no host counterpart. Feral's games copy their
 //! bundled `InputDevices` tree into a cache with it before opening a window.
 

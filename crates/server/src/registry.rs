@@ -311,10 +311,11 @@ mod tests {
         let mut registry = Registry::new();
         registry.checkin(me(), 1, checkin("/bin/sh"), host::identity(me()).unwrap());
         let long = "com.apple.main-thread.with-a-long-name".to_string();
-        registry.name_thread(me(), me(), long.clone());
+        let tid = host::threads(me()).unwrap()[0].tid;
+        registry.name_thread(me(), tid, long.clone());
         let threads = registry.threads(me()).unwrap();
-        let main = threads.iter().find(|thread| thread.tid == me()).unwrap();
-        assert_eq!(main.name, long);
+        let named = threads.iter().find(|thread| thread.tid == tid).unwrap();
+        assert_eq!(named.name, long);
     }
 
     #[test]

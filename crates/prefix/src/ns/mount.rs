@@ -94,7 +94,16 @@ impl Table {
     fn new(mounts: Vec<Mount>) -> Table {
         let mut by_guest = mounts.clone();
         by_guest.sort_by_key(|m| std::cmp::Reverse(m.guest.len()));
-        let mut by_host = mounts;
+        let mut by_host = mounts.clone();
+        // getcwd and descriptor paths may resolve symlinked host directories.
+        // Keep both spellings so /var and /private/var name the same guest path.
+        for mount in mounts {
+            if let Ok(host) = std::fs::canonicalize(&mount.host)
+                && host != mount.host
+            {
+                by_host.push(Mount { host, ..mount });
+            }
+        }
         by_host.sort_by_key(|m| std::cmp::Reverse(m.host.as_os_str().len()));
         Table { by_guest, by_host }
     }
@@ -266,7 +275,7 @@ mod tests {
     fn a_longer_mount_beats_the_root() {
         assert_eq!(
             table().to_host("/tmp/x"),
-            Some(PathBuf::from("/prefixes/default/root/private/tmp/x"))
+            Some(PathBuf::from("/prefixes/default/root/tmp/x"))
         );
         assert_eq!(
             table().to_host("/dev/urandom"),
@@ -303,6 +312,25 @@ mod tests {
     /// The prefix root is a longer *host* path than `/`, so it answers first
     /// and a file in the prefix is never named through the escape hatch.
     #[test]
+    fn a_resolved_host_mount_keeps_its_guest_spelling() {
+        let at = std::env::temp_dir().join(format!("rosemary-mount-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(at.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", at.join("alias")).unwrap();
+        let table = Table::with(&at.join("alias"), []);
+        let physical = std::fs::canonicalize(at.join("real")).unwrap();
+        assert_eq!(
+            table.to_guest(&physical.join("file")),
+            Some(PathBuf::from("/file"))
+        );
+        assert_eq!(
+            table.to_guest(&at.join("alias/file")),
+            Some(PathBuf::from("/file"))
+        );
+        std::fs::remove_dir_all(at).unwrap();
+    }
+
+    #[test]
     fn a_path_inside_the_prefix_is_named_by_its_darwin_path() {
         assert_eq!(
             table().to_guest(Path::new("/prefixes/default/root/usr/lib")),
@@ -310,7 +338,7 @@ mod tests {
         );
         assert_eq!(
             table().to_guest(Path::new("/prefixes/default/root/private/tmp/x")),
-            Some(PathBuf::from("/tmp/x"))
+            Some(PathBuf::from("/private/tmp/x"))
         );
     }
 

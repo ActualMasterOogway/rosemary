@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString, c_char, c_void};
 
 /// `XATTR_NOFOLLOW`, the one Darwin option with a host counterpart - and it has
@@ -7,9 +5,11 @@ use std::ffi::{CStr, CString, c_char, c_void};
 const NOFOLLOW: i32 = 0x0001;
 
 /// Darwin's `XATTR_CREATE`, which is not this host's number.
+#[cfg(not(target_os = "macos"))]
 const CREATE: i32 = 0x0002;
 
 /// Darwin's `XATTR_REPLACE`, likewise.
+#[cfg(not(target_os = "macos"))]
 const REPLACE: i32 = 0x0004;
 
 /// This host's extended-attribute calls, over the guest's own flat names.
@@ -326,6 +326,42 @@ mod host {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod host {
+    use super::*;
+
+    pub fn name(name: &CStr) -> Option<CString> {
+        Some(name.to_owned())
+    }
+
+    pub unsafe fn remove(path: *const c_char, name: &CStr, nofollow: bool) -> i32 {
+        unsafe { libc::removexattr(path, name.as_ptr(), if nofollow { NOFOLLOW } else { 0 }) }
+    }
+
+    pub unsafe fn list(path: *const c_char, nofollow: bool) -> Option<Vec<Vec<u8>>> {
+        let options = if nofollow { NOFOLLOW } else { 0 };
+        let mut bytes = vec![0u8; 256];
+        loop {
+            let got =
+                unsafe { libc::listxattr(path, bytes.as_mut_ptr().cast(), bytes.len(), options) };
+            if got >= 0 {
+                bytes.truncate(got as usize);
+                return Some(
+                    bytes
+                        .split(|b| *b == 0)
+                        .filter(|n| !n.is_empty())
+                        .map(<[u8]>::to_vec)
+                        .collect(),
+                );
+            }
+            if crate::errno::get() != libc::ERANGE || bytes.len() >= 1 << 20 {
+                return None;
+            }
+            bytes.resize(bytes.len() * 4, 0);
+        }
+    }
+}
+
 /// `int getxattr(const char *, const char *, void *, size_t, u_int32_t, int)`
 ///
 /// `position` is Darwin's offset into a resource fork and is refused when it is
@@ -344,6 +380,7 @@ unsafe extern "C" fn getxattr(
     position: u32,
     options: i32,
 ) -> isize {
+    #[cfg(not(target_os = "macos"))]
     if position != 0 {
         crate::errno::set(libc::EINVAL);
         return -1;
@@ -356,7 +393,12 @@ unsafe extern "C" fn getxattr(
         return -1;
     };
     // SAFETY: a translated path and the caller's buffer.
-    unsafe { host::get(path.as_ptr(), &host, value, size, options & NOFOLLOW != 0) }
+    #[cfg(target_os = "macos")]
+    return unsafe { libc::getxattr(path.as_ptr(), host.as_ptr(), value, size, position, options) };
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        host::get(path.as_ptr(), &host, value, size, options & NOFOLLOW != 0)
+    }
 }
 
 /// `int setxattr(const char *, const char *, const void *, size_t, u_int32_t, int)`
@@ -372,6 +414,7 @@ unsafe extern "C" fn setxattr(
     position: u32,
     options: i32,
 ) -> i32 {
+    #[cfg(not(target_os = "macos"))]
     if position != 0 {
         crate::errno::set(libc::EINVAL);
         return -1;
@@ -384,6 +427,9 @@ unsafe extern "C" fn setxattr(
         return -1;
     };
     // SAFETY: a translated path and the caller's buffer.
+    #[cfg(target_os = "macos")]
+    return unsafe { libc::setxattr(path.as_ptr(), host.as_ptr(), value, size, position, options) };
+    #[cfg(not(target_os = "macos"))]
     unsafe {
         host::set(
             path.as_ptr(),
@@ -608,6 +654,7 @@ mod tests {
     /// rather than ignored: ignoring it answers from the start of the attribute
     /// and reports the count as if it came from the offset asked for.
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn a_non_zero_position_is_refused_rather_than_ignored() {
         // SAFETY: nothing is dereferenced on the refusing path.
         let rc = unsafe { getxattr(c"/".as_ptr(), c"x".as_ptr(), core::ptr::null_mut(), 0, 4, 0) };

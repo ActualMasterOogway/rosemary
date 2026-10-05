@@ -6,8 +6,6 @@
 //! Only guests are tasks: a host process is not part of the system a guest
 //! can see, and `task_for_pid` on one fails as it would for a process the
 //! caller may not inspect.
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::c_void;
 
 use super::info::{TimeValue, publish};

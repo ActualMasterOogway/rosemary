@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char, c_int};
 use std::path::Path;
 use std::sync::{LazyLock, RwLock};

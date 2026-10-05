@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! The BSM audit session a guest asks about.
 //!
 //! Darwin puts every process in an audit session, and Security's

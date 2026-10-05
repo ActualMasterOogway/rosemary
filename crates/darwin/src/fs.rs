@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -657,8 +655,8 @@ pub unsafe extern "C" fn mkdtempat_np(dfd: c_int, path: *mut c_char) -> *mut c_c
     let start = template.len() - xs;
     for _ in 0..1000 {
         let mut random = vec![0u8; xs];
-        // SAFETY: a buffer of the length given.
-        if unsafe { libc::getrandom(random.as_mut_ptr().cast(), xs, 0) } != xs as isize {
+        if getrandom::fill(&mut random).is_err() {
+            crate::errno::set(libc::EIO);
             return std::ptr::null_mut();
         }
         for (slot, byte) in template[start..].iter_mut().zip(random) {

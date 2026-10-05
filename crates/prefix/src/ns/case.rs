@@ -15,18 +15,15 @@ use std::path::{Path, PathBuf};
 /// turns the caller's `ENOENT` into a failure with `errno == 0`. Boost reads
 /// that as "not a not-found error" and throws `status: Success`.
 pub(crate) fn insensitive(path: &CStr) -> Option<CString> {
-    // macOS's own kernel folds, so the walk would only ever confirm what the
-    // caller already asked. Refused at run time rather than compiled out, so
-    // that one code path serves every host.
-    if cfg!(target_os = "macos") {
-        return None;
-    }
     let _errno = crate::errno::Held::now();
     let text = path.to_str().ok()?;
     if text.is_empty() {
         return None;
     }
     let wanted = Path::new(text);
+    if wanted.symlink_metadata().is_ok() {
+        return None;
+    }
     let mut at = match wanted.is_absolute() {
         true => PathBuf::from("/"),
         false => PathBuf::from("."),
@@ -58,13 +55,22 @@ pub(crate) fn insensitive(path: &CStr) -> Option<CString> {
 
 /// [`insensitive`] for a path interpreted relative to an open directory.
 ///
-/// `/proc/self/fd` preserves `openat`'s starting point without changing the
-/// process working directory. If procfs is unavailable, the ordinary exact
-/// `openat` attempt has already happened and this fallback simply finds none.
+/// The descriptor's path preserves `openat`'s starting point without changing
+/// the process working directory.
 pub(crate) fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString> {
     if path.to_bytes().starts_with(b"/") || dirfd == libc::AT_FDCWD {
         return insensitive(path);
     }
+    // FIXME (PORTABILITY): port this functionality to starnix?
+    #[cfg(target_os = "macos")]
+    let mut anchored = {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = super::guard::directory_of(dirfd)?;
+        let mut bytes = directory.as_os_str().as_bytes().to_vec();
+        bytes.push(b'/');
+        bytes
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut anchored = format!("/proc/self/fd/{dirfd}/").into_bytes();
     anchored.extend_from_slice(path.to_bytes());
     insensitive(&CString::new(anchored).ok()?)
@@ -95,9 +101,7 @@ fn sole_match(directory: &Path, name: &str) -> Option<PathBuf> {
     found
 }
 
-// The walk answers `None` unconditionally on macOS, so there is nothing here
-// to assert about.
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -131,7 +135,12 @@ mod tests {
                 .expect("utf-8"),
         )
         .expect("no NUL");
-        let found = insensitive(&lowered).expect("a case-insensitive match");
+        let found = insensitive(&lowered);
+        if scratch.0.join("contents/game.ios").exists() {
+            assert_eq!(found, None);
+            return;
+        }
+        let found = found.expect("a case-insensitive match");
         assert_eq!(
             found.to_str().expect("utf-8"),
             scratch
@@ -188,12 +197,15 @@ mod tests {
         // SAFETY: a NUL-terminated path and native flags.
         let dirfd = unsafe { libc::open(directory.as_ptr(), libc::O_RDONLY) };
         assert!(dirfd >= 0);
-        let found =
-            insensitive_at(dirfd, c"contents/game.ios").expect("a case-insensitive relative match");
+        let found = insensitive_at(dirfd, c"contents/game.ios");
         // SAFETY: a descriptor this test just opened.
         unsafe { libc::close(dirfd) };
 
-        assert!(found.to_bytes().ends_with(b"/Contents/Game.ios"));
+        if scratch.0.join("contents/game.ios").exists() {
+            assert_eq!(found, None);
+        } else {
+            assert!(found.unwrap().to_bytes().ends_with(b"/Contents/Game.ios"));
+        }
     }
 
     /// Darwin accepts paths deeper than an arbitrary implementation limit as
@@ -215,8 +227,12 @@ mod tests {
         }
         wanted.push("leaf");
         let wanted = CString::new(wanted.to_str().expect("utf-8")).expect("no NUL");
-        let found = insensitive(&wanted).expect("a case-insensitive deep match");
-        assert!(found.to_bytes().ends_with(b"/D/D/D/D/D/Leaf"));
+        let found = insensitive(&wanted);
+        if Path::new(wanted.to_str().unwrap()).exists() {
+            assert_eq!(found, None);
+        } else {
+            assert!(found.unwrap().to_bytes().ends_with(b"/D/D/D/D/D/Leaf"));
+        }
 
         // The resolved path owns no resources, so the tree can be removed now.
         let root = std::env::temp_dir().join(format!("rosemary-path-deep-{}", std::process::id()));

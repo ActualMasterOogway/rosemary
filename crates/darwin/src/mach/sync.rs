@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::c_int;
 
 pub extern "C" fn csr_check(_mask: u32) -> c_int {

@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use super::kern::*;
 use super::space::{self, HOST_SELF, Name};
 

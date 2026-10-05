@@ -11,14 +11,21 @@ pub fn proc_pidpath(
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let Some(path) = crate::dyld::executable_path() else {
-        crate::shims::set_int_return(ctx, -1);
+    let path = if darwin::libc_backend::using_builtin() {
+        darwin::process::describe(ctx.rdi as i32).map(|process| process.path)
+    } else {
+        crate::dyld::executable_path()
+    };
+    let Some(path) = path else {
+        darwin::errno::set(libc::ESRCH);
+        crate::shims::set_int_return(ctx, 0);
         return Ok(());
     };
     let bytes = path.as_bytes();
     let capacity = ctx.rdx as usize;
     if ctx.rsi == 0 || capacity <= bytes.len() {
-        crate::shims::set_int_return(ctx, -1);
+        darwin::errno::set(libc::EINVAL);
+        crate::shims::set_int_return(ctx, 0);
         return Ok(());
     }
     mem.write(ctx.rsi, bytes)

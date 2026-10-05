@@ -128,12 +128,24 @@ pub(crate) fn from_host(host: &libc::stat) -> Stat {
             sec: host.st_ctime as i64,
             nsec: host.st_ctime_nsec as i64,
         },
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         birthtime: Timespec::default(),
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        birthtime: Timespec {
+            sec: host.st_birthtime,
+            nsec: host.st_birthtime_nsec,
+        },
         size: host.st_size as i64,
         blocks: host.st_blocks as i64,
         blksize: host.st_blksize as i32,
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         flags: 0,
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        flags: host.st_flags,
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         generation: 0,
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        generation: host.st_gen as u32,
         lspare: 0,
         qspare: [0; 2],
     }
@@ -421,7 +433,6 @@ pub unsafe extern "C" fn readlink(
 ///
 /// `None` when there is nothing to record.
 fn creation(create: bool, exclusive: bool, dirfd: c_int, path: *const c_char) -> Option<bool> {
-    #[cfg(not(target_os = "macos"))]
     if create && crate::credentials::creates_as_another() {
         if exclusive {
             return Some(false);
@@ -441,7 +452,6 @@ fn creation(create: bool, exclusive: bool, dirfd: c_int, path: *const c_char) ->
 
 /// Record what [`creation`] said was about to be made, if it was.
 fn created(existed: Option<bool>, made: bool, dirfd: c_int, path: *const c_char) {
-    #[cfg(not(target_os = "macos"))]
     if made && existed == Some(false) {
         // SAFETY: the caller's NUL-terminated path.
         crate::credentials::created(dirfd, unsafe { CStr::from_ptr(path) });
@@ -691,8 +701,12 @@ pub unsafe extern "C" fn fstatat(
 /// directory it starts from, by `..`, an absolute path or a symlink. Safe
 /// archive extraction (`unzip`) relies on it, so it is kept rather than dropped.
 mod beneath {
-    use super::{Found, Stat, as_seen};
-    use std::ffi::{CStr, c_char, c_int};
+    use super::Stat;
+    #[cfg(target_os = "linux")]
+    use super::{Found, as_seen};
+    #[cfg(target_os = "linux")]
+    use std::ffi::CStr;
+    use std::ffi::{c_char, c_int};
 
     /// The `AT_` flag where the host can honour it, and no bits elsewhere, so
     /// the caller's check refuses it by `EINVAL` there.
@@ -1105,6 +1119,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn open_refuses_a_flag_the_host_cannot_honor() {
         // Darwin's O_SHLOCK has no Linux equivalent. Silently dropping it
         // would claim a lock that was never acquired.

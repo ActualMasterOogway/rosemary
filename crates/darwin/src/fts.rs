@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::ptr::null_mut;
 

@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
 

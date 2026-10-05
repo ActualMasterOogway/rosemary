@@ -190,11 +190,13 @@ pub fn provider() -> SyntheticDylib {
         "__dyld_find_unwind_sections",
         crate::dyld::entry::dyld_find_unwind_sections as *const (),
     );
-    if let Some(port) = crate::host::symbol("mach_task_self_") {
-        lib.define_data("_mach_task_self_", port);
-    }
-    if let Some(f) = crate::host::symbol("mach_host_self") {
-        lib.define_fn("_mach_host_self", f as *const ());
+    if !darwin::libc_backend::using_builtin() {
+        if let Some(port) = crate::host::symbol("mach_task_self_") {
+            lib.define_data("_mach_task_self_", port);
+        }
+        if let Some(f) = crate::host::symbol("mach_host_self") {
+            lib.define_fn("_mach_host_self", f as *const ());
+        }
     }
     lib.define_fn("__NSGetArgc", ns_get_argc as *const ());
     lib.define_fn("__NSGetArgv", ns_get_argv as *const ());

@@ -276,28 +276,8 @@ fn tilde(pattern: &[Raw], flags: c_int) -> Vec<Raw> {
     out
 }
 
-#[cfg(not(target_os = "macos"))]
 fn home(user: Option<&CStr>) -> Option<CString> {
     crate::passwd::home(user)
-}
-
-#[cfg(target_os = "macos")]
-fn home(user: Option<&CStr>) -> Option<CString> {
-    let Some(user) = user else {
-        return CString::new(prefix::ns::home()).ok();
-    };
-    let entry = unsafe { libc::getpwnam(user.as_ptr()) };
-    if entry.is_null() {
-        return None;
-    }
-    let pointer = unsafe { (*entry).pw_dir };
-    if pointer.is_null() {
-        return None;
-    }
-    let directory = unsafe { CStr::from_ptr(pointer) };
-    let directory = std::path::Path::new(directory.to_str().ok()?);
-    let guest = prefix::ns::to_guest(directory)?;
-    CString::new(guest.into_os_string().into_encoded_bytes()).ok()
 }
 
 /// The pattern as tokens, and whether it held a metacharacter.
@@ -483,14 +463,12 @@ enum Handle {
     Guest(*mut c_void),
 }
 
-#[cfg(not(target_os = "macos"))]
 unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
     unsafe { crate::dirent::opendir(path.as_ptr()) }
 }
 
 /// The next name in a host handle, as the guest lists the directory: with the
 /// prefix's mount points, which this crate's `readdir` adds.
-#[cfg(not(target_os = "macos"))]
 unsafe fn read_host(dir: *mut libc::DIR) -> Option<Vec<u8>> {
     let entry = unsafe { crate::dirent::next_listed(dir) }.ok()??;
     Some(
@@ -500,39 +478,8 @@ unsafe fn read_host(dir: *mut libc::DIR) -> Option<Vec<u8>> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
 unsafe fn close_host(dir: *mut libc::DIR) {
     unsafe { crate::dirent::closedir(dir) };
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn read_host(dir: *mut libc::DIR) -> Option<Vec<u8>> {
-    let entry = unsafe { libc::readdir(dir) };
-    if entry.is_null() {
-        return None;
-    }
-    Some(
-        unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) }
-            .to_bytes()
-            .to_vec(),
-    )
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn close_host(dir: *mut libc::DIR) {
-    unsafe { libc::closedir(dir) };
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn open_host(path: &CStr) -> *mut libc::DIR {
-    let host = prefix::ns::to_host(path);
-    let dir = unsafe { libc::opendir(host.as_ptr()) };
-    if !dir.is_null() || crate::errno::get() != libc::ENOENT {
-        return dir;
-    }
-    prefix::ns::fold(&host)
-        .map(|found| unsafe { libc::opendir(found.as_ptr()) })
-        .unwrap_or(dir)
 }
 
 #[cfg(not(target_os = "macos"))]

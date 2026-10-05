@@ -156,10 +156,10 @@ fn say(line: &str) {
 
 /// Select or create the guest prefix and record it for child processes.
 pub fn settle_prefix() {
-    if cfg!(target_os = "macos") {
+    let named = std::env::var_os("ROSEMARY_PREFIX");
+    if cfg!(target_os = "macos") && named.is_none() {
         return;
     }
-    let named = std::env::var_os("ROSEMARY_PREFIX");
     // An explicit `off` is the one way to run with no prefix at all.
     if matches!(
         prefix::layout::setting_from(named.clone()),

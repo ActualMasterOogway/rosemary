@@ -22,13 +22,11 @@
 
 use std::ffi::CString;
 
-#[cfg(not(target_os = "macos"))]
 pub mod accounts;
 #[cfg(not(target_os = "macos"))]
 pub mod acl;
 mod atomics;
 pub mod attrlist;
-#[cfg(not(target_os = "macos"))]
 pub mod audit;
 pub mod backtrace;
 pub mod bsd;
@@ -38,7 +36,6 @@ pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod copyfile;
-#[cfg(not(target_os = "macos"))]
 pub mod credentials;
 pub mod data;
 pub mod dirent;
@@ -50,7 +47,6 @@ pub mod fcntl;
 pub mod fmtcheck;
 pub mod fortify;
 pub mod fs;
-#[cfg(not(target_os = "macos"))]
 pub mod fts;
 #[cfg(target_os = "linux")]
 pub mod getopt;
@@ -74,7 +70,6 @@ pub mod math;
 pub mod modes;
 pub mod net;
 mod oslog;
-#[cfg(not(target_os = "macos"))]
 pub mod pam;
 pub mod passthrough;
 pub mod passwd;
@@ -91,7 +86,6 @@ pub mod sched;
 pub mod select;
 pub mod shm;
 pub mod signal;
-#[cfg(not(target_os = "macos"))]
 pub mod sip;
 pub mod spawn;
 pub mod stackprobe;
@@ -314,20 +308,34 @@ static SHARED_MODULES: &[exports::Module] = &[
     resolv::MODULE,
     string::MODULE,
     stat::MODULE,
+    fcntl::entry::MODULE,
     stackprobe::MODULE,
     atomics::MODULE,
     fortify::MODULE,
     env::MODULE,
     humanize::MODULE,
     signal::entry::MODULE,
+    mach::MODULE,
+    fs::MODULE,
+    copyfile::MODULE,
+    xattr::MODULE,
+    passwd::MODULE,
+    audit::MODULE,
+    dirent::MODULE,
+    libproc::MODULE,
+    fts::MODULE,
+    attrlist::MODULE,
+    process::MODULE,
+    credentials::MODULE,
+    pam::MODULE,
+    sip::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
 #[cfg(not(target_os = "macos"))]
 static NONPORTABLE_MODULES: &[exports::Module] = &[
-    mach::MODULE,
     compat::MODULE,
-    fs::MODULE,
+    bsd::MODULE,
     termios::MODULE,
     sched::MODULE,
     random::MODULE,
@@ -341,18 +349,10 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     poll::MODULE,
     select::MODULE,
     net::MODULE,
-    xattr::MODULE,
-    copyfile::MODULE,
     uuid::MODULE,
-    fcntl::entry::MODULE,
-    bsd::MODULE,
     callback::MODULE,
-    passwd::MODULE,
-    audit::MODULE,
-    dirent::MODULE,
     rlimit::MODULE,
     shm::MODULE,
-    libproc::MODULE,
     oslog::MODULE,
     kqueue::MODULE,
     backtrace::MODULE,
@@ -360,8 +360,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     printf_l::MODULE,
     acl::MODULE,
     fmtcheck::MODULE,
-    fts::MODULE,
-    attrlist::MODULE,
     langinfo::MODULE,
     modes::MODULE,
     #[cfg(target_os = "linux")]
@@ -369,10 +367,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     utmpx::MODULE,
     vis::MODULE,
     wait::MODULE,
-    process::MODULE,
-    credentials::MODULE,
-    pam::MODULE,
-    sip::MODULE,
     #[cfg(target_os = "linux")]
     getopt::MODULE,
 ];
@@ -415,9 +409,7 @@ pub const LIBRARY_NAMES: &[&str] = &[
     "/usr/lib/librpcsvc.dylib",
     "/usr/lib/libgcc_s.1.dylib",
     // OpenPAM, which `crate::pam` is on hosts without a Darwin one.
-    #[cfg(not(target_os = "macos"))]
     "/usr/lib/libpam.2.dylib",
-    #[cfg(not(target_os = "macos"))]
     "/usr/lib/libpam.dylib",
     "/usr/lib/system/libcompiler_rt.dylib",
     "/usr/lib/system/libmacho.dylib",
@@ -488,7 +480,11 @@ mod tests {
             }
         }
         for name in ["_copyfile", "_kevent"] {
-            let enabled = !cfg!(target_os = "macos");
+            let enabled = if name == "_copyfile" {
+                builtin
+            } else {
+                !cfg!(target_os = "macos")
+            };
             assert_eq!(is_implemented(name), enabled, "{name}");
             assert_eq!(published(&lib, name).is_some(), enabled, "{name}");
         }
@@ -616,9 +612,11 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn every_path_taking_shim_is_reachable() {
+        if !libc_backend::using_builtin() {
+            return;
+        }
         let unreachable: Vec<&str> = [
             "getenv", "setenv", "putenv", "unsetenv", "chdir", "getcwd", "unlink", "rmdir",
             "remove", "mkdir", "chmod", "chown", "lchown", "truncate", "link", "rename", "symlink",

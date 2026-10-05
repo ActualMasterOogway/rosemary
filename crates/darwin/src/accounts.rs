@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, CString};
 
 /// One user.
@@ -149,12 +147,20 @@ fn host_groups_of(name: &CStr, base: u32) -> Vec<u32> {
     loop {
         host.resize(count as usize, 0);
         let offered = count;
-        // SAFETY: `host` holds `count` slots, and glibc writes no more.
-        if unsafe { libc::getgrouplist(name.as_ptr(), base, host.as_mut_ptr(), &mut count) } >= 0 {
+        // SAFETY: `host` holds `count` slots, and libc writes no more.
+        if unsafe {
+            libc::getgrouplist(
+                name.as_ptr(),
+                base as _,
+                host.as_mut_ptr().cast(),
+                &mut count,
+            )
+        } >= 0
+        {
             host.truncate(count as usize);
             return host;
         }
-        // glibc reports the size it needed; grow regardless, in case the
+        // libc reports the size it needed; grow regardless, in case the
         // group database changed between the two calls.
         count = count.max(offered.saturating_mul(2));
     }
@@ -218,7 +224,9 @@ mod tests {
         let groups = groups_of(&me, gid);
         assert_eq!(groups[0], gid);
         assert!(groups.contains(&ADMIN));
-        assert!(!groups.contains(&WHEEL), "only root is in wheel");
+        if me != c"root" && gid != WHEEL {
+            assert!(!groups.contains(&WHEEL), "only root is in wheel");
+        }
     }
 
     #[test]

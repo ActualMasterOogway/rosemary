@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int};
 use std::sync::{Arc, Mutex};
@@ -39,7 +37,7 @@ impl Default for Dirent {
     }
 }
 
-/// The `DT_*` values are the same numbers on both platforms, so the type byte
+/// The supported hosts share the `DT_*` numbers, so the type byte
 /// is copied rather than translated. Asserted rather than assumed.
 const _: () = {
     assert!(libc::DT_DIR == 4 && libc::DT_REG == 8 && libc::DT_LNK == 10);
@@ -156,9 +154,13 @@ unsafe fn convert(host: *const libc::dirent) -> Dirent {
     let ino = host.d_fileno;
     #[cfg(not(target_os = "freebsd"))]
     let ino = host.d_ino;
+    #[cfg(target_os = "macos")]
+    let seekoff = host.d_seekoff;
+    #[cfg(not(target_os = "macos"))]
+    let seekoff = host.d_off as u64;
     let mut out = Dirent {
         ino,
-        seekoff: host.d_off as u64,
+        seekoff,
         kind: host.d_type,
         ..Dirent::default()
     };
@@ -458,13 +460,14 @@ mod tests {
         std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL")
     }
 
-    /// The offsets are the guest's. `d_name` is the one that matters: two bytes
-    /// later than the host's, so a name read at the host's offset starts on the
-    /// type byte.
+    /// Guest offsets are fixed even when the host uses another layout.
     #[test]
-    fn the_layout_is_darwins_and_not_this_hosts() {
+    fn the_layout_has_darwins_offsets() {
         assert_eq!(std::mem::offset_of!(Dirent, name), 21);
+        #[cfg(target_os = "linux")]
         assert_eq!(std::mem::offset_of!(libc::dirent, d_name), 19);
+        #[cfg(target_os = "macos")]
+        assert_eq!(std::mem::offset_of!(libc::dirent, d_name), 21);
         assert_eq!(size_of::<Dirent>(), 1048);
     }
 

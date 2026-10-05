@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use super::kern::*;
 use super::space::{self, BOOTSTRAP, HOST_SELF, MACH_PORT_NULL, Name, TASK_SELF};
 
@@ -34,7 +32,7 @@ pub extern "C" fn mach_host_self() -> Name {
 /// [`Right::Thread`], so `thread_info` on it answers about this thread.
 pub extern "C" fn mach_thread_self() -> Name {
     let pid = starnix::process::me();
-    let tid = crate::pthread::id() as i32;
+    let tid = crate::process::thread_id();
     space::insert_thread(pid, tid)
 }
 

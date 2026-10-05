@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::c_char;
 
 pub const KERN_SUCCESS: i32 = 0;

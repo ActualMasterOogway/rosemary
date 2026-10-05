@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{c_int, c_void};
 
 const PROC_PIDLISTFDS: c_int = 1;
@@ -152,6 +150,29 @@ pub unsafe extern "C" fn proc_name(pid: c_int, buffer: *mut c_void, size: u32) -
     unsafe { copy_name(&name, buffer, size) }
 }
 
+/// `int proc_pidpath(int, void *, uint32_t)`, using the guest's executable.
+///
+/// # Safety
+///
+/// `buffer` is writable for `size` bytes.
+pub unsafe extern "C" fn proc_pidpath(pid: c_int, buffer: *mut c_void, size: u32) -> c_int {
+    let Some(process) = crate::process::describe(pid) else {
+        crate::errno::set(libc::ESRCH);
+        return 0;
+    };
+    let path = process.path.as_bytes();
+    if buffer.is_null() || size as usize <= path.len() {
+        crate::errno::set(libc::EINVAL);
+        return 0;
+    }
+    // SAFETY: the caller's buffer holds the path and its terminator.
+    unsafe {
+        std::ptr::copy_nonoverlapping(path.as_ptr(), buffer.cast::<u8>(), path.len());
+        *buffer.cast::<u8>().add(path.len()) = 0;
+    }
+    path.len() as c_int
+}
+
 /// # Safety
 ///
 /// `buffer` is null or writable for `size` bytes.
@@ -270,7 +291,7 @@ fn bsd_record(process: &server::protocol::Process) -> ProcBsdInfo {
         pbi_pgid: process.pgid as u32,
         e_tdev: match process.tty_major {
             -1 => u32::MAX,
-            major => libc::makedev(major as u32, process.tty_minor as u32) as u32,
+            major => libc::makedev(major as _, process.tty_minor as _) as u32,
         },
         e_tpgid: process.tpgid as u32,
         pbi_nice: process.nice,
@@ -408,7 +429,7 @@ fn select_pids(kind: u32, info: u32) -> Option<Vec<i32>> {
         PROC_PGRP_ONLY => process.pgid == info as i32,
         PROC_TTY_ONLY => {
             process.tty_major >= 0
-                && libc::makedev(process.tty_major as u32, process.tty_minor as u32) as u32 == info
+                && libc::makedev(process.tty_major as _, process.tty_minor as _) as u32 == info
         }
         PROC_UID_ONLY => process.euid == info,
         PROC_RUID_ONLY => process.uid == info,
@@ -500,6 +521,7 @@ exports::exports! {
     functions {
         "proc_pidinfo" => proc_pidinfo,
         "proc_name" => proc_name,
+        "proc_pidpath" => proc_pidpath,
         "proc_pid_rusage" => proc_pid_rusage,
         "proc_listpids" => proc_listpids,
         "proc_listallpids" => proc_listallpids,

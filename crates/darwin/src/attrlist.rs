@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 use crate::stat::Stat;
@@ -66,7 +64,7 @@ const FSOPT_PACK_INVAL_ATTRS: u64 = 0x8;
 const OPTIONS: u64 = FSOPT_NOFOLLOW | FSOPT_REPORT_FULLSIZE | FSOPT_PACK_INVAL_ATTRS;
 
 /// `enum vtype`, which `ATTR_CMN_OBJTYPE` reports.
-fn object_type(mode: u16) -> libc::mode_t {
+fn object_type(mode: u16) -> u32 {
     match libc::mode_t::from(mode) & libc::S_IFMT {
         libc::S_IFREG => 1,
         libc::S_IFDIR => 2,
@@ -142,14 +140,13 @@ fn pack(list: &AttrList, options: u64, st: &Stat, entries: impl FnOnce() -> u32)
         out.extend_from_slice(&t.sec.to_ne_bytes());
         out.extend_from_slice(&t.nsec.to_ne_bytes());
     };
-    let mode_t_ = |out: &mut Vec<u8>, v: libc::mode_t| out.extend_from_slice(&v.to_ne_bytes());
     let u32_ = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_ne_bytes());
     let i64_ = |out: &mut Vec<u8>, v: i64| out.extend_from_slice(&v.to_ne_bytes());
     if common & ATTR_CMN_DEVID != 0 {
         u32_(&mut out, st.dev as u32);
     }
     if common & ATTR_CMN_OBJTYPE != 0 {
-        mode_t_(&mut out, object_type(st.mode));
+        u32_(&mut out, object_type(st.mode));
     }
     if common & ATTR_CMN_MODTIME != 0 {
         time(&mut out, st.mtime);

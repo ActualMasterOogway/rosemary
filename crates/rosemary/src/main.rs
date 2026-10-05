@@ -13,7 +13,6 @@ use microlift::core::lift_to_function;
 use mimalloc::MiMalloc;
 
 mod prefix_cli;
-#[cfg(not(target_os = "macos"))]
 mod server_cli;
 
 #[global_allocator]
@@ -68,8 +67,9 @@ fn run(
     rosemary::exec::publish(exec);
     // After loading, which settles the CPU type the guest is listed with, and
     // before its first instruction, so it is listed from the start.
-    #[cfg(not(target_os = "macos"))]
-    server_cli::join(guest, &argv);
+    if darwin::libc_backend::using_builtin() {
+        server_cli::join(guest, &argv);
+    }
 
     match startup::run(exec) {
         // `exit` rather than returning the status. Returning goes back through
@@ -175,7 +175,6 @@ fn main() -> ExitCode {
     if first == "prefix" {
         return prefix_cli::command(args);
     }
-    #[cfg(not(target_os = "macos"))]
     if first == "server" {
         return server_cli::command(args);
     }

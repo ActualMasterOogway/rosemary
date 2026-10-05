@@ -507,6 +507,9 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
     if name == 0 {
         return err::EINVAL;
     }
+    // SAFETY: the caller's NUL-terminated name.
+    let full = unsafe { core::ffi::CStr::from_ptr(name as usize as *const libc::c_char) };
+    crate::process::name_thread(&full.to_string_lossy());
     #[cfg(target_os = "macos")]
     {
         // SAFETY: the caller's guarantee; Darwin names the calling thread.
@@ -518,10 +521,6 @@ pub unsafe extern "C" fn setname_np(name: u64) -> i32 {
         // whole call with `ERANGE` for a longer one, where Darwin truncates. Truncated
         // here so a guest with a descriptive name gets a name rather than an error.
         // SAFETY: the caller states `name` is NUL-terminated.
-        let full = unsafe { core::ffi::CStr::from_ptr(name as usize as *const libc::c_char) };
-        // The whole name is kept by the process server, which is where another
-        // task reading this thread's name - `top`, a sampler - asks for it.
-        crate::process::name_thread(&full.to_string_lossy());
         let mut buf = [0u8; 16];
         let bytes = full.to_bytes();
         let n = bytes.len().min(buf.len() - 1);
@@ -561,9 +560,8 @@ pub unsafe extern "C" fn main_np() -> i32 {
 
 /// `int pthread_threadid_np(pthread_t, uint64_t *)`, Darwin's own.
 ///
-/// A null thread means the calling one. The id is this runtime's [`id`], which has the
-/// properties a caller wants - unique while the thread runs - without being Darwin's
-/// actual 64-bit thread id, which nothing here can produce.
+/// A null thread means the calling one. macOS supplies its kernel thread id;
+/// other hosts use the id published with the thread's handle.
 ///
 /// # Safety
 ///
@@ -572,37 +570,60 @@ pub unsafe extern "C" fn threadid_np(thread: u64, out: u64) -> i32 {
     if out == 0 {
         return err::EINVAL;
     }
-    if thread != 0 {
-        // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
-        if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
-            let Some(id) = thread_ids::get(handle::host_of(thread)) else {
-                return err::ESRCH;
-            };
-            unsafe { *(out as usize as *mut u64) = u64::from(id) };
-            return 0;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        let host = if thread == 0 {
+            null_thread()
+        } else {
+            thread_of(thread)
+        };
+        return unsafe { libc::pthread_threadid_np(host, out as usize as *mut u64) };
     }
-    // SAFETY: the caller states `out` is a writable `uint64_t *`.
-    unsafe { *(out as usize as *mut u64) = u64::from(id()) };
-    0
+    #[cfg(not(target_os = "macos"))]
+    {
+        if thread != 0 {
+            // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
+            if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
+                let Some(id) = thread_ids::get(handle::host_of(thread)) else {
+                    return err::ESRCH;
+                };
+                unsafe { *(out as usize as *mut u64) = u64::from(id) };
+                return 0;
+            }
+        }
+        // SAFETY: the caller states `out` is a writable `uint64_t *`.
+        unsafe { *(out as usize as *mut u64) = u64::from(id()) };
+        0
+    }
 }
 
 /// `mach_port_t pthread_mach_thread_np(pthread_t)`, Darwin's own.
 ///
-/// The Mach thread port for a thread, and there is no Mach here. What asks for
-/// it uses it as a per-thread token and nothing else - the vendored `libc++abi`
+/// A borrowed builtin Mach thread name on macOS, or a per-thread token elsewhere.
+/// The vendored `libc++abi`
 /// keys `__cxa_guard_acquire`'s recursion check on it, which is why a program
 /// with a static initializer in a C++ image needs this on Linux at all - so
 /// [`id`] is the answer, unique while the thread runs.
 ///
 pub unsafe extern "C" fn mach_thread_np(thread: u64) -> u32 {
-    if thread != 0 {
-        // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
-        if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
-            return thread_ids::get(handle::host_of(thread)).unwrap_or(0);
+    #[cfg(target_os = "macos")]
+    {
+        let mut tid = 0u64;
+        if unsafe { threadid_np(thread, (&raw mut tid) as usize as u64) } != 0 {
+            return 0;
         }
+        return crate::mach::space::borrow_thread(starnix::process::me(), tid as i32);
     }
-    id()
+    #[cfg(not(target_os = "macos"))]
+    {
+        if thread != 0 {
+            // SAFETY: `thread` is a live handle; `pthread_equal` only compares.
+            if unsafe { libc::pthread_equal(thread_of(thread), libc::pthread_self()) } == 0 {
+                return thread_ids::get(handle::host_of(thread)).unwrap_or(0);
+            }
+        }
+        id()
+    }
 }
 
 /// `int pthread_yield_np(void)`, Darwin's spelling of `sched_yield`.

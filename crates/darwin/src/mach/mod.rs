@@ -1,7 +1,3 @@
-// The clock below is compiled and tested on macOS and bound to nothing there:
-// the host's own Mach is the guest's. See [`symbol`].
-#![cfg_attr(target_os = "macos", allow(dead_code))]
-
 use std::ffi::c_void;
 
 pub mod bootstrap;
@@ -81,11 +77,6 @@ unsafe extern "C" fn current_media_time() -> f64 {
     media_time()
 }
 
-/// Empty on macOS, where the host's own Mach is the guest's.
-#[cfg(target_os = "macos")]
-exports::exports! {}
-
-#[cfg(not(target_os = "macos"))]
 exports::exports! {
     functions {
         "mach_absolute_time" => absolute_time,
@@ -204,19 +195,16 @@ exports::exports! {
 /// The loader binds the address and the guest reads the word through it, so the
 /// value has to be there before the symbol is published rather than before it is
 /// read. `publish_page_size` is idempotent, so asking three times is free.
-#[cfg(not(target_os = "macos"))]
 fn vm_page_size() -> u64 {
     info::publish_page_size();
     &raw const info::VM_PAGE_SIZE as usize as u64
 }
 
-#[cfg(not(target_os = "macos"))]
 fn vm_page_mask() -> u64 {
     info::publish_page_size();
     &raw const info::VM_PAGE_MASK as usize as u64
 }
 
-#[cfg(not(target_os = "macos"))]
 fn vm_page_shift() -> u64 {
     info::publish_page_size();
     &raw const info::VM_PAGE_SHIFT as usize as u64

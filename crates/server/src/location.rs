@@ -39,11 +39,31 @@ pub fn lock_in(directory: &Path) -> PathBuf {
     directory.join("lock")
 }
 
-/// Make `directory` and its parent, private to this user.
+/// Make `directory` private, along with Rosemary's runtime directory when used.
 pub fn prepare(directory: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(directory)?;
-    for dir in [directory.parent(), Some(directory)].into_iter().flatten() {
+    let runtime = runtime_directory();
+    let parent = directory.parent().filter(|parent| *parent == runtime);
+    for dir in [parent, Some(directory)].into_iter().flatten() {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_custom_directory_leaves_its_parent_permissions_alone() {
+        let parent =
+            std::env::temp_dir().join(format!("rosemary-server-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let directory = parent.join("server");
+        prepare(&directory).unwrap();
+        assert_eq!(std::fs::metadata(&parent).unwrap().mode() & 0o777, 0o750);
+        assert_eq!(std::fs::metadata(&directory).unwrap().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
 }

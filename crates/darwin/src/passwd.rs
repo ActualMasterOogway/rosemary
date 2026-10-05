@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int};
 
@@ -14,14 +12,14 @@ pub struct Passwd {
     passwd: *mut c_char,
     uid: u32,
     gid: u32,
-    /// BSD's password-change time. Not a thing this host records.
+    /// BSD's password-change time, or zero on hosts that do not record it.
     change: i64,
     /// BSD's login class. Empty rather than null: a guest is entitled to print it.
     class: *mut c_char,
     gecos: *mut c_char,
     dir: *mut c_char,
     shell: *mut c_char,
-    /// BSD's account-expiry time. As `change`.
+    /// BSD's account-expiry time, or zero when unavailable.
     expire: i64,
 }
 
@@ -59,12 +57,14 @@ unsafe fn strings_of(host: &libc::passwd) -> [CString; 6] {
             false => CString::from(CStr::from_ptr(p)),
         }
     };
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    let class = text(host.pw_class);
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    let class = CString::default();
     [
         text(host.pw_name),
         text(host.pw_passwd),
-        // Darwin has a login class and this host has none. Empty is the honest
-        // answer and a null is not: `pw_class` is a `char *` a guest may print.
-        CString::default(),
+        class,
         text(host.pw_gecos),
         home_of(host),
         CString::new(crate::accounts::guest_shell(text(host.pw_shell).as_bytes()))
@@ -79,11 +79,17 @@ fn entry(host: &libc::passwd, at: impl Fn(usize) -> *mut c_char) -> Passwd {
         passwd: at(1),
         uid: host.pw_uid,
         gid: host.pw_gid,
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        change: host.pw_change,
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         change: 0,
         class: at(2),
         gecos: at(3),
         dir: at(4),
         shell: at(5),
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        expire: host.pw_expire,
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         expire: 0,
     }
 }
@@ -857,7 +863,7 @@ mod tests {
     /// The offsets are the guest's, and `pw_dir` is the one that matters: at
     /// Darwin's 48 it is past the end of this host's whole structure.
     #[test]
-    fn the_layout_is_darwins_and_not_this_hosts() {
+    fn the_layout_has_darwins_offsets() {
         let base = std::ptr::null::<Passwd>();
         let offset = |field: *const c_char| field as usize;
         // SAFETY: offsets computed from a null base, never dereferenced.
@@ -869,6 +875,7 @@ mod tests {
             assert_eq!(offset(&raw const (*base).shell as *const c_char), 56);
         }
         assert_eq!(core::mem::size_of::<Passwd>(), 72);
+        #[cfg(target_os = "linux")]
         assert!(
             core::mem::size_of::<libc::passwd>() <= 48,
             "this host's whole structure ends at or before Darwin's pw_dir offset, \

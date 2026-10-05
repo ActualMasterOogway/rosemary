@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -262,6 +260,15 @@ pub fn insert_task(pid: i32) -> Name {
 
 /// A send right to thread `tid` of task `pid`, reusing a name already held.
 pub fn insert_thread(pid: i32, tid: i32) -> Name {
+    thread_name(pid, tid, true)
+}
+
+/// A borrowed thread name, as `pthread_mach_thread_np` returns.
+pub fn borrow_thread(pid: i32, tid: i32) -> Name {
+    thread_name(pid, tid, false)
+}
+
+fn thread_name(pid: i32, tid: i32, add_reference: bool) -> Name {
     with(|space| {
         for (name, right) in space.names.iter_mut() {
             if let Right::Thread {
@@ -271,7 +278,9 @@ pub fn insert_thread(pid: i32, tid: i32) -> Name {
             } = right
                 && (*held_pid, *held_tid) == (pid, tid)
             {
-                *refs = refs.saturating_add(1);
+                if add_reference {
+                    *refs = refs.saturating_add(1);
+                }
                 return *name;
             }
         }
@@ -302,9 +311,7 @@ pub fn task_pid(name: Name) -> Option<i32> {
 
 /// The task and thread `name` is a right to.
 ///
-/// `pthread_mach_thread_np` hands out a thread's host id as its port, so a
-/// name the space does not hold that is one of this process's threads is
-/// taken as that thread.
+/// Other hosts use a kernel thread id as the borrowed pthread port name.
 pub fn thread_of(name: Name) -> Option<(i32, i32)> {
     {
         let guard = space().read().unwrap_or_else(|e| e.into_inner());
@@ -315,7 +322,8 @@ pub fn thread_of(name: Name) -> Option<(i32, i32)> {
         }
     }
     let pid = own_pid();
-    starnix::process::has_thread(name as i32).then_some((pid, name as i32))
+    let tid = name as i32;
+    starnix::process::has_thread(tid).then_some((pid, tid))
 }
 
 /// How many names the space holds, for `mach_port_space_basic_info`.

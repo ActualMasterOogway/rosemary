@@ -128,8 +128,55 @@ fn executable(pid: i32) -> Option<PathBuf> {
     ))
 }
 
+/// libproc omits exiting processes before they become zombies;
+/// KERN_PROC_PID retains them until their parent reaps.
+/// Offsets are the 64-bit kinfo_proc layout in <sys/sysctl.h>.
+fn kernel_process(pid: i32) -> Option<Process> {
+    let bytes = sysctl::bytes(&[libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid]).ok()?;
+    if bytes.len() != 648 {
+        return None;
+    }
+    let word = |at| i32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+    let wide = |at| i64::from_ne_bytes(bytes[at..at + 8].try_into().unwrap());
+    if word(40) != pid {
+        return None;
+    }
+    let tty = word(572) as u32;
+    let (tty_major, tty_minor) = if tty == NODEV {
+        (-1, -1)
+    } else {
+        (((tty >> 24) & 0xff) as i32, (tty & 0xff_ffff) as i32)
+    };
+    Some(Process {
+        ppid: word(560),
+        pgid: word(564),
+        tty_major,
+        tty_minor,
+        tpgid: word(576),
+        uid: word(392) as u32,
+        euid: word(420) as u32,
+        suid: word(396) as u32,
+        gid: word(400) as u32,
+        egid: word(428) as u32,
+        sgid: word(404) as u32,
+        state: state(bytes[36] as u32),
+        nice: bytes[242] as i8 as i32,
+        start_sec: wide(0),
+        start_usec: word(8),
+        ..Process::default()
+    })
+}
+
 pub fn identity(pid: i32) -> Option<Identity> {
-    let info = bsdinfo(pid)?;
+    let Some(info) = bsdinfo(pid) else {
+        let process = kernel_process(pid)?;
+        return Some(Identity {
+            start: (process.start_sec as u64)
+                .wrapping_mul(1_000_000)
+                .wrapping_add(process.start_usec as u64),
+            exe: (0, 0),
+        });
+    };
     let exe = executable(pid)
         .and_then(|path| std::fs::metadata(path).ok())
         // A zombie has no executable any more, and is still the same process.
@@ -144,7 +191,9 @@ pub fn identity(pid: i32) -> Option<Identity> {
 }
 
 pub fn process(pid: i32) -> Option<Process> {
-    let info = bsdinfo(pid)?;
+    let Some(info) = bsdinfo(pid) else {
+        return kernel_process(pid);
+    };
     let (tty_major, tty_minor) = match info.e_tdev {
         NODEV => (-1, -1),
         dev => (((dev >> 24) & 0xff) as i32, (dev & 0xff_ffff) as i32),

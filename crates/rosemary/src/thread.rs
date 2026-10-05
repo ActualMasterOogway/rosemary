@@ -14,6 +14,9 @@ use crate::vm::VmError;
 
 /// The part of a guest thread another thread may read, and the whole of it.
 pub struct GuestThread {
+    /// The host kernel's id, which builtin Mach ports identify on macOS.
+    #[cfg(target_os = "macos")]
+    tid: u64,
     /// Address of the innermost live [`RegisterContext`] on this thread, or zero when
     /// the thread is not inside guest code.
     context: AtomicU64,
@@ -127,6 +130,19 @@ pub fn by_key(key: u32) -> Option<&'static GuestThread> {
     None
 }
 
+#[cfg(target_os = "macos")]
+pub fn by_tid(tid: i32) -> Option<&'static GuestThread> {
+    for slot in &TABLE {
+        let thread = by_key(slot.key.load(Ordering::Acquire));
+        if let Some(thread) = thread
+            && thread.tid as i32 == tid
+        {
+            return Some(thread);
+        }
+    }
+    None
+}
+
 /// Call `f` with the [`key`] of every registered guest thread.
 ///
 /// A thread that ends mid-walk is reported and then fails to suspend, which is the
@@ -177,6 +193,12 @@ impl ThreadState {
     pub fn new(stack: GuestStack) -> Self {
         let rsp = stack.initial_rsp();
         let published = Arc::new(GuestThread {
+            #[cfg(target_os = "macos")]
+            tid: {
+                let mut tid = 0;
+                unsafe { libc::pthread_threadid_np(darwin::pthread::null_thread(), &mut tid) };
+                tid
+            },
             context: AtomicU64::new(0),
             stack: stack.range(),
         });

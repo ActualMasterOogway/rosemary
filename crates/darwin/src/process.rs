@@ -4,8 +4,6 @@
 //! The server holds the table; this module turns its answers into Darwin's
 //! structures - `kinfo_proc`, `KERN_PROCARGS2` - and answers about this
 //! process locally, so a process with no server still sees itself.
-#![cfg(not(target_os = "macos"))]
-
 use std::sync::OnceLock;
 
 use server::protocol::{Checkin, Process, State, Thread, Usage};
@@ -140,10 +138,25 @@ pub fn visible(pid: i32) -> bool {
     pid == self::pid() || server::client::process(pid).is_some()
 }
 
+/// The host kernel's thread identifier, used by the process server.
+/// macOS Mach ports are separate names and cannot index libproc's threads.
+pub(crate) fn thread_id() -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        let mut id = 0u64;
+        unsafe { libc::pthread_threadid_np(0, &mut id) };
+        id as i32
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::pthread::id() as i32
+    }
+}
+
 /// Tell the server a thread's full name, which the host may have cut short.
 pub fn name_thread(name: &str) {
     if server::client::configured() {
-        server::client::name_thread(crate::pthread::id() as i32, name);
+        server::client::name_thread(thread_id(), name);
     }
 }
 
@@ -333,7 +346,7 @@ fn terminal(process: &Process) -> i32 {
     if process.tty_major < 0 {
         return NODEV;
     }
-    libc::makedev(process.tty_major as u32, process.tty_minor as u32) as i32
+    libc::makedev(process.tty_major as _, process.tty_minor as _) as i32
 }
 
 /// One `kinfo_proc` record.

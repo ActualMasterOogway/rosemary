@@ -57,7 +57,9 @@ unsafe fn host_open(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    // SAFETY: the caller's obligation. Darwin flags are native on macOS.
+    if darwin::libc_backend::using_builtin() {
+        return unsafe { darwin::stat::open(path, flags, mode) };
+    }
     unsafe { libc::open(path, flags, mode_for(flags, mode as u64)) }
 }
 
@@ -78,7 +80,9 @@ unsafe fn host_openat(
     flags: libc::c_int,
     mode: libc::c_uint,
 ) -> libc::c_int {
-    // SAFETY: the caller's obligation. Darwin flags are native on macOS.
+    if darwin::libc_backend::using_builtin() {
+        return unsafe { darwin::stat::openat(dirfd, path, flags, mode) };
+    }
     unsafe { libc::openat(dirfd, path, flags, mode_for(flags, mode as u64)) }
 }
 
@@ -153,13 +157,60 @@ pub unsafe extern "C" fn sem_open_with_mode(
 /// Darwin's `SEM_FAILED`, which is `(sem_t *)-1` where glibc's is null.
 const DARWIN_SEM_FAILED: *mut libc::sem_t = usize::MAX as *mut libc::sem_t;
 
+// Apple arm64 puts variadic arguments on the stack even for builtin libc.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+unsafe extern "C" fn native_open(path: *const libc::c_char, flags: i32, mut args: ...) -> i32 {
+    let mode = if darwin::fcntl::creates(flags) {
+        unsafe { args.next_arg::<libc::c_uint>() }
+    } else {
+        0
+    };
+    unsafe { host_open(path, flags, mode) }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+unsafe extern "C" fn native_openat(
+    fd: i32,
+    path: *const libc::c_char,
+    flags: i32,
+    mut args: ...
+) -> i32 {
+    let mode = if darwin::fcntl::creates(flags) {
+        unsafe { args.next_arg::<libc::c_uint>() }
+    } else {
+        0
+    };
+    unsafe { host_openat(fd, path, flags, mode) }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+unsafe extern "C" fn native_fcntl(fd: i32, command: i32, mut args: ...) -> i32 {
+    let arg = if !takes_third_argument(command) || matches!(command, 63 | 74 | 77 | 85 | 107) {
+        0
+    } else if matches!(
+        command,
+        7..=10 | 42..=44 | 49 | 50 | 52 | 59 | 61 | 65 | 66 | 71 | 72 | 75 | 78
+            | 83 | 90..=94 | 97..=105 | 111 | 113
+    ) {
+        // Pointer commands from Apple's fcntl wrapper; all other commands
+        // take an int. Apple arm64 places both in variadic stack slots.
+        unsafe { args.next_arg::<*mut libc::c_void>() as usize }
+    } else {
+        unsafe { args.next_arg::<libc::c_int>() as usize }
+    };
+    unsafe { host_fcntl(fd, command, arg) }
+}
+
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.
 pub(crate) fn provide(lib: &mut SyntheticDylib) {
-    for name in ["open", "openat", "sem_open"] {
-        lib.define_fn(
-            &format!("_{name}"),
-            host_substitute(name).unwrap() as *const (),
-        );
+    for name in ["open", "openat", "sem_open", "fcntl"] {
+        if name == "fcntl" && !crate::trampoline::running_natively() {
+            continue;
+        }
+        let Some(substitute) = host_substitute(name) else {
+            continue;
+        };
+        lib.define_fn(&format!("_{name}"), substitute as *const ());
     }
 }
 
@@ -172,9 +223,13 @@ pub(crate) fn host_substitute(name: &str) -> Option<u64> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     if crate::trampoline::running_natively() {
         return match name {
-            "open" => Some(libc::open as *const () as u64),
-            "openat" => Some(libc::openat as *const () as u64),
+            "open" => Some(native_open as *const () as u64),
+            "openat" => Some(native_openat as *const () as u64),
             "sem_open" => Some(libc::sem_open as *const () as u64),
+            "fcntl" if !darwin::libc_backend::using_builtin() => {
+                Some(libc::fcntl as *const () as u64)
+            }
+            "fcntl" => Some(native_fcntl as *const () as u64),
             _ => None,
         };
     }
@@ -220,14 +275,16 @@ unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
     unsafe { darwin::fcntl::entry::fcntl(fd, cmd, arg) }
 }
 
-/// On Darwin the guest's command and flags are the host's, so there is nothing to
-/// translate and no entry point in `darwin` to share.
+/// Builtin libc translates descriptor paths; native libc uses the host call.
 ///
 /// # Safety
 ///
 /// As the caller of [`fcntl`].
 #[cfg(target_os = "macos")]
 unsafe fn host_fcntl(fd: i32, cmd: i32, arg: usize) -> i32 {
+    if darwin::libc_backend::using_builtin() {
+        return unsafe { darwin::fcntl::entry::fcntl(fd, cmd, arg) };
+    }
     unsafe { libc::fcntl(fd, cmd, arg) }
 }
 

@@ -359,16 +359,25 @@ fn descriptor_path(fd: c_int) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
 }
 
-// FIXME (ACCURACY): no portable way to name a descriptor's file here, so a
-// base file reached only through a descriptor keeps the host's owner off
-// Linux. Set-id programs are matched by device and inode and are unaffected.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn descriptor_path(fd: c_int) -> Option<PathBuf> {
+    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+        return None;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(path.as_ptr()) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+// FreeBSD cannot yet name a base file reached only through a descriptor.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn descriptor_path(_fd: c_int) -> Option<PathBuf> {
     None
 }
 
 mod record {
     use super::{Found, RECORD};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::ffi::{CString, c_int};
 
     fn parse(value: &[u8]) -> Option<(u32, u32)> {
@@ -457,15 +466,102 @@ mod record {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn joined(dirfd: c_int, path: &std::ffi::CStr) -> Option<CString> {
+        if path.to_bytes().first() == Some(&b'/') || dirfd == libc::AT_FDCWD {
+            return Some(path.to_owned());
+        }
+        let dir = super::descriptor_path(dirfd)?;
+        CString::new([dir.as_os_str().as_encoded_bytes(), b"/", path.to_bytes()].concat()).ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn read(found: Found<'_>) -> Option<(u32, u32)> {
+        let mut value = [0u8; 32];
+        let path;
+        let got = unsafe {
+            match found {
+                Found::Fd(fd) => libc::fgetxattr(
+                    fd,
+                    RECORD.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                ),
+                Found::Path(p, follow) => libc::getxattr(
+                    p.as_ptr(),
+                    RECORD.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                    0,
+                    if follow { 0 } else { libc::XATTR_NOFOLLOW },
+                ),
+                Found::At(dirfd, p, follow) => {
+                    path = joined(dirfd, p)?;
+                    libc::getxattr(
+                        path.as_ptr(),
+                        RECORD.as_ptr(),
+                        value.as_mut_ptr().cast(),
+                        value.len(),
+                        0,
+                        if follow { 0 } else { libc::XATTR_NOFOLLOW },
+                    )
+                }
+            }
+        };
+        parse(value.get(..usize::try_from(got).ok()?)?)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn write(found: Found<'_>, owner: Option<(u32, u32)>) -> std::io::Result<()> {
+        let value = owner.map(|(uid, gid)| format!("{uid}:{gid}"));
+        let path;
+        let rc = unsafe {
+            let (fd, at, follow) = match found {
+                Found::Fd(fd) => (Some(fd), None, true),
+                Found::Path(p, follow) => (None, Some(p), follow),
+                Found::At(dirfd, p, follow) => {
+                    path = joined(dirfd, p).ok_or(std::io::ErrorKind::InvalidInput)?;
+                    (None, Some(path.as_c_str()), follow)
+                }
+            };
+            let options = if follow { 0 } else { libc::XATTR_NOFOLLOW };
+            match (fd, at, &value) {
+                (Some(fd), _, Some(v)) => {
+                    libc::fsetxattr(fd, RECORD.as_ptr(), v.as_ptr().cast(), v.len(), 0, 0)
+                }
+                (Some(fd), _, None) => libc::fremovexattr(fd, RECORD.as_ptr(), 0),
+                (None, Some(p), Some(v)) => libc::setxattr(
+                    p.as_ptr(),
+                    RECORD.as_ptr(),
+                    v.as_ptr().cast(),
+                    v.len(),
+                    0,
+                    options,
+                ),
+                (None, Some(p), None) => libc::removexattr(p.as_ptr(), RECORD.as_ptr(), options),
+                _ => unreachable!("every arm names a file"),
+            }
+        };
+        match rc {
+            0 => Ok(()),
+            _ => match std::io::Error::last_os_error() {
+                e if value.is_none() && e.raw_os_error() == Some(libc::ENOATTR) => Ok(()),
+                e => Err(e),
+            },
+        }
+    }
+
     // FIXME (ACCURACY): FreeBSD keeps these with `extattr_*`, which is not
     // wired up yet; a guest's `chown` there is told it worked and forgotten.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn read(_: Found<'_>) -> Option<(u32, u32)> {
         let _ = parse;
         None
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn write(_: Found<'_>, _: Option<(u32, u32)>) -> std::io::Result<()> {
         let _ = RECORD;
         Err(std::io::ErrorKind::Unsupported.into())
@@ -483,7 +579,7 @@ mod record {
             assert_eq!(parse(b"a:b"), None);
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         #[test]
         fn a_record_round_trips_on_a_file() {
             let dir = std::env::temp_dir().join(format!("ownership-{}", std::process::id()));
@@ -496,6 +592,17 @@ mod record {
                 Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
                 Err(e) => panic!("{e}"),
                 Ok(()) => {
+                    assert_eq!(read(Found::Path(&path, true)), Some((0, 80)));
+                    use std::os::fd::AsRawFd;
+                    let handle = std::fs::File::open(&file).unwrap();
+                    assert_eq!(read(Found::Fd(handle.as_raw_fd())), Some((0, 80)));
+                    write(Found::Fd(handle.as_raw_fd()), Some((1234, 20))).unwrap();
+                    let directory = std::fs::File::open(&dir).unwrap();
+                    assert_eq!(
+                        read(Found::At(directory.as_raw_fd(), c"f", true)),
+                        Some((1234, 20))
+                    );
+                    write(Found::At(directory.as_raw_fd(), c"f", true), Some((0, 80))).unwrap();
                     assert_eq!(read(Found::Path(&path, true)), Some((0, 80)));
                     write(Found::Path(&path, true), None).unwrap();
                     assert_eq!(read(Found::Path(&path, true)), None);

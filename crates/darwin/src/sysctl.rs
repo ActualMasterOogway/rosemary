@@ -164,8 +164,9 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
         [CTL_HW, HW_OPTIONAL, 144] => Some(Value::U32(u32::from(arch == GuestArch::Arm64))),
         [CTL_HW, HW_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
         // Without a pid, the asking process's own.
-        #[cfg(not(target_os = "macos"))]
-        [CTL_SYSCTL, SYSCTL_PROC_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
+        [CTL_SYSCTL, SYSCTL_PROC_CPUTYPE] if crate::libc_backend::using_builtin() => {
+            Some(Value::U32(arch.cpu_type() as u32))
+        }
         [CTL_HW, HW_CPUSUBTYPE] => Some(Value::U32(arch.cpu_subtype() as u32)),
         _ => None,
     }
@@ -276,7 +277,6 @@ fn hostname() -> String {
         .into_owned()
 }
 
-#[cfg(not(target_os = "macos"))]
 pub(crate) fn ncpu() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
@@ -284,6 +284,22 @@ pub(crate) fn ncpu() -> u32 {
 #[cfg(not(target_os = "macos"))]
 fn page_size() -> u32 {
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u32
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn memsize() -> u64 {
+    let mut size = 0u64;
+    let mut len = size_of::<u64>();
+    unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut size).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    size
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -337,6 +353,7 @@ unsafe fn copy_out(value: &Value, oldp: *mut libc::c_void, oldlenp: *mut libc::s
 ///
 /// The list above is narrow on purpose, so the way it grows is by a program naming
 /// what it wanted - which it cannot do through an `ENOENT` alone.
+#[cfg(not(target_os = "macos"))]
 fn say_unanswered(what: &std::fmt::Arguments<'_>) {
     if std::env::var_os("ROSEMARY_TRACE_SYSCTL").is_none() {
         return;
@@ -368,6 +385,17 @@ unsafe extern "C" fn sysctl(
     if let Some(value) = guest_value(mib) {
         // SAFETY: the caller's own `oldp`/`oldlenp`, unmodified.
         return unsafe { copy_out(&value, oldp, oldlenp) };
+    }
+    if crate::libc_backend::using_builtin()
+        && let Some(answer) = process_value(mib)
+    {
+        return match answer {
+            Ok(bytes) => unsafe { copy_out(&Value::Bytes(bytes), oldp, oldlenp) },
+            Err(error) => {
+                crate::errno::set(error);
+                -1
+            }
+        };
     }
     // SAFETY: every argument is the caller's, forwarded unchanged.
     unsafe { fallback(mib, oldp, oldlenp, newp, newlen) }
@@ -432,16 +460,12 @@ unsafe fn fallback(
 }
 
 /// `CTL_KERN` keys that describe processes.
-#[cfg(not(target_os = "macos"))]
 const KERN_PROC: i32 = 14;
-#[cfg(not(target_os = "macos"))]
 const KERN_PROCARGS: i32 = 38;
-#[cfg(not(target_os = "macos"))]
 const KERN_PROCARGS2: i32 = 49;
 
 /// `sysctl.proc_cputype`, a dynamically numbered key on a Mac; this is the
 /// number this module gives it. A pid follows it in the MIB.
-#[cfg(not(target_os = "macos"))]
 const SYSCTL_PROC_CPUTYPE: i32 = 101;
 
 /// Keys answered from the process table: another process's record, its
@@ -450,7 +474,6 @@ const SYSCTL_PROC_CPUTYPE: i32 = 101;
 /// `None` for a key this does not own; `Some(Err(errno))` for one it owns and
 /// refuses - a pid that is not a visible guest is `EINVAL` for the argument
 /// keys, as on a Mac, and an empty list for `KERN_PROC`.
-#[cfg(not(target_os = "macos"))]
 fn process_value(mib: &[i32]) -> Option<Result<Vec<u8>, i32>> {
     match *mib {
         [CTL_KERN, KERN_PROC, selector] => {
@@ -497,8 +520,7 @@ const BY_NAME: &[(&str, &[i32])] = &[
         "sysctl.proc_translated",
         &[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED],
     ),
-    // A Mac numbers this one when it boots; off macOS it is this module's.
-    #[cfg(not(target_os = "macos"))]
+    // Native macOS numbers this key at boot; builtin libc uses its own MIB.
     ("sysctl.proc_cputype", &[CTL_SYSCTL, SYSCTL_PROC_CPUTYPE]),
     ("hw.machine", &[CTL_HW, HW_MACHINE]),
     ("hw.machinearch", &[CTL_HW, HW_MACHINE_ARCH]),
@@ -657,6 +679,10 @@ unsafe extern "C" fn sysctlbyname(
         .to_string_lossy()
         .into_owned();
 
+    #[cfg(target_os = "macos")]
+    if key == "sysctl.proc_cputype" && !crate::libc_backend::using_builtin() {
+        return unsafe { by_name_fallback(&key, oldp, oldlenp, newp, newlen) };
+    }
     if let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) {
         // SAFETY: `mib` is a static slice of the right length; the rest is the
         // caller's.
@@ -735,6 +761,10 @@ unsafe extern "C" fn sysctlnametomib(
     let key = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_string_lossy()
         .into_owned();
+    #[cfg(target_os = "macos")]
+    if key == "sysctl.proc_cputype" && !crate::libc_backend::using_builtin() {
+        return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
+    }
     let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) else {
         #[cfg(target_os = "macos")]
         return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
@@ -982,6 +1012,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn reports_a_64_bit_capable_cpu() {
         assert_eq!(
             ask_name("hw.cpu64bit_capable"),

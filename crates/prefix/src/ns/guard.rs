@@ -131,13 +131,22 @@ fn absolute(dirfd: libc::c_int, path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn directory_of(dirfd: libc::c_int) -> Option<PathBuf> {
+pub(super) fn directory_of(dirfd: libc::c_int) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{dirfd}")).ok()
 }
 
-// FIXME (ACCURACY): no portable way to name a descriptor's directory here, so
-// a write relative to one is not guarded off Linux.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub(super) fn directory_of(dirfd: libc::c_int) -> Option<PathBuf> {
+    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
+    if unsafe { libc::fcntl(dirfd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+        return None;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(path.as_ptr()) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+}
+
+// FreeBSD cannot yet guard writes relative to a descriptor.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn directory_of(_dirfd: libc::c_int) -> Option<PathBuf> {
     None
 }

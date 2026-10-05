@@ -272,6 +272,48 @@ pub fn flags_to_host(flags: i32) -> Result<libc::c_int, i32> {
     Ok(flags)
 }
 
+/// `F_GETPATH` reports the guest spelling of a descriptor's host path.
+unsafe fn getpath(fd: libc::c_int, out: *mut libc::c_char) -> libc::c_int {
+    use std::os::unix::ffi::OsStrExt;
+    if out.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    let Some(host) = starnix::fd::path(fd) else {
+        crate::errno::set(libc::EBADF);
+        return -1;
+    };
+    let guest = prefix::ns::to_guest(&host).unwrap_or(host);
+    let bytes = guest.as_os_str().as_bytes();
+    if bytes.len() >= crate::stat::DARWIN_PATH_MAX {
+        crate::errno::set(libc::ENAMETOOLONG);
+        return -1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr().cast(), out, bytes.len());
+        *out.add(bytes.len()) = 0;
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+pub mod entry {
+    pub unsafe extern "C" fn fcntl(
+        fd: libc::c_int,
+        command: libc::c_int,
+        arg: usize,
+    ) -> libc::c_int {
+        if command == super::cmd::F_GETPATH {
+            return unsafe { super::getpath(fd, arg as *mut libc::c_char) };
+        }
+        unsafe { libc::fcntl(fd, command, arg) }
+    }
+
+    exports::exports! {
+        functions { "fcntl" => fcntl, }
+    }
+}
+
 /// `fcntl` itself, for a host whose commands and flag word are not Darwin's.
 #[cfg(not(target_os = "macos"))]
 pub mod entry {
@@ -294,6 +336,9 @@ pub mod entry {
         command: libc::c_int,
         arg: usize,
     ) -> libc::c_int {
+        if command == cmd::F_GETPATH {
+            return unsafe { super::getpath(fd, arg as *mut libc::c_char) };
+        }
         if command == cmd::F_PREALLOCATE {
             // SAFETY: `F_PREALLOCATE` defines its third argument as `fstore_t *`.
             return unsafe { preallocate(fd, arg as *mut Fstore) };

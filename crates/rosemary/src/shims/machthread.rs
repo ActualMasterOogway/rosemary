@@ -41,10 +41,25 @@ fn thread_get_state(
 ) -> Result<()> {
     let (port, flavor, out, count_at) = (ctx.rdi as u32, ctx.rsi as u32, ctx.rdx, ctx.rcx);
 
-    let Some(thread) = crate::thread::by_key(port) else {
+    let thread = if darwin::libc_backend::using_builtin() {
+        darwin::mach::space::thread_of(port)
+            .filter(|(pid, _)| *pid == std::process::id() as i32)
+            .and_then(|(_, tid)| crate::thread::by_tid(tid))
+    } else {
+        crate::thread::by_key(port)
+    };
+    let Some(thread) = thread else {
+        if darwin::libc_backend::using_builtin() {
+            set_int_return(ctx, KERN_INVALID_ARGUMENT);
+            return Ok(());
+        }
         return passthrough(symbol, ctx);
     };
     if flavor != X86_THREAD_STATE64 && flavor != X86_FLOAT_STATE64 {
+        if darwin::libc_backend::using_builtin() {
+            set_int_return(ctx, KERN_INVALID_ARGUMENT);
+            return Ok(());
+        }
         return passthrough(symbol, ctx);
     }
 
