@@ -157,10 +157,10 @@ fn chained_fixups_decode_into_the_same_shape() {
 }
 
 #[test]
-fn arm64e_chained_pointers_are_refused_specifically() {
+fn arm64e_chained_pointers_decode_to_plain_targets() {
     // The arm64e slice of a system binary is the only easy source of a
-    // PAC-formatted chain. Parsing it as arm64 must fail at the pointer format
-    // rather than decode into plausible nonsense.
+    // PAC-formatted chain. Its signatures are dropped, so every rebase must
+    // land inside the image and every bind must name an import.
     use machish::spec::arch::Arm64;
     let Some(bytes) = common::system_binary(LS) else {
         skip!("{LS} not present")
@@ -172,15 +172,16 @@ fn arm64e_chained_pointers_are_refused_specifically() {
         skip!("arm64 slice does not use chained fixups");
     }
 
-    match decode_image(&obj) {
-        Err(machish::Error::UnknownFixup { format, .. }) => {
-            assert!(
-                format.contains("arm64e"),
-                "wrong rejection reason: {format}"
-            );
+    let (name, fixups) = decode_image(&obj).expect("arm64e chains decode");
+    assert_eq!(name, "chained");
+    assert!(fixups.iter().any(Fixup::is_bind), "no binds decoded");
+    let base = obj.preferred_base().unwrap();
+    for f in &fixups {
+        if let Fixup::RebaseTo { target, .. } = f {
+            // No signature or tag bits survive into the target.
+            assert!(target >> 48 == 0, "signature bits leaked: {target:#x}");
+            assert!(*target >= base, "target below the image: {target:#x}");
         }
-        Err(other) => panic!("expected a specific arm64e rejection, got {other}"),
-        Ok(_) => skip!("this arm64 slice is not arm64e"),
     }
 }
 

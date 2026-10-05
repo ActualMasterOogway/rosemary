@@ -113,17 +113,11 @@ fn decode_segment<'a, S: MachSpec>(
             why: "chained page size",
         });
     }
-    if c::is_arm64e_pointer_format(pointer_format) {
-        // The high bits carry a PAC signature, not a target address.
-        return Err(Error::UnknownFixup {
-            format: "arm64e chained pointer (pointer authentication)",
-            value: u32::from(pointer_format),
-        });
-    }
     if !matches!(
         pointer_format,
         c::DYLD_CHAINED_PTR_64 | c::DYLD_CHAINED_PTR_64_OFFSET
-    ) {
+    ) && !c::is_arm64e_userland_pointer_format(pointer_format)
+    {
         return Err(Error::UnknownFixup {
             format: "chained pointer format",
             value: u32::from(pointer_format),
@@ -191,7 +185,6 @@ fn walk_chain<'a, S: MachSpec>(
     seg: &crate::image::Segment<'a>,
     out: &mut Vec<Fixup<'a>>,
 ) -> Result<()> {
-    let image_base = obj.preferred_base()?;
     let mut at = first;
 
     for _ in 0..MAX_CHAIN_LINKS {
@@ -203,46 +196,119 @@ fn walk_chain<'a, S: MachSpec>(
             .ok_or(Error::OutOfBounds { addr: at, len: 8 })?;
         let raw = obj.view().u64(off)?;
 
-        // Bit 63 selects bind versus rebase in every 64-bit format.
-        if raw >> 63 & 1 == 1 {
-            let ordinal = (raw & 0x00ff_ffff) as u32;
-            // An 8-bit *unsigned* inline addend, distinct from the import
-            // table's signed one; the two add.
-            let inline_addend = (raw >> 24 & 0xff) as i64;
-            let (symbol, table_addend) = imports.get(obj, ordinal)?;
-            out.push(Fixup::Bind {
-                at,
-                symbol,
-                addend: table_addend.wrapping_add(inline_addend),
-                kind: BindKind::Chained,
-            });
+        let (next, stride) = if c::is_arm64e_userland_pointer_format(pointer_format) {
+            out.push(arm64e_link(obj, at, raw, pointer_format, imports)?);
+            (raw >> 51 & 0x7ff, c::CHAINED_NEXT_STRIDE_ARM64E)
         } else {
-            let target = raw & 0x0000_000f_ffff_ffff; // 36 bits
-            let high8 = raw >> 36 & 0xff;
-            let target = match pointer_format {
-                // `_64` stores the unslid VA outright.
-                c::DYLD_CHAINED_PTR_64 => target,
-                // `_64_OFFSET` stores an offset from the image base.
-                _ => image_base.wrapping_add(target),
-            };
-            out.push(Fixup::RebaseTo {
-                at,
-                target: target | high8 << 56,
-            });
-        }
-
-        let next = raw >> 51 & 0xfff;
+            // Bit 63 selects bind versus rebase in every plain 64-bit format.
+            out.push(plain_link(obj, at, raw, pointer_format, imports)?);
+            (raw >> 51 & 0xfff, c::CHAINED_NEXT_STRIDE)
+        };
         if next == 0 {
             return Ok(());
         }
         at = at
-            .checked_add(next * c::CHAINED_NEXT_STRIDE)
+            .checked_add(next * stride)
             .ok_or(Error::OutOfBounds { addr: at, len: 8 })?;
     }
     // `next` is always positive here, so a chain cannot literally loop - but it
     // can be made absurdly long, and the segment bounds check above only stops
     // it once it wanders out. Cap it.
     Err(Error::TooDeep("chained fixup chain"))
+}
+
+/// Decode one link of a `DYLD_CHAINED_PTR_64*` chain.
+fn plain_link<'a, S: MachSpec>(
+    obj: &MachObject<'a, S>,
+    at: Word,
+    raw: u64,
+    pointer_format: u16,
+    imports: &ImportTable<'a>,
+) -> Result<Fixup<'a>> {
+    // Bit 63 selects bind versus rebase in every plain 64-bit format.
+    if raw >> 63 & 1 == 1 {
+        let ordinal = (raw & 0x00ff_ffff) as u32;
+        // An 8-bit *unsigned* inline addend, distinct from the import
+        // table's signed one; the two add.
+        let inline_addend = (raw >> 24 & 0xff) as i64;
+        let (symbol, table_addend) = imports.get(obj, ordinal)?;
+        return Ok(Fixup::Bind {
+            at,
+            symbol,
+            addend: table_addend.wrapping_add(inline_addend),
+            kind: BindKind::Chained,
+        });
+    }
+    let target = raw & 0x0000_000f_ffff_ffff; // 36 bits
+    let high8 = raw >> 36 & 0xff;
+    let target = match pointer_format {
+        // `_64` stores the unslid VA outright.
+        c::DYLD_CHAINED_PTR_64 => target,
+        // `_64_OFFSET` stores an offset from the image base.
+        _ => obj.preferred_base()?.wrapping_add(target),
+    };
+    Ok(Fixup::RebaseTo {
+        at,
+        target: target | high8 << 56,
+    })
+}
+
+/// Decode one link of an arm64e (`DYLD_CHAINED_PTR_ARM64E*`) chain.
+///
+/// Authenticated links carry a key, a diversity and an address-diversity flag
+/// that say how a PAC signature is to be put on the pointer. This decoder
+/// drops them: it describes the pointer the image means, and the host that runs
+/// an arm64e image decides whether that pointer needs signing. Rosemary's
+/// arm64 host process has PAC switched off, where signing is a no-op and a
+/// signed pointer would only be more bytes to strip.
+fn arm64e_link<'a, S: MachSpec>(
+    obj: &MachObject<'a, S>,
+    at: Word,
+    raw: u64,
+    pointer_format: u16,
+    imports: &ImportTable<'a>,
+) -> Result<Fixup<'a>> {
+    let auth = raw >> 63 & 1 == 1;
+    let bind = raw >> 62 & 1 == 1;
+    // Only `_USERLAND24` widens the import ordinal, at the expense of padding.
+    let ordinal_mask = if pointer_format == c::DYLD_CHAINED_PTR_ARM64E_USERLAND24 {
+        0x00ff_ffff
+    } else {
+        0xffff
+    };
+
+    if bind {
+        let ordinal = (raw & ordinal_mask) as u32;
+        let (symbol, table_addend) = imports.get(obj, ordinal)?;
+        // The inline addend is a signed 19-bit field, absent when authenticated.
+        let inline = if auth {
+            0
+        } else {
+            ((raw >> 32 & 0x7_ffff) as i64) << 45 >> 45
+        };
+        return Ok(Fixup::Bind {
+            at,
+            symbol,
+            addend: table_addend.wrapping_add(inline),
+            kind: BindKind::Chained,
+        });
+    }
+
+    let (target, high8) = if auth {
+        (raw & 0xffff_ffff, 0)
+    } else {
+        (raw & 0x0000_07ff_ffff_ffff, raw >> 43 & 0xff) // 43 bits, then high8
+    };
+    let target = match pointer_format {
+        // The original format stores an unslid virtual address.
+        c::DYLD_CHAINED_PTR_ARM64E => target,
+        // The userland formats store an offset from the image base.
+        _ => obj.preferred_base()?.wrapping_add(target),
+    };
+    Ok(Fixup::RebaseTo {
+        at,
+        target: target | high8 << 56,
+    })
 }
 
 /// The `dyld_chained_import*` table and its string pool.

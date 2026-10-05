@@ -22,7 +22,8 @@ impl<S: MachSpec> MachSpec for HostRunnable<S> {
     }
 
     fn accepts_subtype(&self, cpusubtype: i32) -> bool {
-        self.0.accepts_subtype(cpusubtype) && subtype_of(cpusubtype) != CPU_SUBTYPE_ARM64E
+        self.0.accepts_subtype(cpusubtype)
+            && (subtype_of(cpusubtype) != CPU_SUBTYPE_ARM64E || pointer_auth_is_inert())
     }
 
     fn subtype_rank(&self, cpusubtype: i32) -> u32 {
@@ -43,6 +44,40 @@ pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::a
 pub type HostSpec = HostRunnable<NativelyExecutable<machish::spec::arch::X86_64>>;
 #[cfg(not(target_arch = "aarch64"))]
 pub const HOST_SPEC: HostSpec = HostRunnable(NativelyExecutable(machish::spec::arch::X86_64));
+
+/// Whether the pointer-authentication instructions leave a pointer alone in
+/// this process.
+///
+/// That is what lets an arm64e image run here with its pointers stored plain:
+/// `pacia` adds nothing, `autia`/`retab` check nothing, and so a signed and an
+/// unsigned pointer behave the same. It holds for any ordinary arm64 process,
+/// which the kernel gives no keys; an arm64e host would need real signatures
+/// and the loader does not make them, so it is probed rather than assumed.
+#[cfg(target_arch = "aarch64")]
+fn pointer_auth_is_inert() -> bool {
+    use std::sync::OnceLock;
+    static INERT: OnceLock<bool> = OnceLock::new();
+    *INERT.get_or_init(|| {
+        let probe = pointer_auth_is_inert as *const () as u64;
+        let mut signed = probe;
+        // SAFETY: `pacia` only rewrites its register operand; on a CPU without
+        // pointer authentication the encoding is a hint and executes as a nop.
+        unsafe {
+            core::arch::asm!(
+                "hint #8", // pacia1716: sign x17 with modifier x16
+                inout("x17") signed,
+                in("x16") 0u64,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        signed == probe
+    })
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn pointer_auth_is_inert() -> bool {
+    false
+}
 
 /// Whether the native backend can run this slice - the same question the
 /// loader will ask when it selects one.

@@ -130,9 +130,7 @@ impl Engine {
     fn wants(self) -> &'static str {
         match self {
             Engine::Emulated => "an x86-64 slice",
-            // Named rather than left as "a host slice", because the arm64e
-            // exclusion is the part a reader will not have guessed.
-            Engine::Native if cfg!(target_arch = "aarch64") => "an arm64 slice, and not arm64e",
+            Engine::Native if cfg!(target_arch = "aarch64") => "an arm64 or arm64e slice",
             Engine::Native => "an x86-64 slice",
         }
     }

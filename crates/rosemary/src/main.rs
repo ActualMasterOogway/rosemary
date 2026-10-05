@@ -154,6 +154,32 @@ fn guest_spelling(path: &str) -> String {
         .into_owned()
 }
 
+/// On macOS a prefix needs the built-in libc and Objective-C runtime, and the
+/// built-in Objective-C runtime makes re-executing from a bundle mirror
+/// pointless. Explicit settings win.
+#[cfg(target_os = "macos")]
+fn imply_builtin_runtime() {
+    let set_default = |key: &str, value: &str| {
+        if std::env::var_os(key).is_none() {
+            // SAFETY: before any thread has been started.
+            unsafe { std::env::set_var(key, value) };
+        }
+    };
+    let prefixed = std::env::var_os("ROSEMARY_PREFIX").is_some_and(|named| {
+        !matches!(
+            prefix::layout::setting_from(Some(named)),
+            prefix::layout::Setting::Off
+        )
+    });
+    if prefixed {
+        set_default("ROSEMARY_LIBC", "builtin");
+        set_default("ROSEMARY_OBJC", "builtin");
+    }
+    if std::env::var("ROSEMARY_OBJC").as_deref() == Ok("builtin") {
+        set_default("ROSEMARY_BUNDLED", "1");
+    }
+}
+
 fn main() -> ExitCode {
     // `args_os`, not `args`: a process argument is a byte string, and
     // `std::env::args` *panics* on one that is not UTF-8. Some apps spawn
@@ -183,6 +209,8 @@ fn main() -> ExitCode {
         // Before anything can ask which prefix this is, including the paths
         // published below.
         prefix_cli::settle_prefix();
+        #[cfg(target_os = "macos")]
+        imply_builtin_runtime();
         // `--slow` turns every import into a VM exit; `--native`/`--emulated`
         // force a backend the file's own slices would not have chosen.
         let mut policy = ImportPolicy::FastWhenKnown;

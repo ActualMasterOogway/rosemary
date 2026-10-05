@@ -177,8 +177,7 @@ pub const DYLD_CHAINED_PTR_ARM64E_FIRMWARE: u16 = 10;
 pub const DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE: u16 = 11;
 pub const DYLD_CHAINED_PTR_ARM64E_USERLAND24: u16 = 12;
 
-/// Whether a pointer format is one of the pointer-authentication encodings,
-/// which this crate parses only far enough to refuse.
+/// Whether a pointer format is one of the pointer-authentication encodings.
 pub const fn is_arm64e_pointer_format(format: u16) -> bool {
     matches!(
         format,
@@ -186,6 +185,17 @@ pub const fn is_arm64e_pointer_format(format: u16) -> bool {
             | DYLD_CHAINED_PTR_ARM64E_KERNEL
             | DYLD_CHAINED_PTR_ARM64E_USERLAND
             | DYLD_CHAINED_PTR_ARM64E_FIRMWARE
+            | DYLD_CHAINED_PTR_ARM64E_USERLAND24
+    )
+}
+
+/// The arm64e formats an application image uses. The kernel, firmware and
+/// kernel-cache formats are not Mach-O userland and stay refused.
+pub const fn is_arm64e_userland_pointer_format(format: u16) -> bool {
+    matches!(
+        format,
+        DYLD_CHAINED_PTR_ARM64E
+            | DYLD_CHAINED_PTR_ARM64E_USERLAND
             | DYLD_CHAINED_PTR_ARM64E_USERLAND24
     )
 }
@@ -205,6 +215,8 @@ pub const DYLD_CHAINED_IMPORT_ADDEND64: u32 = 3;
 
 /// Chain links are counted in 4-byte units for every 64-bit format.
 pub const CHAINED_NEXT_STRIDE: u64 = 4;
+/// The arm64e userland formats count links in 8-byte units, in an 11-bit field.
+pub const CHAINED_NEXT_STRIDE_ARM64E: u64 = 8;
 
 /// `flags & EXPORT_SYMBOL_FLAGS_KIND_MASK` isolates what sort of thing the
 /// symbol names, which changes what its address *means*.

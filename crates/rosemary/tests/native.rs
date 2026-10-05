@@ -371,29 +371,15 @@ fn forcing_emulated_on_a_native_binary_names_the_architecture() {
     assert!(err.contains("emulated backend"), "{err}");
 }
 
-/// `/bin/ls` is x86-64 plus arm64e, and machish refuses arm64e's authenticated
-/// chained pointers. Selection has to know that before the loader finds out, or
-/// a binary that used to run under emulation stops running at all.
+/// `/bin/ls` is x86-64 plus arm64e. The arm64e slice runs natively: its
+/// authenticated pointers are stored plain, which an arm64 process - one the
+/// kernel gives no PAC keys - treats exactly like signed ones.
 #[test]
-fn an_arm64e_slice_does_not_claim_the_native_backend() {
+fn an_arm64e_slice_runs_on_the_native_backend() {
     if !common::host_macho("/bin/ls") {
         skip!("no host Mach-O at /bin/ls")
     }
-    if HOST_RUNS_X86_64 {
-        // There is no arm64e question to answer: the x86-64 slice is the one
-        // the native backend takes, and it takes it directly.
-        let (status, _, err) = run_guest_with(&["--native"], "/bin/ls", &["/bin"]);
-        assert_eq!(status, Some(0), "stderr: {err}");
-        return;
-    }
-    let (status, _, err) = run_guest_with(&["--native"], "/bin/ls", &[]);
-    assert_eq!(status, Some(1));
-    assert!(err.contains("arm64e"), "{err}");
-
-    // And with nothing forced it runs, which is the part that would regress.
-    let out = common::driver_command()
-        .args(["run", "/bin/ls", "/bin"])
-        .output()
-        .expect("running the driver");
-    assert_eq!(out.status.code(), Some(0));
+    let (status, out, err) = run_guest_with(&["--native"], "/bin/ls", &["/bin"]);
+    assert_eq!(status, Some(0), "stderr: {err}");
+    assert!(out.lines().any(|l| l == "bash"), "{out}");
 }
