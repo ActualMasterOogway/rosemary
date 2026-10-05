@@ -204,7 +204,12 @@ unsafe extern "C" fn native_fcntl(fd: i32, command: i32, mut args: ...) -> i32 {
 /// Claim `_open`, `_openat` and `_sem_open` for this module's wrappers.
 pub(crate) fn provide(lib: &mut SyntheticDylib) {
     for name in ["open", "openat", "sem_open", "fcntl"] {
-        if name == "fcntl" && !crate::trampoline::running_natively() {
+        // The fcntl wrapper only exists for Apple arm64's variadic ABI.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let skip = name == "fcntl" && !crate::trampoline::running_natively();
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        let skip = name == "fcntl";
+        if skip {
             continue;
         }
         let Some(substitute) = host_substitute(name) else {
