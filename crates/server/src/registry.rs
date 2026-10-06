@@ -7,10 +7,18 @@ use crate::protocol::{Checkin, Process, Thread, Usage};
 
 pub const LAUNCHD: i32 = 1;
 
+/// How far up the host's parents a check-in looks for launchd. A job may run
+/// a host program that runs a guest, but not a deep chain of them.
+const ANCESTRY: usize = 16;
+
 struct Record {
     identity: Identity,
     checkin: Checkin,
     credentials: Credentials,
+    /// Whether the process is launchd or descends from it, settled when it
+    /// checked in: a daemon that double-forks is reparented by the host, and
+    /// is launchd's all the same.
+    system: bool,
     /// The connection the process checked in on, while it is open.
     connection: Option<u64>,
     /// Names the guest gave its threads, which the host may have truncated.
@@ -20,11 +28,99 @@ struct Record {
 #[derive(Default)]
 pub struct Registry {
     records: HashMap<i32, Record>,
+    /// The host pid of the prefix's launchd, which guests see as [`LAUNCHD`].
+    launchd: Option<i32>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record the host pid of the prefix's launchd, or that it is gone.
+    pub fn set_launchd(&mut self, pid: Option<i32>) {
+        self.launchd = pid;
+    }
+
+    pub fn launchd(&self) -> Option<i32> {
+        self.launchd
+    }
+
+    /// A host pid as guests know it.
+    pub fn guest_pid(&self, host: i32) -> i32 {
+        match self.launchd == Some(host) {
+            true => LAUNCHD,
+            false => host,
+        }
+    }
+
+    /// A pid a guest named, as the host knows it. The host's own pid 1 is
+    /// never a guest, so the guest's can only mean launchd.
+    pub fn host_pid(&self, guest: i32) -> i32 {
+        match (guest, self.launchd) {
+            (LAUNCHD, Some(host)) => host,
+            _ => guest,
+        }
+    }
+
+    /// Whether a process checking in as `pid` is launchd or one of its
+    /// descendants: an image replacing one that was, or a process whose
+    /// nearest guest ancestor was.
+    fn in_launchd_tree(&mut self, pid: i32) -> bool {
+        let Some(launchd) = self.launchd else {
+            return false;
+        };
+        let mut current = pid;
+        for _ in 0..ANCESTRY {
+            if current == launchd {
+                return true;
+            }
+            if let Some(record) = self.live(current) {
+                // The nearest guest decides; the process itself, on an exec.
+                return record.system;
+            }
+            match host::process(current) {
+                Some(process) if process.ppid > 1 && process.ppid != current => {
+                    current = process.ppid
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether `pid` is launchd or descends from it.
+    pub fn is_system(&self, pid: i32) -> bool {
+        self.records.get(&pid).is_some_and(|record| record.system)
+    }
+
+    /// Every running guest outside launchd's tree, by host pid.
+    ///
+    /// Running means still connected: a guest keeps its connection for life,
+    /// and a record without one is a zombie or a process that has become a
+    /// host program, neither of which is the prefix's to end.
+    pub fn outsiders(&mut self) -> Vec<i32> {
+        self.prune();
+        self.records
+            .iter()
+            .filter(|(_, record)| !record.system && record.connection.is_some())
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// Every running guest, by host pid; see [`Registry::outsiders`].
+    pub fn connected(&mut self) -> Vec<i32> {
+        self.prune();
+        self.records
+            .iter()
+            .filter(|(_, record)| record.connection.is_some())
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// Drop `pid`'s record, for a check-in that was not accepted after all.
+    pub fn forget(&mut self, pid: i32) {
+        self.records.remove(&pid);
     }
 
     pub fn checkin(
@@ -35,18 +131,23 @@ impl Registry {
         identity: Identity,
     ) -> Credentials {
         let credentials = match checkin.fresh {
+            // launchd is root, as the kernel starts it on a Mac; its jobs
+            // inherit that and drop to their `UserName` themselves.
+            true if self.launchd == Some(pid) => Credentials::of(0, 0, vec![0]),
             true => self
                 .inherited(pid)
                 .unwrap_or_else(|| checkin.credentials.clone())
                 .exec(checkin.setid),
             false => checkin.credentials.clone(),
         };
+        let system = self.in_launchd_tree(pid);
         self.records.insert(
             pid,
             Record {
                 identity,
                 checkin,
                 credentials: credentials.clone(),
+                system,
                 connection: Some(connection),
                 thread_names: HashMap::new(),
             },
@@ -122,11 +223,13 @@ impl Registry {
         let record = self.records.get(&pid)?;
         let host = host::process(pid)?;
         let ppid = match self.records.contains_key(&host.ppid) {
-            true => host.ppid,
+            true => self.guest_pid(host.ppid),
+            // launchd's parent is the kernel's, pid 0.
+            false if self.launchd == Some(pid) => 0,
             false => LAUNCHD,
         };
         Some(Process {
-            pid,
+            pid: self.guest_pid(pid),
             ppid,
             pgid: host.pgid,
             sid: host.sid,
@@ -152,7 +255,9 @@ impl Registry {
         })
     }
 
+    /// `pid` here and below is the guest's: launchd is asked for as 1.
     pub fn process(&mut self, pid: i32) -> Option<Process> {
+        let pid = self.host_pid(pid);
         self.live(pid)?;
         self.describe(pid)
     }
@@ -160,19 +265,23 @@ impl Registry {
     /// Every live guest process, in pid order.
     pub fn processes(&mut self) -> Vec<Process> {
         self.prune();
-        let mut pids: Vec<i32> = self.records.keys().copied().collect();
-        pids.sort_unstable();
-        pids.into_iter()
+        let pids: Vec<i32> = self.records.keys().copied().collect();
+        let mut list: Vec<Process> = pids
+            .into_iter()
             .filter_map(|pid| self.describe(pid))
-            .collect()
+            .collect();
+        list.sort_unstable_by_key(|process| process.pid);
+        list
     }
 
     pub fn usage(&mut self, pid: i32) -> Option<Usage> {
+        let pid = self.host_pid(pid);
         self.live(pid)?;
         host::usage(pid)
     }
 
     pub fn threads(&mut self, pid: i32) -> Option<Vec<Thread>> {
+        let pid = self.host_pid(pid);
         let record = self.live(pid)?;
         let mut threads = host::threads(pid)?;
         record
@@ -316,6 +425,50 @@ mod tests {
         let threads = registry.threads(me()).unwrap();
         let named = threads.iter().find(|thread| thread.tid == tid).unwrap();
         assert_eq!(named.name, long);
+    }
+
+    #[test]
+    fn launchd_is_pid_one_and_root_and_its_parent_is_the_kernel() {
+        let mut registry = Registry::new();
+        registry.set_launchd(Some(me()));
+        let creds = registry.checkin(
+            me(),
+            1,
+            fresh("/sbin/launchd", SetId::default()),
+            host::identity(me()).unwrap(),
+        );
+        assert_eq!((creds.ruid, creds.euid), (0, 0));
+        assert!(registry.is_system(me()));
+        let listed = registry.process(LAUNCHD).expect("asked for as pid 1");
+        assert_eq!((listed.pid, listed.ppid), (LAUNCHD, 0));
+        assert_eq!(registry.processes()[0].pid, LAUNCHD);
+        assert!(registry.outsiders().is_empty());
+    }
+
+    #[test]
+    fn a_descendant_of_launchd_is_its_and_anyone_else_is_an_outsider() {
+        let parent = host::process(me()).unwrap().ppid;
+        let mut registry = Registry::new();
+        registry.set_launchd(Some(parent));
+        registry.checkin(
+            me(),
+            1,
+            checkin("/usr/libexec/job"),
+            host::identity(me()).unwrap(),
+        );
+        assert!(registry.is_system(me()));
+        assert!(registry.outsiders().is_empty());
+
+        let mut registry = Registry::new();
+        registry.set_launchd(Some(i32::MAX));
+        registry.checkin(me(), 1, checkin("/bin/sh"), host::identity(me()).unwrap());
+        assert!(!registry.is_system(me()));
+        assert_eq!(registry.outsiders(), vec![me()]);
+        registry.disconnected(1);
+        assert!(
+            registry.outsiders().is_empty(),
+            "only running guests are ended"
+        );
     }
 
     #[test]

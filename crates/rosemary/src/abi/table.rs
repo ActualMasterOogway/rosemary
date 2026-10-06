@@ -2954,6 +2954,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("readlink", I64, P, P, U64),
     sig!("readlinkat", I64, I32, P, P, U64),
     sig!("readv", I64, I32, P, I32),
+    sig!("reboot", I32, I32),
     sig!("realloc", P, P, U64),
     sig!("reallocf", P, P, U64),
     // Darwin's `regex_t` and `regmatch_t` have the same pointer/size_t/off_t

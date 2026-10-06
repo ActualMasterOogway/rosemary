@@ -1077,6 +1077,12 @@ pub mod entry {
                 None => return no_such_signal(),
             },
         };
+        // Broadcasts and process groups are the host's; one process may be
+        // launchd, which the guest calls 1.
+        let pid = match pid > 0 {
+            true => crate::process::host_pid(pid),
+            false => pid,
+        };
         // SAFETY: a plain system call.
         unsafe { libc::kill(pid, host) }
     }

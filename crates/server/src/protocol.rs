@@ -5,7 +5,7 @@ use crate::credentials::{Change, Credentials, Denied, SetId};
 use crate::wire_struct;
 
 // TODO: make this automatic based on source hashes like `metal_translate`
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// What a process tells the server about itself.
 ///
@@ -231,7 +231,8 @@ pub enum Request {
         tid: i32,
         name: String,
     },
-    /// Ask the server to exit once this connection closes, rather than linger.
+    /// Shut the prefix down now: every process outside launchd's tree, then
+    /// launchd and its services, then the server.
     Shutdown,
     /// Change the caller's own ids, by the rules in [`crate::credentials`].
     Credentials(Change),
@@ -247,6 +248,9 @@ pub enum Reply {
         server_pid: i32,
         /// Who the process is, inherited and with its image's set-id applied.
         credentials: Credentials,
+        /// The host pid of the prefix's launchd, which guests know as pid 1,
+        /// or 0 when the prefix has none running.
+        launchd: i32,
     },
     Processes(Vec<Process>),
     /// `None` for a pid that is not a live guest process.
@@ -297,7 +301,8 @@ impl Wire for Reply {
             Reply::CheckedIn {
                 server_pid,
                 credentials,
-            } => out.put(&3u8).put(server_pid).put(credentials),
+                launchd,
+            } => out.put(&3u8).put(server_pid).put(credentials).put(launchd),
             Reply::Processes(list) => out.put(&4u8).put(&List(list.clone())),
             Reply::Process(process) => out.put(&5u8).put(process),
             Reply::Usage(usage) => out.put(&6u8).put(usage),
@@ -315,6 +320,7 @@ impl Wire for Reply {
             3 => Reply::CheckedIn {
                 server_pid: input.take()?,
                 credentials: input.take()?,
+                launchd: input.take()?,
             },
             4 => Reply::Processes(input.take::<List<Process>>()?.0),
             5 => Reply::Process(input.take()?),

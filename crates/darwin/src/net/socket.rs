@@ -138,8 +138,21 @@ unsafe fn with_address(
 ///
 /// `address` is `len` readable bytes.
 unsafe extern "C" fn bind(fd: i32, address: *const c_void, len: u32) -> i32 {
-    // SAFETY: the caller's guarantee, passed along.
-    unsafe { with_address(fd, address, len, libc::bind) }
+    let Some(host) = (unsafe { addr::to_host(address, len) }) else {
+        crate::errno::set(libc::EAFNOSUPPORT);
+        return -1;
+    };
+    // SAFETY: an address this function owns, with the length it was built with.
+    let rc = unsafe { libc::bind(fd, host.as_ptr(), host.len()) };
+    // SAFETY: the address's own bytes, `len` of them.
+    let family = unsafe { (*host.as_ptr()).sa_family } as i32;
+    if rc == 0 && family == libc::AF_UNIX {
+        // SAFETY: as above; the path follows the two-byte family.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(host.as_ptr().cast::<u8>(), host.len() as usize) };
+        crate::sockpath::bound(&bytes[2..]);
+    }
+    rc
 }
 
 /// `int connect(int, const struct sockaddr *, socklen_t)`

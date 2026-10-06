@@ -69,7 +69,11 @@ pub unsafe extern "C" fn proc_pidinfo(
     size: c_int,
 ) -> c_int {
     let me = starnix::process::me();
-    let pid = if pid == 0 { me } else { pid };
+    let pid = if pid == 0 {
+        me
+    } else {
+        crate::process::host_pid(pid)
+    };
     if size < 0 {
         crate::errno::set(libc::EINVAL);
         return 0;

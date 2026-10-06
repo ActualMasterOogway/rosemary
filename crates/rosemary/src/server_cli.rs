@@ -62,6 +62,45 @@ pub fn join(guest: &str, argv: &[OsString]) {
     darwin::process::check_in(guest, argv);
 }
 
+/// Where launchd lives in a prefix.
+const LAUNCHD: &str = "/sbin/launchd";
+
+/// The control socket MiniDarwin's launchd listens on once its jobs are
+/// loaded, which is when the prefix has finished booting.
+const LAUNCHD_SOCKET: &str = "/private/var/run/minidarwin-launchd/control.sock";
+
+/// Whether a prefix boots its launchd, from `ROSEMARY_LAUNCHD`.
+fn launchd_enabled() -> bool {
+    !matches!(
+        std::env::var("ROSEMARY_LAUNCHD").as_deref(),
+        Ok("off" | "0" | "false")
+    )
+}
+
+/// The prefix's launchd, for a server serving that prefix's `directory`.
+///
+/// `None` outside a prefix - the host's own `/sbin/launchd` is not this
+/// runtime's to start - and for a prefix whose base has none.
+fn init_for(directory: &Path) -> Option<server::daemon::Init> {
+    if !launchd_enabled() {
+        return None;
+    }
+    let prefix = prefix::ns::current()?;
+    if server::location::directory_for(Some(prefix.directory())) != directory {
+        return None;
+    }
+    if !prefix::ns::host_path(LAUNCHD).is_file() {
+        return None;
+    }
+    Some(server::daemon::Init {
+        program: std::env::current_exe().ok()?,
+        args: vec!["run".into(), LAUNCHD.into()],
+        current_dir: prefix::ns::host_path("/"),
+        console: Some(directory.join("console.log")),
+        ready: Some(prefix::ns::host_path(LAUNCHD_SOCKET)),
+    })
+}
+
 /// How long a server outlives its last guest, from `ROSEMARY_SERVER_LINGER`.
 fn linger() -> Duration {
     std::env::var("ROSEMARY_SERVER_LINGER")
@@ -123,6 +162,7 @@ pub fn command(mut args: impl Iterator<Item = OsString>) -> ExitCode {
         detach();
     }
     let options = server::daemon::Options {
+        init: init_for(&directory),
         directory,
         linger: linger(),
     };

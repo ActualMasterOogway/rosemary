@@ -87,6 +87,7 @@ pub mod select;
 pub mod shm;
 pub mod signal;
 pub mod sip;
+pub mod sockpath;
 pub mod spawn;
 pub mod stackprobe;
 pub mod stat;
@@ -330,6 +331,9 @@ static SHARED_MODULES: &[exports::Module] = &[
     pam::MODULE,
     sip::MODULE,
     dispatch::MODULE,
+    // Linux answers these in `net`, with every other address conversion.
+    #[cfg(target_os = "macos")]
+    sockpath::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.

@@ -96,6 +96,17 @@ pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
     // Byte 0 is Darwin's `sa_len`, which the host has no field for; byte 1 is
     // the family, which the host reads as the low half of a sixteen-bit one.
     let host = family_to_host(i32::from(out.bytes[1]))?;
+    if host == libc::AF_UNIX && len as usize > 2 {
+        // FIXME (ACCURACY): a path the prefix pushes past `sun_path` is refused
+        // as an unknown family rather than with ENAMETOOLONG.
+        let path = crate::sockpath::to_host(&out.bytes[2..len as usize]).ok()?;
+        if 2 + path.len() > STORAGE {
+            return None;
+        }
+        out.bytes[2..].fill(0);
+        out.bytes[2..2 + path.len()].copy_from_slice(&path);
+        out.len = (2 + path.len()) as libc::socklen_t;
+    }
     #[cfg(target_os = "linux")]
     out.bytes[..2].copy_from_slice(&(host as u16).to_ne_bytes());
     #[cfg(not(target_os = "linux"))]

@@ -16,8 +16,61 @@ struct Me {
 
 static ME: OnceLock<Me> = OnceLock::new();
 
-fn pid() -> i32 {
+/// This process's host pid.
+fn host_self() -> i32 {
     starnix::process::me()
+}
+
+/// This process's pid as guests know it.
+fn pid() -> i32 {
+    guest_pid(host_self())
+}
+
+/// A host pid as guests know it: the prefix's launchd is pid 1, as on a Mac,
+/// where launchd's own start-up refuses to run as anything else.
+pub fn guest_pid(host: i32) -> i32 {
+    match server::client::launchd() == Some(host) {
+        true => server::registry::LAUNCHD,
+        false => host,
+    }
+}
+
+/// A pid a guest named, as the host knows it. The host's own pid 1 is never a
+/// guest's to signal or ask about, so pid 1 can only mean launchd.
+pub fn host_pid(guest: i32) -> i32 {
+    match (guest, server::client::launchd()) {
+        (server::registry::LAUNCHD, Some(host)) => host,
+        _ => guest,
+    }
+}
+
+/// `pid_t getpid(void)`.
+extern "C" fn getpid() -> libc::pid_t {
+    pid()
+}
+
+/// `pid_t getppid(void)`.
+extern "C" fn getppid() -> libc::pid_t {
+    // SAFETY: `getppid` has no preconditions.
+    guest_pid(unsafe { libc::getppid() })
+}
+
+/// `int reboot(int howto)`.
+///
+/// launchd calls it last, once every job is stopped; for a prefix that is
+/// the machine going down, and its end is launchd's exit, after which the
+/// server ends whatever is left. Nobody else may: a guest that wants the
+/// prefix down asks launchd, which is how it is done on a Mac too.
+extern "C" fn reboot(_howto: libc::c_int) -> libc::c_int {
+    if pid() != server::registry::LAUNCHD {
+        crate::errno::set(libc::EPERM);
+        return -1;
+    }
+    // FIXME (ACCURACY): RB_AUTOBOOT would boot the prefix again; every
+    // request halts it.
+    // SAFETY: `_exit` has no preconditions. Not `exit`: the kernel does not
+    // run a rebooting launchd's `atexit` handlers either.
+    unsafe { libc::_exit(0) }
 }
 
 /// Record this process as the guest at `path`, tell the server if there is
@@ -50,7 +103,7 @@ pub fn check_in(path: &str, argv: Vec<Vec<u8>>) {
 
 /// This process, described without the server.
 fn me() -> Option<Process> {
-    let host = starnix::process::process(pid())?;
+    let host = starnix::process::process(host_self())?;
     let (path, argv) = match ME.get() {
         Some(me) => (me.path.clone(), me.argv.clone()),
         // Not started as a guest - a test, or a tool. Its host name is the
@@ -120,15 +173,15 @@ pub fn describe(pid: i32) -> Option<Process> {
 /// What `pid` has used. Answered locally for this process, which is the
 /// common case and needs no round trip.
 pub fn usage(pid: i32) -> Option<Usage> {
-    match pid == self::pid() {
-        true => starnix::process::usage(pid),
+    match host_pid(pid) == host_self() {
+        true => starnix::process::usage(host_self()),
         false => server::client::usage(pid),
     }
 }
 
 pub fn threads(pid: i32) -> Option<Vec<Thread>> {
-    match pid == self::pid() {
-        true => starnix::process::threads(pid),
+    match host_pid(pid) == host_self() {
+        true => starnix::process::threads(host_self()),
         false => server::client::threads(pid),
     }
 }
@@ -482,6 +535,9 @@ pub fn select(selector: i32, argument: Option<i32>) -> Option<Vec<u8>> {
 exports::exports! {
     functions {
         "fork" => fork,
+        "getpid" => getpid,
+        "getppid" => getppid,
+        "reboot" => reboot,
     }
 }
 

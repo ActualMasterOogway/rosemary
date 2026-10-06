@@ -69,8 +69,6 @@ pub const CLAIMED: &[&str] = &[
     "alarm",
     "fsync",
     "ftruncate",
-    "getpid",
-    "getppid",
     "isatty",
     "lseek",
     "pipe",

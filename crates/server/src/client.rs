@@ -14,6 +14,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::codec;
@@ -238,7 +239,12 @@ fn ensure(session: &mut Session, launch: bool) -> Option<()> {
                 // From now on this process is who the server says, and a later
                 // checkin - a `fork` child's, or one after the server restarted
                 // - says so rather than inheriting afresh.
-                Reply::CheckedIn { credentials, .. } => {
+                Reply::CheckedIn {
+                    credentials,
+                    launchd,
+                    ..
+                } => {
+                    LAUNCHD.store(launchd, Ordering::Relaxed);
                     checkin.credentials = credentials;
                     checkin.fresh = false;
                     checkin.setid = Default::default();
@@ -305,6 +311,18 @@ pub fn check_in(mut checkin: Checkin) -> Option<Credentials> {
     ensure(&mut session, true)?;
     let checkin = session.checkin.as_ref()?;
     (!checkin.fresh).then(|| checkin.credentials.clone())
+}
+
+/// The host pid of the prefix's launchd, as of this process's last check-in.
+static LAUNCHD: AtomicI32 = AtomicI32::new(0);
+
+/// The host pid of the prefix's launchd, which guests know as pid 1. `None`
+/// without a server, or when the prefix has no launchd running.
+pub fn launchd() -> Option<i32> {
+    match LAUNCHD.load(Ordering::Relaxed) {
+        0 => None,
+        pid => Some(pid),
+    }
 }
 
 /// Change this process's ids. `None` means there is no server to ask, and the
