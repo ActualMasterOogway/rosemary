@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_uint, c_void};
 
 use foundation::geometry::NSRect;
 use objc::object::Id;
@@ -1007,7 +1007,7 @@ fn install_debug_output() {
 }
 
 /// A borrowed compatibility handle; querying it never changes GL bindings.
-unsafe extern "C" fn cgl_context(receiver: Id, _sel: Sel) -> *mut c_void {
+unsafe extern "C" fn cgl_context(receiver: Id, _sel: Sel) -> CGLContextObj {
     handle_out(receiver)
 }
 
@@ -1015,7 +1015,7 @@ unsafe extern "C" fn cgl_context(receiver: Id, _sel: Sel) -> *mut c_void {
 static HANDLES: std::sync::Mutex<Option<std::collections::HashSet<usize>>> =
     std::sync::Mutex::new(None);
 
-fn handle_out(receiver: Id) -> *mut c_void {
+fn handle_out(receiver: Id) -> CGLContextObj {
     HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1100,7 +1100,12 @@ const kCGLBadValue: i32 = 10008;
 #[allow(non_upper_case_globals)]
 const kCGLBadContext: i32 = 10004;
 
-unsafe fn cgl_set(ctx: *mut c_void, pname: u32, _enabled: bool) -> i32 {
+pub type CGLContextObj = *mut c_void;
+pub type CGLContextParameter = c_uint;
+pub type GLint = c_int;
+pub type CGLError = c_int;
+
+unsafe fn cgl_set(ctx: CGLContextObj, pname: u32, _enabled: bool) -> i32 {
     if handle_in(ctx).is_some() {
         if context_enable::is_known(pname) {
             0
@@ -1114,15 +1119,20 @@ unsafe fn cgl_set(ctx: *mut c_void, pname: u32, _enabled: bool) -> i32 {
 }
 
 /// `CGLError CGLEnable(CGLContextObj ctx, CGLContextEnable pname)`.
-pub unsafe extern "C" fn CGLEnable(ctx: *mut c_void, pname: u32) -> i32 {
+pub unsafe extern "C" fn CGLEnable(ctx: CGLContextObj, pname: CGLContextParameter) -> CGLError {
     // SAFETY: the caller's context-handle obligation is preserved.
     unsafe { cgl_set(ctx, pname, true) }
 }
 
 /// `CGLError CGLDisable(CGLContextObj ctx, CGLContextEnable pname)`.
-pub unsafe extern "C" fn CGLDisable(ctx: *mut c_void, pname: u32) -> i32 {
+pub unsafe extern "C" fn CGLDisable(ctx: CGLContextObj, pname: CGLContextParameter) -> CGLError {
     // SAFETY: the caller's context-handle obligation is preserved.
     unsafe { cgl_set(ctx, pname, false) }
+}
+
+// FIXME (ACCURACY): stub!
+pub unsafe extern "C" fn CGLGetParameter(_ctx: CGLContextObj, _pname: CGLContextParameter, _params: *mut GLint) -> CGLError {
+    kCGLBadEnumeration
 }
 
 /// `CGLError CGLSetParameter(CGLContextObj ctx, CGLContextParameter pname,
@@ -1131,7 +1141,7 @@ pub unsafe extern "C" fn CGLDisable(ctx: *mut c_void, pname: u32) -> i32 {
 /// # Safety
 ///
 /// `ctx` is a handle returned by this module
-pub unsafe extern "C" fn CGLSetParameter(ctx: *mut c_void, pname: u32, params: *const i32) -> i32 {
+pub unsafe extern "C" fn CGLSetParameter(ctx: CGLContextObj, pname: CGLContextParameter, params: *const GLint) -> CGLError {
     let Some(receiver) = handle_in(ctx) else {
         return kCGLBadContext;
     };
@@ -1158,7 +1168,7 @@ pub unsafe extern "C" fn CGLSetParameter(ctx: *mut c_void, pname: u32, params: *
 /// # Safety
 ///
 /// `ctx` is null or a handle `-CGLContextObj` returned.
-pub unsafe extern "C" fn CGLSetCurrentContext(ctx: *mut c_void) -> i32 {
+pub unsafe extern "C" fn CGLSetCurrentContext(ctx: CGLContextObj) -> i32 {
     if ctx.is_null() {
         // SAFETY: the class method reads neither argument.
         unsafe {
@@ -1182,7 +1192,7 @@ pub unsafe extern "C" fn CGLSetCurrentContext(ctx: *mut c_void) -> i32 {
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
-pub unsafe extern "C" fn CGLFlushDrawable(ctx: *mut c_void) -> i32 {
+pub unsafe extern "C" fn CGLFlushDrawable(ctx: CGLContextObj) -> i32 {
     if let Some(receiver) = handle_in(ctx) {
         // SAFETY: a context of this crate's.
         unsafe { flush_buffer(receiver, objc::sel::register(c"flushBuffer")) };
@@ -1196,7 +1206,7 @@ pub unsafe extern "C" fn CGLFlushDrawable(ctx: *mut c_void) -> i32 {
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
-pub unsafe extern "C" fn CGLClearDrawable(ctx: *mut c_void) -> i32 {
+pub unsafe extern "C" fn CGLClearDrawable(ctx: CGLContextObj) -> i32 {
     if let Some(receiver) = handle_in(ctx) {
         // SAFETY: a context of this crate's.
         unsafe { clear_drawable(receiver, objc::sel::register(c"clearDrawable")) };
@@ -1231,7 +1241,7 @@ static LOCK_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
-pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
+pub unsafe extern "C" fn CGLLockContext(ctx: CGLContextObj) -> i32 {
     if handle_in(ctx).is_none() {
         return kCGLBadContext;
     }
@@ -1261,7 +1271,7 @@ pub unsafe extern "C" fn CGLLockContext(ctx: *mut c_void) -> i32 {
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
-pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
+pub unsafe extern "C" fn CGLUnlockContext(ctx: CGLContextObj) -> i32 {
     if handle_in(ctx).is_none() {
         return kCGLBadContext;
     }
@@ -1295,12 +1305,12 @@ pub unsafe extern "C" fn CGLUnlockContext(ctx: *mut c_void) -> i32 {
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
-pub unsafe extern "C" fn CGLGetShareGroup(ctx: *mut c_void) -> *mut c_void {
+pub unsafe extern "C" fn CGLGetShareGroup(ctx: CGLContextObj) -> *mut c_void {
     handle_in(ctx).map_or(std::ptr::null_mut(), |receiver| receiver.cast())
 }
 
 /// `CGLContextObj CGLGetCurrentContext(void)`, from the guest's logical binding.
-pub unsafe extern "C" fn CGLGetCurrentContext() -> *mut c_void {
+pub unsafe extern "C" fn CGLGetCurrentContext() -> CGLContextObj {
     let receiver = CURRENT.get();
     if receiver.is_null() {
         std::ptr::null_mut()

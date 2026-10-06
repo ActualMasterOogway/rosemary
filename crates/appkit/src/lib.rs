@@ -238,6 +238,7 @@ exports::exports! {
         "UCKeyTranslate" => textinput::UCKeyTranslate,
         "CGLEnable" => opengl::CGLEnable,
         "CGLDisable" => opengl::CGLDisable,
+        "CGLGetParameter" => opengl::CGLGetParameter,
         "CGLSetParameter" => opengl::CGLSetParameter,
         "CGLSetCurrentContext" => opengl::CGLSetCurrentContext,
         "CGLGetCurrentContext" => opengl::CGLGetCurrentContext,
