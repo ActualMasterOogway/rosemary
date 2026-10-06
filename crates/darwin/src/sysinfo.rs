@@ -54,7 +54,6 @@ unsafe extern "C" fn getrusage(who: i32, out: *mut Rusage) -> i32 {
     0
 }
 
-
 const PATHCONF: &[(i32, i32)] = &[
     (1, libc::_PC_LINK_MAX),
     (2, libc::_PC_MAX_CANON),

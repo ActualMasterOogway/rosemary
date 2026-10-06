@@ -242,7 +242,8 @@ impl NativeDylibProvider {
     fn autoload_library(&self, install_name: &str) -> bool {
         if !self.autoload
             || self.library_denied(install_name)
-            || !self.attempted.borrow_mut().insert(install_name.to_string()) {
+            || !self.attempted.borrow_mut().insert(install_name.to_string())
+        {
             return false;
         }
         let Ok(c) = std::ffi::CString::new(install_name) else {

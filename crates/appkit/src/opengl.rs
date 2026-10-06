@@ -1131,7 +1131,11 @@ pub unsafe extern "C" fn CGLDisable(ctx: CGLContextObj, pname: CGLContextParamet
 }
 
 // FIXME (ACCURACY): stub!
-pub unsafe extern "C" fn CGLGetParameter(_ctx: CGLContextObj, _pname: CGLContextParameter, _params: *mut GLint) -> CGLError {
+pub unsafe extern "C" fn CGLGetParameter(
+    _ctx: CGLContextObj,
+    _pname: CGLContextParameter,
+    _params: *mut GLint,
+) -> CGLError {
     kCGLBadEnumeration
 }
 
@@ -1141,7 +1145,11 @@ pub unsafe extern "C" fn CGLGetParameter(_ctx: CGLContextObj, _pname: CGLContext
 /// # Safety
 ///
 /// `ctx` is a handle returned by this module
-pub unsafe extern "C" fn CGLSetParameter(ctx: CGLContextObj, pname: CGLContextParameter, params: *const GLint) -> CGLError {
+pub unsafe extern "C" fn CGLSetParameter(
+    ctx: CGLContextObj,
+    pname: CGLContextParameter,
+    params: *const GLint,
+) -> CGLError {
     let Some(receiver) = handle_in(ctx) else {
         return kCGLBadContext;
     };
