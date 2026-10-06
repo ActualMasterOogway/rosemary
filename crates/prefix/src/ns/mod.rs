@@ -56,7 +56,16 @@ fn resolved() -> &'static Resolved {
         };
         let prefix = Prefix::at(directory);
         let user = crate::layout::user_name();
-        let table = Table::rooted(&prefix.drive(), &user, host_home());
+        // The host's console is root's on Linux; a macOS host's is the guest's.
+        let console = cfg!(not(target_os = "macos")).then(|| prefix.console());
+        if let Some(console) = &console {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(console);
+        }
+        let table =
+            Table::rooted_with_console(&prefix.drive(), &user, host_home(), console.as_deref());
         Resolved {
             home: format!("/Users/{user}"),
             prefix: Some(prefix),

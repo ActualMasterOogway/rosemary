@@ -208,6 +208,12 @@ impl Prefix {
         &self.directory
     }
 
+    /// Where the guest's `/dev/console` goes on a host with no console it may
+    /// write, and where its launchd's own output goes.
+    pub fn console(&self) -> PathBuf {
+        self.directory.join("console.log")
+    }
+
     /// The guest's `/`.
     pub fn drive(&self) -> PathBuf {
         self.directory.join(DRIVE)

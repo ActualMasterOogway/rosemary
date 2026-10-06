@@ -365,13 +365,13 @@ fn is_sentinel(handler: u64) -> bool {
 /// Darwin's `siginfo_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct Siginfo {
-    signo: i32,
+pub(crate) struct Siginfo {
+    pub(crate) signo: i32,
     errno: i32,
-    code: i32,
-    pid: i32,
+    pub(crate) code: i32,
+    pub(crate) pid: i32,
     uid: u32,
-    status: i32,
+    pub(crate) status: i32,
     addr: u64,
     value: u64,
     band: i64,
@@ -379,7 +379,7 @@ struct Siginfo {
 }
 
 impl Siginfo {
-    fn new(darwin: i32, info: &Info) -> Siginfo {
+    pub(crate) fn new(darwin: i32, info: &Info) -> Siginfo {
         let status = match info.code {
             Code::Killed | Code::Dumped | Code::Stopped | Code::Trapped => {
                 signal_from_host(info.status).unwrap_or(info.status)
@@ -674,6 +674,101 @@ const _: () = {
 static GUEST_HANDLERS: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
 static GUEST_SIGINFO: [AtomicBool; 32] = [const { AtomicBool::new(false) }; 32];
 
+/// Signals that reached [`deliver`], per Darwin signal: what `EVFILT_SIGNAL`
+/// reports, which counts attempts to deliver whatever the disposition is.
+static DELIVERED: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+
+/// How many `EVFILT_SIGNAL` registrations watch each Darwin signal. While one
+/// does, the host handler is [`deliver`] even for `SIG_DFL` and `SIG_IGN`,
+/// because a signal the host ignores is otherwise invisible.
+static OBSERVERS: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
+
+/// Serializes [`observe`], which changes host dispositions in two steps.
+static OBSERVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How many times `darwin` has been delivered to this process while observed.
+pub fn delivered(darwin: i32) -> u64 {
+    DELIVERED[darwin as usize & 31].load(Ordering::Acquire)
+}
+
+fn observed(slot: usize) -> bool {
+    OBSERVERS[slot].load(Ordering::Acquire) != 0
+}
+
+/// Signals whose default action is to do nothing (`SIGIO` is Darwin's, which
+/// differs from Linux's).
+fn default_ignored(darwin: i32) -> bool {
+    use signum::*;
+    matches!(
+        darwin,
+        SIGCHLD | SIGURG | SIGWINCH | SIGCONT | SIGIO | SIGINFO
+    )
+}
+
+/// Start (`on`) or stop watching `darwin` for `EVFILT_SIGNAL`, answering with
+/// the host `errno` on failure.
+pub fn observe(darwin: i32, on: bool) -> Result<(), c_int> {
+    let Some(host_signum) = signal_to_host(darwin) else {
+        return Err(libc::EINVAL);
+    };
+    if retained(darwin) {
+        return Err(libc::EINVAL);
+    }
+    let slot = darwin as usize;
+    let _guard = OBSERVE.lock().unwrap_or_else(|e| e.into_inner());
+    if !on {
+        let previous = OBSERVERS[slot].fetch_sub(1, Ordering::AcqRel);
+        if previous != 1 {
+            return Ok(());
+        }
+        // Back to what the guest asked for, if that was not a handler.
+        let handler = GUEST_HANDLERS[slot].load(Ordering::Acquire);
+        // SAFETY: a zeroed `struct sigaction` is valid; only read.
+        let mut old: libc::sigaction = unsafe { core::mem::zeroed() };
+        // SAFETY: a live structure to fill in.
+        let queried = unsafe { libc::sigaction(host_signum, core::ptr::null(), &mut old) };
+        if queried == 0 && delivers(old.sa_sigaction) && is_sentinel(handler) {
+            let restored = if handler == 1 {
+                libc::SIG_IGN
+            } else {
+                libc::SIG_DFL
+            };
+            // SAFETY: a disposition value rather than a function.
+            unsafe { libc::signal(host_signum, restored) };
+        }
+        return Ok(());
+    }
+    if OBSERVERS[slot].load(Ordering::Acquire) == 0 {
+        // SAFETY: as above.
+        let mut old: libc::sigaction = unsafe { core::mem::zeroed() };
+        // SAFETY: a live structure to fill in.
+        if unsafe { libc::sigaction(host_signum, core::ptr::null(), &mut old) } != 0 {
+            return Err(crate::errno::get());
+        }
+        if !delivers(old.sa_sigaction) {
+            // A host handler of the runtime's own cannot be wrapped, and
+            // pretending to watch it would never fire.
+            let handler = match old.sa_sigaction {
+                libc::SIG_DFL => 0,
+                libc::SIG_IGN => 1,
+                _ => return Err(libc::EINVAL),
+            };
+            GUEST_SIGINFO[slot].store(false, Ordering::Release);
+            GUEST_HANDLERS[slot].store(handler, Ordering::Release);
+            // SAFETY: as above.
+            let mut act: libc::sigaction = unsafe { core::mem::zeroed() };
+            act.sa_sigaction = deliver as *const () as libc::sighandler_t;
+            act.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+            // SAFETY: two live structures.
+            if unsafe { libc::sigaction(host_signum, &act, core::ptr::null_mut()) } != 0 {
+                return Err(crate::errno::get());
+            }
+        }
+    }
+    OBSERVERS[slot].fetch_add(1, Ordering::AcqRel);
+    Ok(())
+}
+
 type Handler1 = extern "C" fn(c_int);
 type Handler3 = extern "C" fn(c_int, *mut Siginfo, *mut Ucontext);
 
@@ -685,8 +780,20 @@ extern "C" fn deliver(host: c_int, info: *mut libc::siginfo_t, context: *mut c_v
         return;
     };
     let slot = darwin as usize;
+    DELIVERED[slot].fetch_add(1, Ordering::AcqRel);
+    #[cfg(not(target_os = "macos"))]
+    crate::kqueue::signalled();
     let handler = GUEST_HANDLERS[slot].load(Ordering::Acquire);
     if is_sentinel(handler) {
+        // Only here because a kqueue watches it: the default action still
+        // applies, and is replayed now that the watcher has been told.
+        if handler == 0 && observed(slot) && !default_ignored(darwin) {
+            // SAFETY: both are async-signal-safe.
+            unsafe {
+                libc::signal(host, libc::SIG_DFL);
+                libc::raise(host);
+            }
+        }
         return;
     }
     if GUEST_SIGINFO[slot].load(Ordering::Acquire) {
@@ -762,7 +869,13 @@ fn delivers(host_handler: libc::sighandler_t) -> bool {
 /// the host.
 fn route(slot: usize, handler: u64, siginfo: bool) -> libc::sighandler_t {
     if is_sentinel(handler) {
-        return handler as libc::sighandler_t;
+        if !observed(slot) {
+            return handler as libc::sighandler_t;
+        }
+        // A watched signal stays routed through `deliver`.
+        GUEST_SIGINFO[slot].store(false, Ordering::Release);
+        GUEST_HANDLERS[slot].store(handler, Ordering::Release);
+        return deliver as *const () as libc::sighandler_t;
     }
     GUEST_SIGINFO[slot].store(siginfo, Ordering::Release);
     GUEST_HANDLERS[slot].store(handler, Ordering::Release);

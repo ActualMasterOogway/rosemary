@@ -96,7 +96,7 @@ fn init_for(directory: &Path) -> Option<server::daemon::Init> {
         program: std::env::current_exe().ok()?,
         args: vec!["run".into(), LAUNCHD.into()],
         current_dir: prefix::ns::host_path("/"),
-        console: Some(directory.join("console.log")),
+        console: Some(prefix.console()),
         ready: Some(prefix::ns::host_path(LAUNCHD_SOCKET)),
     })
 }

@@ -36,6 +36,19 @@ impl Table {
     /// table is built once and a test that set the variable could not observe
     /// it.
     pub fn rooted(root: &Path, user: &str, host_home: Option<&Path>) -> Table {
+        Table::rooted_with_console(root, user, host_home, None)
+    }
+
+    /// As [`Table::rooted`], with `/dev/console` a file of the prefix's.
+    ///
+    /// A Mac lets any job write its console; a Linux host's `/dev/console` is
+    /// root's, and a launchd job whose output goes there would fail to start.
+    pub fn rooted_with_console(
+        root: &Path,
+        user: &str,
+        host_home: Option<&Path>,
+        console: Option<&Path>,
+    ) -> Table {
         let mut mounts = vec![
             Mount {
                 guest: "/".to_string(),
@@ -61,6 +74,13 @@ impl Table {
                 listed: false,
             },
         ];
+        if let Some(console) = console {
+            mounts.push(Mount {
+                guest: "/dev/console".to_string(),
+                host: console.to_path_buf(),
+                listed: true,
+            });
+        }
         if let Some(host_home) = host_home {
             mounts.push(Mount {
                 guest: format!("/Users/{user}"),

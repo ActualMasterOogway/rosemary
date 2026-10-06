@@ -225,6 +225,95 @@ unsafe extern "C" fn getpeername(fd: i32, address: *mut c_void, len: *mut u32) -
     unsafe { returning_address(fd, address, len, libc::getpeername) }
 }
 
+/// Who is at the other end of a connected Unix socket, as a guest sees them.
+pub(super) struct PeerIds {
+    pub pid: Option<i32>,
+    pub euid: u32,
+    pub egid: u32,
+    pub groups: Vec<u32>,
+}
+
+/// The peer of `fd`, or `None` with `errno` set.
+///
+/// The peer is usually another guest, whose ids are the server's to say - a
+/// guest root is the host's user - so a daemon that insists on a root peer is
+/// answered the way a Mac would. A peer the server does not know is the host
+/// user at the other end.
+pub(super) fn peer_ids(fd: i32) -> Option<PeerIds> {
+    /// Names the guest's descriptor without owning it, or asserting it is valid.
+    struct Raw(i32);
+    impl std::os::fd::AsRawFd for Raw {
+        fn as_raw_fd(&self) -> i32 {
+            self.0
+        }
+    }
+    // SAFETY: a query of a descriptor number.
+    if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        crate::errno::set(libc::EBADF);
+        return None;
+    }
+    let Some(peer) = starnix::socket::peer(&Raw(fd)) else {
+        // Why `fd` has no peer: not a socket, or not connected.
+        let mut value = 0;
+        let mut len = size_of::<i32>() as libc::socklen_t;
+        // SAFETY: a local to receive the type.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&raw mut value).cast(),
+                &raw mut len,
+            )
+        };
+        crate::errno::set(if rc == 0 {
+            libc::ENOTCONN
+        } else {
+            crate::errno::get()
+        });
+        return None;
+    };
+    Some(match peer.pid.and_then(server::client::process) {
+        Some(process) => PeerIds {
+            pid: peer.pid,
+            euid: process.euid,
+            egid: process.egid,
+            groups: process.groups,
+        },
+        None => {
+            // SAFETY: `getgid` takes nothing and cannot fail.
+            let gid = unsafe { libc::getgid() };
+            PeerIds {
+                pid: peer.pid,
+                euid: peer.uid,
+                egid: gid,
+                groups: vec![gid],
+            }
+        }
+    })
+}
+
+/// `int getpeereid(int fd, uid_t *euid, gid_t *egid)`
+///
+/// # Safety
+///
+/// `euid` and `egid` are writable.
+unsafe extern "C" fn getpeereid(fd: i32, euid: *mut u32, egid: *mut u32) -> i32 {
+    let Some(peer) = peer_ids(fd) else {
+        return -1;
+    };
+    // SAFETY: the caller's.
+    unsafe {
+        if !euid.is_null() {
+            euid.write_unaligned(peer.euid);
+        }
+        if !egid.is_null() {
+            egid.write_unaligned(peer.egid);
+        }
+    }
+    0
+}
+
 /// `ssize_t send(int, const void *, size_t, int)`
 ///
 /// # Safety
@@ -948,6 +1037,7 @@ exports::exports! {
         "accept" => accept,
         "getsockname" => getsockname,
         "getpeername" => getpeername,
+        "getpeereid" => getpeereid,
         "send" => send,
         "recv" => recv,
         "sendto" => sendto,
@@ -961,6 +1051,26 @@ exports::exports! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn getpeereid_names_this_user_on_a_socket_pair() {
+        let (one, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut uid, mut gid) = (u32::MAX, u32::MAX);
+        use std::os::fd::AsRawFd;
+        // SAFETY: two writable ids.
+        let rc = unsafe { super::getpeereid(one.as_raw_fd(), &mut uid, &mut gid) };
+        assert_eq!(rc, 0);
+        // SAFETY: `getuid` has no preconditions.
+        assert_eq!(uid, unsafe { libc::getuid() });
+    }
+
+    #[test]
+    fn getpeereid_refuses_a_descriptor_that_is_not_a_socket() {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: two writable ids; fd 0 is not a connected socket.
+        let rc = unsafe { super::getpeereid(-1, &mut uid, &mut gid) };
+        assert_eq!(rc, -1);
+    }
+
     #[test]
     fn receiving_does_not_parse_output_buffers() {
         let mut bytes = [0xffu8; 32];

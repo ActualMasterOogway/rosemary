@@ -491,6 +491,89 @@ pub(crate) unsafe extern "C" fn setsockopt(
     unsafe { libc::setsockopt(fd, level, name, value, len) }
 }
 
+/// `SOL_LOCAL`, and the options on it that name the peer of a Unix socket.
+const SOL_LOCAL: i32 = 0;
+const LOCAL_PEERCRED: i32 = 0x001;
+const LOCAL_PEERPID: i32 = 0x002;
+const LOCAL_PEEREPID: i32 = 0x003;
+
+/// Darwin's `struct xucred`: version, uid, a count, and the group list, whose
+/// first entry is the effective gid.
+#[repr(C)]
+struct Xucred {
+    version: u32,
+    uid: u32,
+    ngroups: i16,
+    groups: [u32; 16],
+}
+
+/// The `SOL_LOCAL` options, which this host has none of: Linux says the same
+/// things through `SO_PEERCRED`, in a different structure.
+///
+/// # Safety
+///
+/// `value` is `*len` writable bytes and `len` is a writable `socklen_t`.
+unsafe fn local_option(fd: i32, name: i32, value: *mut c_void, len: *mut u32) -> i32 {
+    if value.is_null() || len.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    let (bytes, size): ([u8; size_of::<Xucred>()], usize) = match name {
+        LOCAL_PEERCRED | LOCAL_PEERPID | LOCAL_PEEREPID => {
+            let Some(peer) = super::socket::peer_ids(fd) else {
+                return -1;
+            };
+            if name == LOCAL_PEERCRED {
+                let mut cred = Xucred {
+                    version: 0,
+                    uid: peer.euid,
+                    ngroups: 0,
+                    groups: [0; 16],
+                };
+                // The effective gid leads, as a Mac's `cr_groups[0]` does.
+                let list = std::iter::once(peer.egid)
+                    .chain(peer.groups.iter().copied().filter(|g| *g != peer.egid));
+                for (slot, gid) in cred.groups.iter_mut().zip(list) {
+                    *slot = gid;
+                    cred.ngroups += 1;
+                }
+                let mut bytes = [0; size_of::<Xucred>()];
+                // SAFETY: `Xucred` is plain data; its padding bytes are
+                // copied along, which a guest never reads.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const cred).cast::<u8>(),
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                    )
+                };
+                (bytes, size_of::<Xucred>())
+            } else {
+                let Some(pid) = peer.pid else {
+                    crate::errno::set(libc::ENOTCONN);
+                    return -1;
+                };
+                let mut bytes = [0; size_of::<Xucred>()];
+                bytes[..4].copy_from_slice(&pid.to_ne_bytes());
+                (bytes, size_of::<i32>())
+            }
+        }
+        _ => {
+            say_unknown_option(SOL_LOCAL, name);
+            crate::errno::set(libc::ENOPROTOOPT);
+            return -1;
+        }
+    };
+    // SAFETY: `len` is the caller's; a short buffer gets a short answer, as
+    // `getsockopt` gives.
+    unsafe {
+        let room = *len as usize;
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), value.cast::<u8>(), size.min(room));
+        *len = size as u32;
+    }
+    0
+}
+
 /// `int getsockopt(int, int, int, void *, socklen_t *)`
 ///
 /// # Safety
@@ -510,6 +593,10 @@ unsafe extern "C" fn getsockopt(
     if level == SOL_SOCKET && matches!(name, so::NREAD | so::NWRITE) {
         // SAFETY: the caller's buffer and length slot.
         return unsafe { queued_bytes(fd, name, value, len) };
+    }
+    if level == SOL_LOCAL {
+        // SAFETY: the caller's buffer and length slot.
+        return unsafe { local_option(fd, name, value, len) };
     }
     let Some((host_level, host_name)) = option_to_host(level, name) else {
         crate::errno::set(libc::ENOPROTOOPT);
@@ -591,6 +678,42 @@ mod tests {
 
     /// The level itself collides: Darwin's `SOL_SOCKET` passed through names an
     /// IP protocol here, and this host's names one on Darwin.
+    #[test]
+    fn a_unix_socket_peer_is_named_by_its_credentials() {
+        use std::os::fd::AsRawFd;
+        let (one, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        // SAFETY: `getuid` has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let mut cred = [0u8; size_of::<Xucred>()];
+        let mut len = cred.len() as u32;
+        // SAFETY: a buffer and its length.
+        let rc = unsafe {
+            local_option(
+                one.as_raw_fd(),
+                LOCAL_PEERCRED,
+                cred.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((rc, len as usize), (0, size_of::<Xucred>()));
+        assert_eq!(u32::from_ne_bytes(cred[4..8].try_into().unwrap()), uid);
+        assert!(i16::from_ne_bytes(cred[8..10].try_into().unwrap()) >= 1);
+
+        let mut pid = [0u8; 4];
+        let mut len = 4;
+        // SAFETY: as above.
+        let rc = unsafe {
+            local_option(
+                one.as_raw_fd(),
+                LOCAL_PEERPID,
+                pid.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(i32::from_ne_bytes(pid), std::process::id() as i32);
+    }
+
     #[test]
     fn the_level_is_translated_rather_than_passed_through() {
         assert_ne!(SOL_SOCKET, libc::SOL_SOCKET);

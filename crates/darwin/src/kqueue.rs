@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_int, c_void};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use static_init::dynamic;
@@ -27,6 +28,7 @@ const _: () = {
 
 const EVFILT_READ: i16 = -1;
 const EVFILT_WRITE: i16 = -2;
+const EVFILT_SIGNAL: i16 = -6;
 const EVFILT_USER: i16 = -10;
 
 const EV_ADD: u16 = 0x0001;
@@ -51,6 +53,9 @@ struct Registration {
     fflags: u32,
     udata: usize,
     enabled: bool,
+    /// `EVFILT_SIGNAL`: how many deliveries of the signal were already
+    /// reported, or happened before the registration.
+    seen: u64,
 }
 
 impl Registration {
@@ -81,6 +86,16 @@ struct Queue<B> {
     backend: Arc<B>,
 }
 
+impl<B> Drop for Queue<B> {
+    fn drop(&mut self) {
+        for registration in self.registrations.values() {
+            if registration.filter == EVFILT_SIGNAL {
+                let _ = crate::signal::observe(registration.ident as i32, false);
+            }
+        }
+    }
+}
+
 impl<B> Queue<B> {
     fn new(backend: B) -> Self {
         Self {
@@ -106,6 +121,8 @@ struct Ready {
 trait ReadinessBackend: Sized {
     fn new() -> Result<(Self, c_int), c_int>;
     fn wake(&self);
+    /// The descriptor `wake` writes, for a signal handler to write.
+    fn wake_descriptor(&self) -> c_int;
     fn drain_wake(&self);
     fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int>;
     fn wait(
@@ -137,6 +154,9 @@ impl ReadinessBackend for PollBackend {
 
     fn wake(&self) {
         wake_fd(self.wake)
+    }
+    fn wake_descriptor(&self) -> c_int {
+        self.wake
     }
     fn drain_wake(&self) {
         drain_fd(self.wake)
@@ -182,6 +202,7 @@ impl Drop for EpollBackend {
     fn drop(&mut self) {
         // This is the private wakeup descriptor, never the guest-visible
         // kqueue descriptor (which the guest owns and may already have closed).
+        forget_waker(self.wake);
         unsafe { libc::close(self.wake) };
     }
 }
@@ -244,6 +265,9 @@ impl ReadinessBackend for EpollBackend {
 
     fn wake(&self) {
         wake_fd(self.wake)
+    }
+    fn wake_descriptor(&self) -> c_int {
+        self.wake
     }
     fn drain_wake(&self) {
         drain_fd(self.wake)
@@ -407,6 +431,48 @@ fn wake_fd(queue: c_int) {
     unsafe { libc::write(queue, (&raw const one).cast::<c_void>(), size_of::<u64>()) };
 }
 
+/// The wakeup descriptors of queues that watch signals. A signal handler may
+/// take no lock, so this is a fixed table it can scan.
+const WAKERS: usize = 64;
+static WAKER_FDS: [AtomicI32; WAKERS] = [const { AtomicI32::new(-1) }; WAKERS];
+
+fn register_waker(fd: c_int) -> Result<(), c_int> {
+    if WAKER_FDS
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == fd)
+    {
+        return Ok(());
+    }
+    for slot in &WAKER_FDS {
+        if slot
+            .compare_exchange(-1, fd, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err(libc::ENOMEM)
+}
+
+/// Before the descriptor closes, so its number is not written once it names
+/// something else.
+fn forget_waker(fd: c_int) {
+    for slot in &WAKER_FDS {
+        let _ = slot.compare_exchange(fd, -1, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+/// A watched signal arrived: wake every queue that watches signals, and let
+/// each decide whether it is theirs. Async-signal-safe.
+pub(crate) fn signalled() {
+    for slot in &WAKER_FDS {
+        let fd = slot.load(Ordering::Acquire);
+        if fd >= 0 {
+            wake_fd(fd);
+        }
+    }
+}
+
 /// Drain the wakeup channel, which is level-triggered and would otherwise
 /// return from every later `poll` at once.
 fn drain_fd(queue: c_int) {
@@ -422,7 +488,10 @@ fn drain_fd(queue: c_int) {
 /// `data`, which is a value rather than the `errno` slot, so nothing later
 /// translates it.
 fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(), c_int> {
-    if !matches!(change.filter, EVFILT_READ | EVFILT_WRITE | EVFILT_USER) {
+    if !matches!(
+        change.filter,
+        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL
+    ) {
         return Err(crate::errno::from_host(libc::EINVAL));
     }
     let key = (change.ident, change.filter);
@@ -441,6 +510,9 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         state.registrations = registrations;
         state.triggered = triggered;
         state.triggered_set = triggered_set;
+        if change.filter == EVFILT_SIGNAL {
+            let _ = crate::signal::observe(change.ident as i32, false);
+        }
         return Ok(());
     }
 
@@ -448,7 +520,20 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         // A readiness filter names a descriptor, and one that is not open is
         // `EBADF` at registration rather than at the first `poll` - which is
         // where BSD reports it, and the only place a caller looks.
-        if change.filter != EVFILT_USER {
+        let mut seen = 0;
+        if change.filter == EVFILT_SIGNAL {
+            let darwin =
+                i32::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EINVAL))?;
+            seen = match registrations.get(&key) {
+                Some(existing) => existing.seen,
+                None => {
+                    register_waker(state.backend.wake_descriptor())
+                        .map_err(crate::errno::from_host)?;
+                    crate::signal::observe(darwin, true).map_err(crate::errno::from_host)?;
+                    crate::signal::delivered(darwin)
+                }
+            };
+        } else if change.filter != EVFILT_USER {
             let fd =
                 c_int::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
@@ -464,6 +549,7 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
                 fflags: change.fflags,
                 udata: change.udata,
                 enabled: change.flags & EV_DISABLE == 0,
+                seen,
             },
         );
     } else {
@@ -519,7 +605,7 @@ fn sync_interest<B: ReadinessBackend>(
     filter: i16,
     ident: usize,
 ) -> Result<(), c_int> {
-    if filter == EVFILT_USER {
+    if matches!(filter, EVFILT_USER | EVFILT_SIGNAL) {
         return Ok(());
     }
     let fd = c_int::try_from(ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
@@ -562,7 +648,7 @@ fn poll_set(
     let mut interest: HashMap<c_int, i16> = HashMap::new();
     interest.insert(queue, libc::POLLIN);
     for registration in registrations.values() {
-        if !registration.enabled || registration.filter == EVFILT_USER {
+        if !registration.enabled || matches!(registration.filter, EVFILT_USER | EVFILT_SIGNAL) {
             continue;
         }
         let Ok(fd) = c_int::try_from(registration.ident) else {
@@ -661,11 +747,10 @@ pub unsafe extern "C" fn kevent(
         return out.len() as c_int;
     }
 
-    let triggered = !state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .triggered
-        .is_empty();
+    let triggered = {
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.triggered.is_empty() || signals_pending(&state.registrations)
+    };
     // Something is already waiting, so this is a collection rather than a wait.
     let wait = match triggered {
         true => 0,
@@ -707,6 +792,37 @@ pub unsafe extern "C" fn kevent(
             && registration.enabled
         {
             out.push(registration.fired());
+        }
+    }
+
+    let mut signals: Vec<(usize, i16)> = state
+        .registrations
+        .keys()
+        .filter(|key| key.1 == EVFILT_SIGNAL)
+        .copied()
+        .collect();
+    signals.sort_unstable();
+    for key in signals {
+        if out.len() == capacity {
+            break;
+        }
+        let Some(registration) = state.registrations.get_mut(&key) else {
+            continue;
+        };
+        let count = crate::signal::delivered(registration.ident as i32);
+        if !registration.enabled || count <= registration.seen {
+            continue;
+        }
+        let mut event = registration.fired();
+        event.data = (count - registration.seen) as isize;
+        registration.seen = count;
+        out.push(event);
+        let (ident, flags) = (registration.ident, registration.flags);
+        if flags & EV_ONESHOT != 0 {
+            state.registrations.remove(&key);
+            let _ = crate::signal::observe(ident as i32, false);
+        } else if flags & EV_DISPATCH != 0 {
+            registration.enabled = false;
         }
     }
 
@@ -770,6 +886,13 @@ pub unsafe extern "C" fn kevent(
     // grew past that.
     unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), events, out.len()) };
     out.len() as c_int
+}
+
+/// Whether an enabled signal registration has deliveries it has not reported.
+fn signals_pending(registrations: &HashMap<(usize, i16), Registration>) -> bool {
+    registrations.values().any(|r| {
+        r.filter == EVFILT_SIGNAL && r.enabled && crate::signal::delivered(r.ident as i32) > r.seen
+    })
 }
 
 /// `kevent64` and the filters `poll` cannot answer; see the module note.
@@ -1003,6 +1126,120 @@ mod tests {
             0,
             "the caller's request is not handed back as a property of the event"
         );
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    /// Applies `change` and collects what is ready, without waiting.
+    fn collect(queue: c_int, change: Option<&Kevent>) -> (c_int, Kevent) {
+        let mut got = [Kevent::default(); 1];
+        // SAFETY: at most one change, room for one event, and no wait.
+        let n = unsafe {
+            kevent(
+                queue,
+                change.map_or(std::ptr::null(), |c| c as *const Kevent),
+                change.is_some() as c_int,
+                got.as_mut_ptr(),
+                1,
+                &raw const NO_WAIT,
+            )
+        };
+        (n, got[0])
+    }
+
+    /// A signal whose default action is to do nothing is still reported, with
+    /// the number of deliveries since the last report.
+    #[test]
+    fn a_signal_event_counts_deliveries_of_an_ignored_by_default_signal() {
+        use crate::signal::signum::SIGWINCH;
+        let queue = kqueue();
+        let add = Kevent {
+            ident: SIGWINCH as usize,
+            filter: EVFILT_SIGNAL,
+            flags: EV_ADD | EV_ENABLE,
+            udata: 9,
+            ..Kevent::default()
+        };
+        assert_eq!(collect(queue, Some(&add)).0, 0, "nothing delivered yet");
+        let host = crate::signal::signal_to_host(SIGWINCH).expect("a host signal");
+        // SAFETY: a signal this process takes by default as a no-op.
+        unsafe {
+            libc::raise(host);
+            libc::raise(host);
+        }
+        let (n, event) = collect(queue, None);
+        assert_eq!(n, 1);
+        assert_eq!(event.ident, SIGWINCH as usize);
+        assert_eq!(event.filter, EVFILT_SIGNAL);
+        assert_eq!(event.data, 2);
+        assert_eq!(event.udata, 9);
+        assert_eq!(collect(queue, None).0, 0, "reported once");
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    /// `SIG_IGN` does not hide a signal from the queue, and removing the last
+    /// registration puts the disposition back, so the signal stays ignored.
+    #[test]
+    fn a_signal_event_sees_an_ignored_signal_and_restores_the_disposition() {
+        use crate::signal::signum::SIGUSR2;
+        let host = crate::signal::signal_to_host(SIGUSR2).expect("a host signal");
+        // SAFETY: SIG_IGN is a value, not a function.
+        unsafe { crate::signal::signal(SIGUSR2, 1) };
+        let queue = kqueue();
+        let mut change = Kevent {
+            ident: SIGUSR2 as usize,
+            filter: EVFILT_SIGNAL,
+            flags: EV_ADD,
+            ..Kevent::default()
+        };
+        assert_eq!(collect(queue, Some(&change)).0, 0);
+        // SAFETY: ignored, so this returns.
+        unsafe { libc::raise(host) };
+        let (n, event) = collect(queue, None);
+        assert_eq!((n, event.data), (1, 1));
+
+        change.flags = EV_DELETE;
+        assert_eq!(collect(queue, Some(&change)).0, 0);
+        // SAFETY: the disposition is SIG_IGN again, or this kills the test.
+        unsafe { libc::raise(host) };
+        assert_eq!(collect(queue, None).0, 0);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    /// `SIGCHLD`, which is what `opend` watches: a child exiting is reported.
+    #[test]
+    fn a_signal_event_reports_a_child_exiting() {
+        use crate::signal::signum::SIGCHLD;
+        let queue = kqueue();
+        let add = Kevent {
+            ident: SIGCHLD as usize,
+            filter: EVFILT_SIGNAL,
+            flags: EV_ADD,
+            ..Kevent::default()
+        };
+        assert_eq!(collect(queue, Some(&add)).0, 0);
+        let mut child = std::process::Command::new("true").spawn().expect("true");
+        child.wait().expect("the child");
+        let mut got = [Kevent::default(); 1];
+        let timeout = libc::timespec {
+            tv_sec: 5,
+            tv_nsec: 0,
+        };
+        // SAFETY: no changes, room for one event.
+        let n = unsafe {
+            kevent(
+                queue,
+                std::ptr::null(),
+                0,
+                got.as_mut_ptr(),
+                1,
+                &raw const timeout,
+            )
+        };
+        assert_eq!(n, 1);
+        assert!(got[0].data >= 1);
         // SAFETY: this test's own descriptor.
         unsafe { libc::close(queue) };
     }
