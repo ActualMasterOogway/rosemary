@@ -1,0 +1,29 @@
+# minidarwin rootfs spec. Format: docs/rootfs-spec.md
+format: 1
+identity:
+  arch: "x86_64"
+  libsystem: "Libsystem-1356"
+  min_os: "26.0"
+  project: "minidarwin"
+  xnu: "xnu-12377.121.6"
+release:
+  sequence: 13
+  tag: "v13.0.0"
+  commit: "1fde7f79ae880e37eb8d3733f81b5605073b3b04"
+  repository: "V3L0C1T13S/minidarwin"
+artifact:
+  name: "minidarwin-rootfs-x86_64-r13.tar.gz"
+  format: "tar+gzip"
+  size: 47130736
+  sha256: "ecc41c6f3a8dfe8b65d83f59cf5e50dfed51c4f2cf23fa3c97c7c348efe82a7b"
+  sources:
+    - "https://github.com/V3L0C1T13S/minidarwin/releases/download/v13.0.0/minidarwin-rootfs-x86_64-r13.tar.gz"
+manifest:
+  name: "minidarwin-rootfs-x86_64-r13.manifest.yaml"
+  size: 1920877
+  sha256: "68e65282696a8e92d8669722ceb0fccab829dadb60f0a6b5bd6804386124e06a"
+  tree: "41bf8e35326fd15ab3162b266b62a11311457a62deac19a91d1cc5d71abb50a4"
+  sources:
+    - "https://github.com/V3L0C1T13S/minidarwin/releases/download/v13.0.0/minidarwin-rootfs-x86_64-r13.manifest.yaml"
+verification:
+  policy: "strict"
