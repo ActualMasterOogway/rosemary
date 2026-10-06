@@ -1,5 +1,3 @@
-#![cfg_attr(target_os = "macos", allow(dead_code))]
-
 pub mod block;
 pub mod data;
 pub mod object;
@@ -89,16 +87,11 @@ unsafe fn once_with(predicate: *mut c_void, body: impl FnOnce()) {
 /// Recorded here rather than at start-up because this is the call that runs on
 /// the thread the program was loaded on, which is what `dispatch_get_main_queue`
 /// means by main.
-#[cfg(not(target_os = "macos"))]
 fn main_queue() -> u64 {
     queue::note_main_thread();
     queue::main_queue()
 }
 
-#[cfg(target_os = "macos")]
-exports::exports! {}
-
-#[cfg(not(target_os = "macos"))]
 exports::exports! {
     functions {
         "dispatch_queue_create" => queue::queue_create,

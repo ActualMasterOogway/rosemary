@@ -2,7 +2,6 @@ use crate::sysctl::{
     CTL_HW, CTL_KERN, HW_MACHINE, KERN_HOSTNAME, KERN_OSRELEASE, KERN_OSTYPE, KERN_VERSION,
 };
 
-#[cfg(not(target_os = "macos"))]
 #[repr(C)]
 struct Rusage {
     utime: [i64; 2],
@@ -12,7 +11,6 @@ struct Rusage {
 
 /// `getrusage` converts Darwin's 32-bit `tv_usec` fields and byte-valued
 /// `ru_maxrss` instead of exposing Linux's layout and KiB count.
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn getrusage(who: i32, out: *mut Rusage) -> i32 {
     if out.is_null() {
         crate::errno::set(libc::EFAULT);
@@ -56,7 +54,7 @@ unsafe extern "C" fn getrusage(who: i32, out: *mut Rusage) -> i32 {
     0
 }
 
-#[cfg(not(target_os = "macos"))]
+
 const PATHCONF: &[(i32, i32)] = &[
     (1, libc::_PC_LINK_MAX),
     (2, libc::_PC_MAX_CANON),
@@ -69,11 +67,11 @@ const PATHCONF: &[(i32, i32)] = &[
     (9, libc::_PC_VDISABLE),
     (10, libc::_PC_SYMLINK_MAX),
 ];
-#[cfg(not(target_os = "macos"))]
+
 fn pathconf_name(name: i32) -> Option<i32> {
     PATHCONF.iter().find(|(d, _)| *d == name).map(|(_, h)| *h)
 }
-#[cfg(not(target_os = "macos"))]
+
 unsafe extern "C" fn pathconf(path: *const libc::c_char, name: i32) -> i64 {
     let Some(name) = pathconf_name(name) else {
         crate::errno::set(libc::EINVAL);
@@ -85,7 +83,7 @@ unsafe extern "C" fn pathconf(path: *const libc::c_char, name: i32) -> i64 {
         (value, value >= 0)
     })
 }
-#[cfg(not(target_os = "macos"))]
+
 unsafe extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
     match pathconf_name(name) {
         Some(name) => unsafe { libc::fpathconf(fd, name) as i64 },
@@ -95,7 +93,7 @@ unsafe extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
         }
     }
 }
-#[cfg(not(target_os = "macos"))]
+
 unsafe extern "C" fn confstr(name: i32, out: *mut libc::c_char, len: usize) -> usize {
     if name == 1 {
         unsafe { libc::confstr(libc::_CS_PATH, out, len) }
@@ -211,7 +209,6 @@ fn ask(mib: &[i32]) -> String {
 /// 1 through 52, plus the handful above it that programs actually ask for; a
 /// name outside it is `EINVAL` rather than a guess, because a guess here is the
 /// bug being fixed.
-#[cfg(not(target_os = "macos"))]
 mod sc {
     pub const ARG_MAX: i32 = 1;
     pub const CHILD_MAX: i32 = 2;
@@ -280,9 +277,6 @@ mod sc {
     pub const PHYS_PAGES: i32 = 200;
 }
 
-/// The host's `_SC_*` for a guest's Darwin one, or `None` for a name this
-/// mapping does not carry.
-#[cfg(not(target_os = "macos"))]
 fn host_confname(name: i32) -> Option<i32> {
     Some(match name {
         sc::ARG_MAX => libc::_SC_ARG_MAX,
@@ -356,12 +350,11 @@ fn host_confname(name: i32) -> Option<i32> {
 
 /// `long sysconf(int name)`, with `name` translated out of Darwin's numbering.
 ///
-/// Only the name is rewritten. The *value* is the host's own answer, because
+/// Only the name is rewritten. The value is the host's own answer, because
 /// every entry above is a question about the machine this is actually running
 /// on: the page size has to be the real one or a mapping is the wrong size, and
 /// the processor count has to be the real one or a thread pool is the wrong
 /// shape.
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn sysconf(name: i32) -> libc::c_long {
     let Some(host) = host_confname(name) else {
         crate::errno::set(libc::EINVAL);
@@ -418,7 +411,6 @@ unsafe extern "C" fn compat_mode(
 /// # Safety
 ///
 /// `response` is null or a writable `SInt32 *`.
-#[cfg(not(target_os = "macos"))]
 unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
     /// `paramErr`.
     const PARAM_ERROR: i16 = -50;
@@ -452,8 +444,36 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
     0
 }
 
-// Not the same list on both hosts: `Gestalt` is CoreServices' and is passed
-// through where there is one, and `sysconf`'s names are Darwin's already on a
+/// `dyld_build_version_t`
+#[repr(C)]
+struct BuildVersion {
+    platform: u32,
+    version: u32,
+}
+
+const PLATFORM_MACOS: u32 = 1;
+
+/// A version packs as `major << 16 | minor << 8 | patch`. Entries for another
+/// platform are not about this OS and are skipped.
+///
+/// # Safety
+///
+/// `versions` is null or points at `count` readable `dyld_build_version_t`s.
+unsafe extern "C" fn availability_version_check(count: u32, versions: *const BuildVersion) -> u8 {
+    if versions.is_null() {
+        return 1;
+    }
+    let (major, minor, patch) = crate::sysctl::macos_version();
+    let running = ((major as u32) << 16) | ((minor as u32) << 8) | patch as u32;
+    // SAFETY: the caller states `versions` holds `count` entries.
+    let wanted = unsafe { std::slice::from_raw_parts(versions, count as usize) };
+    wanted
+        .iter()
+        .filter(|entry| entry.platform == PLATFORM_MACOS)
+        .all(|entry| entry.version <= running) as u8
+}
+
+// Not the same list on both hosts: `sysconf`'s names are Darwin's already on a
 // Mac.
 /// Darwin's `NXArchInfo`.
 #[repr(C)]
@@ -528,17 +548,12 @@ exports::exports! {
         "NXGetLocalArchInfo" => nx_get_local_arch_info,
         "NXGetArchInfoFromCpuType" => nx_get_arch_info_from_cpu_type,
         "compat_mode" => compat_mode,
-        #[cfg(not(target_os = "macos"))]
         "Gestalt" => gestalt,
-        #[cfg(not(target_os = "macos"))]
+        "_availability_version_check" => availability_version_check,
         "sysconf" => sysconf,
-        #[cfg(not(target_os = "macos"))]
         "getrusage" => getrusage,
-        #[cfg(not(target_os = "macos"))]
         "pathconf" => pathconf,
-        #[cfg(not(target_os = "macos"))]
         "fpathconf" => fpathconf,
-        #[cfg(not(target_os = "macos"))]
         "confstr" => confstr,
     }
 }
@@ -576,6 +591,22 @@ mod tests {
         assert_eq!(field(&u, 0), "Darwin");
         assert_eq!(field(&u, 4), "x86_64");
         assert!(!field(&u, 2).is_empty(), "a release is reported");
+    }
+
+    /// `@available` answers against the version everything else reports, and a
+    /// platform that is not macOS does not take part.
+    #[test]
+    fn availability_check_follows_the_reported_version() {
+        let (major, minor, _) = crate::sysctl::macos_version();
+        let pack = |major: i32, minor: i32| ((major as u32) << 16) | ((minor as u32) << 8);
+        let check = |platform, version| {
+            let entry = BuildVersion { platform, version };
+            unsafe { availability_version_check(1, &entry) }
+        };
+        assert_eq!(check(PLATFORM_MACOS, pack(major, minor)), 1);
+        assert_eq!(check(PLATFORM_MACOS, pack(major, minor + 1)), 0);
+        assert_eq!(check(PLATFORM_MACOS, pack(major + 1, 0)), 0);
+        assert_eq!(check(2, pack(99, 0)), 1);
     }
 
     /// `uname` and a direct `sysctl` are the same question, and must not be capable

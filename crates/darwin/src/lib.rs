@@ -329,6 +329,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     credentials::MODULE,
     pam::MODULE,
     sip::MODULE,
+    dispatch::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -341,7 +342,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     random::MODULE,
     ioctl::MODULE,
     ulock::MODULE,
-    dispatch::MODULE,
     data::MODULE,
     xlocale::MODULE,
     malloc::MODULE,

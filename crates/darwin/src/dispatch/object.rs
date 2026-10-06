@@ -87,6 +87,10 @@ pub unsafe fn header<'a>(handle: u64) -> Option<&'a Header> {
     }
 }
 
+pub fn is_own(_handle: u64) -> bool {
+    true
+}
+
 /// The header a guest's handle names, if it is of `kind`.
 ///
 /// # Safety

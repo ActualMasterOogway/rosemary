@@ -66,13 +66,8 @@ pub unsafe extern "C" fn create(
     } else {
         destructor
     };
-    let queue = if queue == 0 {
-        unsafe { super::queue::get_global_queue(0, 0) }
-    } else {
-        queue
-    };
+    let queue = hold_queue(queue);
     let size = if buffer.is_null() { 0 } else { size };
-    super::object::retain(queue);
     let copies = destructor == 0;
     let owned = match copies && !buffer.is_null() && size != 0 {
         // SAFETY: the caller states the buffer has `size` readable bytes.
@@ -103,7 +98,7 @@ impl Data {
             // The FREE sentinel transfers ownership to the guest allocator.
             unsafe { crate::heap::free(self.borrowed as *mut c_void) };
         } else if destructor != 0 {
-            super::queue::async_owned(self.queue, destructor);
+            run_destructor(self.queue, destructor);
         }
         self.borrowed = std::ptr::null();
     }
@@ -112,8 +107,23 @@ impl Data {
 impl Drop for Data {
     fn drop(&mut self) {
         self.destroy_buffer();
-        unsafe { super::object::release(self.queue) };
+        // SAFETY: the reference `hold_queue` took.
+        unsafe { super::object::release_entry(self.queue) };
     }
+}
+
+fn hold_queue(queue: u64) -> u64 {
+    let queue = if queue == 0 {
+        unsafe { super::queue::get_global_queue(0, 0) }
+    } else {
+        queue
+    };
+    super::object::retain(queue);
+    queue
+}
+
+fn run_destructor(queue: u64, destructor: u64) {
+    super::queue::async_owned(queue, destructor);
 }
 
 /// The bytes this object stands for, however it came to own them.

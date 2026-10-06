@@ -168,6 +168,18 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
             Some(Value::U32(arch.cpu_type() as u32))
         }
         [CTL_HW, HW_CPUSUBTYPE] => Some(Value::U32(arch.cpu_subtype() as u32)),
+        // The OS the guest believes it is on is a fixed identity, not the host's:
+        // a program comparing `uname`, `kern.osproductversion` and
+        // `_availability_version_check` against one another, or against what it
+        // saw on another host, must get the one answer from all of them.
+        [CTL_KERN, KERN_OSTYPE] => Some(Value::Str("Darwin".to_string())),
+        [CTL_KERN, KERN_OSRELEASE] => Some(Value::Str(release())),
+        [CTL_KERN, KERN_OSREV] => Some(Value::U32(199_506)),
+        [CTL_KERN, KERN_VERSION] => Some(Value::Str(version())),
+        [CTL_KERN, KERN_OSVERSION] => Some(Value::Str(build())),
+        [CTL_KERN, KERN_OSPRODUCTVERSION] | [CTL_KERN, KERN_OSPRODUCTVERSIONCOMPAT] => {
+            Some(Value::Str(product_version()))
+        }
         _ => None,
     }
 }
@@ -180,11 +192,6 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
 #[cfg(not(target_os = "macos"))]
 fn host_value(mib: &[i32]) -> Option<Value> {
     match mib {
-        [CTL_KERN, KERN_OSTYPE] => Some(Value::Str("Darwin".to_string())),
-        [CTL_KERN, KERN_OSRELEASE] => Some(Value::Str(release())),
-        [CTL_KERN, KERN_OSREV] => Some(Value::U32(199_506)),
-        [CTL_KERN, KERN_VERSION] => Some(Value::Str(version())),
-        [CTL_KERN, KERN_OSVERSION] => Some(Value::Str(build())),
         [CTL_KERN, KERN_HOSTNAME] => Some(Value::Str(hostname())),
         [CTL_KERN, KERN_ARGMAX] => Some(Value::U32(1024 * 1024)),
         [CTL_HW, HW_MODEL] => Some(Value::Str(model())),
@@ -203,12 +210,12 @@ fn host_value(mib: &[i32]) -> Option<Value> {
     }
 }
 
-/// The `kern.*` strings, overridable so a guest can be told it is on a given release.
+/// The `kern.*` strings, the same on every host and overridable so a guest can be
+/// told it is on a given release.
 ///
 /// The defaults describe macOS 15.0. A program that branches on the OS version needs
 /// a *specific* answer far more than it needs a true one, and the environment is where
 /// that belongs rather than a rebuild.
-#[cfg(not(target_os = "macos"))]
 fn release() -> String {
     env_or("ROSEMARY_DARWIN_RELEASE", "24.0.0")
 }
@@ -219,7 +226,6 @@ fn release() -> String {
 /// `kern.osrelease` and a guest that calls `Gestalt` are asking the same
 /// question and must not get two answers. Darwin 20 is macOS 11 and each is one
 /// apart after that; before it, every Darwin was some 10.x.
-#[cfg(not(target_os = "macos"))]
 pub fn macos_version() -> (i32, i32, i32) {
     let release = release();
     let mut parts = release.split('.').map(|p| p.parse::<i32>().unwrap_or(0));
@@ -232,12 +238,19 @@ pub fn macos_version() -> (i32, i32, i32) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// `kern.osproductversion`, spelled as macOS does: no patch component when it is 0.
+fn product_version() -> String {
+    let (major, minor, patch) = macos_version();
+    match patch {
+        0 => format!("{major}.{minor}"),
+        _ => format!("{major}.{minor}.{patch}"),
+    }
+}
+
 fn build() -> String {
     env_or("ROSEMARY_DARWIN_BUILD", "24A335")
 }
 
-#[cfg(not(target_os = "macos"))]
 fn version() -> String {
     env_or(
         "ROSEMARY_DARWIN_VERSION",
@@ -257,7 +270,6 @@ fn model() -> String {
     env_or("ROSEMARY_DARWIN_MODEL", "Mac15,3")
 }
 
-#[cfg(not(target_os = "macos"))]
 fn env_or(key: &str, fallback: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| fallback.to_string())
 }
@@ -561,8 +573,6 @@ const BY_NAME: &[(&str, &[i32])] = &[
 #[cfg(not(target_os = "macos"))]
 fn named(name: &str) -> Option<Value> {
     match name {
-        "kern.osproductversion" => Some(Value::Str(env_or("ROSEMARY_MACOS_VERSION", "15.0"))),
-        "kern.osproductversioncompat" => Some(Value::Str(env_or("ROSEMARY_MACOS_VERSION", "15.0"))),
         "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
         "hw.cpufamily" | "hw.cpusubfamily" => Some(Value::U32(0)),
         // Both guest architectures are 64-bit. A caller that reads a missing
