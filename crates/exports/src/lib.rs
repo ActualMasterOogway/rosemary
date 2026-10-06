@@ -27,6 +27,11 @@ pub trait Exports {
     /// `symbol` is the Mach-O spelling, leading underscore included.
     fn function(&mut self, symbol: &str, address: u64);
     fn data(&mut self, symbol: &str, address: u64);
+    /// `symbol` exists and is null on purpose, as an absolute-zero export is.
+    ///
+    /// Its own call so that a sink can tell it from a `data` whose address came
+    /// back zero by mistake, which [`NonNull`] refuses.
+    fn null(&mut self, symbol: &str);
 }
 
 /// One module's answers, as a value.
@@ -48,6 +53,8 @@ pub struct Module {
     /// hot path asks.
     pub names: fn() -> Names,
     pub symbol: fn(&str) -> Option<u64>,
+    /// Every data symbol published as null on purpose, Mach-O spelling.
+    pub null_data: fn() -> Names,
     pub provide: fn(&mut dyn Exports),
 }
 
@@ -72,6 +79,11 @@ impl Module {
     pub fn all_names(modules: &[Module]) -> Names {
         modules.iter().flat_map(|m| (m.names)()).collect()
     }
+
+    /// Every intentionally null data symbol any of `modules` publishes.
+    pub fn all_null_data(modules: &[Module]) -> Names {
+        modules.iter().flat_map(|m| (m.null_data)()).collect()
+    }
 }
 
 /// The address of a function, as the loader wants it.
@@ -85,7 +97,7 @@ pub fn address(f: *const ()) -> u64 {
 
 /// Declare what a module publishes.
 ///
-/// Three optional sections, each written once:
+/// Five optional sections, each written once:
 ///
 /// ```ignore
 /// exports::exports! {
@@ -99,6 +111,9 @@ pub fn address(f: *const ()) -> u64 {
 ///     data {
 ///         "_NSApp" => ns_app_cell(),
 ///     }
+///     null_data {
+///         "__objc_empty_vtable",
+///     }
 ///     groups { pasteboard_manager, coretext, cgcontext }
 /// }
 /// ```
@@ -108,13 +123,20 @@ pub fn address(f: *const ()) -> u64 {
 /// name is the Mach-O spelling verbatim: those are not all C identifiers -
 /// `_OBJC_CLASS_$_NSView` is not - and there is no bare form to derive one from.
 ///
+/// A `null_data` entry is a data symbol that exists and is zero on purpose,
+/// like Apple's absolute-zero exports, in the Mach-O spelling. It is published
+/// through [`Exports::null`] rather than as zero `data`, so it binds without
+/// being mistaken for an address that failed to resolve, and `null_data()`
+/// lists them.
+///
 /// A `constants` entry is data at a fixed address - a `static`'s, not a cell
 /// built on demand - written in the bare spelling. Being fixed is what lets
 /// `symbol()` answer it as well, so a `dlsym` of `in6addr_any` gets the address
 /// the loader bound. Ordinary `data` is left out of `symbol()`: not every such
 /// expression can be evaluated twice and give the same answer.
 ///
-/// Generated: `MEMBERS`, `names()`, `symbol()`, `provide()` and `MODULE`. Data
+/// Generated: `MEMBERS`, `names()`, `symbol()`, `null_data()`, `provide()` and
+/// `MODULE`. Data
 /// entries are deliberately absent from `names()` and `symbol()`, which are the
 /// function lookup a `dlsym` uses; publishing them is `provide()`'s job.
 #[macro_export]
@@ -125,6 +147,9 @@ macro_rules! exports {
         })?
         $(data {
             $($(#[$dmeta:meta])* $dname:literal => $dvalue:expr),* $(,)?
+        })?
+        $(null_data {
+            $($(#[$nmeta:meta])* $nname:literal),* $(,)?
         })?
         $(constants {
             $($(#[$cmeta:meta])* $cname:literal => $cvalue:expr),* $(,)?
@@ -178,6 +203,19 @@ macro_rules! exports {
             $crate::Module::resolve(MEMBERS, name)
         }
 
+        /// Every data symbol this module and its members publish as null.
+        #[allow(unused_mut)]
+        pub fn null_data() -> $crate::Names {
+            let mut out = $crate::Names::new();
+            $($(
+                $(#[$nmeta])*
+                #[allow(unused_doc_comments)]
+                out.push($nname);
+            )*)?
+            out.extend($crate::Module::all_null_data(MEMBERS));
+            out
+        }
+
         /// Publish everything this module defines into `out`.
         #[allow(unused_variables)]
         pub fn provide(out: &mut dyn $crate::Exports) {
@@ -196,6 +234,11 @@ macro_rules! exports {
                 out.data($dname, $dvalue);
             )*)?
             $($(
+                $(#[$nmeta])*
+                #[allow(unused_doc_comments)]
+                out.null($nname);
+            )*)?
+            $($(
                 $(#[$cmeta])*
                 #[allow(unused_doc_comments)]
                 out.data(concat!("_", $cname), $cvalue);
@@ -208,6 +251,7 @@ macro_rules! exports {
             path: module_path!(),
             names,
             symbol,
+            null_data,
             provide,
         };
     };

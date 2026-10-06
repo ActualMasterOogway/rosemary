@@ -611,6 +611,11 @@ pub fn provider() -> SyntheticDylib {
     for (name, addr) in super::host::block_data() {
         lib.define_data(&name, addr);
     }
+    // Null on purpose under either runtime: Apple's libobjc exports these as
+    // absolute zeros too.
+    for name in ::objc::null_data() {
+        lib.define_absent(name);
+    }
     lib
 }
 
@@ -1769,6 +1774,19 @@ mod tests {
             missing.is_empty(),
             "the objc provider defines none of {missing:?}"
         );
+    }
+
+    #[test]
+    fn empty_vtable_binds_to_null() {
+        let mut found = None;
+        machish::resolve::SymbolProvider::enumerate(&provider(), &mut |name, resolved| {
+            if name == "__objc_empty_vtable" {
+                found = Some(resolved);
+            }
+        });
+        let resolved = found.expect("the builtin runtime defines __objc_empty_vtable");
+        assert_eq!(resolved.addr, 0);
+        assert_eq!(resolved.kind, machish::resolve::SymbolKind::Absent);
     }
 
     /// The gaps are gaps, and not names that quietly started working.

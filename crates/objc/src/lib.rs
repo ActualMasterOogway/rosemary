@@ -149,6 +149,12 @@ exports::exports! {
         #[cfg(target_arch = "x86_64")]
         "objc_msgSendSuper2_stret_fixup" => msg::msg_send_super2_stret_fixup,
     }
+    null_data {
+        // Older compilers point every class's vtable slot here; newer ones emit
+        // the zero directly. Apple's libobjc still exports it as an absolute
+        // zero so those binaries bind, and nothing reads the slot.
+        "__objc_empty_vtable",
+    }
     // libclosure, which is this runtime's for the reason `block` gives.
     groups {
         block,

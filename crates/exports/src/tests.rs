@@ -26,6 +26,11 @@ mod leaf {
             "_leaf_datum" => 0xdead_beef,
             "_OBJC_CLASS_$_Leaf" => 0x1000,
         }
+        null_data {
+            "__leaf_empty_vtable",
+            #[cfg(any())]
+            "__leaf_never_null",
+        }
         constants {
             "leaf_constant" => 0x2000,
         }
@@ -114,6 +119,24 @@ fn a_constant_is_published_and_answered() {
     assert!(leaf::names().contains(&"leaf_constant"));
 }
 
+/// Null on purpose is its own call, so a sink never confuses it with a zero
+/// address that should have been something.
+#[test]
+fn null_data_is_published_as_null_and_not_as_data() {
+    let mut out = Recording::default();
+    leaf::provide(&mut out);
+    assert_eq!(out.nulls, ["__leaf_empty_vtable"]);
+    assert!(!out.data.iter().any(|(n, _)| n == "__leaf_empty_vtable"));
+}
+
+#[test]
+fn null_data_is_listed_but_not_answered() {
+    assert_eq!(leaf::null_data(), ["__leaf_empty_vtable"]);
+    assert_eq!(group::null_data(), ["__leaf_empty_vtable"]);
+    assert_eq!(leaf::symbol("__leaf_empty_vtable"), None);
+    assert!(!leaf::names().contains(&"__leaf_empty_vtable"));
+}
+
 #[test]
 fn a_group_answers_every_members_name() {
     let missing: crate::Names = group::names()
@@ -144,8 +167,9 @@ fn a_null_address_is_not_published() {
         out.function("_present", 0x1000);
         out.function("_absent", 0);
         out.data("_absent_datum", 0);
+        out.null("_declared_null");
     }
-    assert_eq!(recorded.symbols(), ["_present"]);
+    assert_eq!(recorded.symbols(), ["_present", "_declared_null"]);
 }
 
 #[test]
@@ -162,6 +186,7 @@ fn a_denied_symbol_is_not_published() {
         };
         out.function("_kept", 0x1000);
         out.function("_withheld", 0x2000);
+        out.null("_withheld");
     }
     assert_eq!(recorded.symbols(), ["_kept"]);
 }

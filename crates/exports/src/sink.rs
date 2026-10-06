@@ -24,6 +24,11 @@ impl Exports for NonNull<'_> {
             self.0.data(symbol, address);
         }
     }
+
+    /// Passed through: a null here was declared, not lost.
+    fn null(&mut self, symbol: &str) {
+        self.0.null(symbol);
+    }
 }
 
 /// Publish everything `deny` does not name.
@@ -48,6 +53,12 @@ impl Exports for Denying<'_> {
             self.inner.data(symbol, address);
         }
     }
+
+    fn null(&mut self, symbol: &str) {
+        if !(self.deny)(symbol) {
+            self.inner.null(symbol);
+        }
+    }
 }
 
 /// Everything published, in order, for a test that asks about the whole set.
@@ -59,15 +70,17 @@ impl Exports for Denying<'_> {
 pub struct Recording {
     pub functions: Vec<(String, u64)>,
     pub data: Vec<(String, u64)>,
+    pub nulls: Vec<String>,
 }
 
 impl Recording {
-    /// Every symbol published, function and data together.
+    /// Every symbol published, function, data and null together.
     pub fn symbols(&self) -> Vec<&str> {
         self.functions
             .iter()
             .chain(&self.data)
             .map(|(name, _)| name.as_str())
+            .chain(self.nulls.iter().map(String::as_str))
             .collect()
     }
 }
@@ -80,6 +93,10 @@ impl Exports for Recording {
     fn data(&mut self, symbol: &str, address: u64) {
         self.data.push((symbol.to_string(), address));
     }
+
+    fn null(&mut self, symbol: &str) {
+        self.nulls.push(symbol.to_string());
+    }
 }
 
 /// The loader's library as a sink.
@@ -91,5 +108,9 @@ impl Exports for machish::resolve::SyntheticDylib {
 
     fn data(&mut self, symbol: &str, address: u64) {
         self.define_data(symbol, address);
+    }
+
+    fn null(&mut self, symbol: &str) {
+        self.define_absent(symbol);
     }
 }
