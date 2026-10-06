@@ -558,8 +558,18 @@ pub unsafe extern "C" fn main_np() -> i32 {
     i32::from(*MAIN == id())
 }
 
-/// `int pthread_threadid_np(pthread_t, uint64_t *)`, Darwin's own.
-///
+pub unsafe extern "C" fn cpu_number_np(out: u64) -> i32 {
+    if out == 0 {
+        return err::EINVAL;
+    }
+    #[cfg(target_os = "linux")]
+    let cpu = unsafe { libc::sched_getcpu() }.max(0) as u64;
+    #[cfg(not(target_os = "linux"))]
+    let cpu = 0u64;
+    unsafe { *(out as usize as *mut u64) = cpu };
+    0
+}
+
 /// A null thread means the calling one. macOS supplies its kernel thread id;
 /// other hosts use the id published with the thread's handle.
 ///
@@ -1101,6 +1111,8 @@ exports::exports! {
         "pthread_getname_np" => getname_np,
         "pthread_main_np" => main_np,
         "pthread_threadid_np" => threadid_np,
+        #[cfg(not(target_os = "macos"))]
+        "pthread_cpu_number_np" => cpu_number_np,
         "pthread_mach_thread_np" => mach_thread_np,
         "pthread_yield_np" => yield_np,
         "pthread_set_qos_class_self_np" => set_qos_class_self_np,
