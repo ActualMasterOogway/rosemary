@@ -365,7 +365,7 @@ fn is_sentinel(handler: u64) -> bool {
 /// Darwin's `siginfo_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Siginfo {
+pub struct Siginfo {
     pub(crate) signo: i32,
     errno: i32,
     pub(crate) code: i32,
