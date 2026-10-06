@@ -37,39 +37,11 @@ unsafe extern "C" fn process_info(class: Id, _sel: Sel) -> Id {
     }) as Id
 }
 
-/// The macOS version, as the rest of this runtime states it.
-#[cfg(not(target_os = "macos"))]
+/// The macOS version, as the rest of this runtime states it - the host's own
+/// is not the one a guest is told on any other host.
 fn version() -> (i64, i64, i64) {
     let (major, minor, patch) = darwin::sysctl::macos_version();
     (major as i64, minor as i64, patch as i64)
-}
-
-/// On a Mac this class is Apple's unless the built-in runtime is in use, and
-/// when it is, the honest answer is the host's own.
-#[cfg(target_os = "macos")]
-fn version() -> (i64, i64, i64) {
-    let mut buffer = [0u8; 32];
-    let mut length = buffer.len();
-    // SAFETY: a name this process owns and a buffer described by its length.
-    let rc = unsafe {
-        libc::sysctlbyname(
-            c"kern.osproductversion".as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || length == 0 {
-        return (0, 0, 0);
-    }
-    let text = String::from_utf8_lossy(&buffer[..length.saturating_sub(1)]).into_owned();
-    let mut parts = text.split('.').map(|p| p.parse().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
 }
 
 unsafe extern "C" fn operating_system_version(_receiver: Id, _sel: Sel) -> OperatingSystemVersion {
