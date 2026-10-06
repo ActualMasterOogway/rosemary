@@ -18,6 +18,11 @@ pub fn bootstrap() {
             default_device_with_media_type as *const std::ffi::c_void,
             c"@24@0:8@16",
         );
+        metaclass.replace_method(
+            objc::sel::get("authorizationStatusForMediaType:"),
+            authorization_status_for_media_type as *const std::ffi::c_void,
+            c"q24@0:8@16",
+        );
     });
 }
 
@@ -37,6 +42,22 @@ unsafe extern "C" fn devices_with_media_type(_class: Id, _sel: Sel, _media_type:
 /// `+[AVCaptureDevice defaultDeviceWithMediaType:]`: nil, for the same reason.
 unsafe extern "C" fn default_device_with_media_type(_class: Id, _sel: Sel, _media_type: Id) -> Id {
     std::ptr::null_mut()
+}
+
+/// `AVAuthorizationStatusDenied`.
+const AUTHORIZATION_STATUS_DENIED: isize = 2;
+
+/// `+[AVCaptureDevice authorizationStatusForMediaType:]`.
+///
+/// Without a capture backend, access can never be granted. Denied (rather than
+/// not-determined) keeps callers from waiting on a permission prompt that
+/// `requestAccessForMediaType:completionHandler:` could never resolve.
+unsafe extern "C" fn authorization_status_for_media_type(
+    _class: Id,
+    _sel: Sel,
+    _media_type: Id,
+) -> isize {
+    AUTHORIZATION_STATUS_DENIED
 }
 
 /// The Objective-C class objects exported by AVFoundation.framework.
@@ -99,6 +120,20 @@ mod tests {
             )
         };
         assert!(device.is_null());
+    }
+
+    #[test]
+    fn capture_device_authorization_is_denied() {
+        let implementation: unsafe extern "C" fn(Id, Sel, Id) -> isize =
+            unsafe { std::mem::transmute(class_method("authorizationStatusForMediaType:")) };
+        let status = unsafe {
+            implementation(
+                std::ptr::null_mut(),
+                objc::sel::get("authorizationStatusForMediaType:"),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 2);
     }
 
     #[test]
