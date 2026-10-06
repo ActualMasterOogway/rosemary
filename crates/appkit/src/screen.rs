@@ -38,12 +38,22 @@ pub const INSTANCE_SIZE: usize = size_of::<Screen>();
 /// whether they are on the display they meant to be, so two objects for one
 /// display would make that comparison false on a single-monitor machine.
 fn screen_for(display: u32) -> Id {
-    static SCREENS: std::sync::Mutex<Vec<(u32, usize)>> = std::sync::Mutex::new(Vec::new());
+    screen_object(c"NSScreen", display)
+}
+
+/// [`screen_for`] for any class using the `Screen` layout, which is how
+/// `UIScreen` stands for the same display.
+pub(crate) fn screen_object(class_name: &std::ffi::CStr, display: u32) -> Id {
+    static SCREENS: std::sync::Mutex<Vec<(std::ffi::CString, u32, usize)>> =
+        std::sync::Mutex::new(Vec::new());
     let mut screens = SCREENS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, object)) = screens.iter().find(|(d, _)| *d == display) {
+    if let Some((_, _, object)) = screens
+        .iter()
+        .find(|(n, d, _)| n.as_c_str() == class_name && *d == display)
+    {
         return *object as Id;
     }
-    let class = objc::class::lookup(c"NSScreen").expect("declared before its methods");
+    let class = objc::class::lookup(class_name).expect("declared before its methods");
     // SAFETY: `Screen` is the layout the class was registered with.
     let screen = unsafe { corefoundation::base::allocate::<Screen>(class) };
     // SAFETY: freshly allocated.
@@ -51,11 +61,11 @@ fn screen_for(display: u32) -> Id {
     // Retained forever: a screen a guest can release is one it can make dangle,
     // and these are handed out unowned by `+mainScreen`.
     objc::arc::retain(screen as Id);
-    screens.push((display, screen as usize));
+    screens.push((class_name.to_owned(), display, screen as usize));
     screen as Id
 }
 
-fn display_of(receiver: Id) -> u32 {
+pub(crate) fn display_of(receiver: Id) -> u32 {
     // SAFETY: a screen of this crate's.
     unsafe { (*(receiver as *const Screen)).display as u32 }
 }
@@ -118,7 +128,7 @@ unsafe extern "C" fn maximum_frames_per_second(receiver: Id, _sel: Sel) -> isize
     refresh_rate(receiver).round().max(1.0) as isize
 }
 
-fn refresh_rate(receiver: Id) -> f64 {
+pub(crate) fn refresh_rate(receiver: Id) -> f64 {
     sdl3::video::display_refresh_rate(display_of(receiver))
         .filter(|rate| rate.is_finite() && *rate > 0.0)
         .map(f64::from)

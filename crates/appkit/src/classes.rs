@@ -73,6 +73,9 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSMenu", None, crate::menu::MENU_INSTANCE_SIZE),
     ("NSMenuItem", None, crate::menu::ITEM_INSTANCE_SIZE),
     ("NSScreen", None, crate::screen::INSTANCE_SIZE),
+    // UIKit's screen shares `NSScreen`'s layout; see `crate::displaylink`.
+    ("UIScreen", None, crate::screen::INSTANCE_SIZE),
+    ("CADisplayLink", None, crate::displaylink::INSTANCE_SIZE),
     ("NSEvent", None, crate::nsevent::INSTANCE_SIZE),
     ("NSCursor", None, crate::cursor::CURSOR_INSTANCE_SIZE),
     ("NSColor", None, crate::color::INSTANCE_SIZE),

@@ -32,6 +32,7 @@ pub(crate) mod decode;
 pub mod decor;
 mod define;
 pub mod dialog;
+mod displaylink;
 pub mod dock;
 pub mod event;
 mod font;
@@ -95,6 +96,7 @@ pub fn bootstrap() {
         image::bitmap::install();
         menu::install();
         screen::install();
+        displaylink::install();
         window::install();
         window_controller::install();
         view::install();
@@ -129,6 +131,7 @@ pub fn bootstrap() {
 exports::exports! {
     functions {
         "NSApplicationMain" => application::NSApplicationMain,
+        "CAFrameRateRangeMake" => displaylink::CAFrameRateRangeMake,
         "CGMainDisplayID" => screen::CGMainDisplayID,
         "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
         "CGDisplayBounds" => screen::CGDisplayBounds,
