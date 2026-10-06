@@ -90,22 +90,17 @@ impl Emitter {
                     extra.push(SpirvOperand::IdRef(self.operand(&gradient.0, values)?));
                     extra.push(SpirvOperand::IdRef(self.operand(&gradient.1, values)?));
                 }
-                if let Some(offset) = offset {
-                    // Metal requires a sampling offset to be a compile-time
-                    // constant, which is also the only form Vulkan accepts
-                    // outside a gather.
-                    if !matches!(offset, Operand::Composite { .. } | Operand::Integer { .. }) {
-                        return Err(emission(
-                            "a sampling offset must be a constant to be emitted",
-                        ));
-                    }
+                // Metal requires a sampling offset to be a compile-time
+                // constant, which is also the only form Vulkan accepts outside
+                // a gather.
+                if let Some(offset) = offset.as_ref().map(sampling_offset).transpose()?.flatten() {
                     mask |= if gather.is_some() {
                         self.capability(Capability::ImageGatherExtended)?;
                         ImageOperands::OFFSET
                     } else {
                         ImageOperands::CONST_OFFSET
                     };
-                    extra.push(SpirvOperand::IdRef(self.operand(offset, values)?));
+                    extra.push(SpirvOperand::IdRef(self.operand(&offset, values)?));
                 }
                 match gather {
                     Some(component) => {
@@ -290,5 +285,62 @@ impl Emitter {
             .bitcast(ty, result_id, value)
             .map_err(build_error)?;
         Ok(())
+    }
+}
+
+/// The image operand for a constant sampling offset, or `None` where the
+/// offset is zero and so needs no operand at all. AIR passes an offset with
+/// nearly every sample, almost always `int2(0)`.
+fn sampling_offset(offset: &Operand) -> Result<Option<Operand>, TranslateError> {
+    let offset = signed_offset(offset)?;
+    Ok((!is_zero(&offset)).then_some(offset))
+}
+
+/// A constant offset retyped as Metal's signed `int2`/`int3`; the bits are
+/// unchanged. The IR is signless, and SPIRV-Cross spells an unsigned offset
+/// as a `uint2`, which MSL's `sample` does not accept.
+fn signed_offset(offset: &Operand) -> Result<Operand, TranslateError> {
+    let signed = |ty: &Type| {
+        ty.signed_integer()
+            .ok_or_else(|| emission("a sampling offset must be an integer constant"))
+    };
+    Ok(match offset {
+        Operand::Integer { ty, value } => Operand::Integer {
+            ty: signed(ty)?,
+            value: *value,
+        },
+        Operand::Composite { ty, elements } => Operand::Composite {
+            ty: signed(ty)?,
+            elements: elements
+                .iter()
+                .map(signed_offset)
+                .collect::<Result<_, _>>()?,
+        },
+        // An undefined lane may be given any value, and zero leaves the
+        // sample unchanged.
+        Operand::Undef(Type::Vector { element, lanes }) => signed_offset(&Operand::Composite {
+            ty: Type::Vector {
+                element: element.clone(),
+                lanes: *lanes,
+            },
+            elements: vec![Operand::Undef((**element).clone()); usize::from(*lanes)],
+        })?,
+        Operand::Undef(ty) => Operand::Integer {
+            ty: signed(ty)?,
+            value: 0,
+        },
+        _ => {
+            return Err(emission(
+                "a sampling offset must be a constant to be emitted",
+            ));
+        }
+    })
+}
+
+fn is_zero(offset: &Operand) -> bool {
+    match offset {
+        Operand::Integer { value, .. } => *value == 0,
+        Operand::Composite { elements, .. } => elements.iter().all(is_zero),
+        _ => false,
     }
 }

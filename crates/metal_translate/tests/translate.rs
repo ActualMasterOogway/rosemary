@@ -1837,3 +1837,205 @@ fn mix_is_exact_at_its_endpoints() {
         );
     }
 }
+
+/// Emit a kernel which samples a 2D texture at an explicit level with
+/// `offset`, and return the operands of its `OpImageSampleExplicitLod`
+/// alongside the parsed module.
+fn sample_with_offset(offset: Operand) -> (rspirv::dr::Module, Vec<rspirv::dr::Operand>) {
+    let texture = Type::Texture(TextureType {
+        dimension: TextureDimension::D2,
+        array: false,
+        multisampled: false,
+        depth: false,
+        texel: Box::new(Type::Float { bits: 32 }),
+        signed: false,
+        access: Access::Sample,
+    });
+    let float = Type::Float { bits: 32 };
+    let float2 = Type::Vector {
+        element: Box::new(float.clone()),
+        lanes: 2,
+    };
+    let module = Module {
+        static_initializers: Vec::new(),
+        globals: Vec::new(),
+        functions: vec![Function {
+            name: "sample_offset".to_string(),
+            result: Type::Void,
+            parameters: vec![
+                Parameter {
+                    value: ValueId(0),
+                    name: "source".to_string(),
+                    ty: texture.clone(),
+                },
+                Parameter {
+                    value: ValueId(1),
+                    name: "linear".to_string(),
+                    ty: Type::Sampler,
+                },
+            ],
+            values: vec![
+                texture.clone(),
+                Type::Sampler,
+                Type::Vector {
+                    element: Box::new(float.clone()),
+                    lanes: 4,
+                },
+            ],
+            blocks: vec![Block {
+                id: BlockId(0),
+                name: "entry".to_string(),
+                instructions: vec![Instruction {
+                    result: Some(ValueId(2)),
+                    kind: InstructionKind::TextureSample {
+                        texture: Operand::Value(ValueId(0)),
+                        sampler: Operand::Value(ValueId(1)),
+                        coordinate: Operand::Composite {
+                            ty: float2,
+                            elements: vec![Operand::f32(0.5); 2],
+                        },
+                        array_index: None,
+                        offset: Some(offset),
+                        lod: Some(Operand::f32(0.0)),
+                        gradient: None,
+                        bias: None,
+                        gather: None,
+                    },
+                }],
+                terminator: Terminator::Return(None),
+            }],
+        }],
+        entries: vec![EntryPoint {
+            function: 0,
+            stage: Stage::Kernel,
+            resources: vec![
+                Resource {
+                    argument: 0,
+                    kind: ResourceKind::Texture,
+                    index: 0,
+                    count: 1,
+                    access: Access::Sample,
+                    ty: texture,
+                    name: Some("source".to_string()),
+                },
+                Resource {
+                    argument: 1,
+                    kind: ResourceKind::Sampler,
+                    index: 0,
+                    count: 1,
+                    access: Access::Read,
+                    ty: Type::Sampler,
+                    name: Some("linear".to_string()),
+                },
+            ],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        }],
+    };
+    let artifact = emit_spirv(&module, &TargetProfile::vulkan_1_3())
+        .unwrap()
+        .entries
+        .remove(0);
+    let parsed = rspirv::dr::load_words(&artifact.words).unwrap();
+    let operands = parsed
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .find(|instruction| instruction.class.opcode == Op::ImageSampleExplicitLod)
+        .expect("the sample is emitted")
+        .operands
+        .clone();
+    (parsed, operands)
+}
+
+/// AIR's signless `<2 x i32>` offset, as the importer produces it.
+fn unsigned_int2(x: i32, y: i32) -> Operand {
+    let int = Type::Int {
+        bits: 32,
+        signed: false,
+    };
+    Operand::Composite {
+        ty: Type::Vector {
+            element: Box::new(int.clone()),
+            lanes: 2,
+        },
+        elements: [x, y]
+            .into_iter()
+            .map(|value| Operand::Integer {
+                ty: int.clone(),
+                value: u64::from(value as u32),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn emits_a_sampling_offset_as_a_signed_constant() {
+    use rspirv::dr::Operand as Word;
+    use rspirv::spirv::ImageOperands;
+
+    let (module, operands) = sample_with_offset(unsigned_int2(-1, 2));
+    // Sampled image, coordinate, mask, then the Lod and ConstOffset ids.
+    let [
+        _,
+        _,
+        Word::ImageOperands(mask),
+        Word::IdRef(_),
+        Word::IdRef(offset),
+    ] = operands.as_slice()
+    else {
+        panic!("unexpected sample operands: {operands:?}");
+    };
+    assert_eq!(*mask, ImageOperands::LOD | ImageOperands::CONST_OFFSET);
+
+    let defined = |id: u32| {
+        module
+            .types_global_values
+            .iter()
+            .find(|instruction| instruction.result_id == Some(id))
+            .unwrap()
+    };
+    let composite = defined(*offset);
+    assert_eq!(composite.class.opcode, Op::ConstantComposite);
+    let vector = defined(composite.result_type.unwrap());
+    let Word::IdRef(element) = vector.operands[0] else {
+        panic!("vector has no element type");
+    };
+    // OpTypeInt's operands are its width and signedness.
+    assert_eq!(
+        defined(element).operands,
+        [Word::LiteralBit32(32), Word::LiteralBit32(1)]
+    );
+    let lanes: Vec<_> = composite
+        .operands
+        .iter()
+        .map(|lane| {
+            let Word::IdRef(lane) = lane else {
+                panic!("constant lane is not an id");
+            };
+            defined(*lane).operands[0].clone()
+        })
+        .collect();
+    assert_eq!(lanes, [Word::LiteralBit32(u32::MAX), Word::LiteralBit32(2)]);
+}
+
+#[test]
+fn omits_a_zero_sampling_offset() {
+    use rspirv::dr::Operand as Word;
+    use rspirv::spirv::ImageOperands;
+
+    for offset in [
+        unsigned_int2(0, 0),
+        Operand::Undef(Type::Vector {
+            element: Box::new(Type::u32()),
+            lanes: 2,
+        }),
+    ] {
+        let (_, operands) = sample_with_offset(offset);
+        let [_, _, Word::ImageOperands(mask), Word::IdRef(_)] = operands.as_slice() else {
+            panic!("unexpected sample operands: {operands:?}");
+        };
+        assert_eq!(*mask, ImageOperands::LOD);
+    }
+}
