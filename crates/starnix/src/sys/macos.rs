@@ -481,3 +481,79 @@ pub fn fd_path(fd: RawFd) -> Option<PathBuf> {
 pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
     fd_path(fd)
 }
+
+pub fn errno_location() -> *mut libc::c_int {
+    // SAFETY: takes no argument and returns this thread's own slot.
+    unsafe { libc::__error() }
+}
+
+fn xattr_result(rc: libc::ssize_t) -> io::Result<usize> {
+    usize::try_from(rc).map_err(|_| io::Error::last_os_error())
+}
+
+fn xattr_status(rc: libc::c_int) -> io::Result<()> {
+    match rc {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+fn xattr_options(follow: bool) -> libc::c_int {
+    if follow { 0 } else { libc::XATTR_NOFOLLOW }
+}
+
+pub fn xattr_get_fd(fd: RawFd, name: &CStr, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: a NUL-terminated name and a buffer of its own length.
+    xattr_result(unsafe {
+        libc::fgetxattr(fd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, 0)
+    })
+}
+
+pub fn xattr_get_path(path: &CStr, name: &CStr, buf: &mut [u8], follow: bool) -> io::Result<usize> {
+    // SAFETY: NUL-terminated strings and a buffer of its own length.
+    xattr_result(unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            xattr_options(follow),
+        )
+    })
+}
+
+pub fn xattr_set_fd(fd: RawFd, name: &CStr, value: &[u8]) -> io::Result<()> {
+    // SAFETY: a NUL-terminated name and the value's own bytes.
+    xattr_status(unsafe {
+        libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0)
+    })
+}
+
+pub fn xattr_set_path(path: &CStr, name: &CStr, value: &[u8], follow: bool) -> io::Result<()> {
+    // SAFETY: NUL-terminated strings and the value's own bytes.
+    xattr_status(unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            xattr_options(follow),
+        )
+    })
+}
+
+pub fn xattr_remove_fd(fd: RawFd, name: &CStr) -> io::Result<()> {
+    // SAFETY: a NUL-terminated name.
+    xattr_status(unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) })
+}
+
+pub fn xattr_remove_path(path: &CStr, name: &CStr, follow: bool) -> io::Result<()> {
+    // SAFETY: NUL-terminated strings.
+    xattr_status(unsafe { libc::removexattr(path.as_ptr(), name.as_ptr(), xattr_options(follow)) })
+}
+
+pub fn xattr_is_missing(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ENOATTR)
+}

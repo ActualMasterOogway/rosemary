@@ -156,35 +156,7 @@ pub fn to_host(darwin: i32) -> i32 {
     darwin
 }
 
-/// This thread's `errno` slot.
-///
-/// The one accessor the rest of this project should use. `libc::__errno_location`
-/// exists only on Linux and `libc::__error` only on the BSDs, so a direct call to
-/// either is a portability bug waiting for the other host.
-#[inline(always)]
-pub fn location() -> *mut libc::c_int {
-    // SAFETY: every spelling returns this thread's own slot, live for as long as the
-    // thread is, and none takes an argument.
-    #[cfg(not(target_os = "linux"))]
-    unsafe {
-        libc::__error()
-    }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::__errno_location()
-    }
-}
-
-#[inline(always)]
-pub fn get() -> i32 {
-    // SAFETY: `location` returns a live slot for this thread.
-    unsafe { *location() }
-}
-
-#[inline(always)]
-pub fn set(value: i32) {
-    unsafe { *location() = value };
-}
+pub use starnix::errno::{get, location, set};
 
 /// The guest's own `errno`, in Darwin's numbering, one per thread.
 ///

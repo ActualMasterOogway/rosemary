@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// turns the caller's `ENOENT` into a failure with `errno == 0`. Boost reads
 /// that as "not a not-found error" and throws `status: Success`.
 pub(crate) fn insensitive(path: &CStr) -> Option<CString> {
-    let _errno = crate::errno::Held::now();
+    let _errno = starnix::errno::Held::now();
     let text = path.to_str().ok()?;
     if text.is_empty() {
         return None;
@@ -178,10 +178,10 @@ mod tests {
         let scratch = scratch("errno");
         let absent =
             CString::new(scratch.0.join("Contents").join("nothing").to_str().unwrap()).unwrap();
-        crate::errno::set(libc::ENOENT);
+        starnix::errno::set(libc::ENOENT);
         assert_eq!(insensitive(&absent), None);
-        assert_eq!(crate::errno::get(), libc::ENOENT);
-        crate::errno::set(0);
+        assert_eq!(starnix::errno::get(), libc::ENOENT);
+        starnix::errno::set(0);
     }
 
     #[test]

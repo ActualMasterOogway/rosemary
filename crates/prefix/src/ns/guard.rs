@@ -18,7 +18,7 @@ struct Guard {
 
 fn guard() -> Option<&'static Guard> {
     static GUARD: LazyLock<Option<Guard>> = LazyLock::new(|| {
-        let _errno = crate::errno::Held::now();
+        let _errno = starnix::errno::Held::now();
         let prefix = super::current()?;
         let provisioned = crate::provision::load(prefix).ok()?;
         let drive = prefix.drive();
@@ -59,7 +59,7 @@ pub fn may_write_at(dirfd: libc::c_int, host: &CStr) -> Result<(), libc::c_int> 
     if super::current().is_none() {
         return Ok(());
     }
-    let _errno = crate::errno::Held::now();
+    let _errno = starnix::errno::Held::now();
     let Some(guard) = guard() else {
         return Ok(());
     };

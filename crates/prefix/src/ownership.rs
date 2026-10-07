@@ -186,7 +186,7 @@ struct View {
 
 fn view() -> Option<&'static View> {
     static VIEW: LazyLock<Option<View>> = LazyLock::new(|| {
-        let _errno = crate::errno::Held::now();
+        let _errno = starnix::errno::Held::now();
         let prefix = crate::ns::current()?;
         let drive = prefix.drive();
         let mut drives = vec![drive.clone()];
@@ -248,7 +248,7 @@ pub fn of(found: Found<'_>, dev: u64, ino: u64) -> Option<Owner> {
     if !on_drive(dev) {
         return None;
     }
-    let _errno = crate::errno::Held::now();
+    let _errno = starnix::errno::Held::now();
     if records_exist()
         && let Some((uid, gid)) = record::read(found)
     {
@@ -274,7 +274,7 @@ pub fn record(found: Found<'_>, dev: u64, owner: Option<(u32, u32)>) -> std::io:
     if !inside(found, dev) {
         return Err(std::io::ErrorKind::Unsupported.into());
     }
-    let _errno = crate::errno::Held::now();
+    let _errno = starnix::errno::Held::now();
     if owner.is_some()
         && let Some(prefix) = crate::ns::current()
     {
@@ -295,7 +295,7 @@ pub fn inside(found: Found<'_>, dev: u64) -> bool {
     if crate::ns::current().is_none() || !on_drive(dev) {
         return false;
     }
-    let _errno = crate::errno::Held::now();
+    let _errno = starnix::errno::Held::now();
     let (Some(view), Some(path)) = (view(), host_path_of(found)) else {
         return false;
     };
@@ -360,8 +360,7 @@ fn descriptor_path(fd: c_int) -> Option<PathBuf> {
 
 mod record {
     use super::{Found, RECORD};
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use std::ffi::{CString, c_int};
+    use starnix::xattr::{self, Target};
 
     fn parse(value: &[u8]) -> Option<(u32, u32)> {
         let text = std::str::from_utf8(value).ok()?;
@@ -369,180 +368,37 @@ mod record {
         Some((uid.parse().ok()?, gid.parse().ok()?))
     }
 
-    /// A path relative to a descriptor, as one the `*xattr` calls take.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn joined(dirfd: c_int, path: &std::ffi::CStr) -> Option<CString> {
-        if path.to_bytes().first() == Some(&b'/') || dirfd == libc::AT_FDCWD {
-            return Some(path.to_owned());
+    fn target(found: Found<'_>) -> Target<'_> {
+        match found {
+            Found::Fd(fd) => Target::Fd(fd),
+            Found::Path(path, follow) => Target::Path(path, follow),
+            Found::At(dirfd, path, follow) => Target::At(dirfd, path, follow),
         }
-        let dir = starnix::fd::path(dirfd)?;
-        CString::new([dir.as_os_str().as_encoded_bytes(), b"/", path.to_bytes()].concat()).ok()
     }
 
-    #[cfg(target_os = "linux")]
     pub fn read(found: Found<'_>) -> Option<(u32, u32)> {
         let mut value = [0u8; 32];
-        let (buf, size) = (value.as_mut_ptr().cast(), value.len());
-        // SAFETY: a NUL-terminated name and path, and a buffer of `size`.
-        let got = unsafe {
-            match found {
-                Found::Fd(fd) => libc::fgetxattr(fd, RECORD.as_ptr(), buf, size),
-                Found::Path(path, follow) | Found::At(libc::AT_FDCWD, path, follow) => match follow
-                {
-                    true => libc::getxattr(path.as_ptr(), RECORD.as_ptr(), buf, size),
-                    false => libc::lgetxattr(path.as_ptr(), RECORD.as_ptr(), buf, size),
-                },
-                Found::At(dirfd, path, follow) => {
-                    let path = joined(dirfd, path)?;
-                    match follow {
-                        true => libc::getxattr(path.as_ptr(), RECORD.as_ptr(), buf, size),
-                        false => libc::lgetxattr(path.as_ptr(), RECORD.as_ptr(), buf, size),
-                    }
-                }
-            }
-        };
-        parse(value.get(..usize::try_from(got).ok()?)?)
+        let got = xattr::get(target(found), RECORD, &mut value).ok()?;
+        parse(value.get(..got)?)
     }
 
-    #[cfg(target_os = "linux")]
     pub fn write(found: Found<'_>, owner: Option<(u32, u32)>) -> std::io::Result<()> {
-        let value = owner.map(|(uid, gid)| format!("{uid}:{gid}"));
-        let path;
-        // SAFETY: a NUL-terminated name and path, and the value's own bytes.
-        let rc = unsafe {
-            let (fd, at, follow) = match found {
-                Found::Fd(fd) => (Some(fd), None, true),
-                Found::Path(p, follow) => (None, Some(p), follow),
-                Found::At(dirfd, p, follow) => {
-                    path = joined(dirfd, p).ok_or(std::io::ErrorKind::InvalidInput)?;
-                    (None, Some(path.as_c_str()), follow)
-                }
-            };
-            match (fd, at, &value) {
-                (Some(fd), _, Some(v)) => {
-                    libc::fsetxattr(fd, RECORD.as_ptr(), v.as_ptr().cast(), v.len(), 0)
-                }
-                (Some(fd), _, None) => libc::fremovexattr(fd, RECORD.as_ptr()),
-                (None, Some(p), Some(v)) => match follow {
-                    true => {
-                        libc::setxattr(p.as_ptr(), RECORD.as_ptr(), v.as_ptr().cast(), v.len(), 0)
-                    }
-                    false => {
-                        libc::lsetxattr(p.as_ptr(), RECORD.as_ptr(), v.as_ptr().cast(), v.len(), 0)
-                    }
-                },
-                (None, Some(p), None) => match follow {
-                    true => libc::removexattr(p.as_ptr(), RECORD.as_ptr()),
-                    false => libc::lremovexattr(p.as_ptr(), RECORD.as_ptr()),
-                },
-                (None, None, _) => unreachable!("every arm names a file"),
+        match owner {
+            Some((uid, gid)) => {
+                xattr::set(target(found), RECORD, format!("{uid}:{gid}").as_bytes())
             }
-        };
-        match rc {
-            0 => Ok(()),
-            _ => match std::io::Error::last_os_error() {
-                // Forgetting a record that was never made is done already.
-                e if value.is_none() && e.raw_os_error() == Some(libc::ENODATA) => Ok(()),
-                e => Err(e),
+            // Forgetting a record that was never made is done already.
+            None => match xattr::remove(target(found), RECORD) {
+                Err(e) if xattr::is_missing(&e) => Ok(()),
+                other => other,
             },
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn read(found: Found<'_>) -> Option<(u32, u32)> {
-        let mut value = [0u8; 32];
-        let path;
-        let got = unsafe {
-            match found {
-                Found::Fd(fd) => libc::fgetxattr(
-                    fd,
-                    RECORD.as_ptr(),
-                    value.as_mut_ptr().cast(),
-                    value.len(),
-                    0,
-                    0,
-                ),
-                Found::Path(p, follow) => libc::getxattr(
-                    p.as_ptr(),
-                    RECORD.as_ptr(),
-                    value.as_mut_ptr().cast(),
-                    value.len(),
-                    0,
-                    if follow { 0 } else { libc::XATTR_NOFOLLOW },
-                ),
-                Found::At(dirfd, p, follow) => {
-                    path = joined(dirfd, p)?;
-                    libc::getxattr(
-                        path.as_ptr(),
-                        RECORD.as_ptr(),
-                        value.as_mut_ptr().cast(),
-                        value.len(),
-                        0,
-                        if follow { 0 } else { libc::XATTR_NOFOLLOW },
-                    )
-                }
-            }
-        };
-        parse(value.get(..usize::try_from(got).ok()?)?)
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn write(found: Found<'_>, owner: Option<(u32, u32)>) -> std::io::Result<()> {
-        let value = owner.map(|(uid, gid)| format!("{uid}:{gid}"));
-        let path;
-        let rc = unsafe {
-            let (fd, at, follow) = match found {
-                Found::Fd(fd) => (Some(fd), None, true),
-                Found::Path(p, follow) => (None, Some(p), follow),
-                Found::At(dirfd, p, follow) => {
-                    path = joined(dirfd, p).ok_or(std::io::ErrorKind::InvalidInput)?;
-                    (None, Some(path.as_c_str()), follow)
-                }
-            };
-            let options = if follow { 0 } else { libc::XATTR_NOFOLLOW };
-            match (fd, at, &value) {
-                (Some(fd), _, Some(v)) => {
-                    libc::fsetxattr(fd, RECORD.as_ptr(), v.as_ptr().cast(), v.len(), 0, 0)
-                }
-                (Some(fd), _, None) => libc::fremovexattr(fd, RECORD.as_ptr(), 0),
-                (None, Some(p), Some(v)) => libc::setxattr(
-                    p.as_ptr(),
-                    RECORD.as_ptr(),
-                    v.as_ptr().cast(),
-                    v.len(),
-                    0,
-                    options,
-                ),
-                (None, Some(p), None) => libc::removexattr(p.as_ptr(), RECORD.as_ptr(), options),
-                _ => unreachable!("every arm names a file"),
-            }
-        };
-        match rc {
-            0 => Ok(()),
-            _ => match std::io::Error::last_os_error() {
-                e if value.is_none() && e.raw_os_error() == Some(libc::ENOATTR) => Ok(()),
-                e => Err(e),
-            },
-        }
-    }
-
-    // FIXME (ACCURACY): FreeBSD keeps these with `extattr_*`, which is not
-    // wired up yet; a guest's `chown` there is told it worked and forgotten.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub fn read(_: Found<'_>) -> Option<(u32, u32)> {
-        let _ = parse;
-        None
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub fn write(_: Found<'_>, _: Option<(u32, u32)>) -> std::io::Result<()> {
-        let _ = RECORD;
-        Err(std::io::ErrorKind::Unsupported.into())
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::ffi::CString;
 
         #[test]
         fn a_record_is_two_ids() {
@@ -591,7 +447,7 @@ mod record {
 /// knows whether finding one is worth a syscall.
 pub fn on_drive(dev: u64) -> bool {
     static DEV: LazyLock<Option<u64>> = LazyLock::new(|| {
-        let _errno = crate::errno::Held::now();
+        let _errno = starnix::errno::Held::now();
         Some(std::fs::metadata(crate::ns::current()?.drive()).ok()?.dev())
     });
     *DEV == Some(dev)

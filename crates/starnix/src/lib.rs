@@ -13,13 +13,17 @@
 //!   process's own descriptors, mappings and audit ids.
 //! * [`system`] - the machine: memory, CPU ticks, cores, the CPU's name.
 //! * [`socket`] - who is on the other end of a Unix socket.
+//! * [`errno`] - this thread's `errno` slot.
+//! * [`xattr`] - extended attributes by descriptor or path.
 //! * [`fd`] - a path that reaches what a descriptor has open.
 //! * [`signal`] - what the kernel hands a signal handler.
 
+pub mod errno;
 pub mod fd;
 pub mod process;
 pub mod signal;
 pub mod socket;
 pub mod system;
+pub mod xattr;
 
 mod sys;

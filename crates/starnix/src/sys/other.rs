@@ -87,3 +87,41 @@ pub fn fd_path(_fd: RawFd) -> Option<PathBuf> {
 pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
     fd_path(fd)
 }
+
+pub fn errno_location() -> *mut libc::c_int {
+    // SAFETY: takes no argument and returns this thread's own slot.
+    unsafe { libc::__error() }
+}
+
+pub fn xattr_get_fd(_: RawFd, _: &std::ffi::CStr, _: &mut [u8]) -> io::Result<usize> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_get_path(
+    _: &std::ffi::CStr,
+    _: &std::ffi::CStr,
+    _: &mut [u8],
+    _: bool,
+) -> io::Result<usize> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_set_fd(_: RawFd, _: &std::ffi::CStr, _: &[u8]) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_set_path(_: &std::ffi::CStr, _: &std::ffi::CStr, _: &[u8], _: bool) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_remove_fd(_: RawFd, _: &std::ffi::CStr) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_remove_path(_: &std::ffi::CStr, _: &std::ffi::CStr, _: bool) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+pub fn xattr_is_missing(_: &io::Error) -> bool {
+    false
+}
