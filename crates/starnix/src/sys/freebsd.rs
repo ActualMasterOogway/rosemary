@@ -299,3 +299,7 @@ pub fn fd_path(fd: RawFd) -> Option<PathBuf> {
     let path = text(&info.kf_path);
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
+
+pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
+    fd_path(fd)
+}

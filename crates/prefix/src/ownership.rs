@@ -354,25 +354,8 @@ fn host_path_of(found: Found<'_>) -> Option<PathBuf> {
     Some(directory.join(path))
 }
 
-#[cfg(target_os = "linux")]
 fn descriptor_path(fd: c_int) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
-}
-
-#[cfg(target_os = "macos")]
-fn descriptor_path(fd: c_int) -> Option<PathBuf> {
-    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
-    if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
-        return None;
-    }
-    let path = unsafe { std::ffi::CStr::from_ptr(path.as_ptr()) };
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
-}
-
-// FreeBSD cannot yet name a base file reached only through a descriptor.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn descriptor_path(_fd: c_int) -> Option<PathBuf> {
-    None
+    starnix::fd::resolved(fd)
 }
 
 mod record {
@@ -387,14 +370,13 @@ mod record {
     }
 
     /// A path relative to a descriptor, as one the `*xattr` calls take.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn joined(dirfd: c_int, path: &std::ffi::CStr) -> Option<CString> {
         if path.to_bytes().first() == Some(&b'/') || dirfd == libc::AT_FDCWD {
             return Some(path.to_owned());
         }
-        let mut joined = format!("/proc/self/fd/{dirfd}/").into_bytes();
-        joined.extend_from_slice(path.to_bytes());
-        CString::new(joined).ok()
+        let dir = starnix::fd::path(dirfd)?;
+        CString::new([dir.as_os_str().as_encoded_bytes(), b"/", path.to_bytes()].concat()).ok()
     }
 
     #[cfg(target_os = "linux")]
@@ -464,15 +446,6 @@ mod record {
                 e => Err(e),
             },
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn joined(dirfd: c_int, path: &std::ffi::CStr) -> Option<CString> {
-        if path.to_bytes().first() == Some(&b'/') || dirfd == libc::AT_FDCWD {
-            return Some(path.to_owned());
-        }
-        let dir = super::descriptor_path(dirfd)?;
-        CString::new([dir.as_os_str().as_encoded_bytes(), b"/", path.to_bytes()].concat()).ok()
     }
 
     #[cfg(target_os = "macos")]

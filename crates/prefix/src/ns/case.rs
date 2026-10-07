@@ -1,4 +1,5 @@
 use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 /// `path`, spelled the way the filesystem spells it, or `None` if no
@@ -61,17 +62,10 @@ pub(crate) fn insensitive_at(dirfd: libc::c_int, path: &CStr) -> Option<CString>
     if path.to_bytes().starts_with(b"/") || dirfd == libc::AT_FDCWD {
         return insensitive(path);
     }
-    // FIXME (PORTABILITY): port this functionality to starnix?
-    #[cfg(target_os = "macos")]
-    let mut anchored = {
-        use std::os::unix::ffi::OsStrExt;
-        let directory = super::guard::directory_of(dirfd)?;
-        let mut bytes = directory.as_os_str().as_bytes().to_vec();
-        bytes.push(b'/');
-        bytes
-    };
-    #[cfg(not(target_os = "macos"))]
-    let mut anchored = format!("/proc/self/fd/{dirfd}/").into_bytes();
+    let mut anchored = super::guard::directory_of(dirfd)?
+        .into_os_string()
+        .into_vec();
+    anchored.push(b'/');
     anchored.extend_from_slice(path.to_bytes());
     insensitive(&CString::new(anchored).ok()?)
 }

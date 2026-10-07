@@ -477,3 +477,7 @@ pub fn fd_path(fd: RawFd) -> Option<PathBuf> {
     let path = CStr::from_bytes_until_nul(&path).ok()?;
     Some(PathBuf::from(path.to_string_lossy().into_owned()))
 }
+
+pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
+    fd_path(fd)
+}

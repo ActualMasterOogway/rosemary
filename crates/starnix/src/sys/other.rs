@@ -83,3 +83,7 @@ pub fn peer(fd: RawFd) -> Option<Peer> {
 pub fn fd_path(_fd: RawFd) -> Option<PathBuf> {
     None
 }
+
+pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
+    fd_path(fd)
+}

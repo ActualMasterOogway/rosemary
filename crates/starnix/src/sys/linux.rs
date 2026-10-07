@@ -349,3 +349,7 @@ pub fn peer(fd: RawFd) -> Option<Peer> {
 pub fn fd_path(fd: RawFd) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/proc/self/fd/{fd}")))
 }
+
+pub fn fd_target(fd: RawFd) -> Option<PathBuf> {
+    std::fs::read_link(fd_path(fd)?).ok()
+}
