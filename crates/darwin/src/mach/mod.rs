@@ -146,6 +146,7 @@ exports::exports! {
 
         "vm_region_64" => vm::vm_region_64,
         "vm_region_recurse_64" | "mach_vm_region_recurse" => vm::vm_region_recurse_64,
+        "vm_allocate" | "mach_vm_allocate" => vm::vm_allocate,
         "vm_deallocate" | "mach_vm_deallocate" => vm::vm_deallocate,
         "mach_vm_region" => vm::vm_region_64,
         "vm_read_overwrite" => vm::vm_read_overwrite,

@@ -5,6 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use static_init::dynamic;
 
+use crate::mach::space::{self, Name};
+use crate::mach::wire::Receiver;
+
 /// `struct kevent`, which the guest both fills in and reads back.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -27,6 +30,7 @@ const _: () = {
 const EVFILT_READ: i16 = -1;
 const EVFILT_WRITE: i16 = -2;
 const EVFILT_SIGNAL: i16 = -6;
+const EVFILT_MACHPORT: i16 = -8;
 const EVFILT_USER: i16 = -10;
 
 const EV_ADD: u16 = 0x0001;
@@ -34,6 +38,7 @@ const EV_DELETE: u16 = 0x0002;
 const EV_ENABLE: u16 = 0x0004;
 const EV_DISABLE: u16 = 0x0008;
 const EV_ONESHOT: u16 = 0x0010;
+const EV_CLEAR: u16 = 0x0020;
 const EV_RECEIPT: u16 = 0x0040;
 const EV_DISPATCH: u16 = 0x0080;
 const EV_ERROR: u16 = 0x4000;
@@ -41,6 +46,10 @@ const EV_EOF: u16 = 0x8000;
 
 /// `NOTE_TRIGGER`, the one `fflags` bit `EVFILT_USER` acts on.
 const NOTE_TRIGGER: u32 = 0x0100_0000;
+
+/// `MACH_RCV_MSG` in an `EVFILT_MACHPORT` registration's `fflags`: receive the
+/// message into the event. Only `kevent64`/`kevent_qos` have room for it.
+const MACH_RCV_MSG: u32 = 0x0000_0002;
 
 /// What one `EV_ADD` recorded.
 #[derive(Clone, Copy)]
@@ -76,6 +85,11 @@ impl Registration {
 
 struct Queue<B> {
     registrations: HashMap<(usize, i16), Registration>,
+    /// The Mach receive sockets the backend watches for `EV_CLEAR`
+    /// `EVFILT_MACHPORT` registrations, by descriptor. Holding the receiver
+    /// keeps the descriptor open, so its number cannot be reused while the
+    /// host still watches it.
+    port_watch: HashMap<c_int, Arc<Receiver>>,
     /// Triggered `EVFILT_USER` idents, in the order they were triggered, and
     /// the set form of the same thing - a second trigger before the first is
     /// delivered is one event, not two.
@@ -98,6 +112,7 @@ impl<B> Queue<B> {
     fn new(backend: B) -> Self {
         Self {
             registrations: HashMap::new(),
+            port_watch: HashMap::new(),
             triggered: VecDeque::new(),
             triggered_set: HashSet::new(),
             backend: Arc::new(backend),
@@ -105,12 +120,36 @@ impl<B> Queue<B> {
     }
 }
 
+/// What a descriptor is watched for, as `POLLIN`/`POLLOUT` bits: `level` for
+/// plain registrations, `edge` for `EV_CLEAR` ones.
+///
+/// Edges come from the host's own edge triggering. Rebuilding them from level
+/// readiness would lose the data that arrives after a caller drains a
+/// descriptor and before its next `kevent`.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Interest {
+    level: i16,
+    edge: i16,
+}
+
+/// Where a ready descriptor was reported from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The private wakeup channel.
+    Wake,
+    Level,
+    Edge,
+    /// A Mach receive socket of an `EV_CLEAR` `EVFILT_MACHPORT`, which is never
+    /// one of the guest's descriptors.
+    Port,
+}
+
 /// A ready descriptor reported by one concrete host readiness mechanism.
 #[derive(Clone, Copy)]
 struct Ready {
     fd: c_int,
     revents: i16,
-    wake: bool,
+    source: Source,
 }
 
 /// The host-specific part of a kqueue. `Queue<B>` is monomorphized with the
@@ -122,11 +161,18 @@ trait ReadinessBackend: Sized {
     /// The descriptor `wake` writes, for a signal handler to write.
     fn wake_descriptor(&self) -> c_int;
     fn drain_wake(&self);
-    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int>;
+    /// Whether the host can report edges, which `EV_CLEAR` needs.
+    const EDGE: bool;
+    fn update(&self, fd: c_int, before: Interest, after: Interest) -> Result<(), c_int>;
+    /// Watch, or stop watching, a Mach receive socket for edges.
+    fn watch_port(&self, fd: c_int, watch: bool) -> Result<(), c_int>;
+    /// `ports` are Mach receive sockets that end the wait when readable but
+    /// are never reported: `kevent` asks the ports themselves afterwards.
     fn wait(
         &self,
         queue: c_int,
         registrations: &HashMap<(usize, i16), Registration>,
+        ports: &[c_int],
         capacity: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int>;
@@ -159,18 +205,34 @@ impl ReadinessBackend for PollBackend {
     fn drain_wake(&self) {
         drain_fd(self.wake)
     }
-    fn update(&self, _: c_int, _: i16, _: i16) -> Result<(), c_int> {
-        Ok(())
+    // `poll` has no edges, and an `EV_CLEAR` answered with level readiness
+    // spins a caller that only reads on a change.
+    const EDGE: bool = false;
+    fn update(&self, _: c_int, _: Interest, after: Interest) -> Result<(), c_int> {
+        match after.edge {
+            0 => Ok(()),
+            _ => Err(libc::EINVAL),
+        }
+    }
+    fn watch_port(&self, _: c_int, _: bool) -> Result<(), c_int> {
+        Err(libc::EINVAL)
     }
 
     fn wait(
         &self,
         queue: c_int,
         registrations: &HashMap<(usize, i16), Registration>,
+        ports: &[c_int],
         _: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int> {
         let mut watched = poll_set(queue, registrations);
+        let registered = watched.len();
+        watched.extend(ports.iter().map(|fd| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }));
         let ready =
             unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, timeout) };
         if ready < 0 {
@@ -178,11 +240,15 @@ impl ReadinessBackend for PollBackend {
         }
         Ok(watched
             .into_iter()
+            .take(registered)
             .filter(|entry| entry.revents != 0)
             .map(|entry| Ready {
                 fd: entry.fd,
                 revents: entry.revents,
-                wake: entry.fd == queue,
+                source: match entry.fd == queue {
+                    true => Source::Wake,
+                    false => Source::Level,
+                },
             })
             .collect())
     }
@@ -191,6 +257,10 @@ impl ReadinessBackend for PollBackend {
 #[cfg(target_os = "linux")]
 struct EpollBackend {
     epoll: c_int,
+    /// A second epoll holding the `EPOLLET` entries, itself watched by
+    /// `epoll`: one epoll entry per descriptor cannot be level for one filter
+    /// and edge for the other.
+    edge: c_int,
     wake: c_int,
     poll_only: Mutex<HashSet<c_int>>,
 }
@@ -201,28 +271,49 @@ impl Drop for EpollBackend {
         // This is the private wakeup descriptor, never the guest-visible
         // kqueue descriptor (which the guest owns and may already have closed).
         forget_waker(self.wake);
-        unsafe { libc::close(self.wake) };
+        unsafe {
+            libc::close(self.wake);
+            libc::close(self.edge);
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 impl EpollBackend {
     const WAKE_TOKEN: u64 = u64::MAX;
+    /// The token `edge` itself is registered in `epoll` under.
+    const EDGE_TOKEN: u64 = u64::MAX - 1;
+    /// Set in an `edge` entry's token for a Mach receive socket.
+    const PORT_BIT: u64 = 1 << 32;
 
-    fn event(fd: c_int, interest: i16) -> libc::epoll_event {
-        libc::epoll_event {
-            events: ((interest & libc::POLLIN != 0) as u32 * libc::EPOLLIN as u32)
-                | ((interest & libc::POLLOUT != 0) as u32 * libc::EPOLLOUT as u32),
-            u64: fd as u64,
-        }
-    }
-
-    fn ctl(epoll: c_int, op: c_int, fd: c_int, interest: i16) -> Result<(), c_int> {
-        let mut event = Self::event(fd, interest);
+    fn ctl(epoll: c_int, op: c_int, fd: c_int, events: u32, token: u64) -> Result<(), c_int> {
+        let mut event = libc::epoll_event { events, u64: token };
         if unsafe { libc::epoll_ctl(epoll, op, fd, &raw mut event) } < 0 {
             Err(crate::errno::get())
         } else {
             Ok(())
+        }
+    }
+
+    fn events(interest: i16) -> u32 {
+        ((interest & libc::POLLIN != 0) as u32 * libc::EPOLLIN as u32)
+            | ((interest & libc::POLLOUT != 0) as u32 * libc::EPOLLOUT as u32)
+    }
+
+    /// Move `fd`'s entry in `epoll` from `before` to `after`.
+    fn diff(epoll: c_int, fd: c_int, before: i16, after: i16, extra: u32) -> Result<(), c_int> {
+        let events = Self::events(after) | extra;
+        let result = match (before != 0, after != 0) {
+            (false, true) => Self::ctl(epoll, libc::EPOLL_CTL_ADD, fd, events, fd as u64),
+            (true, true) => Self::ctl(epoll, libc::EPOLL_CTL_MOD, fd, events, fd as u64),
+            (true, false) => Self::ctl(epoll, libc::EPOLL_CTL_DEL, fd, 0, 0),
+            (false, false) => Ok(()),
+        };
+        match result {
+            // Closing a watched FD removes it from epoll. Keep Darwin's
+            // deletion semantics even if the host has already done that work.
+            Err(errno) if after == 0 && matches!(errno, libc::ENOENT | libc::EBADF) => Ok(()),
+            other => other,
         }
     }
 }
@@ -234,31 +325,51 @@ impl ReadinessBackend for EpollBackend {
         if epoll < 0 {
             return Err(crate::errno::get());
         }
-        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if wake < 0 {
-            unsafe { libc::close(epoll) };
-            return Err(crate::errno::get());
-        }
-        let mut event = libc::epoll_event {
-            events: libc::EPOLLIN as u32,
-            u64: Self::WAKE_TOKEN,
-        };
-        if unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_ADD, wake, &raw mut event) } < 0 {
+        let edge = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if edge < 0 {
             let errno = crate::errno::get();
-            unsafe {
-                libc::close(wake);
-                libc::close(epoll)
-            };
+            unsafe { libc::close(epoll) };
             return Err(errno);
         }
-        Ok((
-            Self {
-                epoll,
-                wake,
-                poll_only: Mutex::new(HashSet::new()),
-            },
+        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if wake < 0 {
+            let errno = crate::errno::get();
+            unsafe {
+                libc::close(edge);
+                libc::close(epoll);
+            }
+            return Err(errno);
+        }
+        // From here `Drop` closes `wake` and `edge`; only the guest-visible
+        // epoll needs closing by hand on failure.
+        let backend = Self {
             epoll,
-        ))
+            edge,
+            wake,
+            poll_only: Mutex::new(HashSet::new()),
+        };
+        let registered = Self::ctl(
+            epoll,
+            libc::EPOLL_CTL_ADD,
+            wake,
+            libc::EPOLLIN as u32,
+            Self::WAKE_TOKEN,
+        )
+        .and_then(|()| {
+            Self::ctl(
+                epoll,
+                libc::EPOLL_CTL_ADD,
+                edge,
+                libc::EPOLLIN as u32,
+                Self::EDGE_TOKEN,
+            )
+        });
+        if let Err(errno) = registered {
+            drop(backend);
+            unsafe { libc::close(epoll) };
+            return Err(errno);
+        }
+        Ok((backend, epoll))
     }
 
     fn wake(&self) {
@@ -271,32 +382,46 @@ impl ReadinessBackend for EpollBackend {
         drain_fd(self.wake)
     }
 
-    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int> {
-        if before == after {
+    const EDGE: bool = true;
+
+    fn update(&self, fd: c_int, before: Interest, after: Interest) -> Result<(), c_int> {
+        if before.edge != after.edge {
+            match Self::diff(self.edge, fd, before.edge, after.edge, libc::EPOLLET as u32) {
+                // A regular file, which epoll refuses. It is always ready, so
+                // it has no edges to report; refused rather than reported
+                // once and then never.
+                Err(libc::EPERM) => return Err(libc::EINVAL),
+                other => other?,
+            }
+        }
+        if before.level == after.level {
             return Ok(());
         }
         let mut poll_only = self.poll_only.lock().unwrap_or_else(|e| e.into_inner());
         if poll_only.contains(&fd) {
-            if after == 0 {
+            if after.level == 0 {
                 poll_only.remove(&fd);
             }
             return Ok(());
         }
-        let result = match (before != 0, after != 0) {
-            (false, true) => Self::ctl(self.epoll, libc::EPOLL_CTL_ADD, fd, after),
-            (true, true) => Self::ctl(self.epoll, libc::EPOLL_CTL_MOD, fd, after),
-            (true, false) => Self::ctl(self.epoll, libc::EPOLL_CTL_DEL, fd, 0),
-            (false, false) => Ok(()),
-        };
-        match result {
-            Err(errno) if before == 0 && errno == libc::EPERM => {
+        match Self::diff(self.epoll, fd, before.level, after.level, 0) {
+            Err(errno) if before.level == 0 && errno == libc::EPERM => {
                 poll_only.insert(fd);
                 Ok(())
             }
-            // Closing a watched FD removes it from epoll. Keep Darwin's
-            // deletion semantics even if the host has already done that work.
-            Err(errno) if after == 0 && matches!(errno, libc::ENOENT | libc::EBADF) => Ok(()),
             other => other,
+        }
+    }
+
+    fn watch_port(&self, fd: c_int, watch: bool) -> Result<(), c_int> {
+        let token = fd as u64 | Self::PORT_BIT;
+        let events = (libc::EPOLLIN | libc::EPOLLET) as u32;
+        match watch {
+            true => Self::ctl(self.edge, libc::EPOLL_CTL_ADD, fd, events, token),
+            false => match Self::ctl(self.edge, libc::EPOLL_CTL_DEL, fd, 0, 0) {
+                Err(libc::ENOENT | libc::EBADF) => Ok(()),
+                other => other,
+            },
         }
     }
 
@@ -304,6 +429,7 @@ impl ReadinessBackend for EpollBackend {
         &self,
         queue: c_int,
         registrations: &HashMap<(usize, i16), Registration>,
+        ports: &[c_int],
         capacity: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int> {
@@ -313,17 +439,17 @@ impl ReadinessBackend for EpollBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if poll_only.is_empty() {
+        if poll_only.is_empty() && ports.is_empty() {
             return self.wait_epoll(queue, capacity, timeout);
         }
-        let mut watched = Vec::with_capacity(poll_only.len() + 1);
+        let mut watched = Vec::with_capacity(poll_only.len() + ports.len() + 1);
         watched.push(libc::pollfd {
             fd: queue,
             events: libc::POLLIN,
             revents: 0,
         });
         for fd in &poll_only {
-            let interest = interest_for(registrations, *fd);
+            let interest = interest_for(registrations, *fd).level;
             if interest != 0 {
                 watched.push(libc::pollfd {
                     fd: *fd,
@@ -332,15 +458,21 @@ impl ReadinessBackend for EpollBackend {
                 });
             }
         }
+        let registered = watched.len();
+        watched.extend(ports.iter().map(|fd| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }));
         if unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, timeout) } < 0 {
             return Err(crate::errno::get());
         }
-        for entry in watched.iter().skip(1) {
+        for entry in watched[..registered].iter().skip(1) {
             if entry.revents != 0 {
                 result.push(Ready {
                     fd: entry.fd,
                     revents: entry.revents,
-                    wake: false,
+                    source: Source::Level,
                 });
             }
         }
@@ -363,21 +495,51 @@ impl EpollBackend {
         capacity: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int> {
-        let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; capacity.max(1)];
+        // One slot more than the caller wants, so the wakeup or the edge
+        // epoll cannot crowd out a ready descriptor.
+        let mut result = Vec::new();
+        for event in Self::collect(queue, capacity + 1, timeout)? {
+            match event.u64 {
+                Self::WAKE_TOKEN => result.push(Ready {
+                    fd: self.wake,
+                    revents: libc::POLLIN,
+                    source: Source::Wake,
+                }),
+                Self::EDGE_TOKEN => {
+                    for edge in Self::collect(self.edge, capacity.max(1), 0)? {
+                        result.push(Ready {
+                            fd: edge.u64 as u32 as c_int,
+                            revents: epoll_revents(edge.events),
+                            source: match edge.u64 & Self::PORT_BIT != 0 {
+                                true => Source::Port,
+                                false => Source::Edge,
+                            },
+                        });
+                    }
+                }
+                token => result.push(Ready {
+                    fd: token as c_int,
+                    revents: epoll_revents(event.events),
+                    source: Source::Level,
+                }),
+            }
+        }
+        Ok(result)
+    }
+
+    fn collect(
+        epoll: c_int,
+        capacity: usize,
+        timeout: c_int,
+    ) -> Result<Vec<libc::epoll_event>, c_int> {
+        let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; capacity];
         let count =
-            unsafe { libc::epoll_wait(queue, events.as_mut_ptr(), events.len() as c_int, timeout) };
+            unsafe { libc::epoll_wait(epoll, events.as_mut_ptr(), events.len() as c_int, timeout) };
         if count < 0 {
             return Err(crate::errno::get());
         }
-        Ok(events
-            .into_iter()
-            .take(count as usize)
-            .map(|event| Ready {
-                fd: event.u64 as c_int,
-                revents: epoll_revents(event.events),
-                wake: event.u64 == Self::WAKE_TOKEN,
-            })
-            .collect())
+        events.truncate(count as usize);
+        Ok(events)
     }
 }
 
@@ -416,16 +578,21 @@ impl Drop for KqueueBackend {
 
 #[cfg(target_os = "macos")]
 impl KqueueBackend {
+    /// The `udata` each host registration carries, so a reported event says
+    /// which kind of registration it came from.
     const WAKE_TOKEN: usize = usize::MAX;
+    const LEVEL_TOKEN: usize = 0;
+    const EDGE_TOKEN: usize = 1;
+    const PORT_TOKEN: usize = 2;
 
-    fn change(&self, fd: c_int, filter: i16, flags: u16) -> Result<(), c_int> {
+    fn change(&self, fd: c_int, filter: i16, flags: u16, token: usize) -> Result<(), c_int> {
         let change = libc::kevent {
             ident: fd as usize,
             filter,
             flags,
             fflags: 0,
             data: 0,
-            udata: std::ptr::null_mut(),
+            udata: token as *mut c_void,
         };
         let result = unsafe {
             libc::kevent(
@@ -530,34 +697,91 @@ impl ReadinessBackend for KqueueBackend {
         drain_fd(self.wake_read)
     }
 
-    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int> {
+    const EDGE: bool = true;
+
+    fn update(&self, fd: c_int, before: Interest, after: Interest) -> Result<(), c_int> {
+        /// `None` for unwatched, else whether the filter is edge-triggered.
+        fn mode(interest: Interest, bit: i16) -> Option<bool> {
+            match (interest.edge & bit != 0, interest.level & bit != 0) {
+                (true, _) => Some(true),
+                (false, true) => Some(false),
+                (false, false) => None,
+            }
+        }
         for (bit, filter) in [
             (libc::POLLIN, libc::EVFILT_READ),
             (libc::POLLOUT, libc::EVFILT_WRITE),
         ] {
-            match (before & bit != 0, after & bit != 0) {
-                (false, true) => self.change(fd, filter, libc::EV_ADD)?,
+            let (was, now) = (mode(before, bit), mode(after, bit));
+            if was == now {
+                continue;
+            }
+            // Deleted and added again rather than modified, so the host
+            // re-reads `EV_CLEAR` and the token rather than keeping the old.
+            if was.is_some() {
                 // Closing a watched descriptor removes its filters. Keep
                 // Darwin's deletion semantics even if the host already has.
-                (true, false) => match self.change(fd, filter, libc::EV_DELETE) {
+                match self.change(fd, filter, libc::EV_DELETE, 0) {
                     Err(errno) if !matches!(errno, libc::ENOENT | libc::EBADF) => {
                         return Err(errno);
                     }
                     _ => {}
-                },
-                _ => {}
+                }
+            }
+            if let Some(edge) = now {
+                let (flags, token) = match edge {
+                    true => (libc::EV_ADD | libc::EV_CLEAR, Self::EDGE_TOKEN),
+                    false => (libc::EV_ADD, Self::LEVEL_TOKEN),
+                };
+                self.change(fd, filter, flags, token)?;
             }
         }
         Ok(())
+    }
+
+    fn watch_port(&self, fd: c_int, watch: bool) -> Result<(), c_int> {
+        match watch {
+            true => self.change(
+                fd,
+                libc::EVFILT_READ,
+                libc::EV_ADD | libc::EV_CLEAR,
+                Self::PORT_TOKEN,
+            ),
+            false => match self.change(fd, libc::EVFILT_READ, libc::EV_DELETE, 0) {
+                Err(libc::ENOENT | libc::EBADF) => Ok(()),
+                other => other,
+            },
+        }
     }
 
     fn wait(
         &self,
         queue: c_int,
         _: &HashMap<(usize, i16), Registration>,
+        ports: &[c_int],
         capacity: usize,
-        timeout: c_int,
+        mut timeout: c_int,
     ) -> Result<Vec<Ready>, c_int> {
+        // The ports' sockets are not in the host queue (a port set's members
+        // can change under a registration), so wait on both with `poll` - a
+        // kqueue descriptor polls readable while it has events - and then
+        // collect from the host queue without waiting.
+        if !ports.is_empty() && timeout != 0 {
+            let mut watched: Vec<libc::pollfd> = std::iter::once(queue)
+                .chain(ports.iter().copied())
+                .map(|fd| libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            if unsafe { libc::poll(watched.as_mut_ptr(), watched.len() as libc::nfds_t, timeout) }
+                < 0
+            {
+                return Err(crate::errno::get());
+            }
+            timeout = 0;
+        }
         let wait = libc::timespec {
             tv_sec: (timeout / 1000) as libc::time_t,
             tv_nsec: (timeout % 1000) as libc::c_long * 1_000_000,
@@ -596,7 +820,12 @@ impl ReadinessBackend for KqueueBackend {
         // registration on a descriptor against one entry, so fold them.
         let mut result: Vec<Ready> = Vec::new();
         for event in events.iter().take(count as usize) {
-            let wake = event.udata as usize == Self::WAKE_TOKEN;
+            let source = match event.udata as usize {
+                Self::WAKE_TOKEN => Source::Wake,
+                Self::EDGE_TOKEN => Source::Edge,
+                Self::PORT_TOKEN => Source::Port,
+                _ => Source::Level,
+            };
             let fd = event.ident as c_int;
             let mut revents = match event.filter {
                 libc::EVFILT_READ => libc::POLLIN,
@@ -612,9 +841,16 @@ impl ReadinessBackend for KqueueBackend {
                     _ => libc::POLLERR,
                 };
             }
-            match result.iter_mut().find(|r| !wake && !r.wake && r.fd == fd) {
+            match result
+                .iter_mut()
+                .find(|r| source != Source::Wake && r.source == source && r.fd == fd)
+            {
                 Some(existing) => existing.revents |= revents,
-                None => result.push(Ready { fd, revents, wake }),
+                None => result.push(Ready {
+                    fd,
+                    revents,
+                    source,
+                }),
             }
         }
         Ok(result)
@@ -723,7 +959,7 @@ fn drain_fd(queue: c_int) {
 fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(), c_int> {
     if !matches!(
         change.filter,
-        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL
+        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT
     ) {
         return Err(crate::errno::from_host(libc::EINVAL));
     }
@@ -749,6 +985,14 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         return Ok(());
     }
 
+    if change.flags & EV_ADD != 0
+        && change.flags & EV_CLEAR != 0
+        && matches!(change.filter, EVFILT_READ | EVFILT_WRITE | EVFILT_MACHPORT)
+        && !B::EDGE
+    {
+        return Err(crate::errno::from_host(libc::EINVAL));
+    }
+
     if change.flags & EV_ADD != 0 {
         // A readiness filter names a descriptor, and one that is not open is
         // `EBADF` at registration rather than at the first `poll` - which is
@@ -766,6 +1010,17 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
                     crate::signal::delivered(darwin)
                 }
             };
+        } else if change.filter == EVFILT_MACHPORT {
+            // Receiving into the event needs the `ext` words only `kevent64`
+            // has; without them there is nowhere to put the message.
+            if change.fflags & MACH_RCV_MSG != 0 {
+                return Err(crate::errno::from_host(libc::EINVAL));
+            }
+            let name =
+                Name::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EINVAL))?;
+            if space::receiver(name).is_none() && space::members(name).is_none() {
+                return Err(crate::errno::from_host(libc::EINVAL));
+            }
         } else if change.filter != EVFILT_USER {
             let fd =
                 c_int::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
@@ -806,6 +1061,9 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         }
     }
     sync_interest(state, &registrations, change.filter, change.ident)?;
+    if change.filter == EVFILT_MACHPORT {
+        sync_ports(&mut state.port_watch, &*state.backend, &registrations)?;
+    }
     let woke = change.filter == EVFILT_USER
         && change.fflags & NOTE_TRIGGER != 0
         && triggered != state.triggered;
@@ -818,18 +1076,63 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
     Ok(())
 }
 
-fn interest_for(registrations: &HashMap<(usize, i16), Registration>, fd: c_int) -> i16 {
+fn interest_for(registrations: &HashMap<(usize, i16), Registration>, fd: c_int) -> Interest {
     registrations
         .values()
         .filter(|registration| registration.enabled && registration.ident == fd as usize)
-        .fold(0, |interest, registration| {
+        .fold(Interest::default(), |mut interest, registration| {
+            let bit = match registration.filter {
+                EVFILT_READ => libc::POLLIN,
+                EVFILT_WRITE => libc::POLLOUT,
+                _ => 0,
+            };
+            match registration.flags & EV_CLEAR != 0 {
+                true => interest.edge |= bit,
+                false => interest.level |= bit,
+            }
             interest
-                | match registration.filter {
-                    EVFILT_READ => libc::POLLIN,
-                    EVFILT_WRITE => libc::POLLOUT,
-                    _ => 0,
-                }
         })
+}
+
+/// Point the backend's port watches at the receive rights the enabled
+/// `EV_CLEAR` `EVFILT_MACHPORT` registrations name now.
+///
+/// Run after every change to one of them, so a re-enabled registration is
+/// watched afresh - which reports a message already waiting, as Darwin's
+/// `EV_ENABLE` does - and before every wait, since a port set's members
+/// change without telling the queue.
+fn sync_ports<B: ReadinessBackend>(
+    watch: &mut HashMap<c_int, Arc<Receiver>>,
+    backend: &B,
+    registrations: &HashMap<(usize, i16), Registration>,
+) -> Result<(), c_int> {
+    let wanted: HashMap<c_int, Arc<Receiver>> = registrations
+        .values()
+        .filter(|r| r.filter == EVFILT_MACHPORT && r.enabled && r.flags & EV_CLEAR != 0)
+        .flat_map(|r| receivers(r.ident as Name))
+        .map(|(_, port)| (port.fd(), port))
+        .collect();
+    // Removed while `watch` still holds the receiver, so the descriptor named
+    // is still the socket that was watched.
+    watch.retain(|fd, port| {
+        let keep = wanted
+            .get(fd)
+            .is_some_and(|wanted| Arc::ptr_eq(wanted, port));
+        if !keep {
+            let _ = backend.watch_port(*fd, false);
+        }
+        keep
+    });
+    for (fd, port) in wanted {
+        if watch.contains_key(&fd) {
+            continue;
+        }
+        backend
+            .watch_port(fd, true)
+            .map_err(crate::errno::from_host)?;
+        watch.insert(fd, port);
+    }
+    Ok(())
 }
 
 fn sync_interest<B: ReadinessBackend>(
@@ -838,7 +1141,7 @@ fn sync_interest<B: ReadinessBackend>(
     filter: i16,
     ident: usize,
 ) -> Result<(), c_int> {
-    if matches!(filter, EVFILT_USER | EVFILT_SIGNAL) {
+    if matches!(filter, EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT) {
         return Ok(());
     }
     let fd = c_int::try_from(ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
@@ -881,7 +1184,12 @@ fn poll_set(
     let mut interest: HashMap<c_int, i16> = HashMap::new();
     interest.insert(queue, libc::POLLIN);
     for registration in registrations.values() {
-        if !registration.enabled || matches!(registration.filter, EVFILT_USER | EVFILT_SIGNAL) {
+        if !registration.enabled
+            || matches!(
+                registration.filter,
+                EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT
+            )
+        {
             continue;
         }
         let Ok(fd) = c_int::try_from(registration.ident) else {
@@ -980,9 +1288,23 @@ pub unsafe extern "C" fn kevent(
         return out.len() as c_int;
     }
 
+    // Held for the whole wait so no socket closes, and its number is reused,
+    // while `poll` watches it.
+    let ports = {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = &mut *state;
+        if let Err(errno) = sync_ports(&mut state.port_watch, &*state.backend, &state.registrations)
+        {
+            crate::errno::set(crate::errno::to_host(errno));
+            return -1;
+        }
+        watched_ports(&state.registrations)
+    };
     let triggered = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        !state.triggered.is_empty() || signals_pending(&state.registrations)
+        !state.triggered.is_empty()
+            || signals_pending(&state.registrations)
+            || ports.iter().any(|port| port.ready())
     };
     // Something is already waiting, so this is a collection rather than a wait.
     let wait = match triggered {
@@ -1000,7 +1322,8 @@ pub unsafe extern "C" fn kevent(
         let backend = Arc::clone(&state.backend);
         let registrations = state.registrations.clone();
         drop(state);
-        match backend.wait(queue, &registrations, capacity, wait) {
+        let port_fds: Vec<c_int> = ports.iter().map(|port| port.fd()).collect();
+        match backend.wait(queue, &registrations, &port_fds, capacity, wait) {
             Ok(ready) => ready,
             Err(errno) => {
                 crate::errno::set(errno);
@@ -1010,7 +1333,7 @@ pub unsafe extern "C" fn kevent(
     };
 
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-    if ready.iter().any(|entry| entry.wake) {
+    if ready.iter().any(|entry| entry.source == Source::Wake) {
         state.backend.drain_wake();
     }
 
@@ -1059,14 +1382,106 @@ pub unsafe extern "C" fn kevent(
         }
     }
 
-    for entry in ready {
-        if out.len() == capacity || entry.wake || entry.revents == 0 {
+    let mut machports: Vec<(usize, i16)> = state
+        .registrations
+        .keys()
+        .filter(|key| key.1 == EVFILT_MACHPORT)
+        .copied()
+        .collect();
+    machports.sort_unstable();
+    for key in machports {
+        if out.len() == capacity {
+            break;
+        }
+        let Some(registration) = state.registrations.get_mut(&key) else {
+            continue;
+        };
+        // An `EV_CLEAR` registration fires on an arrival, from the backend.
+        if !registration.enabled || registration.flags & EV_CLEAR != 0 {
             continue;
         }
+        // Darwin names the member the message waits on, not the set.
+        let Some(member) = receivers(registration.ident as Name)
+            .into_iter()
+            .find(|(_, port)| port.ready())
+            .map(|(name, _)| name)
+        else {
+            continue;
+        };
+        let mut event = registration.fired();
+        event.data = member as isize;
+        out.push(event);
+        if registration.flags & EV_DISPATCH != 0 {
+            registration.enabled = false;
+        }
+        if registration.flags & EV_ONESHOT != 0 {
+            state.registrations.remove(&key);
+        }
+    }
+
+    let mut ports_changed = false;
+    for entry in &ready {
+        if out.len() == capacity || entry.source != Source::Port {
+            continue;
+        }
+        let Some(port) = state.port_watch.get(&entry.fd).cloned() else {
+            continue;
+        };
+        let mut firing: Vec<((usize, i16), Registration)> = state
+            .registrations
+            .iter()
+            .filter(|(_, r)| r.filter == EVFILT_MACHPORT && r.enabled && r.flags & EV_CLEAR != 0)
+            .map(|(key, r)| (*key, *r))
+            .collect();
+        firing.sort_unstable_by_key(|(key, _)| *key);
+        for (key, registration) in firing {
+            if out.len() == capacity {
+                break;
+            }
+            let Some(member) = receivers(registration.ident as Name)
+                .into_iter()
+                .find(|(_, member)| Arc::ptr_eq(member, &port))
+                .map(|(name, _)| name)
+            else {
+                continue;
+            };
+            let mut event = registration.fired();
+            event.data = member as isize;
+            out.push(event);
+            if registration.flags & EV_ONESHOT != 0 {
+                state.registrations.remove(&key);
+                ports_changed = true;
+            } else if registration.flags & EV_DISPATCH != 0 {
+                if let Some(registration) = state.registrations.get_mut(&key) {
+                    registration.enabled = false;
+                }
+                ports_changed = true;
+            }
+        }
+    }
+    if ports_changed {
+        let state = &mut *state;
+        let _ = sync_ports(&mut state.port_watch, &*state.backend, &state.registrations);
+    }
+
+    for entry in ready {
+        if out.len() == capacity || entry.revents == 0 {
+            continue;
+        }
+        // A level entry answers the plain registrations on the descriptor and
+        // an edge entry the `EV_CLEAR` ones, so a hangup the level side keeps
+        // reporting does not re-fire an edge registration.
+        let edge = match entry.source {
+            Source::Level => false,
+            Source::Edge => true,
+            Source::Wake | Source::Port => continue,
+        };
         let firing: Vec<((usize, i16), Registration)> = state
             .registrations
             .iter()
-            .filter(|(_, r)| r.enabled && r.ident == entry.fd as usize)
+            .filter(|(_, r)| {
+                r.enabled && r.ident == entry.fd as usize && (r.flags & EV_CLEAR != 0) == edge
+            })
             .map(|(key, r)| (*key, *r))
             .collect();
         for (key, registration) in firing {
@@ -1119,6 +1534,33 @@ pub unsafe extern "C" fn kevent(
     // grew past that.
     unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), events, out.len()) };
     out.len() as c_int
+}
+
+/// The receive rights an `EVFILT_MACHPORT` registration on `name` watches:
+/// the port itself, or every member of a port set, by name.
+///
+/// Resolved on every call rather than at registration, because Mach lets a
+/// set gain and lose members while a kqueue watches it.
+fn receivers(name: Name) -> Vec<(Name, Arc<Receiver>)> {
+    if let Some(port) = space::receiver(name) {
+        return vec![(name, port)];
+    }
+    space::members(name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|member| space::receiver(member).map(|port| (member, port)))
+        .collect()
+}
+
+/// Every receive right an enabled level-triggered `EVFILT_MACHPORT`
+/// registration watches.
+fn watched_ports(registrations: &HashMap<(usize, i16), Registration>) -> Vec<Arc<Receiver>> {
+    registrations
+        .values()
+        .filter(|r| r.filter == EVFILT_MACHPORT && r.enabled && r.flags & EV_CLEAR == 0)
+        .flat_map(|r| receivers(r.ident as Name))
+        .map(|(_, port)| port)
+        .collect()
 }
 
 /// Whether an enabled signal registration has deliveries it has not reported.
@@ -1580,5 +2022,289 @@ mod tests {
         };
         assert_eq!(n, -1);
         assert_eq!(crate::errno::get(), libc::EBADF);
+    }
+
+    /// A receive right in a fresh port set, which is how Crashpad's handshake
+    /// server watches its port.
+    fn port_in_set() -> (Name, Name) {
+        let (mut set, mut port) = (space::MACH_PORT_NULL, space::MACH_PORT_NULL);
+        // SAFETY: live locals for the out-parameters.
+        unsafe {
+            space::mach_port_allocate(space::TASK_SELF, space::RIGHT_PORT_SET, &mut set);
+            space::mach_port_allocate(space::TASK_SELF, space::RIGHT_RECEIVE, &mut port);
+        }
+        assert_eq!(
+            space::mach_port_insert_member(space::TASK_SELF, port, set),
+            0
+        );
+        (set, port)
+    }
+
+    /// Send an empty message with `id` to the receive right `port`.
+    fn post(port: Name, id: i32) {
+        let mut header = [0u32; 6];
+        header[1] = size_of_val(&header) as u32;
+        header[2] = port;
+        header[5] = id as u32;
+        // SAFETY: a whole header-only message of the size it states.
+        let rc = unsafe {
+            crate::mach::msg::mach_msg(
+                header.as_mut_ptr().cast(),
+                1,
+                size_of_val(&header) as u32,
+                0,
+                space::MACH_PORT_NULL,
+                0,
+                space::MACH_PORT_NULL,
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    /// Watch `name` with `EV_CLEAR`, as Crashpad does.
+    fn watch_machport(queue: c_int, name: Name) -> c_int {
+        watch(queue, name as usize, EVFILT_MACHPORT, EV_ADD | EV_CLEAR)
+    }
+
+    /// Apply one change carrying `udata` 9, answering what `kevent` did.
+    fn watch(queue: c_int, ident: usize, filter: i16, flags: u16) -> c_int {
+        let add = Kevent {
+            ident,
+            filter,
+            flags,
+            udata: 9,
+            ..Kevent::default()
+        };
+        // SAFETY: one change and no room for events.
+        unsafe {
+            kevent(
+                queue,
+                &raw const add,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        }
+    }
+
+    /// Crashpad's `ChildPortHandshake` registers its port set this way and
+    /// aborts on any failure.
+    #[test]
+    fn a_message_on_a_port_set_member_is_reported_with_the_member_name() {
+        let queue = kqueue();
+        let (set, port) = port_in_set();
+        assert_eq!(watch_machport(queue, set), 0);
+        let mut got = [Kevent::default(); 1];
+        // SAFETY: room for one event.
+        unsafe {
+            assert_eq!(
+                kevent(
+                    queue,
+                    std::ptr::null(),
+                    0,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT
+                ),
+                0,
+                "nothing is queued yet"
+            );
+            post(port, 7);
+            assert_eq!(
+                kevent(
+                    queue,
+                    std::ptr::null(),
+                    0,
+                    got.as_mut_ptr(),
+                    1,
+                    &raw const NO_WAIT
+                ),
+                1
+            );
+        }
+        assert_eq!(got[0].ident, set as usize);
+        assert_eq!(got[0].filter, EVFILT_MACHPORT);
+        assert_eq!(got[0].udata, 9);
+        assert_eq!(got[0].data, port as isize, "the member, not the set");
+        space::destroy(set);
+        space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    #[test]
+    fn a_message_wakes_a_wait_on_a_port_set_that_had_no_timeout() {
+        let queue = kqueue();
+        let (set, port) = port_in_set();
+        assert_eq!(watch_machport(queue, set), 0);
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            post(port, 1);
+        });
+        let mut got = [Kevent::default(); 1];
+        // SAFETY: room for one event and a null timeout.
+        let n = unsafe {
+            kevent(
+                queue,
+                std::ptr::null(),
+                0,
+                got.as_mut_ptr(),
+                1,
+                std::ptr::null(),
+            )
+        };
+        sender.join().expect("the sending thread");
+        assert_eq!(n, 1);
+        assert_eq!(got[0].filter, EVFILT_MACHPORT);
+        assert_eq!(got[0].data, port as isize);
+        space::destroy(set);
+        space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    #[test]
+    fn a_machport_filter_on_a_name_without_a_receive_right_is_refused() {
+        let queue = kqueue();
+        assert_eq!(watch_machport(queue, 0xdead_0003), -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    /// Crashpad's handshake watches its pipe this way and blocks until
+    /// something changes; a level answer would make that wait a spin.
+    #[test]
+    fn a_writable_pipe_under_ev_clear_is_reported_once() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        assert_eq!(
+            watch(queue, write_end as usize, EVFILT_WRITE, EV_ADD | EV_CLEAR),
+            0
+        );
+        assert_eq!(collect(queue, None).0, 1, "writable when registered");
+        assert_eq!(collect(queue, None).0, 0, "and not again until it changes");
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            libc::close(read_end);
+            assert_eq!(
+                collect(queue, None).0,
+                1,
+                "the reader going away is a change"
+            );
+            libc::close(write_end);
+            libc::close(queue);
+        }
+    }
+
+    #[test]
+    fn a_readable_descriptor_under_ev_clear_fires_again_only_when_more_arrives() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        assert_eq!(
+            watch(queue, read_end as usize, EVFILT_READ, EV_ADD | EV_CLEAR),
+            0
+        );
+        assert_eq!(collect(queue, None).0, 0);
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            assert_eq!(libc::write(write_end, c"x".as_ptr().cast(), 1), 1);
+            let (n, event) = collect(queue, None);
+            assert_eq!((n, event.data), (1, 1));
+            assert_eq!(
+                collect(queue, None).0,
+                0,
+                "the byte is still there, unchanged"
+            );
+            assert_eq!(libc::write(write_end, c"y".as_ptr().cast(), 1), 1);
+            let (n, event) = collect(queue, None);
+            assert_eq!((n, event.data), (1, 2));
+            libc::close(read_end);
+            libc::close(write_end);
+            libc::close(queue);
+        }
+    }
+
+    /// Without `EV_CLEAR` the same descriptor keeps reporting.
+    #[test]
+    fn a_readable_descriptor_without_ev_clear_keeps_firing() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        assert_eq!(watch(queue, read_end as usize, EVFILT_READ, EV_ADD), 0);
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            assert_eq!(libc::write(write_end, c"x".as_ptr().cast(), 1), 1);
+            assert_eq!(collect(queue, None).0, 1);
+            assert_eq!(collect(queue, None).0, 1);
+            libc::close(read_end);
+            libc::close(write_end);
+            libc::close(queue);
+        }
+    }
+
+    /// libdispatch's pairing: fire once, stay quiet while disabled, and on
+    /// `EV_ENABLE` report what is still waiting.
+    #[test]
+    fn re_enabling_an_ev_clear_dispatch_registration_reports_what_is_waiting() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        assert_eq!(
+            watch(
+                queue,
+                read_end as usize,
+                EVFILT_READ,
+                EV_ADD | EV_CLEAR | EV_DISPATCH
+            ),
+            0
+        );
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            assert_eq!(libc::write(write_end, c"x".as_ptr().cast(), 1), 1);
+            assert_eq!(collect(queue, None).0, 1);
+            assert_eq!(libc::write(write_end, c"y".as_ptr().cast(), 1), 1);
+            assert_eq!(collect(queue, None).0, 0, "disabled by the delivery");
+            assert_eq!(watch(queue, read_end as usize, EVFILT_READ, EV_ENABLE), 0);
+            let (n, event) = collect(queue, None);
+            assert_eq!((n, event.data), (1, 2));
+            libc::close(read_end);
+            libc::close(write_end);
+            libc::close(queue);
+        }
+    }
+
+    #[test]
+    fn a_port_under_ev_clear_fires_once_per_arrival() {
+        let queue = kqueue();
+        let (set, port) = port_in_set();
+        assert_eq!(watch_machport(queue, set), 0);
+        post(port, 1);
+        let (n, event) = collect(queue, None);
+        assert_eq!((n, event.data), (1, port as isize));
+        assert_eq!(
+            collect(queue, None).0,
+            0,
+            "the message is still queued, unchanged"
+        );
+        post(port, 2);
+        assert_eq!(collect(queue, None).0, 1);
+        space::destroy(set);
+        space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    #[test]
+    fn a_port_without_ev_clear_fires_while_a_message_waits() {
+        let queue = kqueue();
+        let (set, port) = port_in_set();
+        assert_eq!(watch(queue, set as usize, EVFILT_MACHPORT, EV_ADD), 0);
+        post(port, 1);
+        assert_eq!(collect(queue, None).0, 1);
+        assert_eq!(collect(queue, None).0, 1);
+        space::destroy(set);
+        space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
     }
 }

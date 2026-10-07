@@ -145,7 +145,7 @@ const _: () = {
     assert!(std::mem::offset_of!(TaskVmInfo, phys_footprint) == 144);
 };
 
-fn page_size() -> u64 {
+pub(super) fn page_size() -> u64 {
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u64
 }
 

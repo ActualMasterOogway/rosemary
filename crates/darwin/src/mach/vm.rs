@@ -371,6 +371,85 @@ pub unsafe extern "C" fn vm_region_recurse_64(
     KERN_SUCCESS
 }
 
+/// `VM_FLAGS_*` that `vm_allocate` answers. `FIXED` is zero: the absence of
+/// `ANYWHERE`.
+const VM_FLAGS_ANYWHERE: i32 = 0x0001;
+const VM_FLAGS_RANDOM_ADDR: i32 = 0x0008;
+const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+/// `VM_FLAGS_ALIAS_MASK`: the `VM_MAKE_TAG` label, which only feeds `vmmap`'s
+/// statistics and has nothing to attach to on this host.
+const VM_FLAGS_ALIAS_MASK: i32 = 0xff00_0000u32 as i32;
+
+/// `kern_return_t vm_allocate(vm_map_t target_task, vm_address_t *address,
+/// vm_size_t size, int flags)`, and `mach_vm_allocate`, which is the same call
+/// on a 64-bit task.
+///
+/// Zero-filled anonymous memory, as Mach's is. Crashpad allocates its message
+/// buffers this way; the host's own would be asked about a task name this
+/// runtime made up.
+///
+/// # Safety
+///
+/// `address` is readable and writable.
+pub unsafe extern "C" fn vm_allocate(task: Name, address: *mut u64, size: u64, flags: i32) -> i32 {
+    if task != TASK_SELF || address.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // Purgeable, superpage, 4GB-chunk and the rest change what the memory is,
+    // and pretending to honour them would hand back something else.
+    if flags
+        & !(VM_FLAGS_ANYWHERE | VM_FLAGS_RANDOM_ADDR | VM_FLAGS_OVERWRITE | VM_FLAGS_ALIAS_MASK)
+        != 0
+    {
+        eprintln!("rosemary: vm_allocate: unsupported flags {flags:#x}");
+        return KERN_INVALID_ARGUMENT;
+    }
+    if size == 0 {
+        // SAFETY: the caller states `address` is writable.
+        unsafe { *address = 0 };
+        return KERN_SUCCESS;
+    }
+    let page = super::info::page_size();
+    let Some(length) = size.checked_next_multiple_of(page) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+    // SAFETY: the caller states `address` is readable.
+    let hint = match anywhere {
+        true => 0,
+        false => (unsafe { *address }) & !(page - 1),
+    };
+    let fixed = match !anywhere && flags & VM_FLAGS_OVERWRITE != 0 {
+        true => libc::MAP_FIXED,
+        false => 0,
+    };
+    // SAFETY: a new anonymous mapping; `MAP_FIXED` only where the caller asked
+    // to replace what is there.
+    let mapped = unsafe {
+        libc::mmap(
+            hint as *mut c_void,
+            length as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON | fixed,
+            -1,
+            0,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        return KERN_NO_SPACE;
+    }
+    // A fixed request without `OVERWRITE` must not land anywhere else, and a
+    // hint is all `mmap` will take without displacing a neighbour.
+    if !anywhere && mapped as u64 != hint {
+        // SAFETY: the mapping made above, which nothing else has seen.
+        unsafe { libc::munmap(mapped, length as usize) };
+        return KERN_NO_SPACE;
+    }
+    // SAFETY: the caller states `address` is writable.
+    unsafe { *address = mapped as u64 };
+    KERN_SUCCESS
+}
+
 /// `kern_return_t vm_deallocate(vm_map_t target_task, vm_address_t address,
 /// vm_size_t size)`
 ///
@@ -531,5 +610,44 @@ mod tests {
         assert_eq!(status, KERN_SUCCESS);
         assert_eq!(into, from);
         assert_eq!(wrote, 4);
+    }
+
+    /// The buffer Crashpad's message server receives into.
+    #[test]
+    fn allocates_zeroed_memory_anywhere_and_gives_it_back() {
+        let mut address = 0_u64;
+        // `VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_MACH_MSG)`.
+        // SAFETY: a writable out-parameter.
+        let status = unsafe { vm_allocate(TASK_SELF, &mut address, 100, 0x1400_0001) };
+        assert_eq!(status, KERN_SUCCESS);
+        assert_ne!(address, 0);
+        assert_eq!(address % super::super::info::page_size(), 0);
+        // SAFETY: the 100 bytes just allocated.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(address as *mut u8, 100) };
+        assert!(bytes.iter().all(|byte| *byte == 0));
+        bytes[99] = 1;
+        // SAFETY: the allocation above.
+        assert_eq!(
+            unsafe { vm_deallocate(TASK_SELF, address, 100) },
+            KERN_SUCCESS
+        );
+    }
+
+    /// A fixed request over memory already in use is refused, not moved.
+    #[test]
+    fn a_fixed_allocation_over_a_mapping_is_no_space() {
+        let mut taken = 0_u64;
+        // SAFETY: a writable out-parameter.
+        assert_eq!(
+            unsafe { vm_allocate(TASK_SELF, &mut taken, 4096, VM_FLAGS_ANYWHERE) },
+            KERN_SUCCESS
+        );
+        let mut address = taken;
+        // SAFETY: a writable out-parameter.
+        let status = unsafe { vm_allocate(TASK_SELF, &mut address, 4096, 0) };
+        assert_eq!(status, KERN_NO_SPACE);
+        assert_eq!(address, taken);
+        // SAFETY: the allocation above.
+        unsafe { vm_deallocate(TASK_SELF, taken, 4096) };
     }
 }
