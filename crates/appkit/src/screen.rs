@@ -22,6 +22,14 @@ pub unsafe extern "C" fn CGSessionCopyCurrentDictionary() -> corefoundation::bas
     )
 }
 
+/// `CGWindowServerCreateServerPort`, a private call callers use to ask whether
+/// a WindowServer is reachable. There is none here, so the answer is
+/// `MACH_PORT_NULL`, which is what Apple's returns when it cannot connect.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub unsafe extern "C" fn CGWindowServerCreateServerPort() -> u32 {
+    0
+}
+
 use crate::define::{class_methods, methods};
 
 #[repr(C)]
@@ -454,6 +462,41 @@ pub unsafe extern "C" fn CGDisplayIsOnline(display: u32) -> u32 {
     sdl3::video::displays().contains(&display) as u32
 }
 
+/// `boolean_t CGDisplayIsBuiltin(CGDirectDisplayID)`
+///
+/// False: SDL does not say which panel is the laptop's own, and claiming a
+/// built-in one would have callers look for brightness and lid state that is
+/// not modelled.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayIsBuiltin(_display: u32) -> u32 {
+    0
+}
+
+/// `CGDirectDisplayID CGDisplayPrimaryDisplay(CGDirectDisplayID)`
+///
+/// With no mirroring modelled, every display is its own primary.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayPrimaryDisplay(display: u32) -> u32 {
+    display
+}
+
+/// `CGError CGDisplayRelease(CGDirectDisplayID)`
+///
+/// `CGDisplayCapture` is not modelled, so there is never anything to release;
+/// kCGErrorSuccess.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayRelease(_display: u32) -> i32 {
+    0
+}
+
+/// `double CGDisplayRotation(CGDirectDisplayID)`
+///
+/// SDL's display orientation is not mapped to degrees; an unrotated panel.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayRotation(_display: u32) -> f64 {
+    0.0
+}
+
 /// `boolean_t CGDisplayIsAsleep(CGDirectDisplayID)`
 ///
 /// False: a display this process can enumerate is one SDL is talking to, and
@@ -506,14 +549,33 @@ pub unsafe extern "C" fn CGDisplaySerialNumber(_display: u32) -> u32 {
 /// `fixed` is `None` for the mode `CGDisplayCopyDisplayMode` hands out, which reads
 /// the desktop mode when asked, for the reason the module note gives about
 /// caching. A listed mode is a snapshot of one SDL fullscreen mode.
+///
+/// A caller reaches into the real structure: `+0x10` holds the mode's
+/// `CFDictionary` of IOKit properties, and fastfetch reads it there. So the
+/// layout starts with a CoreFoundation-sized header and that dictionary - empty,
+/// since SDL has none of those properties - rather than the Rust fields, which
+/// such a caller would otherwise read as a garbage object.
 #[repr(C)]
 struct DisplayMode {
+    _base: [usize; 2],
+    properties: CFTypeRef,
     display: u32,
     fixed: Option<sdl3::DisplayMode>,
 }
 
 fn new_mode(display: u32, fixed: Option<sdl3::DisplayMode>) -> *const c_void {
-    let mode = Box::leak(Box::new(DisplayMode { display, fixed }));
+    let properties = corefoundation::collections::new_dictionary(
+        &[],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    let mode = Box::leak(Box::new(DisplayMode {
+        _base: [0; 2],
+        properties,
+        display,
+        fixed,
+    }));
     let handle = mode as *const DisplayMode as *const c_void;
     corefoundation::base::note_opaque(handle);
     handle

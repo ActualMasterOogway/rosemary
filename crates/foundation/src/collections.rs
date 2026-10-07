@@ -768,6 +768,50 @@ contents_of! {
     array_init_with_contents_of_url => true, true, true;
 }
 
+/// The `...WithContentsOfURL:error:` forms. A failure reports
+/// `NSFileReadUnknownError` (256) in `NSCocoaErrorDomain`; the reason a load
+/// failed is not classified further.
+unsafe fn contents_of_url_error(
+    receiver: Id,
+    argument: Id,
+    error: *mut Id,
+    want_array: bool,
+    init: bool,
+) -> Id {
+    // SAFETY: as `contents_of` requires.
+    let found = unsafe { contents_of(receiver, argument, want_array, true, init) };
+    if !error.is_null() {
+        // SAFETY: the caller's out-parameter.
+        unsafe {
+            *error = match found.is_null() {
+                true => crate::error::make(
+                    "NSCocoaErrorDomain",
+                    256,
+                    "The file couldn\u{2019}t be opened.",
+                ),
+                false => std::ptr::null_mut(),
+            }
+        };
+    }
+    found
+}
+
+macro_rules! contents_of_url_error {
+    ($($name:ident => $array:literal, $init:literal;)*) => {$(
+        unsafe extern "C" fn $name(receiver: Id, _sel: Sel, url: Id, error: *mut Id) -> Id {
+            // SAFETY: forwarded from a method of the matching class and arity.
+            unsafe { contents_of_url_error(receiver, url, error, $array, $init) }
+        }
+    )*};
+}
+
+contents_of_url_error! {
+    dictionary_with_contents_of_url_error => false, false;
+    dictionary_init_with_contents_of_url_error => false, true;
+    array_with_contents_of_url_error => true, false;
+    array_init_with_contents_of_url_error => true, true;
+}
+
 /// `-writeToFile:atomically:`.
 ///
 /// The atomic flag is honoured by writing beside the target and renaming, which
@@ -2052,11 +2096,13 @@ pub(crate) fn install() {
         "arrayWithObjects:count:" => array_with_objects_count, c"@32@0:8^@16Q24";
         "arrayWithContentsOfFile:" => array_with_contents_of_file, c"@24@0:8@16";
         "arrayWithContentsOfURL:" => array_with_contents_of_url, c"@24@0:8@16";
+        "arrayWithContentsOfURL:error:" => array_with_contents_of_url_error, c"@32@0:8@16^@24";
     });
     methods!(array, {
         "initWithObjects:count:" => array_init_with_objects_count, c"@32@0:8^@16Q24";
         "initWithContentsOfFile:" => array_init_with_contents_of_file, c"@24@0:8@16";
         "initWithContentsOfURL:" => array_init_with_contents_of_url, c"@24@0:8@16";
+        "initWithContentsOfURL:error:" => array_init_with_contents_of_url_error, c"@32@0:8@16^@24";
     });
     methods!(mutable_array, {
         "init" => init_mutable_array, c"@16@0:8";
@@ -2101,11 +2147,13 @@ pub(crate) fn install() {
         "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
         "dictionaryWithContentsOfFile:" => dictionary_with_contents_of_file, c"@24@0:8@16";
         "dictionaryWithContentsOfURL:" => dictionary_with_contents_of_url, c"@24@0:8@16";
+        "dictionaryWithContentsOfURL:error:" => dictionary_with_contents_of_url_error, c"@32@0:8@16^@24";
     });
     methods!(dictionary_class, {
         "initWithObjects:forKeys:count:" => dictionary_init_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
         "initWithContentsOfFile:" => dictionary_init_with_contents_of_file, c"@24@0:8@16";
         "initWithContentsOfURL:" => dictionary_init_with_contents_of_url, c"@24@0:8@16";
+        "initWithContentsOfURL:error:" => dictionary_init_with_contents_of_url_error, c"@32@0:8@16^@24";
     });
     methods!(mutable_dictionary, {
         "init" => init_mutable_dictionary, c"@16@0:8";

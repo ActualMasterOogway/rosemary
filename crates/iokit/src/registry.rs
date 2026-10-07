@@ -687,8 +687,21 @@ pub unsafe extern "C" fn IODispatchCalloutFromMessage(
 ) {
 }
 
+/// `CFDictionaryRef KextManagerCopyLoadedKextInfo(CFArrayRef ids, CFArrayRef keys)`.
+///
+/// Empty: there is no kernel extension loaded on a host that has no XNU. A
+/// caller looking for a particular bundle id finds it absent, which is the true
+/// answer, where a null return would be read as the query itself failing.
+pub unsafe extern "C" fn KextManagerCopyLoadedKextInfo(
+    _ids: CFTypeRef,
+    _keys: CFTypeRef,
+) -> CFTypeRef {
+    empty_dictionary()
+}
+
 exports::exports! {
     functions {
+        "KextManagerCopyLoadedKextInfo" => KextManagerCopyLoadedKextInfo,
         "IOServiceMatching" => IOServiceMatching,
         "IORegistryEntryIDMatching" => IORegistryEntryIDMatching,
         "IOServiceGetMatchingServices" => IOServiceGetMatchingServices,

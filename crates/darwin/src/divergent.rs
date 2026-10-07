@@ -36,6 +36,7 @@ pub const NAMES: &[(&str, &str)] = &[
     ("fstatat", STAT),
     ("statfs", STAT),
     ("fstatfs", STAT),
+    ("getfsstat", STAT),
     // `struct dirent`: Darwin has a `d_namlen` glibc has not, so `d_type` and
     // the name are two bytes later. `crate::dirent` answers all but the last;
     // the entries are what stop the host's own being bound instead. `opendir`

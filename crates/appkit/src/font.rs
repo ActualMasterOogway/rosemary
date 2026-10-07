@@ -78,6 +78,26 @@ unsafe extern "C" fn system_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id
     unsafe { autorelease(font) }
 }
 
+/// `+userFixedPitchFontOfSize:`, the monospaced `kCTFontUIFontUserFixedPitch`.
+unsafe extern "C" fn user_fixed_pitch_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
+    // SAFETY: `kCTFontUIFontUserFixedPitch` with no language.
+    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(1, size, std::ptr::null()) };
+    // SAFETY: a fresh object, or null.
+    unsafe { autorelease(font) }
+}
+
+/// `+monospacedSystemFontOfSize:weight:`; the weight picks nothing here, as
+/// there is one face per family.
+unsafe extern "C" fn monospaced_system_font_of_size(
+    class: Id,
+    sel: Sel,
+    size: f64,
+    _weight: f64,
+) -> Id {
+    // SAFETY: the same arguments the one-size form takes.
+    unsafe { user_fixed_pitch_font_of_size(class, sel, size) }
+}
+
 unsafe extern "C" fn system_font_size(_class: Id, _sel: Sel) -> f64 {
     13.0
 }
@@ -89,12 +109,55 @@ unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
     unsafe { corefoundation::api::CFAutorelease(font) as Id }
 }
 
+/// The `NSFont` instance accessors.
+///
+/// A font here is the Core Text one - a `CFDictionary` of attributes, see
+/// `coretext` - so the receiver is an `NSDictionary` and these are installed
+/// there. There is no `NSFont` class of its own to put them on until fonts stop
+/// being dictionaries.
+unsafe fn autoreleased(string: *const std::ffi::c_void) -> Id {
+    unsafe { autorelease(string) }
+}
+
+unsafe extern "C" fn font_family_name(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a font this runtime made; the copy is +1.
+    unsafe { autoreleased(crate::coretext::CTFontCopyFamilyName(receiver as *const _)) }
+}
+
+unsafe extern "C" fn font_name(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: as above.
+    unsafe {
+        autoreleased(crate::coretext::CTFontCopyPostScriptName(
+            receiver as *const _,
+        ))
+    }
+}
+
+unsafe extern "C" fn font_point_size(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: as above.
+    unsafe { crate::coretext::CTFontGetSize(receiver as *const _) }
+}
+
 pub(crate) fn install() {
+    let dictionary = objc::class::lookup(c"NSDictionary").expect("declared before its methods");
+    methods!(dictionary, {
+        "familyName" => font_family_name, c"@16@0:8";
+        "fontName" => font_name, c"@16@0:8";
+        "displayName" => font_family_name, c"@16@0:8";
+        "pointSize" => font_point_size, c"d16@0:8";
+    });
+
     let class = objc::class::lookup(c"NSFont").expect("declared before its methods");
     class_methods!(class, {
         "fontWithName:size:" => font_with_name, c"@32@0:8@16d24";
         "systemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
         "boldSystemFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "userFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "messageFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "menuFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "labelFontOfSize:" => system_font_of_size, c"@24@0:8d16";
+        "monospacedSystemFontOfSize:weight:" => monospaced_system_font_of_size, c"@32@0:8d16d24";
+        "userFixedPitchFontOfSize:" => user_fixed_pitch_font_of_size, c"@24@0:8d16";
         "systemFontSize" => system_font_size, c"d16@0:8";
     });
 

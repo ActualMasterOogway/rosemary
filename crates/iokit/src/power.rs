@@ -35,6 +35,15 @@ pub unsafe extern "C" fn IOPSGetPowerSourceDescription(
     std::ptr::null_mut()
 }
 
+/// `CFDictionaryRef IOPSCopyExternalPowerAdapterDetails(void)`.
+///
+/// Null, which is what a Mac with no adapter attached answers: wattage and
+/// identity are an SMC's to report, and the host exposes none, so naming an
+/// adapter would be inventing one. A `Copy`, so nothing is owned either way.
+pub unsafe extern "C" fn IOPSCopyExternalPowerAdapterDetails() -> CFTypeRef {
+    std::ptr::null_mut()
+}
+
 /// `CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(callback, context)`.
 ///
 /// Null: nothing here changes power state, so a source would be one that never
@@ -53,6 +62,7 @@ exports::exports! {
         "IOPSCopyPowerSourcesInfo" => IOPSCopyPowerSourcesInfo,
         "IOPSCopyPowerSourcesList" => IOPSCopyPowerSourcesList,
         "IOPSGetPowerSourceDescription" => IOPSGetPowerSourceDescription,
+        "IOPSCopyExternalPowerAdapterDetails" => IOPSCopyExternalPowerAdapterDetails,
         "IOPSNotificationCreateRunLoopSource" => IOPSNotificationCreateRunLoopSource,
     }
 }

@@ -1097,6 +1097,7 @@ const kCGLBadEnumeration: i32 = 10010;
 const kCGLBadAddress: i32 = 10014;
 #[allow(non_upper_case_globals)]
 const kCGLBadValue: i32 = 10008;
+const kCGLBadPixelFormat: i32 = 10002;
 #[allow(non_upper_case_globals)]
 const kCGLBadContext: i32 = 10004;
 
@@ -1315,6 +1316,115 @@ pub unsafe extern "C" fn CGLUnlockContext(ctx: CGLContextObj) -> i32 {
 /// As [`CGLSetCurrentContext`].
 pub unsafe extern "C" fn CGLGetShareGroup(ctx: CGLContextObj) -> *mut c_void {
     handle_in(ctx).map_or(std::ptr::null_mut(), |receiver| receiver.cast())
+}
+
+/// `CGLError CGLChoosePixelFormat(const CGLPixelFormatAttribute *attribs,
+/// CGLPixelFormatObj *pix, GLint *npix)`.
+///
+/// A CGL pixel format is the `NSOpenGLPixelFormat` itself (see
+/// [`cgl_pixel_format`]), and the attribute list is the same one
+/// `-initWithAttributes:` takes, so the format is made the way AppKit makes it.
+/// Its attributes are recorded rather than matched against a visual, so there is
+/// always exactly one.
+///
+/// # Safety
+///
+/// `attribs` is a zero-terminated list; `pix` and `npix` are null or writable.
+pub unsafe extern "C" fn CGLChoosePixelFormat(
+    attribs: *const u32,
+    pix: *mut *mut c_void,
+    npix: *mut i32,
+) -> i32 {
+    if pix.is_null() {
+        return kCGLBadValue;
+    }
+    let class =
+        objc::class::lookup(c"NSOpenGLPixelFormat").expect("NSOpenGLPixelFormat is declared");
+    let format = objc::object::create_instance(class, 0);
+    // SAFETY: a fresh pixel format and the initializer's declared arguments.
+    let format =
+        unsafe { init_with_attributes(format, objc::sel::get("initWithAttributes:"), attribs) };
+    // SAFETY: the caller's out-parameters.
+    unsafe {
+        *pix = format.cast();
+        if !npix.is_null() {
+            *npix = 1;
+        }
+    }
+    0
+}
+
+/// `CGLError CGLDestroyPixelFormat(CGLPixelFormatObj)`.
+pub unsafe extern "C" fn CGLDestroyPixelFormat(pix: *mut c_void) -> i32 {
+    if pix.is_null() {
+        return kCGLBadPixelFormat;
+    }
+    objc::arc::release(pix.cast());
+    0
+}
+
+/// `CGLError CGLCreateContext(CGLPixelFormatObj, CGLContextObj share, CGLContextObj *)`.
+///
+/// The context is the `NSOpenGLContext` AppKit would have made, and stays lazy at
+/// the SDL layer until it is made current. `share` is not honoured, for the
+/// reason [`CGLGetShareGroup`] gives.
+///
+/// # Safety
+///
+/// `pix` is a handle [`CGLChoosePixelFormat`] made; `ctx` is null or writable.
+pub unsafe extern "C" fn CGLCreateContext(
+    pix: *mut c_void,
+    _share: CGLContextObj,
+    ctx: *mut CGLContextObj,
+) -> i32 {
+    if pix.is_null() {
+        return kCGLBadPixelFormat;
+    }
+    if ctx.is_null() {
+        return kCGLBadValue;
+    }
+    let class = objc::class::lookup(c"NSOpenGLContext").expect("NSOpenGLContext is declared");
+    let context = objc::object::create_instance(class, 0);
+    // SAFETY: a fresh context and the initializer's declared arguments.
+    let context = unsafe {
+        init_with_format(
+            context,
+            objc::sel::get("initWithFormat:shareContext:"),
+            pix.cast(),
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: the caller's out-parameter.
+    unsafe { *ctx = handle_out(context) };
+    0
+}
+
+/// `void CGLDestroyContext(CGLContextObj)`: the handle stops being valid and the
+/// creation reference is dropped.
+pub unsafe extern "C" fn CGLDestroyContext(ctx: CGLContextObj) -> i32 {
+    let Some(receiver) = handle_in(ctx) else {
+        return kCGLBadContext;
+    };
+    if let Some(live) = HANDLES.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        live.remove(&(ctx as usize));
+    }
+    objc::arc::release(receiver);
+    0
+}
+
+/// `CGLError CGLGetVersion(GLint *major, GLint *minor)`: CGL 1.2, which is what
+/// every Mac since 10.4 reports.
+pub unsafe extern "C" fn CGLGetVersion(major: *mut i32, minor: *mut i32) -> i32 {
+    // SAFETY: the caller's out-parameters, each null or writable.
+    unsafe {
+        if !major.is_null() {
+            *major = 1;
+        }
+        if !minor.is_null() {
+            *minor = 2;
+        }
+    }
+    0
 }
 
 /// `CGLContextObj CGLGetCurrentContext(void)`, from the guest's logical binding.

@@ -928,8 +928,20 @@ pub unsafe extern "C" fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int {
 ///
 /// `out` is a writable pointer slot or null.
 pub unsafe extern "C" fn getmntinfo(out: *mut *mut Statfs, _flags: c_int) -> c_int {
+    if out.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller provided a writable result slot and `root_mount` is static.
+    unsafe { out.write(root_mount() as *const Statfs as *mut Statfs) };
+    1
+}
+
+/// The one mount this runtime reports, as [`getmntinfo`] and [`getfsstat`] both
+/// answer it.
+fn root_mount() -> &'static Statfs {
     static ROOT: std::sync::OnceLock<Statfs> = std::sync::OnceLock::new();
-    let root = ROOT.get_or_init(|| {
+    ROOT.get_or_init(|| {
         let path = c"/";
         let mut value = Statfs {
             bsize: 0,
@@ -957,13 +969,26 @@ pub unsafe extern "C" fn getmntinfo(out: *mut *mut Statfs, _flags: c_int) -> c_i
         value.mntonname[0] = b'/';
         value.fstypename[..5].copy_from_slice(b"other");
         value
-    });
-    if out.is_null() {
-        crate::errno::set(libc::EFAULT);
-        return -1;
+    })
+}
+
+/// `int getfsstat(struct statfs *, int, int)`.
+///
+/// The same single mount [`getmntinfo`] reports. A null buffer asks only how many
+/// there are; a buffer too small for one entry gets none, as Darwin answers.
+///
+/// # Safety
+///
+/// `buffer` is null or writable for `size` bytes.
+pub unsafe extern "C" fn getfsstat(buffer: *mut Statfs, size: c_int, _flags: c_int) -> c_int {
+    if buffer.is_null() {
+        return 1;
     }
-    // SAFETY: the caller provided a writable result slot and `root` is static.
-    unsafe { out.write(root as *const Statfs as *mut Statfs) };
+    if (size.max(0) as usize) < size_of::<Statfs>() {
+        return 0;
+    }
+    // SAFETY: the buffer holds at least one entry, by the check above.
+    unsafe { buffer.write(*root_mount()) };
     1
 }
 
@@ -985,6 +1010,7 @@ exports::exports! {
         "statfs" | "statfs$INODE64" => statfs,
         "fstatfs" | "fstatfs$INODE64" => fstatfs,
         "getmntinfo" | "getmntinfo$INODE64" => getmntinfo,
+        "getfsstat" | "getfsstat$INODE64" => getfsstat,
         "devname" => devname,
         "access" => access,
         "faccessat" => faccessat,
