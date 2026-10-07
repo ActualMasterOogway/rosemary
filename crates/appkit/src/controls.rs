@@ -492,7 +492,10 @@ mod slot {
     /// Whether the state shows by swapping in the alternate title and image
     /// (`showsStateBy` includes `NSContentsCellMask`).
     pub const SHOWS_ALTERNATE: usize = 19;
-    pub const BUTTON_OBJECTS: [usize; 7] = [
+    /// `-contentTintColor`, retained.
+    pub const TINT_COLOR: usize = 20;
+    pub const BUTTON_OBJECTS: [usize; 8] = [
+        TINT_COLOR,
         IMAGE,
         TITLE,
         ALTERNATE_IMAGE,
@@ -512,7 +515,7 @@ mod slot {
     pub const KNOB_PROPORTION: usize = 1;
 }
 
-const ROW: usize = 20;
+const ROW: usize = 21;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -751,6 +754,15 @@ unsafe extern "C" fn button_set_alternate_image(receiver: Id, _sel: Sel, value: 
     crate::backing::needs_display(receiver);
 }
 
+unsafe extern "C" fn button_set_content_tint_color(receiver: Id, _sel: Sel, value: Id) {
+    write_object(buttons(), receiver, slot::TINT_COLOR, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn button_content_tint_color(receiver: Id, _sel: Sel) -> Id {
+    read(buttons(), receiver, slot::TINT_COLOR) as Id
+}
+
 unsafe extern "C" fn button_alternate_image(receiver: Id, _sel: Sel) -> Id {
     read(buttons(), receiver, slot::ALTERNATE_IMAGE) as Id
 }
@@ -824,6 +836,13 @@ unsafe extern "C" fn button_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
         }
         // Proportionally down and centred, `NSButton`'s defaults.
         let destination = image_placement(view::bounds_of(receiver), natural, 0, 0);
+        // A tint colours template images only; any other draws as it is.
+        let tint = read(buttons(), receiver, slot::TINT_COLOR) as Id;
+        if !tint.is_null() && crate::image::is_template_image(image) {
+            let (r, g, b, a) = crate::color::components(tint);
+            crate::image::draw_tinted(image, destination, [r, g, b, a]);
+            return;
+        }
         let draw: unsafe extern "C" fn(Id, Sel, NSRect, NSRect, usize, f64) =
             std::mem::transmute(objc::msg::entry());
         draw(
@@ -1703,6 +1722,8 @@ pub(crate) fn install() {
         "target" => button_target, c"@16@0:8";
         "setAction:" => button_set_action, c"v24@0:8:16";
         "action" => button_action, c":16@0:8";
+        "setContentTintColor:" => button_set_content_tint_color, c"v24@0:8@16";
+        "contentTintColor" => button_content_tint_color, c"@16@0:8";
         "setAlternateImage:" => button_set_alternate_image, c"v24@0:8@16";
         "alternateImage" => button_alternate_image, c"@16@0:8";
         "setBordered:" => button_set_bordered, c"v20@0:8c16";
@@ -1784,6 +1805,32 @@ mod tests {
         // SAFETY: the receiver is the same live button.
         let stored = unsafe { button_title(button, objc::sel::get("title")) };
         assert_eq!(unsafe { foundation::string::bytes(stored) }, b"Install");
+        objc::arc::release(button);
+    }
+
+    #[test]
+    fn button_content_tint_color_is_retained_and_read_back() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSButton").expect("NSButton");
+        let button = objc::object::create_instance(class, 0);
+        let color = crate::color::rgba(1.0, 0.0, 0.0, 1.0);
+        // SAFETY: the receiver is a button and the argument is an NSColor.
+        unsafe {
+            assert!(
+                button_content_tint_color(button, objc::sel::get("contentTintColor")).is_null()
+            );
+            button_set_content_tint_color(button, objc::sel::get("setContentTintColor:"), color);
+            let stored = button_content_tint_color(button, objc::sel::get("contentTintColor"));
+            assert_eq!(stored, color);
+            button_set_content_tint_color(
+                button,
+                objc::sel::get("setContentTintColor:"),
+                std::ptr::null_mut(),
+            );
+            assert!(
+                button_content_tint_color(button, objc::sel::get("contentTintColor")).is_null()
+            );
+        }
         objc::arc::release(button);
     }
 

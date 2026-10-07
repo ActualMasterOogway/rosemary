@@ -725,6 +725,47 @@ fn draw(
     );
 }
 
+/// Whether `-setTemplate:` marked the image, which is what a tint colour applies to.
+pub(crate) fn is_template_image(object: Id) -> bool {
+    is_image(object) && image_of(object).template != 0
+}
+
+/// Draw a template image filled with `tint` (straight RGBA) where it is
+/// opaque, as `NSButton.contentTintColor` does.
+pub(crate) fn draw_tinted(receiver: Id, destination: NSRect, tint: [f64; 4]) {
+    let image = image_of(receiver);
+    if !has_content(image) {
+        return;
+    }
+    let Some(cg_image) = cg_image_of(receiver) else {
+        return;
+    };
+    let Some((width, height, mut pixels)) = crate::graphics::image_bgra(cg_image) else {
+        return;
+    };
+    let channel = |value: f64| value.clamp(0.0, 1.0);
+    let [red, green, blue, alpha] = tint.map(channel);
+    for texel in pixels.as_chunks_mut::<4>().0 {
+        // Premultiplied: the image's coverage scales the colour and its alpha.
+        let coverage = f64::from(texel[3]) / 255.0 * alpha;
+        texel[0] = (blue * coverage * 255.0).round() as u8;
+        texel[1] = (green * coverage * 255.0).round() as u8;
+        texel[2] = (red * coverage * 255.0).round() as u8;
+        texel[3] = (coverage * 255.0).round() as u8;
+    }
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        image.size,
+        destination,
+        NSRect::default(),
+        2,
+        1.0,
+        false,
+    );
+}
+
 /// `NSDrawNinePartImage`: corners at their own size, edges and center
 /// stretched over what is left.
 ///
