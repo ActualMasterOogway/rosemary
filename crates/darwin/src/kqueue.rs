@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -135,13 +133,13 @@ trait ReadinessBackend: Sized {
 }
 
 /// The portable reconstruction of a readiness set. It remains the complete
-/// implementation outside Linux.
-#[cfg(not(target_os = "linux"))]
+/// implementation on hosts with neither epoll nor a Darwin kqueue.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct PollBackend {
     wake: c_int,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl ReadinessBackend for PollBackend {
     fn new() -> Result<(Self, c_int), c_int> {
         let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -391,9 +389,243 @@ fn epoll_revents(events: u32) -> i16 {
         | ((events & libc::EPOLLHUP as u32 != 0) as i16 * libc::POLLHUP)
 }
 
+/// The host's own kqueue. Guest signals are emulated, so `EVFILT_SIGNAL` and
+/// `EVFILT_USER` stay in `Queue`; the host queue only answers readiness, and
+/// is what the guest holds, so polling it reports watched descriptors.
+#[cfg(target_os = "macos")]
+struct KqueueBackend {
+    kqueue: c_int,
+    /// A pipe rather than `EVFILT_USER`, so a signal handler can wake the
+    /// queue with a plain `write` through `WAKER_FDS`.
+    wake_read: c_int,
+    wake_write: c_int,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for KqueueBackend {
+    fn drop(&mut self) {
+        // The host queue is the guest-visible descriptor and the guest's to
+        // close; only the private pipe is ours.
+        forget_waker(self.wake_write);
+        unsafe {
+            libc::close(self.wake_read);
+            libc::close(self.wake_write);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl KqueueBackend {
+    const WAKE_TOKEN: usize = usize::MAX;
+
+    fn change(&self, fd: c_int, filter: i16, flags: u16) -> Result<(), c_int> {
+        let change = libc::kevent {
+            ident: fd as usize,
+            filter,
+            flags,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let result = unsafe {
+            libc::kevent(
+                self.kqueue,
+                &raw const change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            Err(crate::errno::get())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cloexec_nonblocking(fd: c_int) -> Result<(), c_int> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0
+            || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+            || libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+        {
+            return Err(crate::errno::get());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+impl ReadinessBackend for KqueueBackend {
+    fn new() -> Result<(Self, c_int), c_int> {
+        let kqueue = unsafe { libc::kqueue() };
+        if kqueue < 0 {
+            return Err(crate::errno::get());
+        }
+        let mut ends = [0 as c_int; 2];
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } < 0 {
+            let errno = crate::errno::get();
+            unsafe { libc::close(kqueue) };
+            return Err(errno);
+        }
+        // From here `Drop` closes the pipe; only the queue needs closing by
+        // hand on failure.
+        let backend = Self {
+            kqueue,
+            wake_read: ends[0],
+            wake_write: ends[1],
+        };
+        let wake = libc::kevent {
+            ident: backend.wake_read as usize,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_ADD,
+            fflags: 0,
+            data: 0,
+            udata: Self::WAKE_TOKEN as *mut c_void,
+        };
+        // `O_NONBLOCK` on a kqueue is `ENOTTY`, and it is never read directly.
+        let cloexec = match unsafe { libc::fcntl(kqueue, libc::F_SETFD, libc::FD_CLOEXEC) } {
+            0 => Ok(()),
+            _ => Err(crate::errno::get()),
+        };
+        let registered = cloexec
+            .and_then(|()| cloexec_nonblocking(backend.wake_read))
+            .and_then(|()| cloexec_nonblocking(backend.wake_write))
+            .and_then(|()| {
+                let result = unsafe {
+                    libc::kevent(
+                        kqueue,
+                        &raw const wake,
+                        1,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null(),
+                    )
+                };
+                if result < 0 {
+                    Err(crate::errno::get())
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(errno) = registered {
+            drop(backend);
+            unsafe { libc::close(kqueue) };
+            return Err(errno);
+        }
+        Ok((backend, kqueue))
+    }
+
+    fn wake(&self) {
+        wake_fd(self.wake_write)
+    }
+    fn wake_descriptor(&self) -> c_int {
+        self.wake_write
+    }
+    fn drain_wake(&self) {
+        drain_fd(self.wake_read)
+    }
+
+    fn update(&self, fd: c_int, before: i16, after: i16) -> Result<(), c_int> {
+        for (bit, filter) in [
+            (libc::POLLIN, libc::EVFILT_READ),
+            (libc::POLLOUT, libc::EVFILT_WRITE),
+        ] {
+            match (before & bit != 0, after & bit != 0) {
+                (false, true) => self.change(fd, filter, libc::EV_ADD)?,
+                // Closing a watched descriptor removes its filters. Keep
+                // Darwin's deletion semantics even if the host already has.
+                (true, false) => match self.change(fd, filter, libc::EV_DELETE) {
+                    Err(errno) if !matches!(errno, libc::ENOENT | libc::EBADF) => {
+                        return Err(errno);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn wait(
+        &self,
+        queue: c_int,
+        _: &HashMap<(usize, i16), Registration>,
+        capacity: usize,
+        timeout: c_int,
+    ) -> Result<Vec<Ready>, c_int> {
+        let wait = libc::timespec {
+            tv_sec: (timeout / 1000) as libc::time_t,
+            tv_nsec: (timeout % 1000) as libc::c_long * 1_000_000,
+        };
+        let timeout = match timeout < 0 {
+            true => std::ptr::null(),
+            false => &raw const wait,
+        };
+        // One slot more than the caller wants, so the wakeup cannot crowd
+        // out a ready descriptor.
+        let mut events = vec![
+            libc::kevent {
+                ident: 0,
+                filter: 0,
+                flags: 0,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            capacity + 1
+        ];
+        let count = unsafe {
+            libc::kevent(
+                queue,
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as c_int,
+                timeout,
+            )
+        };
+        if count < 0 {
+            return Err(crate::errno::get());
+        }
+        // The host reports each filter on its own; `kevent` matches every
+        // registration on a descriptor against one entry, so fold them.
+        let mut result: Vec<Ready> = Vec::new();
+        for event in events.iter().take(count as usize) {
+            let wake = event.udata as usize == Self::WAKE_TOKEN;
+            let fd = event.ident as c_int;
+            let mut revents = match event.filter {
+                libc::EVFILT_READ => libc::POLLIN,
+                libc::EVFILT_WRITE => libc::POLLOUT,
+                _ => 0,
+            };
+            if event.flags & libc::EV_EOF != 0 {
+                revents |= libc::POLLHUP;
+            }
+            if event.flags & libc::EV_ERROR != 0 {
+                revents = match event.data as c_int {
+                    libc::EBADF => libc::POLLNVAL,
+                    _ => libc::POLLERR,
+                };
+            }
+            match result.iter_mut().find(|r| !wake && !r.wake && r.fd == fd) {
+                Some(existing) => existing.revents |= revents,
+                None => result.push(Ready { fd, revents, wake }),
+            }
+        }
+        Ok(result)
+    }
+}
+
 #[cfg(target_os = "linux")]
 type SelectedBackend = EpollBackend;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+type SelectedBackend = KqueueBackend;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 type SelectedBackend = PollBackend;
 
 fn queues() -> &'static Mutex<HashMap<c_int, Arc<Mutex<Queue<SelectedBackend>>>>> {
@@ -427,7 +659,8 @@ pub extern "C" fn kqueue() -> c_int {
 /// Wake a `kevent` blocked on `queue`.
 fn wake_fd(queue: c_int) {
     let one: u64 = 1;
-    // SAFETY: an eventfd this module created, and eight bytes to write.
+    // SAFETY: an eventfd or non-blocking pipe this module created, and eight
+    // bytes to write. A full pipe is already a pending wakeup.
     unsafe { libc::write(queue, (&raw const one).cast::<c_void>(), size_of::<u64>()) };
 }
 
@@ -640,7 +873,7 @@ fn timeout_ms(timeout: *const libc::timespec) -> Result<c_int, c_int> {
 
 /// The descriptors to wait on: the wakeup channel, and every enabled readiness
 /// registration folded together by descriptor.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn poll_set(
     queue: c_int,
     registrations: &HashMap<(usize, i16), Registration>,
@@ -974,9 +1207,9 @@ mod tests {
         assert_eq!(got[0].data, 5, "five bytes are waiting");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn linux_queue_descriptor_is_readable_when_a_watched_descriptor_is_ready() {
+    fn queue_descriptor_is_readable_when_a_watched_descriptor_is_ready() {
         let queue = kqueue();
         let (read_end, write_end) = pipe();
         let add = Kevent {
@@ -1024,9 +1257,10 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    /// epoll refuses regular files, so Linux answers them with `poll`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn linux_epoll_keeps_regular_files_on_the_poll_compatibility_path() {
+    fn a_regular_file_is_reported_readable() {
         use std::os::fd::AsRawFd;
 
         let queue = kqueue();
@@ -1054,6 +1288,41 @@ mod tests {
         assert_eq!(got[0].ident, file.as_raw_fd() as usize);
         // SAFETY: this test's queue descriptor.
         unsafe { libc::close(queue) };
+    }
+
+    /// A closed writer is readiness with `EV_EOF`, reported once even when the
+    /// reader also watches for writability.
+    #[test]
+    fn a_hangup_is_reported_once_with_eof() {
+        let queue = kqueue();
+        let (read_end, write_end) = pipe();
+        let changes = [EVFILT_READ, EVFILT_WRITE].map(|filter| Kevent {
+            ident: read_end as usize,
+            filter,
+            flags: EV_ADD,
+            ..Kevent::default()
+        });
+        let mut got = [Kevent::default(); 4];
+        // SAFETY: two changes and room for four events.
+        unsafe {
+            libc::close(write_end);
+            let n = kevent(
+                queue,
+                changes.as_ptr(),
+                2,
+                got.as_mut_ptr(),
+                4,
+                &raw const NO_WAIT,
+            );
+            let reads = got[..n.max(0) as usize]
+                .iter()
+                .filter(|event| event.filter == EVFILT_READ)
+                .collect::<Vec<_>>();
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].flags & EV_EOF, EV_EOF);
+            libc::close(read_end);
+            libc::close(queue);
+        }
     }
 
     /// `EVFILT_USER` is what a program wakes its own I/O thread with, and the

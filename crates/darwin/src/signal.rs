@@ -781,7 +781,6 @@ extern "C" fn deliver(host: c_int, info: *mut libc::siginfo_t, context: *mut c_v
     };
     let slot = darwin as usize;
     DELIVERED[slot].fetch_add(1, Ordering::AcqRel);
-    #[cfg(not(target_os = "macos"))]
     crate::kqueue::signalled();
     let handler = GUEST_HANDLERS[slot].load(Ordering::Acquire);
     if is_sentinel(handler) {

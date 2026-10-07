@@ -332,6 +332,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     sip::MODULE,
     dispatch::MODULE,
     net::MODULE,
+    kqueue::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -355,7 +356,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     rlimit::MODULE,
     shm::MODULE,
     oslog::MODULE,
-    kqueue::MODULE,
     backtrace::MODULE,
     #[cfg(target_arch = "x86_64")]
     printf_l::MODULE,
@@ -481,13 +481,8 @@ mod tests {
             }
         }
         for name in ["_copyfile", "_kevent"] {
-            let enabled = if name == "_copyfile" {
-                builtin
-            } else {
-                !cfg!(target_os = "macos")
-            };
-            assert_eq!(is_implemented(name), enabled, "{name}");
-            assert_eq!(published(&lib, name).is_some(), enabled, "{name}");
+            assert_eq!(is_implemented(name), builtin, "{name}");
+            assert_eq!(published(&lib, name).is_some(), builtin, "{name}");
         }
         assert!(is_implemented("_sysctl"));
         for name in [
