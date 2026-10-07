@@ -41,6 +41,10 @@ impl Gpu {
     /// through `-contents` crosses the bus. `MTLStorageModeShared` on a Mac
     /// with a discrete GPU is system memory too.
     pub fn create_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
+        self.create_buffer_with(length, true)
+    }
+
+    fn create_buffer_with(&self, length: u64, zeroed: bool) -> Result<GpuBuffer, String> {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::UNIFORM_BUFFER
             | vk::BufferUsageFlags::VERTEX_BUFFER
@@ -80,7 +84,7 @@ impl Gpu {
         // handed over is already zero, and during a streaming burst - which is
         // where this matters, because it is gigabytes a second - almost all of
         // it is, so only a reused range is written over.
-        if !allocation.pristine {
+        if zeroed && !allocation.pristine {
             // SAFETY: the mapping covers this whole range.
             crate::stats::timed(crate::stats::Counter::BufferZeroMicros, || unsafe {
                 std::ptr::write_bytes(allocation.contents, 0, length as usize)
@@ -92,6 +96,12 @@ impl Gpu {
             contents: allocation.contents,
             length,
         })
+    }
+
+    /// A host-visible buffer whose bytes the caller overwrites in full before
+    /// the device reads them, so a reused range is not zeroed first.
+    pub fn create_staging_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
+        self.create_buffer_with(length, false)
     }
 
     /// Destroy a buffer this device made and return its range to the heap.
@@ -193,8 +203,16 @@ impl Gpu {
         let aspect = aspect_of(description.format);
         let levels = description.levels.max(1);
         let layers = description.layers.max(1);
+        let view = self.create_view(*image, description)?;
+        let view = Guard::new(view, |view| {
+            // SAFETY: a view of this device's which nothing has used.
+            unsafe { self.device.destroy_image_view(view, None) };
+        });
         // Every texture stays in `GENERAL` from creation: see `render_pass`.
-        self.one_shot(|device, command_buffer| {
+        // Nothing below may fail once the transition is recorded, because the
+        // batch then names the image.
+        self.defer(|gpu, batch| {
+            batch.touch(*image);
             let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::GENERAL)
@@ -209,10 +227,11 @@ impl Gpu {
                     layer_count: layers,
                 })
                 .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
-            // SAFETY: recording into a command buffer this call owns.
+            // SAFETY: recording into the batch's command buffer, which the
+            // batch lock gives this thread alone.
             unsafe {
-                device.cmd_pipeline_barrier(
-                    command_buffer,
+                gpu.device.cmd_pipeline_barrier(
+                    batch.command_buffer(),
                     vk::PipelineStageFlags::TOP_OF_PIPE,
                     vk::PipelineStageFlags::ALL_COMMANDS,
                     vk::DependencyFlags::empty(),
@@ -221,8 +240,9 @@ impl Gpu {
                     &[barrier],
                 )
             };
+            Ok(())
         })?;
-        let view = self.create_view(*image, description)?;
+        let view = view.take();
         Ok(GpuImage {
             image: image.take(),
             memory: Some(memory.take()),
@@ -290,8 +310,15 @@ impl Gpu {
     }
 
     /// Destroy an image this device made. The caller must have waited for
-    /// every submission which referred to it.
+    /// every submission which referred to it; a deferred transfer which
+    /// still names it keeps it until the device has run that transfer.
     pub fn destroy_image(&self, image: GpuImage) {
+        if let Some(image) = self.defer_destruction(image) {
+            self.destroy_image_now(image);
+        }
+    }
+
+    pub(super) fn destroy_image_now(&self, image: GpuImage) {
         // SAFETY: the caller guarantees the image is idle.
         unsafe {
             self.device.destroy_image_view(image.view, None);

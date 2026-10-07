@@ -1039,6 +1039,158 @@ fn a_translated_triangle_draws_on_the_gpu() {
     }
 }
 
+/// `-replaceRegion:` is recorded for the next submission rather than run on
+/// the spot, so the texels must still be there - in the order the copies were
+/// made - by the time a command buffer reads them.
+#[test]
+fn replaced_texels_reach_the_next_command_buffer() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const SIZE: u64 = 8;
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    let descriptor = resource::TextureDescriptor {
+        texture_type: 2,
+        pixel_format: 70, // RGBA8Unorm
+        width: SIZE,
+        height: SIZE,
+        depth: 1,
+        mipmap_level_count: 1,
+        sample_count: 1,
+        array_length: 1,
+        storage_mode: 0,
+        usage: gpu::USAGE_SHADER_READ,
+    };
+    let texture = resource::new_texture(gpu, descriptor);
+    assert!(!texture.is_null());
+
+    let whole: Vec<u8> = (0..SIZE * SIZE * 4).map(|byte| byte as u8).collect();
+    let corner = [0xAB_u8; 2 * 2 * 4];
+    // SAFETY: textures this test made, and byte runs covering each region.
+    unsafe {
+        replace_region(texture, [0, 0, SIZE, SIZE], &whole, SIZE * 4);
+        // A later copy over part of the first must win.
+        replace_region(texture, [1, 1, 2, 2], &corner, 2 * 4);
+    }
+
+    // SAFETY: the same calls the guest makes.
+    let (readback, queue) = unsafe {
+        (
+            new_buffer(device, std::ptr::null(), (SIZE * SIZE * 4) as usize, 0),
+            new_command_queue(device, std::ptr::null()),
+        )
+    };
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let command = send(queue, "commandBuffer");
+        let blit = send(command, "blitCommandEncoder");
+        copy_texture_to_buffer(blit, texture, readback, SIZE);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+
+        let contents = object::body::<resource::Buffer>(readback).inner.contents;
+        let read = std::slice::from_raw_parts(contents, whole.len());
+        let mut expected = whole.clone();
+        for y in 1..3 {
+            for x in 1..3 {
+                let at = ((y * SIZE + x) * 4) as usize;
+                expected[at..at + 4].copy_from_slice(&[0xAB; 4]);
+            }
+        }
+        assert_eq!(read, expected.as_slice());
+    }
+}
+
+/// A texture released while a copy into it is still waiting for a
+/// submission must outlive that copy rather than be destroyed under it.
+#[test]
+fn a_texture_released_before_its_upload_runs_outlives_it() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    let texture = resource::new_texture(
+        gpu,
+        resource::TextureDescriptor {
+            texture_type: 2,
+            pixel_format: 70, // RGBA8Unorm
+            width: 4,
+            height: 4,
+            depth: 1,
+            mipmap_level_count: 1,
+            sample_count: 1,
+            array_length: 1,
+            storage_mode: 0,
+            usage: gpu::USAGE_SHADER_READ,
+        },
+    );
+    assert!(!texture.is_null());
+    // SAFETY: a texture this test made, and bytes covering it.
+    unsafe { replace_region(texture, [0, 0, 4, 4], &[7; 64], 16) };
+    objc::arc::release(texture);
+    // SAFETY: the same calls the guest makes.
+    unsafe {
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        assert_eq!(send_number_result(command, "status"), 4);
+    }
+}
+
+/// # Safety
+///
+/// `receiver` must implement `selector` returning an `NSUInteger`.
+unsafe fn send_number_result(receiver: Id, selector: &str) -> u64 {
+    let sel = objc::sel::get(selector);
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(receiver) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the registered signature.
+    let call: unsafe extern "C" fn(Id, Sel) -> u64 =
+        unsafe { std::mem::transmute(method.implementation()) };
+    unsafe { call(receiver, sel) }
+}
+
+/// # Safety
+///
+/// `texture` must be an `RosemaryMTLTexture` of four bytes a texel, and
+/// `bytes` must cover the region at `bytes_per_row`.
+unsafe fn replace_region(texture: Id, region: [u64; 4], bytes: &[u8], bytes_per_row: u64) {
+    #[repr(C)]
+    struct Region {
+        origin: [u64; 3],
+        size: [u64; 3],
+    }
+    let sel =
+        objc::sel::get("replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:");
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(texture) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the registered signature.
+    let call: unsafe extern "C" fn(Id, Sel, Region, u64, u64, *const u8, u64, u64) =
+        unsafe { std::mem::transmute(method.implementation()) };
+    let [x, y, width, height] = region;
+    unsafe {
+        call(
+            texture,
+            sel,
+            Region {
+                origin: [x, y, 0],
+                size: [width, height, 1],
+            },
+            0,
+            0,
+            bytes.as_ptr(),
+            bytes_per_row,
+            0,
+        )
+    };
+}
+
 /// # Safety
 ///
 /// `command` must be an `RosemaryMTLCommandBuffer` and `pass` a render pass

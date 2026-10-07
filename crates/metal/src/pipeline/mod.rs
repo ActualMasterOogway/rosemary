@@ -34,7 +34,13 @@ pub(crate) struct Layouts {
     pub sets: [vk::DescriptorSetLayout; SETS],
     pub pipeline: vk::PipelineLayout,
     pub push_set: Option<usize>,
+    /// The binding numbers of the buffer set (0) declared as dynamic storage
+    /// buffers, in ascending order - the order Vulkan takes their offsets in.
+    pub dynamic: Vec<u32>,
 }
+
+/// The buffer set's index in the Metal resource ABI.
+pub(crate) const BUFFER_SET: usize = 0;
 
 impl Layouts {
     /// Give back what one pipeline state owns here.
@@ -103,6 +109,13 @@ pub(crate) fn layouts_for(gpu: &Gpu, resources: &[&[ResourceBinding]]) -> Result
         per_set.each_ref().map(Vec::len),
         gpu.max_push_descriptors as usize,
     );
+    let dynamic = match push_set == Some(BUFFER_SET) {
+        true => Vec::new(),
+        false => dynamic_bindings(
+            &mut per_set[BUFFER_SET],
+            gpu.limits.max_descriptor_set_storage_buffers_dynamic as usize,
+        ),
+    };
     let mut sets = [vk::DescriptorSetLayout::null(); SETS];
     for (index, bindings) in per_set.iter().enumerate() {
         sets[index] = gpu.descriptor_set_layout(bindings, stages, push_set == Some(index))?;
@@ -115,6 +128,46 @@ pub(crate) fn layouts_for(gpu: &Gpu, resources: &[&[ResourceBinding]]) -> Result
         sets,
         pipeline,
         push_set,
+        dynamic,
+    })
+}
+
+/// Make the buffer set's storage buffers dynamic, as many as `limit` allows,
+/// lowest binding first, and answer which.
+///
+/// A `-setBytes:` copy lands at a new offset of an upload chunk on every
+/// call, so a set holding it is a fresh allocation and write on every draw.
+/// As a dynamic buffer the descriptor names the chunk, which stays the same,
+/// and the offset is handed over when the set is bound. A pushed set needs
+/// none of this - pushing is the write - and cannot hold dynamic descriptors.
+fn dynamic_bindings(bindings: &mut [(u32, vk::DescriptorType)], limit: usize) -> Vec<u32> {
+    let mut dynamic = bindings
+        .iter()
+        .filter(|(_, kind)| *kind == vk::DescriptorType::STORAGE_BUFFER)
+        .map(|(binding, _)| *binding)
+        .collect::<Vec<_>>();
+    dynamic.sort_unstable();
+    dynamic.dedup();
+    dynamic.truncate(limit);
+    for (binding, kind) in bindings {
+        if dynamic.binary_search(binding).is_ok() {
+            *kind = vk::DescriptorType::STORAGE_BUFFER_DYNAMIC;
+        }
+    }
+    dynamic
+}
+
+/// The descriptor type one binding has under `layouts`.
+pub(crate) fn binding_type(
+    binding: &ResourceBinding,
+    layouts: &Layouts,
+) -> Option<vk::DescriptorType> {
+    let kind = descriptor_type(binding)?;
+    let dynamic = binding.descriptor_set as usize == BUFFER_SET
+        && layouts.dynamic.binary_search(&binding.binding).is_ok();
+    Some(match dynamic {
+        true => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
+        false => kind,
     })
 }
 
@@ -240,7 +293,21 @@ pub(crate) fn install() {
 
 #[cfg(test)]
 mod tests {
-    use super::choose_push_set;
+    use super::{choose_push_set, dynamic_bindings};
+    use ash::vk;
+
+    #[test]
+    fn the_lowest_buffer_bindings_become_dynamic_up_to_the_limit() {
+        let buffer = vk::DescriptorType::STORAGE_BUFFER;
+        let dynamic = vk::DescriptorType::STORAGE_BUFFER_DYNAMIC;
+        let mut bindings = vec![(5, buffer), (1, buffer), (3, buffer), (1, buffer)];
+        assert_eq!(dynamic_bindings(&mut bindings, 2), [1, 3]);
+        assert_eq!(
+            bindings,
+            [(5, buffer), (1, dynamic), (3, dynamic), (1, dynamic)]
+        );
+        assert!(dynamic_bindings(&mut [(0, buffer)], 0).is_empty());
+    }
 
     #[test]
     fn push_set_prefers_buffers_then_the_largest_one_that_fits() {

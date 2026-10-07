@@ -32,6 +32,7 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             bound: Default::default(),
             set_cache: Default::default(),
             wanted: Default::default(),
+            dynamic_offsets: Vec::new(),
             vertex_buffers: [(vk::Buffer::null(), 0); SLOTS],
             index_buffer: (vk::Buffer::null(), 0, vk::IndexType::UINT16),
         },
@@ -132,6 +133,16 @@ pub(super) unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
     encoder.barrier();
 }
 
+/// Whether two entries write one binding - a buffer both stages declare -
+/// where only writing every entry, in order, says which one wins.
+fn repeats_a_binding(entries: &[DescriptorEntry]) -> bool {
+    entries.iter().enumerate().any(|(at, entry)| {
+        entries[..at]
+            .iter()
+            .any(|other| other.binding == entry.binding)
+    })
+}
+
 /// Report a resource the pipeline declares which nothing satisfies.
 ///
 /// The draw is still recorded: see [`Encoder::collect_writes`].
@@ -163,14 +174,11 @@ impl Encoder {
     pub(super) fn bind_resources(
         &mut self,
         resources: &[metal_translate::ResourceBinding],
-        layouts: &[vk::DescriptorSetLayout; SETS],
-        pipeline_layout: vk::PipelineLayout,
-        push_set: Option<usize>,
+        layouts: &Layouts,
         bind_point: vk::PipelineBindPoint,
     ) -> bool {
         let start = stats::enabled().then(std::time::Instant::now);
-        let bound =
-            self.bind_resources_inner(resources, layouts, pipeline_layout, push_set, bind_point);
+        let bound = self.bind_resources_inner(resources, layouts, bind_point);
         if let Some(start) = start {
             stats::add(Counter::BindMicros, start.elapsed().as_micros() as u64);
         }
@@ -181,26 +189,24 @@ impl Encoder {
     pub(super) fn bind_resources_inner(
         &mut self,
         resources: &[metal_translate::ResourceBinding],
-        layouts: &[vk::DescriptorSetLayout; SETS],
-        pipeline_layout: vk::PipelineLayout,
-        push_set: Option<usize>,
+        layouts: &Layouts,
         bind_point: vk::PipelineBindPoint,
     ) -> bool {
-        let used = self.collect_writes(resources);
-        let push_compatible = self.bound[bind_point_slot(bind_point)].layouts == *layouts;
-        let Some(sets) = self.materialize_sets(layouts, &used, push_set) else {
+        let used = self.collect_writes(resources, layouts);
+        let push_compatible = self.bound[bind_point_slot(bind_point)].layouts == layouts.sets;
+        let Some(sets) = self.materialize_sets(&layouts.sets, &used, layouts.push_set) else {
             gpu::trace_once(
                 "a descriptor set could not be allocated, so the draw or dispatch which needed \
                  it is not recorded",
             );
             return false;
         };
-        self.bind_sets(&used, &sets, layouts, pipeline_layout, bind_point);
-        if let Some(index) = push_set.filter(|index| used[*index]) {
+        self.bind_sets(&used, &sets, &layouts.sets, layouts.pipeline, bind_point);
+        if let Some(index) = layouts.push_set.filter(|index| used[*index]) {
             self.push_set(
                 index,
-                layouts[index],
-                pipeline_layout,
+                layouts.sets[index],
+                layouts.pipeline,
                 bind_point,
                 push_compatible,
             );
@@ -217,7 +223,11 @@ impl Encoder {
     /// paired null image still supplies the defined zero result. Without the
     /// feature, retain the old skip fallback until reflection carries enough
     /// descriptor shape to create matching placeholder images.
-    fn collect_writes(&mut self, resources: &[metal_translate::ResourceBinding]) -> [bool; SETS] {
+    fn collect_writes(
+        &mut self,
+        resources: &[metal_translate::ResourceBinding],
+        layouts: &Layouts,
+    ) -> [bool; SETS] {
         let (null_descriptors, null_sampler) = {
             let gpu = self.command().gpu;
             (gpu.null_descriptors, gpu.null_sampler)
@@ -236,9 +246,11 @@ impl Encoder {
             used[set] = true;
             let slot = stage_slot(binding.stage);
             let index = binding.metal_index as usize;
-            let Some(kind) = descriptor_type(binding) else {
+            let Some(kind) = binding_type(binding, layouts) else {
                 continue;
             };
+            let dynamic = kind == vk::DescriptorType::STORAGE_BUFFER_DYNAMIC;
+            let mut dynamic_offset = 0;
             let (handle, offset, range) = match binding.kind {
                 ResourceKind::Buffer => {
                     let bound = self.buffers[slot].get(index).copied().unwrap_or_default();
@@ -254,19 +266,21 @@ impl Encoder {
                         }
                     }
                     use vk::Handle;
-                    (
-                        bound.buffer.as_raw(),
-                        if bound.buffer == vk::Buffer::null() {
-                            0
-                        } else {
-                            bound.offset.min(bound.end)
-                        },
-                        if bound.buffer == vk::Buffer::null() {
-                            vk::WHOLE_SIZE
-                        } else {
-                            bound.range
-                        },
-                    )
+                    if bound.buffer == vk::Buffer::null() {
+                        (bound.buffer.as_raw(), 0, vk::WHOLE_SIZE)
+                    } else if dynamic && bound.uploaded {
+                        // The chunk from its start, moved to the copy by the
+                        // dynamic offset: the descriptor is then the same for
+                        // every copy in the chunk.
+                        dynamic_offset = bound.offset as u32;
+                        (bound.buffer.as_raw(), 0, bound.range)
+                    } else {
+                        (
+                            bound.buffer.as_raw(),
+                            bound.offset.min(bound.end),
+                            bound.range,
+                        )
+                    }
                 }
                 ResourceKind::Texture => {
                     let bound = self.textures[slot]
@@ -323,7 +337,19 @@ impl Encoder {
                 handle,
                 offset,
                 range,
+                dynamic_offset,
             });
+        }
+        // One offset per dynamic binding of the layout, in binding order,
+        // including one nothing satisfied.
+        self.dynamic_offsets.clear();
+        for binding in &layouts.dynamic {
+            let offset = self.wanted[BUFFER_SET]
+                .iter()
+                .rev()
+                .find(|entry| entry.binding == *binding)
+                .map_or(0, |entry| entry.dynamic_offset);
+            self.dynamic_offsets.push(offset);
         }
         used
     }
@@ -369,7 +395,8 @@ impl Encoder {
                 for entry in &self.set_cache[index].entries {
                     use vk::Handle;
                     match entry.kind {
-                        vk::DescriptorType::STORAGE_BUFFER => buffer_infos.push(
+                        vk::DescriptorType::STORAGE_BUFFER
+                        | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => buffer_infos.push(
                             vk::DescriptorBufferInfo::default()
                                 .buffer(vk::Buffer::from_raw(entry.handle))
                                 .offset(entry.offset)
@@ -396,7 +423,8 @@ impl Encoder {
                         .dst_binding(entry.binding)
                         .descriptor_type(entry.kind);
                     writes.push(match entry.kind {
-                        vk::DescriptorType::STORAGE_BUFFER => {
+                        vk::DescriptorType::STORAGE_BUFFER
+                        | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => {
                             next_buffer += 1;
                             write.buffer_info(std::slice::from_ref(&buffer_infos[next_buffer - 1]))
                         }
@@ -419,6 +447,10 @@ impl Encoder {
     /// Record one set directly into the command buffer. Its contents belong
     /// to the bind point and remain live until an incompatible layout disturbs
     /// them, so an unchanged draw can skip the command just like a bound set.
+    ///
+    /// Vulkan lets pushed descriptors be updated incrementally, so a draw
+    /// which changes one buffer of an otherwise identical set pushes that
+    /// buffer alone rather than the whole set again.
     fn push_set(
         &mut self,
         index: usize,
@@ -428,14 +460,30 @@ impl Encoder {
         compatible: bool,
     ) {
         let cache = &self.set_cache[index];
-        if compatible && cache.layout == layout && cache.entries == self.wanted[index] {
+        let entries = &self.wanted[index];
+        // What the bind point already holds is the cached push, only where
+        // nothing disturbed it and the last write here was a push.
+        let live = compatible && cache.layout == layout && cache.set == vk::DescriptorSet::null();
+        if live && cache.entries == *entries {
             return;
         }
+        let incremental = live
+            && cache.entries.len() == entries.len()
+            && cache
+                .entries
+                .iter()
+                .zip(entries)
+                .all(|(old, new)| (old.binding, old.kind) == (new.binding, new.kind))
+            && !repeats_a_binding(entries);
+        let changed = entries
+            .iter()
+            .enumerate()
+            .filter(|(at, entry)| !incremental || cache.entries[*at] != **entry)
+            .map(|(_, entry)| entry);
 
-        let entries = &self.wanted[index];
         let mut buffer_infos = Vec::new();
         let mut image_infos = Vec::new();
-        for entry in entries {
+        for entry in changed.clone() {
             use vk::Handle;
             match entry.kind {
                 vk::DescriptorType::STORAGE_BUFFER => buffer_infos.push(
@@ -455,8 +503,8 @@ impl Encoder {
             }
         }
         let (mut next_buffer, mut next_image) = (0, 0);
-        let mut writes = Vec::with_capacity(entries.len());
-        for entry in entries {
+        let mut writes = Vec::with_capacity(buffer_infos.len() + image_infos.len());
+        for entry in changed {
             let write = vk::WriteDescriptorSet::default()
                 .dst_binding(entry.binding)
                 .descriptor_type(entry.kind);
@@ -487,7 +535,7 @@ impl Encoder {
                 &writes,
             )
         };
-        stats::add(Counter::PushDescriptorWrites, entries.len() as u64);
+        stats::add(Counter::PushDescriptorWrites, writes.len() as u64);
         let cache = &mut self.set_cache[index];
         cache.layout = layout;
         cache.set = vk::DescriptorSet::null();
@@ -495,7 +543,7 @@ impl Encoder {
     }
 
     /// Bind the sets the pipeline uses, skipping any already bound under a
-    /// compatible layout.
+    /// compatible layout with the same dynamic offsets.
     fn bind_sets(
         &mut self,
         used: &[bool; SETS],
@@ -513,12 +561,26 @@ impl Encoder {
         if !compatible {
             bound.layouts = *layouts;
             bound.sets = [vk::DescriptorSet::null(); SETS];
+            bound.offsets.clear();
         }
         for index in (0..SETS).filter(|index| used[*index]) {
-            if bound.sets[index] == sets[index] {
+            if sets[index] == vk::DescriptorSet::null() {
+                // The push set, which `push_set` records.
+                continue;
+            }
+            let offsets: &[u32] = match index {
+                BUFFER_SET => &self.dynamic_offsets,
+                _ => &[],
+            };
+            if bound.sets[index] == sets[index] && (index != BUFFER_SET || bound.offsets == offsets)
+            {
                 continue;
             }
             bound.sets[index] = sets[index];
+            if index == BUFFER_SET {
+                bound.offsets.clear();
+                bound.offsets.extend_from_slice(offsets);
+            }
             // SAFETY: recording into this command buffer.
             unsafe {
                 gpu.device.cmd_bind_descriptor_sets(
@@ -527,7 +589,7 @@ impl Encoder {
                     pipeline_layout,
                     index as u32,
                     &[sets[index]],
-                    &[],
+                    offsets,
                 )
             };
         }
@@ -655,9 +717,7 @@ impl Encoder {
         }
         if !self.bind_resources(
             &state.resources,
-            &state.layouts.sets,
-            state.layouts.pipeline,
-            state.layouts.push_set,
+            &state.layouts,
             vk::PipelineBindPoint::GRAPHICS,
         ) {
             return None;

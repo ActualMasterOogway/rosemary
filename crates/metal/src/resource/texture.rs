@@ -269,8 +269,9 @@ pub(super) unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
 
 /// `-[MTLTexture replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:]`.
 ///
-/// Metal copies immediately, outside any command buffer, so this stages the
-/// bytes into a host-visible buffer and runs one copy synchronously.
+/// Metal copies immediately, outside any command buffer. The bytes are staged
+/// at once and the copy is recorded ahead of the next submission, which is the
+/// first thing that can observe the texture: see `gpu::deferred`.
 pub(super) unsafe extern "C" fn replace_region(
     receiver: Id,
     _sel: Sel,
@@ -342,50 +343,62 @@ pub(super) unsafe extern "C" fn replace_region(
              describe a {width}x{height}x{depth} region"
         ));
     }
-    let staging = match texture.gpu.create_buffer(total) {
-        Ok(staging) => staging,
-        Err(reason) => return gpu::trace(format!("replaceRegion: staging failed: {reason}")),
-    };
-    // SAFETY: the guest promised `total` readable bytes, and the staging
-    // buffer is mapped over at least that many.
-    unsafe { std::ptr::copy_nonoverlapping(bytes, staging.contents, total as usize) };
-    let copy = vk::BufferImageCopy::default()
-        .buffer_offset(0)
-        .buffer_row_length(row_length as u32)
-        .buffer_image_height(image_height as u32)
-        .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: texture.image.aspect,
-            mip_level: checked.level,
-            base_array_layer: checked.slice,
-            layer_count: 1,
-        })
-        .image_offset(vk::Offset3D {
-            x: checked.origin[0] as i32,
-            y: checked.origin[1] as i32,
-            z: checked.origin[2] as i32,
-        })
-        .image_extent(vk::Extent3D {
-            width: checked.size[0],
-            height: checked.size[1],
-            depth: checked.size[2],
-        });
+    // SAFETY: the guest promised `total` readable bytes. They are copied
+    // into staging before this returns, as Metal copies them.
+    let source = unsafe { std::slice::from_raw_parts(bytes, total as usize) };
+    // A buffer offset of a copy into an image must be a whole number of texel
+    // blocks, and of four bytes for a depth/stencil one.
+    let alignment = lcm(texel.max(1), 16);
     let image = texture.image.image;
-    let result = texture.gpu.one_shot(|device, command_buffer| {
-        // SAFETY: recording into a command buffer the call owns; the image is
-        // in GENERAL layout from creation.
+    let aspect = texture.image.aspect;
+    let result = texture.gpu.defer(|gpu, batch| {
+        let (buffer, offset) = batch.stage(gpu, source, alignment)?;
+        batch.touch(image);
+        let copy = vk::BufferImageCopy::default()
+            .buffer_offset(offset)
+            .buffer_row_length(row_length as u32)
+            .buffer_image_height(image_height as u32)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: aspect,
+                mip_level: checked.level,
+                base_array_layer: checked.slice,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D {
+                x: checked.origin[0] as i32,
+                y: checked.origin[1] as i32,
+                z: checked.origin[2] as i32,
+            })
+            .image_extent(vk::Extent3D {
+                width: checked.size[0],
+                height: checked.size[1],
+                depth: checked.size[2],
+            });
+        // SAFETY: recording into the batch's command buffer, which the batch
+        // lock gives this thread alone; the image is in GENERAL from creation.
         unsafe {
-            device.cmd_copy_buffer_to_image(
-                command_buffer,
-                staging.buffer,
+            gpu.device.cmd_copy_buffer_to_image(
+                batch.command_buffer(),
+                buffer,
                 image,
                 vk::ImageLayout::GENERAL,
                 &[copy],
             )
         };
+        Ok(())
     });
     if let Err(reason) = result {
         gpu::trace(format!("replaceRegion: copy failed: {reason}"));
     }
-    // The copy completed before `one_shot` returned.
-    texture.gpu.destroy_buffer(staging);
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    let gcd = {
+        let (mut x, mut y) = (a, b);
+        while y != 0 {
+            (x, y) = (y, x % y);
+        }
+        x
+    };
+    a / gcd * b
 }

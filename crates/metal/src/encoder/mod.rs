@@ -33,7 +33,8 @@ use crate::gpu::{
 };
 use crate::object::{self, methods};
 use crate::pipeline::{
-    ComputePipeline, DepthStencilKey, RenderPipeline, RenderVariantKey, SETS, descriptor_type,
+    BUFFER_SET, ComputePipeline, DepthStencilKey, Layouts, RenderPipeline, RenderVariantKey, SETS,
+    binding_type,
 };
 use crate::resource::{Buffer, DepthStencilState, SamplerState, Texture};
 use crate::stats::{self, Counter};
@@ -53,6 +54,9 @@ struct BufferBinding {
     /// The descriptor's range: the rest of a guest buffer, or exactly the
     /// bytes a `-setBytes:` copied.
     range: u64,
+    /// Whether `buffer` is an upload chunk `-setBytes:` copied into, whose
+    /// offset can be a dynamic one.
+    uploaded: bool,
 }
 
 impl Default for BufferBinding {
@@ -62,6 +66,7 @@ impl Default for BufferBinding {
             offset: 0,
             end: 0,
             range: vk::WHOLE_SIZE,
+            uploaded: false,
         }
     }
 }
@@ -91,7 +96,7 @@ impl std::hash::Hasher for AddressHasher {
 type AddressSet = std::collections::HashSet<usize, std::hash::BuildHasherDefault<AddressHasher>>;
 
 /// One descriptor write, as the encoder last recorded it for a set.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 struct DescriptorEntry {
     binding: u32,
     kind: vk::DescriptorType,
@@ -99,7 +104,30 @@ struct DescriptorEntry {
     handle: u64,
     offset: u64,
     range: u64,
+    /// For a dynamic buffer, the offset handed over when the set is bound.
+    /// Not part of the descriptor, so not part of the comparison.
+    dynamic_offset: u32,
 }
+
+impl PartialEq for DescriptorEntry {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            self.binding,
+            self.kind,
+            self.handle,
+            self.offset,
+            self.range,
+        ) == (
+            other.binding,
+            other.kind,
+            other.handle,
+            other.offset,
+            other.range,
+        )
+    }
+}
+
+impl Eq for DescriptorEntry {}
 
 /// The descriptor set last written for one set index, reused while the
 /// resources a draw needs are the ones it already holds.
@@ -117,6 +145,8 @@ struct BindPoint {
     pipeline: vk::Pipeline,
     layouts: [vk::DescriptorSetLayout; SETS],
     sets: [vk::DescriptorSet; SETS],
+    /// The buffer set's dynamic offsets, bound with it.
+    offsets: Vec<u32>,
 }
 
 pub(crate) struct CommandQueue {
@@ -192,6 +222,8 @@ pub(crate) struct Encoder {
     set_cache: [SetCache; SETS],
     /// Scratch for the entries a draw needs, kept to avoid an allocation.
     wanted: [Vec<DescriptorEntry>; SETS],
+    /// The buffer set's dynamic offsets for the draw, in binding order.
+    dynamic_offsets: Vec<u32>,
     vertex_buffers: [(vk::Buffer, u64); SLOTS],
     index_buffer: (vk::Buffer, u64, vk::IndexType),
 }

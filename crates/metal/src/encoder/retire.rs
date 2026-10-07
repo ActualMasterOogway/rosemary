@@ -142,13 +142,13 @@ impl Submission {
             .sum()
     }
 
-    /// Submit presentation copies directly behind the guest work. A
-    /// swapchain keeps its own reference until the copy fence signals; a
-    /// readback fallback remains here and is handed to its dedicated worker
-    /// after guest completion.
+    /// Hand the drawables this command buffer presents to the device's
+    /// presentation thread, in submission order. Called once the guest work
+    /// is on the queue, so the presentation copies land behind it.
     pub(super) fn schedule_presents(&mut self) {
-        self.presents
-            .retain(|drawable| !crate::present::enqueue_swapchain(drawable.as_id()));
+        for drawable in self.presents.drain(..) {
+            crate::present::enqueue(drawable.into_raw());
+        }
     }
 
     pub(crate) fn wait_and_finish(self) {
@@ -189,12 +189,10 @@ impl Submission {
             gpu_times = Some((self.scheduled_time.min(end), end));
         }
         self.gpu.release_timestamp_pool(self.timestamps);
+        // Only a command buffer which never reached the queue still holds
+        // drawables here; its frames are never shown.
         for drawable in self.presents.drain(..) {
-            if result.is_ok() {
-                crate::present::enqueue_readback(drawable.into_raw());
-            } else {
-                crate::present::complete(drawable.as_id());
-            }
+            crate::present::complete(drawable.as_id());
         }
         // The work has completed, so everything the recording referred to and every
         // transient object it created can go.

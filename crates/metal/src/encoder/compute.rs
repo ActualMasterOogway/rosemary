@@ -55,9 +55,7 @@ pub(super) unsafe extern "C" fn dispatch_threadgroups(
     encoder.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline);
     if !encoder.bind_resources(
         &state.resources,
-        &state.layouts.sets,
-        state.layouts.pipeline,
-        state.layouts.push_set,
+        &state.layouts,
         vk::PipelineBindPoint::COMPUTE,
     ) {
         return;

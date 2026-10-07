@@ -51,6 +51,9 @@ counters!(
     PipelineMicros = "pipeline_micros",
     QueueMicros = "queue_micros",
     GpuMicros = "gpu_micros",
+    ImmediateCalls = "immediate_calls",
+    ImmediateMicros = "immediate_micros",
+    DeferredTransfers = "deferred_transfers",
 );
 
 #[allow(clippy::declare_interior_mutable_const)]

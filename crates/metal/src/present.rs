@@ -7,17 +7,30 @@ use crate::gpu::{self, Gpu, GpuImage, ImageDescription};
 use crate::object::{self, methods};
 use crate::resource::Texture;
 
-struct ReadbackQueue {
+/// One device's presentation, in the order its drawables were handed over.
+///
+/// Presenting waits: for a swapchain image to come back from the presentation
+/// engine, for the copy into the last one to finish, or for a whole readback.
+/// That belongs on a thread of its own, not on the guest's committing thread -
+/// where it also held every other thread's commit behind it - and not on the
+/// completion-handler thread a guest's `-present` in a scheduled handler runs
+/// on. The drawable ring bounds the queue: a guest cannot be vended a fourth
+/// drawable before one of three has been presented.
+pub(crate) struct Presenter {
     pending: std::sync::Mutex<std::collections::VecDeque<usize>>,
     ready: std::sync::Condvar,
     worker: std::sync::Once,
 }
 
-static READBACKS: ReadbackQueue = ReadbackQueue {
-    pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
-    ready: std::sync::Condvar::new(),
-    worker: std::sync::Once::new(),
-};
+impl Presenter {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            ready: std::sync::Condvar::new(),
+            worker: std::sync::Once::new(),
+        }
+    }
+}
 
 pub(crate) struct Drawable {
     pub gpu: &'static Gpu,
@@ -293,7 +306,7 @@ unsafe extern "C" fn drawable_layer(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn drawable_present(receiver: Id, _sel: Sel) {
     if submit(receiver) {
-        present(receiver);
+        enqueue(objc::arc::retain(receiver));
     }
 }
 
@@ -322,18 +335,54 @@ unsafe extern "C" fn drawable_dealloc(receiver: Id, _sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
-/// Read the drawable's image back and blit it into the window.
-pub(crate) fn present(drawable: Id) {
-    if enqueue_swapchain(drawable) {
+/// Hand one owned drawable reference to its device's presentation thread.
+///
+/// The caller has made sure the work which renders the drawable is on the
+/// queue already, so whatever the thread submits lands after it.
+pub(crate) fn enqueue(drawable: Id) {
+    if drawable.is_null() || !object::is_kind(drawable, c"RosemaryCAMetalDrawable") {
+        objc::arc::release(drawable);
         return;
     }
-    present_readback(drawable);
-    complete(drawable);
+    // SAFETY: a drawable of this crate's, checked above.
+    let gpu = unsafe { object::body::<Drawable>(drawable) }.gpu;
+    let presenter = &gpu.presenter;
+    presenter.worker.call_once(|| {
+        std::thread::Builder::new()
+            .name("metal:present".to_string())
+            .spawn(move || present_worker(gpu))
+            .expect("a thread for Metal presentation");
+    });
+    let mut pending = presenter.pending.lock().expect("presentation queue");
+    pending.push_back(drawable as usize);
+    presenter.ready.notify_one();
 }
 
-/// Attach the swapchain copy directly behind the guest submission. The
-/// swapchain owns a retained reference until its copy fence signals.
-pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
+fn present_worker(gpu: &'static Gpu) {
+    let presenter = &gpu.presenter;
+    loop {
+        let drawable = {
+            let mut pending = presenter.pending.lock().expect("presentation queue");
+            loop {
+                if let Some(drawable) = pending.pop_front() {
+                    break drawable as Id;
+                }
+                pending = presenter.ready.wait(pending).expect("presentation queue");
+            }
+        };
+        // A readback's copy is queued behind the guest's work, and waits
+        // for its own fence, so it reads what the guest rendered.
+        if !enqueue_swapchain(drawable) {
+            present_readback(drawable);
+            complete(drawable);
+        }
+        objc::arc::release(drawable);
+    }
+}
+
+/// Copy a drawable into its window's swapchain and present it. The swapchain
+/// owns a retained reference until its copy fence signals.
+fn enqueue_swapchain(drawable: Id) -> bool {
     if drawable.is_null() || !object::is_kind(drawable, c"RosemaryCAMetalDrawable") {
         return false;
     }
@@ -350,7 +399,7 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
     let Some(frame) = layer_frame(described.layer) else {
         return false;
     };
-    if std::env::var_os("ROSEMARY_PRESENT_READBACK").is_some() {
+    if forced_readback() {
         return false;
     }
     // Where a web view sits over this layer, the window's store carries its
@@ -372,6 +421,9 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
         Ok(true) => {
             gpu::milestone("presented frame");
             crate::stats::count(crate::stats::Counter::Frames);
+            // The readback path reports from `present_readback`; without this
+            // a swapchain run never prints its statistics at all.
+            crate::stats::tick();
             true
         }
         Ok(false) => false,
@@ -379,40 +431,6 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> bool {
             gpu::trace(format!("swapchain presentation failed: {reason}"));
             false
         }
-    }
-}
-
-/// Hand a completed drawable to the slow host-readback lane. `drawable` is
-/// one owned reference, consumed by the worker.
-pub(crate) fn enqueue_readback(drawable: Id) {
-    READBACKS.worker.call_once(|| {
-        std::thread::Builder::new()
-            .name("metal:readback".to_string())
-            .spawn(readback_worker)
-            .expect("a thread for Metal presentation readbacks");
-    });
-    let mut pending = READBACKS.pending.lock().expect("presentation readbacks");
-    pending.push_back(drawable as usize);
-    READBACKS.ready.notify_one();
-}
-
-fn readback_worker() {
-    loop {
-        let drawable = {
-            let mut pending = READBACKS.pending.lock().expect("presentation readbacks");
-            loop {
-                if let Some(drawable) = pending.pop_front() {
-                    break drawable as Id;
-                }
-                pending = READBACKS
-                    .ready
-                    .wait(pending)
-                    .expect("presentation readbacks");
-            }
-        };
-        present_readback(drawable);
-        complete(drawable);
-        objc::arc::release(drawable);
     }
 }
 
@@ -537,6 +555,13 @@ fn present_inner(drawable: Id) {
 }
 
 /// Where a layer sits in its window, or `None` for a layer no view holds.
+/// `ROSEMARY_PRESENT_READBACK`, read once: presentation asks every frame.
+fn forced_readback() -> bool {
+    #[static_init::dynamic]
+    static FORCED: bool = std::env::var_os("ROSEMARY_PRESENT_READBACK").is_some();
+    *FORCED
+}
+
 pub(crate) fn layer_frame(layer: Id) -> Option<appkit::view::Frame> {
     // SAFETY: a `CAMetalLayer` this runtime made, whose view outlives it.
     let view = unsafe { appkit::layer::view_of(layer) };
@@ -780,7 +805,7 @@ pub(crate) fn present_store(
     holes: &[appkit::backing::Hole],
     overlays: &[appkit::backing::GpuOverlay],
 ) -> bool {
-    if std::env::var_os("ROSEMARY_PRESENT_READBACK").is_some() {
+    if forced_readback() {
         return false;
     }
     // SAFETY: the Metal framework's exported constructor, which has no

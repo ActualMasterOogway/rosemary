@@ -55,7 +55,7 @@ impl Gpu {
         acquired
     }
 
-    fn acquire_context_unbounded(&self) -> Result<CommandContext, String> {
+    pub(super) fn acquire_context_unbounded(&self) -> Result<CommandContext, String> {
         if let Some(context) = self.contexts.lock().expect("command contexts").pop() {
             return Ok(context);
         }
@@ -102,6 +102,12 @@ impl Gpu {
     /// Hand back a command buffer which is not pending on the queue: its work
     /// has completed, or it was never submitted.
     pub fn release_context(&self, context: CommandContext) {
+        self.recycle_context(context);
+        self.release_context_budget();
+    }
+
+    /// Keep or destroy a context, outside the command-buffer budget.
+    pub(super) fn recycle_context(&self, context: CommandContext) {
         // SAFETY: the caller guarantees nothing allocated from the pool is
         // pending, and the pool is not in use on any other thread.
         let reset = unsafe {
@@ -111,8 +117,6 @@ impl Gpu {
         let mut contexts = self.contexts.lock().expect("command contexts");
         if reset.is_ok() && contexts.len() < RECYCLED {
             contexts.push(context);
-            drop(contexts);
-            self.release_context_budget();
             return;
         }
         drop(contexts);
@@ -120,7 +124,6 @@ impl Gpu {
             self.device.destroy_command_pool(context.pool, None);
             self.device.destroy_fence(context.fence, None);
         }
-        self.release_context_budget();
     }
 
     fn release_context_budget(&self) {
@@ -147,6 +150,9 @@ impl Gpu {
         let sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(CAPACITY * 4),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
                 .descriptor_count(CAPACITY * 4),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)

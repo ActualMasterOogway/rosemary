@@ -44,6 +44,7 @@ pub(super) unsafe extern "C" fn set_buffer<const STAGE: usize>(
             offset,
             end: inner.length,
             range: vk::WHOLE_SIZE,
+            uploaded: false,
         }
     };
     if let Some(slot) = encoder.buffers[STAGE].get_mut(index as usize) {
@@ -93,6 +94,7 @@ pub(super) unsafe extern "C" fn set_bytes<const STAGE: usize>(
             offset,
             end: offset + length,
             range: length,
+            uploaded: true,
         };
     }
 }
@@ -107,6 +109,10 @@ pub(super) unsafe extern "C" fn set_buffer_offset<const STAGE: usize>(
     let encoder = unsafe { object::body::<Encoder>(receiver) };
     if let Some(slot) = encoder.buffers[STAGE].get_mut(index as usize) {
         slot.offset = offset;
+        // Metal allows this only on a buffer set with `-setBuffer:`. On a
+        // `-setBytes:` copy it would move a dynamic offset past the bytes the
+        // chunk was written with, so it stays an ordinary descriptor.
+        slot.uploaded = false;
     }
 }
 

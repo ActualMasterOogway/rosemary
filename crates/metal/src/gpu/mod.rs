@@ -1,3 +1,4 @@
+mod deferred;
 mod format;
 mod guard;
 mod memory;
@@ -78,6 +79,12 @@ pub struct Gpu {
     /// In-flight work and its completion worker are device-local. Independent
     /// Vulkan devices must never head-of-line block one another.
     pub(crate) submissions: crate::submission::Tracker,
+    /// Texture work Metal performs outside any command buffer, run ahead of
+    /// the next submission.
+    deferred: deferred::Deferred,
+    /// The thread drawables are presented on, so presentation never holds
+    /// up a commit.
+    pub(crate) presenter: crate::present::Presenter,
     memory: vk::PhysicalDeviceMemoryProperties,
     pub limits: vk::PhysicalDeviceLimits,
     /// One layout per distinct set of Metal binding indices, so pipelines
@@ -666,6 +673,8 @@ impl Gpu {
             queue: Mutex::new(queue),
             submission_boundary: Mutex::new(()),
             submissions: crate::submission::Tracker::new(),
+            deferred: deferred::Deferred::default(),
+            presenter: crate::present::Presenter::new(),
             memory,
             limits: properties.limits,
             layouts: Mutex::new(HashMap::new()),

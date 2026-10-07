@@ -15,6 +15,7 @@ impl Gpu {
         let submit = vk::SubmitInfo::default().command_buffers(&buffers);
         {
             let queue = self.queue.lock().expect("Vulkan queue");
+            self.flush_deferred(*queue);
             // SAFETY: the queue is held exclusively for the submission.
             unsafe { self.device.reset_fences(&[fence]) }
                 .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
@@ -22,6 +23,8 @@ impl Gpu {
             unsafe { self.device.queue_submit(*queue, &[submit], fence) }
                 .map_err(|error| format!("vkQueueSubmit failed with {error:?}"))?;
         }
+        // Outside the queue lock: this destroys buffers and images.
+        self.retire_deferred();
         Ok(())
     }
 
@@ -93,6 +96,7 @@ impl Gpu {
             .wait_dst_stage_mask(&wait_stages)
             .signal_semaphores(signal);
         let queue = self.queue.lock().expect("Vulkan queue");
+        self.flush_deferred(*queue);
         // SAFETY: the queue is held exclusively; the fence and semaphores
         // belong to this device.
         unsafe { self.device.reset_fences(&[fence]) }
@@ -179,6 +183,13 @@ impl Gpu {
     /// putting a fresh texture into a usable layout, and copying bytes a guest
     /// handed to `-replaceRegion:`. Those go through here.
     pub fn one_shot(&self, body: impl FnOnce(&Device, vk::CommandBuffer)) -> Result<(), String> {
+        crate::stats::count(crate::stats::Counter::ImmediateCalls);
+        crate::stats::timed(crate::stats::Counter::ImmediateMicros, || {
+            self.one_shot_inner(body)
+        })
+    }
+
+    fn one_shot_inner(&self, body: impl FnOnce(&Device, vk::CommandBuffer)) -> Result<(), String> {
         let mut slot = self.immediate.lock().expect("immediate command state");
         if slot.is_none() {
             let pool_info = vk::CommandPoolCreateInfo::default()
