@@ -151,6 +151,7 @@ pub const NAMES: &[(&str, &str)] = &[
     // `struct termios` field order, and the `c_cc` indices.
     ("tcgetattr", TERMIOS),
     ("tcsetattr", TERMIOS),
+    ("openpty", TERMIOS),
     // The socket API, every layer of which disagrees; `crate::net` answers all of
     // these, and the entries are what stop the host's own being bound instead.
     // `listen`, `shutdown` and the `inet_addr` family are absent on purpose: they

@@ -3218,6 +3218,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("task_policy_get", I32, U32, U32, P, P, P),
     sig!("task_info", I32, U32, U32, P, P),
     sig!("task_threads", I32, U32, P, P),
+    sig!("openpty", I32, P, P, P, P, P),
     sig!("tcflush", I32, I32, I32),
     sig!("tcgetattr", I32, I32, P),
     sig!("tcsendbreak", I32, I32, I32),

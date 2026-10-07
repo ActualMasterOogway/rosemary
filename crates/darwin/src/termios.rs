@@ -384,9 +384,66 @@ unsafe extern "C" fn cfmakeraw(term: *mut Termios) {
     term.c_cc[VTIME] = 0;
 }
 
+/// `int openpty(int *, int *, char *, const struct termios *, const struct winsize *)`
+///
+/// The host opens the pair; the terminal settings are Darwin's layout and go
+/// through `tcsetattr` above, so they arrive in the host's bits. `winsize` is
+/// four `unsigned short`s on both and passes straight through.
+///
+/// # Safety
+///
+/// `leader` and `follower` are writable; `name`, `term` and `size` are null or
+/// a buffer for the path, a Darwin `struct termios` and a `struct winsize`.
+unsafe extern "C" fn openpty(
+    leader: *mut c_int,
+    follower: *mut c_int,
+    name: *mut libc::c_char,
+    term: *const Termios,
+    size: *const libc::winsize,
+) -> c_int {
+    let (mut master, mut slave) = (0, 0);
+    // The host would read `term` in its own layout, so none is passed on.
+    // SAFETY: two slots this frame owns; the caller's name buffer.
+    let made = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            name,
+            // FreeBSD's binding takes `*mut` for both; Linux's takes `*const`.
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if made != 0 {
+        return made;
+    }
+    // SAFETY: the caller's structures, and descriptors just opened.
+    let configured = unsafe {
+        (term.is_null() || tcsetattr(slave, 0, term) == 0)
+            && (size.is_null() || libc::ioctl(slave, libc::TIOCSWINSZ, size) == 0)
+    };
+    if !configured {
+        let error = crate::errno::get();
+        // SAFETY: descriptors this call opened and has not handed out.
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        crate::errno::set(error);
+        return -1;
+    }
+    // SAFETY: the caller's slots.
+    unsafe {
+        leader.write(master);
+        follower.write(slave);
+    }
+    0
+}
+
 exports::exports! {
     functions {
         "cfmakeraw" => cfmakeraw,
+        "openpty" => openpty,
         "tcgetattr" => tcgetattr,
         "tcsetattr" => tcsetattr,
         "cfgetispeed" => cfgetispeed,
@@ -405,6 +462,7 @@ mod tests {
     fn every_terminal_entry_is_published() {
         for name in [
             "cfmakeraw",
+            "openpty",
             "tcgetattr",
             "tcsetattr",
             "cfgetispeed",
@@ -434,8 +492,8 @@ mod tests {
                 &mut leader,
                 &mut follower,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
         assert_eq!(made, 0, "no pty to test with");
@@ -451,6 +509,58 @@ mod tests {
             assert_eq!(back.c_lflag & (ICANON | ECHO), 0);
             assert_eq!(back.c_oflag & OPOST, 0);
             assert_eq!((back.c_cc[16], back.c_cc[17]), (1, 0), "VMIN and VTIME");
+            libc::close(leader);
+            libc::close(follower);
+        }
+    }
+
+    /// `openpty` takes Darwin's `termios`: a raw one asked for at open time
+    /// must read back raw, and the window size must land.
+    #[test]
+    fn openpty_applies_darwin_settings() {
+        const ECHO: u64 = 0x8;
+        const ICANON: u64 = 0x100;
+        let (mut leader, mut follower) = (0, 0);
+        let mut raw: Termios = unsafe { std::mem::zeroed() };
+        let size = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let mut name = [0 as libc::c_char; 128];
+        // SAFETY: slots, a name buffer and structures this test owns.
+        unsafe {
+            assert_eq!(
+                openpty(
+                    &mut leader,
+                    &mut follower,
+                    name.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null()
+                ),
+                0
+            );
+            assert_eq!(tcgetattr(follower, &mut raw), 0);
+            libc::close(leader);
+            libc::close(follower);
+            cfmakeraw(&mut raw);
+            assert_eq!(
+                openpty(
+                    &mut leader,
+                    &mut follower,
+                    std::ptr::null_mut(),
+                    &raw,
+                    &size
+                ),
+                0
+            );
+            let mut back: Termios = std::mem::zeroed();
+            assert_eq!(tcgetattr(follower, &mut back), 0);
+            assert_eq!(back.c_lflag & (ICANON | ECHO), 0);
+            let mut got: libc::winsize = std::mem::zeroed();
+            assert_eq!(libc::ioctl(follower, libc::TIOCGWINSZ, &mut got), 0);
+            assert_eq!((got.ws_row, got.ws_col), (24, 80));
             libc::close(leader);
             libc::close(follower);
         }
