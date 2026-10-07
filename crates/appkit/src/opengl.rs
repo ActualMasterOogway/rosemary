@@ -1097,6 +1097,7 @@ const kCGLBadEnumeration: i32 = 10010;
 const kCGLBadAddress: i32 = 10014;
 #[allow(non_upper_case_globals)]
 const kCGLBadValue: i32 = 10008;
+#[allow(non_upper_case_globals)]
 const kCGLBadPixelFormat: i32 = 10002;
 #[allow(non_upper_case_globals)]
 const kCGLBadContext: i32 = 10004;
