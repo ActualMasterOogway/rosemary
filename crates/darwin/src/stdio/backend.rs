@@ -7,9 +7,9 @@ use super::{CloseFn, File, ReadFn, SeekFn, WriteFn, flag};
 
 unsafe extern "C" {
     /// Declared here because the bindings do not have it on every host;
-    /// `wchar_t` is 32 bits on all of them.
-    pub(super) fn mbrtowc(wc: *mut u32, s: *const c_char, n: usize, state: *mut c_void) -> usize;
-    pub(super) fn wcrtomb(s: *mut c_char, wc: u32, state: *mut c_void) -> usize;
+    /// `wchar_t` is `int` on all of them, as `xlocale` declares it too.
+    pub(super) fn mbrtowc(wc: *mut c_int, s: *const c_char, n: usize, state: *mut c_void) -> usize;
+    pub(super) fn wcrtomb(s: *mut c_char, wc: c_int, state: *mut c_void) -> usize;
 }
 
 /// The descriptor of a stream whose cookie is itself.
@@ -413,7 +413,7 @@ unsafe extern "C" fn memstream_write(cookie: *mut c_void, buf: *const c_char, n:
             // Bytes in, wide characters out, a partial sequence carried over.
             let mut at = 0;
             while at < n {
-                let mut wc = 0u32;
+                let mut wc: c_int = 0;
                 let used = mbrtowc(&mut wc, buf.add(at), n - at, (&raw mut ms.mbstate).cast());
                 match used {
                     usize::MAX => return -1,
@@ -421,7 +421,7 @@ unsafe extern "C" fn memstream_write(cookie: *mut c_void, buf: *const c_char, n:
                     x if x == usize::MAX - 1 => break,
                     _ => {
                         let slot = (*ms.bufp).cast::<u32>().add(ms.offset);
-                        slot.write_unaligned(wc);
+                        slot.write_unaligned(wc as u32);
                         ms.offset += 1;
                         at += used.max(1);
                     }

@@ -309,13 +309,13 @@ impl Input {
                 return None;
             }
             let b = c as c_char;
-            let mut wc = 0u32;
+            let mut wc: c_int = 0;
             // SAFETY: one byte and a conversion state of any host's size.
             let n = unsafe { mbrtowc(&mut wc, &b, 1, state.as_mut_ptr().cast()) };
             match n {
                 usize::MAX => return None,
                 x if x == usize::MAX - 1 => continue,
-                _ => return Some(wc),
+                _ => return Some(wc as u32),
             }
         }
     }
@@ -807,7 +807,11 @@ unsafe fn scan(fp: *mut File, format: *const c_char, next: Destinations) -> c_in
                             let mut fresh = [0u64; 16];
                             // SAFETY: a buffer longer than any sequence.
                             let m = unsafe {
-                                wcrtomb(back.as_mut_ptr().cast(), wc, fresh.as_mut_ptr().cast())
+                                wcrtomb(
+                                    back.as_mut_ptr().cast(),
+                                    wc as c_int,
+                                    fresh.as_mut_ptr().cast(),
+                                )
                             };
                             if m != usize::MAX {
                                 for &b in back[..m].iter().rev() {

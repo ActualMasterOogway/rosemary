@@ -1,107 +1,42 @@
-#![cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-
-use std::ffi::{c_char, c_int, c_void};
-
-/// The SysV `va_list`, which is one of these and not a pointer.
-///
-/// `#[repr(C)]` because the trampoline writes it by offset and glibc reads it
-/// by offset; the two have to agree on all twenty-four bytes.
-#[repr(C)]
-struct VaList {
-    gp_offset: u32,
-    fp_offset: u32,
-    overflow_arg_area: *mut c_void,
-    reg_save_area: *mut c_void,
-}
+use std::ffi::{VaList, c_char, c_int};
 
 unsafe extern "C" {
-    fn vsnprintf(buffer: *mut c_char, size: usize, format: *const c_char, ap: *mut VaList)
-    -> c_int;
-    fn vsscanf(input: *const c_char, format: *const c_char, ap: *mut VaList) -> c_int;
-    fn vasprintf(out: *mut *mut c_char, format: *const c_char, ap: *mut VaList) -> c_int;
-}
-
-/// Build a `va_list` for a function with `$named` register arguments and call
-/// `$body` with a pointer to it in the next argument register.
-///
-/// `$slot` is that register, which is the trampoline's one hand-written detail:
-/// the assembler cannot count the named arguments for us.
-macro_rules! trampoline {
-    ($name:literal, $body:path, gp_offset = $named:literal, slot = $slot:literal) => {
-        core::arch::global_asm!(
-            ".text",
-            concat!(".globl ", $name),
-            concat!(".hidden ", $name),
-            concat!(".type ", $name, ", @function"),
-            concat!($name, ":"),
-            "push rbp",
-            "mov rbp, rsp",
-            // 176 bytes of register save area, then the 24-byte `va_list`,
-            // rounded up to keep the stack sixteen-aligned for the call.
-            "sub rsp, 208",
-            "mov [rsp], rdi",
-            "mov [rsp + 8], rsi",
-            "mov [rsp + 16], rdx",
-            "mov [rsp + 24], rcx",
-            "mov [rsp + 32], r8",
-            "mov [rsp + 40], r9",
-            "movaps [rsp + 48], xmm0",
-            "movaps [rsp + 64], xmm1",
-            "movaps [rsp + 80], xmm2",
-            "movaps [rsp + 96], xmm3",
-            "movaps [rsp + 112], xmm4",
-            "movaps [rsp + 128], xmm5",
-            "movaps [rsp + 144], xmm6",
-            "movaps [rsp + 160], xmm7",
-            concat!("mov dword ptr [rsp + 176], ", $named),
-            "mov dword ptr [rsp + 180], 48",
-            "lea rax, [rbp + 16]",
-            "mov [rsp + 184], rax",
-            "mov rax, rsp",
-            "mov [rsp + 192], rax",
-            concat!("lea ", $slot, ", [rsp + 176]"),
-            "call {body}",
-            "mov rsp, rbp",
-            "pop rbp",
-            "ret",
-            concat!(".size ", $name, ", . - ", $name),
-            body = sym $body,
-        );
-    };
+    fn vsnprintf(buffer: *mut c_char, size: usize, format: *const c_char, ap: VaList) -> c_int;
+    fn vsscanf(input: *const c_char, format: *const c_char, ap: VaList) -> c_int;
+    fn vasprintf(out: *mut *mut c_char, format: *const c_char, ap: VaList) -> c_int;
 }
 
 /// `int snprintf_l(char *, size_t, locale_t, const char *, ...)`
 ///
 /// # Safety
 ///
-/// The trampoline's: the arguments are the ones the caller passed, and the
-/// `va_list` describes its own frame.
-unsafe extern "C" fn snprintf_l_body(
+/// `buffer` holds `size` bytes, `locale` is null or a `locale_t` this process
+/// made, and the arguments match `format`.
+unsafe extern "C" fn snprintf_l(
     buffer: *mut c_char,
     size: usize,
     locale: libc::locale_t,
     format: *const c_char,
-    ap: *mut VaList,
+    args: ...
 ) -> c_int {
     let _switched = crate::xlocale::switch(locale);
-    // SAFETY: the caller's buffer and format, and a `va_list` the trampoline
-    // built for this frame.
-    unsafe { vsnprintf(buffer, size, format, ap) }
+    // SAFETY: the caller's buffer, format and arguments.
+    unsafe { vsnprintf(buffer, size, format, args) }
 }
 
 /// `int sscanf_l(const char *, locale_t, const char *, ...)`
 ///
 /// # Safety
 ///
-/// As [`snprintf_l_body`].
-unsafe extern "C" fn sscanf_l_body(
+/// As [`snprintf_l`].
+unsafe extern "C" fn sscanf_l(
     input: *const c_char,
     locale: libc::locale_t,
     format: *const c_char,
-    ap: *mut VaList,
+    args: ...
 ) -> c_int {
     let _switched = crate::xlocale::switch(locale);
-    unsafe { vsscanf(input, format, ap) }
+    unsafe { vsscanf(input, format, args) }
 }
 
 /// `int asprintf_l(char **, locale_t, const char *, ...)`
@@ -116,12 +51,12 @@ unsafe extern "C" fn sscanf_l_body(
 ///
 /// # Safety
 ///
-/// As [`snprintf_l_body`].
-unsafe extern "C" fn asprintf_l_body(
+/// As [`snprintf_l`].
+unsafe extern "C" fn asprintf_l(
     out: *mut *mut c_char,
     locale: libc::locale_t,
     format: *const c_char,
-    ap: *mut VaList,
+    args: ...
 ) -> c_int {
     if out.is_null() {
         return -1;
@@ -129,9 +64,8 @@ unsafe extern "C" fn asprintf_l_body(
     let mut host: *mut c_char = std::ptr::null_mut();
     let written = {
         let _switched = crate::xlocale::switch(locale);
-        // SAFETY: a live `char *` slot, the caller's format, and a `va_list`
-        // the trampoline built for this frame.
-        unsafe { vasprintf(&raw mut host, format, ap) }
+        // SAFETY: a live `char *` slot, and the caller's format and arguments.
+        unsafe { vasprintf(&raw mut host, format, args) }
     };
     if written < 0 || host.is_null() {
         return -1;
@@ -152,38 +86,11 @@ unsafe extern "C" fn asprintf_l_body(
     written
 }
 
-// `rdi, rsi, rdx, rcx, r8, r9` is the order, so the argument after four named
-// ones is `r8` and after three is `rcx`.
-trampoline!(
-    "rosemary_snprintf_l",
-    snprintf_l_body,
-    gp_offset = 32,
-    slot = "r8"
-);
-trampoline!(
-    "rosemary_sscanf_l",
-    sscanf_l_body,
-    gp_offset = 24,
-    slot = "rcx"
-);
-trampoline!(
-    "rosemary_asprintf_l",
-    asprintf_l_body,
-    gp_offset = 24,
-    slot = "rcx"
-);
-
-unsafe extern "C" {
-    fn rosemary_snprintf_l();
-    fn rosemary_sscanf_l();
-    fn rosemary_asprintf_l();
-}
-
 exports::exports! {
     functions {
-        "snprintf_l" => rosemary_snprintf_l,
-        "sscanf_l" => rosemary_sscanf_l,
-        "asprintf_l" => rosemary_asprintf_l,
+        "snprintf_l" => snprintf_l,
+        "sscanf_l" => sscanf_l,
+        "asprintf_l" => asprintf_l,
     }
 }
 
@@ -192,12 +99,10 @@ mod tests {
     use super::*;
     use std::ffi::CStr;
 
-    /// The trampolines are variadic C functions, which is exactly what Rust
-    /// cannot declare - so each is called through a transmuted pointer with the
-    /// signature the caller would have used.
-    fn snprintf_l()
+    /// Called through the published symbol, as a guest would reach it.
+    fn published_snprintf_l()
     -> unsafe extern "C" fn(*mut c_char, usize, libc::locale_t, *const c_char, ...) -> c_int {
-        // SAFETY: the trampoline is a variadic function of this shape.
+        // SAFETY: the export is a variadic function of this shape.
         unsafe { std::mem::transmute(symbol("snprintf_l").expect("published")) }
     }
 
@@ -209,7 +114,7 @@ mod tests {
         // SAFETY: a buffer this test sized, and a format matching the
         // arguments after it.
         let written = unsafe {
-            snprintf_l()(
+            published_snprintf_l()(
                 buffer.as_mut_ptr(),
                 buffer.len(),
                 std::ptr::null_mut(),
@@ -235,7 +140,7 @@ mod tests {
     fn a_double_is_read_from_the_vector_registers() {
         let mut buffer = [0i8; 64];
         unsafe {
-            snprintf_l()(
+            published_snprintf_l()(
                 buffer.as_mut_ptr(),
                 buffer.len(),
                 std::ptr::null_mut(),
@@ -267,7 +172,7 @@ mod tests {
         // SAFETY: as above, with a real locale rather than a null one.
         unsafe {
             let before = libc::uselocale(std::ptr::null_mut());
-            snprintf_l()(
+            published_snprintf_l()(
                 buffer.as_mut_ptr(),
                 buffer.len(),
                 c_locale,

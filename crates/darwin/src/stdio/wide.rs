@@ -39,7 +39,7 @@ unsafe fn getwc_locked(fp: *mut File) -> c_int {
             if (*fp).r <= 0 && !engine::refill(fp) {
                 return WEOF;
             }
-            let mut wc = 0u32;
+            let mut wc: c_int = 0;
             let used = mbrtowc(&mut wc, (*fp).p.cast(), (*fp).r as usize, mbstate(fp));
             match used {
                 usize::MAX => {
@@ -55,7 +55,7 @@ unsafe fn getwc_locked(fp: *mut File) -> c_int {
                     let n = n.max(1);
                     (*fp).p = (*fp).p.add(n);
                     (*fp).r -= n as c_int;
-                    return wc as c_int;
+                    return wc;
                 }
             }
         }
@@ -68,7 +68,7 @@ unsafe fn putwc_locked(wc: c_int, fp: *mut File) -> c_int {
     // SAFETY: the caller's locked stream and a buffer longer than any
     // multibyte character.
     unsafe {
-        let n = wcrtomb(buf.as_mut_ptr().cast(), wc as u32, mbstate(fp));
+        let n = wcrtomb(buf.as_mut_ptr().cast(), wc, mbstate(fp));
         if n == usize::MAX {
             (*fp).flags |= flag::ERR;
             return WEOF;
@@ -153,11 +153,7 @@ pub unsafe extern "C" fn ungetwc(wc: c_int, fp: *mut File) -> c_int {
         let _guard = wide(fp);
         // A copy: pushing back must not disturb the read side's state.
         let mut scratch = state(fp).mbstate;
-        let n = wcrtomb(
-            buf.as_mut_ptr().cast(),
-            wc as u32,
-            (&raw mut scratch).cast(),
-        );
+        let n = wcrtomb(buf.as_mut_ptr().cast(), wc, (&raw mut scratch).cast());
         if n == usize::MAX {
             return WEOF;
         }
