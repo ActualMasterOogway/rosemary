@@ -1141,6 +1141,9 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     if let Some(addr) = crate::frameworks::symbol(name) {
         return Some(remember_native_symbol(addr, name, None));
     }
+    if let Some(addr) = crate::objc::host::symbol(name) {
+        return Some(remember_native_symbol(addr, name, None));
+    }
 
     // The global fallback, which is a *host* search - and one that has to go
     // through `darwin`, not straight to `dlsym`. A guest asking `RTLD_DEFAULT`
@@ -2035,6 +2038,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Roblox calls `dlsym(RTLD_NEXT, "objc_autoreleasePoolPush")` from a static
+    /// initializer and calls the answer without checking it.
+    #[test]
+    fn a_global_search_finds_the_objc_runtime() {
+        const RTLD_NEXT: u64 = u64::MAX;
+        let name = "objc_autoreleasePoolPush";
+        let expected = crate::objc::host::symbol(name).expect("the runtime defines it");
+        let expected = remember_native_symbol(expected, name, None);
+        assert_eq!(lookup(RTLD_NEXT, name), Some(expected));
+        assert_eq!(lookup(global_handle(), name), Some(expected));
     }
 
     #[test]
