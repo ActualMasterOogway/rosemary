@@ -23,6 +23,7 @@ unsafe extern "C" {
 static DSO_HANDLE: u8 = 0;
 
 pub unsafe extern "C" fn atexit(handler: *const ()) -> c_int {
+    crate::stdio::register_cleanup();
     // SAFETY: registering against the host should be fine since the ABIs match
     unsafe {
         __cxa_atexit(
@@ -61,6 +62,7 @@ pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
             block as u64
         }
     };
+    crate::stdio::register_cleanup();
     // SAFETY: a handler of this crate's own, the kept block as its argument, and
     // a DSO handle of this crate's own.
     unsafe {

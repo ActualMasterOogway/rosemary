@@ -208,7 +208,7 @@ fn exec_path(given: &CStr) -> CString {
 }
 
 /// Recognise thin and fat Mach-O images by their magic, in either byte order.
-fn is_mach_o(path: &CStr) -> bool {
+pub(crate) fn is_mach_o(path: &CStr) -> bool {
     let Ok(text) = path.to_str() else {
         return false;
     };
@@ -1039,6 +1039,30 @@ pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
     drop(signals);
     crate::errno::set(error);
     result
+}
+
+/// Start `sh -c command` as `popen` does: `dup2` each `(from, to)` and close
+/// each of `close` in the child, with the guest's environment.
+pub(crate) fn spawn_shell(
+    command: &CStr,
+    dup2: &[(c_int, c_int)],
+    close: &[c_int],
+) -> Result<libc::pid_t, c_int> {
+    let actions = FileActions {
+        actions: dup2
+            .iter()
+            .map(|&(from, to)| Action::Dup2 { from, to })
+            .chain(close.iter().map(|&fd| Action::Close(fd)))
+            .collect(),
+    };
+    let host = actions.to_host()?;
+    let args = [c"sh".to_owned(), c"-c".to_owned(), command.to_owned()];
+    let mut pid = 0;
+    // SAFETY: the strings and the host actions outlive the call.
+    match unsafe { spawn_host(&mut pid, BSHELL, &args, environ(), Some(&host), None) } {
+        0 => Ok(pid),
+        rc => Err(rc),
+    }
 }
 
 /// # Safety

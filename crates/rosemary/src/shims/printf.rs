@@ -480,13 +480,13 @@ fn read_wide_string(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<char>> {
 const MAX_WIDE: usize = 64 * 1024;
 
 /// A wide format string, as the bytes [`render`] formats.
-fn wide_format(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
+pub(crate) fn wide_format(args: &VarArgs<'_>, ptr: u64) -> Result<Vec<u8>> {
     let chars = read_wide_string(args, ptr)?;
     Ok(chars.into_iter().collect::<String>().into_bytes())
 }
 
 /// A rendering, back as `wchar_t` units.
-fn wide_from_utf8(bytes: &[u8]) -> Vec<u32> {
+pub(crate) fn wide_from_utf8(bytes: &[u8]) -> Vec<u32> {
     String::from_utf8_lossy(bytes)
         .chars()
         .map(u32::from)
@@ -674,40 +674,40 @@ fn pad_bytes(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
     }
 }
 
-/// The host stream a guest `printf` writes to.
+/// The guest's `stdout`, which a guest `printf` writes to.
 ///
-/// Resolved rather than declared as an `extern`: the symbol is `__stdoutp` on Darwin
-/// and `stdout` elsewhere, so a link-time reference names one host or the other. See
-/// [`darwin::stdio`], which also answers the guest's own `___stdoutp` import - out of
-/// the same object, so a shim's output and the guest's interleave as they would
-/// natively.
-fn host_stdout() -> *mut libc::FILE {
+/// [`darwin::stdio`]'s answer, which is also what the guest's own `___stdoutp`
+/// import holds - so a shim's output and the guest's share one buffer and
+/// interleave as they would natively.
+fn guest_stdout() -> *mut core::ffi::c_void {
     darwin::stdio::stdout()
 }
 
 /// `stderr`, for the same reason.
-fn host_stderr() -> *mut libc::FILE {
+fn guest_stderr() -> *mut core::ffi::c_void {
     darwin::stdio::stderr()
 }
 
-pub(crate) fn write_host(stream: *mut libc::FILE, bytes: &[u8]) {
-    if stream.is_null() || bytes.is_empty() {
-        return;
-    }
-    // SAFETY: `bytes` is a live slice of `len` bytes and `stream` is a host
-    // `FILE*` - either the host's own stdout or a pointer the guest obtained
-    // from a passed-through `fopen`/`___stdoutp`, both of which are host
-    // pointers by construction of the native provider.
-    unsafe {
-        libc::fwrite(bytes.as_ptr().cast(), 1, bytes.len(), stream);
+/// Write `bytes` to a guest stream, returning whether all of them went.
+pub(crate) fn write_guest(stream: *mut core::ffi::c_void, bytes: &[u8]) -> bool {
+    // SAFETY: `stream` is a `FILE *` the guest holds, which is the kind the
+    // selected libc made - `darwin::stdio`'s, or the host's under the native
+    // libc - and `write` picks the same one.
+    unsafe { darwin::stdio::write(stream, bytes) == bytes.len() }
+}
+
+/// What a `printf` returns: the length, or -1 if the stream refused it.
+fn written(ok: bool, out: &[u8]) -> i32 {
+    match ok || out.is_empty() {
+        true => out.len() as i32,
+        false => -1,
     }
 }
 
 /// `int printf(const char *fmt, ...)`
 pub fn printf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from(symbol, ctx, &*mem, ctx.rdi, 1)?;
-    write_host(host_stdout(), &out);
-    set_int_return(ctx, out.len() as i32);
+    set_int_return(ctx, written(write_guest(guest_stdout(), &out), &out));
     Ok(())
 }
 
@@ -718,15 +718,17 @@ pub fn malloc_printf(
     mem: &mut dyn GuestMemory,
 ) -> Result<()> {
     let out = format_from(symbol, ctx, &*mem, ctx.rdi, 1)?;
-    write_host(host_stderr(), &out);
+    write_guest(guest_stderr(), &out);
     Ok(())
 }
 
 /// `int fprintf(FILE *stream, const char *fmt, ...)`
 pub fn fprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from(symbol, ctx, &*mem, ctx.rsi, 2)?;
-    write_host(ctx.rdi as usize as *mut libc::FILE, &out);
-    set_int_return(ctx, out.len() as i32);
+    set_int_return(
+        ctx,
+        written(write_guest(ctx.rdi as usize as *mut _, &out), &out),
+    );
     Ok(())
 }
 
@@ -835,15 +837,16 @@ pub(crate) fn format_from_list(
 
 pub fn vprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from_list(symbol, ctx, mem, ctx.rdi, ctx.rsi)?;
-    write_host(host_stdout(), &out);
-    set_int_return(ctx, out.len() as i32);
+    set_int_return(ctx, written(write_guest(guest_stdout(), &out), &out));
     Ok(())
 }
 
 pub fn vfprintf(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
     let out = format_from_list(symbol, ctx, mem, ctx.rsi, ctx.rdx)?;
-    write_host(ctx.rdi as usize as *mut libc::FILE, &out);
-    set_int_return(ctx, out.len() as i32);
+    set_int_return(
+        ctx,
+        written(write_guest(ctx.rdi as usize as *mut _, &out), &out),
+    );
     Ok(())
 }
 

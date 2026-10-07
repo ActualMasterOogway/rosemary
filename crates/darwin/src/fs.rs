@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::stat::{DARWIN_PATH_MAX, guest_path, may_write, stdio_writes, with_fallback};
+use crate::stat::{DARWIN_PATH_MAX, guest_path, may_write, with_fallback};
 
 /// The host path `path` names, or `None` for a null pointer.
 fn host(path: *const c_char) -> Option<CString> {
@@ -531,31 +531,6 @@ pub unsafe extern "C" fn symlink(target: *const c_char, link: *const c_char) -> 
     unsafe { libc::symlink(target.as_ptr(), link.as_ptr()) }
 }
 
-/// `FILE *freopen(const char *, const char *, FILE *)`
-///
-/// # Safety
-///
-/// `path` and `mode` are NUL-terminated strings and `stream` is a `FILE *` the
-/// host's stdio owns.
-pub unsafe extern "C" fn freopen(
-    path: *const c_char,
-    mode: *const c_char,
-    stream: *mut libc::FILE,
-) -> *mut libc::FILE {
-    let writing = unsafe { stdio_writes(mode) };
-    // freopen closes the old stream even on failure, so it cannot be retried.
-    let translated = host(path);
-    let folded = translated.as_ref().and_then(|path| prefix::ns::fold(path));
-    let path = folded
-        .as_ref()
-        .or(translated.as_ref())
-        .map_or(path, |p| p.as_ptr());
-    if writing && !path.is_null() && !may_write(path) {
-        return std::ptr::null_mut();
-    }
-    unsafe { libc::freopen(path, mode, stream) }
-}
-
 /// `int mkstemp(char *template)`
 ///
 /// The template is rewritten in place with the name that was created, and the
@@ -746,7 +721,6 @@ exports::exports! {
         "clonefileat" => clonefileat,
         "rename" => rename,
         "symlink" => symlink,
-        "freopen" => freopen,
         "mkstemp" => mkstemp,
         "mkdtemp" => mkdtemp,
         "mkdtempat_np" => mkdtempat_np,

@@ -676,7 +676,7 @@ fn half_close_if_asked(fd: i32, darwin_flags: i32, sent: isize) -> isize {
 /// # Safety
 ///
 /// `buf` is `len` readable bytes.
-unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
+pub(crate) unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
     if super::sockopt::suppresses_sigpipe(fd) {
         let previous_errno = crate::errno::get();
         // SAFETY: the caller's buffer. A `send` with no flags is a `write` on

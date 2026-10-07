@@ -34,6 +34,7 @@ pub mod pthread;
 pub mod runtime;
 pub mod sscanf;
 pub mod stackprobe;
+pub mod stdio;
 pub mod sysvsem;
 pub mod vmmap;
 pub mod zlib;
@@ -175,6 +176,7 @@ pub fn dispatch(
                 .or_else(|| intdiv::shim_for(name))
                 .or_else(|| process::shim_for(name))
                 .or_else(|| stackprobe::shim_for(name))
+                .or_else(|| stdio::shim_for(name))
                 .or_else(|| sysvsem::shim_for(name))
                 .or_else(|| vmmap::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
@@ -205,6 +207,7 @@ pub fn is_shimmed(symbol: &str) -> bool {
         || intdiv::shim_for(name).is_some()
         || process::shim_for(name).is_some()
         || stackprobe::shim_for(name).is_some()
+        || stdio::shim_for(name).is_some()
         || sysvsem::shim_for(name).is_some()
         || vmmap::shim_for(name).is_some()
         || crate::jmpbuf::shim_for(name).is_some()

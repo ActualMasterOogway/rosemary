@@ -91,8 +91,6 @@ pub mod spawn;
 pub mod stackprobe;
 pub mod stat;
 pub mod stdio;
-#[cfg(target_os = "linux")]
-pub mod stream;
 pub mod strict;
 pub mod string;
 pub mod sysctl;
@@ -204,10 +202,20 @@ pub fn symbol(symbol: &str) -> Option<u64> {
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
-    if divergent::contains(name) || strict::enabled() || !host_fallback_allowed(name) {
+    if divergent::contains(name)
+        || strict::enabled()
+        || !host_fallback_allowed(name)
+        || stdio_refuses(name)
+    {
         return None;
     }
     host_symbol(name)
+}
+
+/// A stdio name the builtin libc does not implement. The host's would be
+/// handed one of [`stdio`]'s streams, which it cannot read.
+fn stdio_refuses(name: &str) -> bool {
+    libc_backend::using_builtin() && stdio::REFUSED.contains(&name)
 }
 
 /// [`symbol`] without the [`strict`] refusal, for a shim naming what it forwards to.
@@ -219,7 +227,7 @@ pub fn shim_symbol(symbol: &str) -> Option<u64> {
     if let Some(addr) = implemented(name) {
         return Some(addr);
     }
-    if divergent::contains(name) || !host_fallback_allowed(name) {
+    if divergent::contains(name) || !host_fallback_allowed(name) || stdio_refuses(name) {
         return None;
     }
     host_symbol(name)
@@ -230,6 +238,9 @@ pub fn refusal(symbol: &str) -> String {
     let name = base_name(symbol);
     match divergent::reason(name) {
         Some(why) => format!("{symbol}: no Darwin-compatible implementation on this host: {why}"),
+        None if stdio_refuses(name) => format!(
+            "{symbol}: not implemented by the builtin stdio, and the host's cannot use its streams"
+        ),
         None if strict::enabled() && host_symbol(name).is_some() => format!(
             "{symbol}: nothing in this tree implements it, and {} withdraws the host's own",
             strict::VAR
@@ -288,7 +299,6 @@ fn registered(name: &str) -> Option<u64> {
 /// Guest-aware overrides enabled on every host, even with native libc.
 static DEFAULT_MODULES: &[exports::Module] = &[
     idle::MODULE,
-    stdio::MODULE,
     errno::MODULE,
     sysctl::MODULE,
     sysinfo::MODULE,
@@ -302,6 +312,7 @@ static DEFAULT_MODULES: &[exports::Module] = &[
 /// Builtin libc modules shared by macOS and non-macOS hosts.
 static SHARED_MODULES: &[exports::Module] = &[
     pthread::MODULE,
+    stdio::MODULE,
     clock::MODULE,
     glob::MODULE,
     regex::MODULE,
@@ -426,6 +437,8 @@ pub const LIBRARY_NAMES: &[&str] = &[
 ];
 
 pub fn provider() -> machish::resolve::SyntheticDylib {
+    // Before the guest's initializers can register an exit handler of their own.
+    stdio::register_cleanup();
     let mut lib = machish::resolve::SyntheticDylib::new("<darwin>");
     lib.flat(true);
     for name in LIBRARY_NAMES {

@@ -23,6 +23,8 @@ pub fn cxa_atexit(
     let handler = callbacks.substitute(symbol, ctx.rdi)?;
     let arg = ctx.rsi as *mut c_void;
 
+    // Ahead of the handler, so stdio's flush runs after it as Darwin's does.
+    darwin::stdio::register_cleanup();
     // SAFETY: `handler` is either null or an arm64 trampoline this runtime
     // compiled and keeps mapped for the VM's lifetime - which is what
     // `substitute` guarantees and what the published VM makes true past `main`.
@@ -56,6 +58,8 @@ pub fn atexit(
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
     let handler = callbacks.substitute(symbol, ctx.rdi)?;
+    // Ahead of the handler, so stdio's flush runs after it as Darwin's does.
+    darwin::stdio::register_cleanup();
     // SAFETY: as `cxa_atexit`, whose obligations these are.
     let rc = unsafe {
         __cxa_atexit(

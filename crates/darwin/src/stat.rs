@@ -225,19 +225,6 @@ fn writes(host_flags: c_int) -> bool {
         || host_flags & (libc::O_CREAT | libc::O_TRUNC) != 0
 }
 
-/// Whether an `fopen` mode string can change the file it opens.
-///
-/// # Safety
-///
-/// `mode` is null or a NUL-terminated string.
-pub(crate) unsafe fn stdio_writes(mode: *const c_char) -> bool {
-    if mode.is_null() {
-        return false;
-    }
-    let mode = unsafe { CStr::from_ptr(mode) }.to_bytes();
-    mode.iter().any(|b| matches!(b, b'w' | b'a' | b'+'))
-}
-
 /// `int stat(const char *, struct stat *)`
 ///
 /// # Safety
@@ -466,32 +453,6 @@ pub(crate) fn guest_path(host: &CStr) -> Option<std::ffi::CString> {
     let host = host.to_str().ok()?;
     let guest = prefix::ns::to_guest(std::path::Path::new(host))?;
     std::ffi::CString::new(guest.into_os_string().into_encoded_bytes()).ok()
-}
-
-/// `FILE *fopen(const char *, const char *)`, with the same fallback.
-///
-/// # Safety
-///
-/// Both arguments are NUL-terminated strings.
-pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
-    let writing = unsafe { stdio_writes(mode) };
-    with_fallback(path, |path| {
-        if writing && !may_write(path) {
-            return (std::ptr::null_mut(), false);
-        }
-        // `w` and `a` create; `x` is C11's exclusive.
-        // SAFETY: the caller's NUL-terminated mode.
-        let creates = writing
-            && unsafe { CStr::from_ptr(mode) }
-                .to_bytes()
-                .iter()
-                .any(|b| matches!(b, b'w' | b'a'));
-        let exclusive = unsafe { CStr::from_ptr(mode) }.to_bytes().contains(&b'x');
-        let existed = creation(creates, exclusive, libc::AT_FDCWD, path);
-        let file = unsafe { libc::fopen(path, mode) };
-        created(existed, !file.is_null(), libc::AT_FDCWD, path);
-        (file, !file.is_null())
-    })
 }
 
 /// `int open(const char *, int, ...)`, with the same fallback.
@@ -1029,7 +990,6 @@ exports::exports! {
         "faccessat" => faccessat,
         "realpath" => realpath,
         "readlink" => readlink,
-        "fopen" | "fopen$UNIX2003" => fopen,
         "open" => open,
         "openat" => openat,
     }

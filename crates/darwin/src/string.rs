@@ -109,40 +109,6 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut c_char, buflen: usize
     unsafe { libc::strerror_r(crate::errno::to_host(errnum), buf, buflen) }
 }
 
-/// `void perror(const char *s)`
-///
-/// Reads the *guest's* `errno`, which is a different slot holding a different
-/// numbering from the one this host's `perror` would read. Written out here
-/// rather than forwarded, because forwarding it would print this host's last
-/// error rather than the guest's.
-///
-/// # Safety
-///
-/// `s` is NUL-terminated or null.
-pub unsafe extern "C" fn perror(s: *const c_char) {
-    let errnum = crate::errno::to_host(crate::errno::guest_errno());
-    // SAFETY: the host's own static message for a number it knows.
-    let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errnum)) };
-    let prefix = match s.is_null() {
-        true => None,
-        false => Some(unsafe { std::ffi::CStr::from_ptr(s) }),
-    };
-    let line = match prefix.map(|p| p.to_bytes()).filter(|p| !p.is_empty()) {
-        Some(p) => format!(
-            "{}: {}\n",
-            String::from_utf8_lossy(p),
-            String::from_utf8_lossy(message.to_bytes())
-        ),
-        None => format!("{}\n", String::from_utf8_lossy(message.to_bytes())),
-    };
-    // SAFETY: a buffer this function owns, written to the descriptor Darwin's
-    // `perror` writes to. `write` rather than `fputs(stderr)` because the guest's
-    // `stderr` is `crate::stdio`'s and this is below it.
-    unsafe {
-        libc::write(2, line.as_ptr().cast(), line.len());
-    }
-}
-
 exports::exports! {
     functions {
         "timingsafe_bcmp" => timingsafe_bcmp,
@@ -150,7 +116,6 @@ exports::exports! {
         "memset_pattern8" => memset_pattern8,
         "memset_pattern16" => memset_pattern16,
         "strerror" => strerror,
-        "perror" => perror,
         "strerror_r" => strerror_r,
     }
 }
