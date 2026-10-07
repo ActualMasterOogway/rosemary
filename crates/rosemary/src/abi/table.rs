@@ -2803,6 +2803,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // program asks the kernel about its own task.
     sig!("proc_pidinfo", I32, I32, I32, U64, P, I32),
     sig!("proc_pid_rusage", I32, I32, I32, P),
+    sig!("kpersona_pidinfo", I32, I32, P),
     sig!("proc_listpids", I32, U32, U32, P, I32),
     sig!("proc_listallpids", I32, P, I32),
     sig!("memorystatus_control", I32, U32, I32, U32, P, U64),

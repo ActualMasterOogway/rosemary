@@ -521,8 +521,18 @@ pub extern "C" fn memorystatus_control(
     -1
 }
 
+/// `int kpersona_pidinfo(pid_t pid, struct kpersona_info *info)`.
+///
+/// Personas are a macOS kernel concept with no host equivalent, so no process
+/// has one to report and a made-up id would be invention.
+pub extern "C" fn kpersona_pidinfo(_pid: i32, _info: *mut c_void) -> c_int {
+    crate::errno::set(libc::ENOTSUP);
+    -1
+}
+
 exports::exports! {
     functions {
+        "kpersona_pidinfo" => kpersona_pidinfo,
         "proc_pidinfo" => proc_pidinfo,
         "proc_name" => proc_name,
         "proc_pidpath" => proc_pidpath,

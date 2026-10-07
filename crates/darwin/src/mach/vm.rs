@@ -9,6 +9,9 @@ use super::space::{MACH_PORT_NULL, Name, TASK_SELF};
 /// promise. The 32-bit `VM_REGION_BASIC_INFO` is a different structure and is
 /// refused rather than filled with this one.
 const VM_REGION_BASIC_INFO_64: i32 = 9;
+/// `VM_REGION_EXTENDED_INFO`, what `ps` and `vmmap` read sharing and residency
+/// from.
+const VM_REGION_EXTENDED_INFO: i32 = 10;
 /// `VM_REGION_TOP_INFO`, what `top` sorts a task's memory into private and
 /// shared with.
 const VM_REGION_TOP_INFO: i32 = 12;
@@ -68,6 +71,28 @@ struct TopInfo {
 const _: () = {
     // `VM_REGION_TOP_INFO_COUNT` is five words, and rounds the last byte up.
     assert!(size_of::<TopInfo>() == 20);
+};
+
+/// `struct vm_region_extended_info`, without the trailing `pages_reusable`
+/// that newer SDKs append. Resident page counts are not tracked and read zero.
+#[repr(C, packed(4))]
+#[derive(Clone, Copy, Default)]
+struct ExtendedInfo {
+    protection: i32,
+    user_tag: u32,
+    pages_resident: u32,
+    pages_shared_now_private: u32,
+    pages_swapped_out: u32,
+    pages_dirtied: u32,
+    ref_count: u32,
+    shadow_depth: u16,
+    external_pager: u8,
+    share_mode: u8,
+}
+
+const _: () = {
+    // 8 words, and `VM_REGION_EXTENDED_INFO_COUNT` is 9 with `pages_reusable`.
+    assert!(size_of::<ExtendedInfo>() == 32);
 };
 
 /// The first mapping ending above `address`, which is Mach's own search: the
@@ -132,6 +157,10 @@ pub unsafe extern "C" fn vm_region_64(
     if flavor == VM_REGION_TOP_INFO {
         // SAFETY: the caller's obligations, as below.
         return unsafe { top_info(address, size, info, count, object_name) };
+    }
+    if flavor == VM_REGION_EXTENDED_INFO {
+        // SAFETY: the caller's obligations, as below.
+        return unsafe { extended_info(address, size, info, count, object_name) };
     }
     if flavor != VM_REGION_BASIC_INFO_64 {
         unsupported(flavor);
@@ -213,6 +242,55 @@ unsafe fn top_info(
         *size = region.end - region.start;
         info.cast::<TopInfo>().write_unaligned(top);
         *count = (size_of::<TopInfo>() / size_of::<u32>()) as u32;
+        if !object_name.is_null() {
+            *object_name = MACH_PORT_NULL;
+        }
+    }
+    KERN_SUCCESS
+}
+
+/// [`vm_region_64`]'s `VM_REGION_EXTENDED_INFO`. A caller built against a newer
+/// SDK offers one more word for `pages_reusable`, which is zeroed.
+///
+/// # Safety
+///
+/// As [`vm_region_64`].
+unsafe fn extended_info(
+    address: *mut u64,
+    size: *mut u64,
+    info: *mut c_void,
+    count: *mut u32,
+    object_name: *mut Name,
+) -> i32 {
+    const WORDS: usize = size_of::<ExtendedInfo>() / size_of::<u32>();
+    // SAFETY: the caller states `count` is readable.
+    let capacity = unsafe { *count } as usize;
+    if capacity < WORDS {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller states `address` is readable.
+    let Some(region) = region_at_or_after(unsafe { *address }) else {
+        return KERN_INVALID_ADDRESS;
+    };
+    let extended = ExtendedInfo {
+        protection: protection(&region),
+        ref_count: 1,
+        share_mode: match region.shared {
+            true => SM_SHARED,
+            false => SM_PRIVATE,
+        },
+        ..ExtendedInfo::default()
+    };
+    let words = capacity.min(WORDS + 1);
+    // SAFETY: the caller's obligations, with the capacity checked above.
+    unsafe {
+        *address = region.start;
+        *size = region.end - region.start;
+        if words > WORDS {
+            info.cast::<u32>().add(WORDS).write_unaligned(0);
+        }
+        info.cast::<ExtendedInfo>().write_unaligned(extended);
+        *count = words as u32;
         if !object_name.is_null() {
             *object_name = MACH_PORT_NULL;
         }
