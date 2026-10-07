@@ -94,6 +94,8 @@ fn id_options_to_host(options: c_int) -> Option<c_int> {
     )
 }
 
+type DarwinId = u32;
+
 /// `int waitid(idtype_t idtype, id_t id, siginfo_t *info, int options)`
 ///
 /// `idtype_t` (`P_ALL`, `P_PID`, `P_PGID`) is numbered alike on both; the
@@ -104,7 +106,7 @@ fn id_options_to_host(options: c_int) -> Option<c_int> {
 /// `info` is null or a writable Darwin `siginfo_t`.
 pub unsafe extern "C" fn waitid(
     idtype: c_int,
-    id: u32,
+    id: DarwinId,
     info: *mut crate::signal::Siginfo,
     options: c_int,
 ) -> c_int {
@@ -125,7 +127,7 @@ pub unsafe extern "C" fn waitid(
     // nothing to report must leave behind.
     let mut host: libc::siginfo_t = unsafe { std::mem::zeroed() };
     // SAFETY: a local `siginfo_t`.
-    if unsafe { libc::waitid(idtype, id, &mut host, host_options) } != 0 {
+    if unsafe { libc::waitid(idtype, id as libc::id_t, &mut host, host_options) } != 0 {
         return -1;
     }
     if !info.is_null() {
