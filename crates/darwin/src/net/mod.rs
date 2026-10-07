@@ -1,8 +1,13 @@
-#![cfg(not(target_os = "macos"))]
+//! Darwin's sockets, resolver and interface list over whichever host runs them.
+//!
+//! Every host translates, macOS included, where most of it is the identity: the
+//! code path is the same everywhere, so a fault can be told apart as one host's
+//! or the translation's. What the hosts spell differently is in [`host`].
 
 pub mod addr;
 pub mod control;
 pub mod descriptor;
+pub mod host;
 pub mod ifaddrs;
 pub mod interface;
 pub mod resolve;

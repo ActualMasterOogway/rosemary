@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 
 use super::addr::{self, HostAddr};
+use super::host;
 
 /// Darwin's `MSG_*`, from `<sys/socket.h>`.
 mod msg {
@@ -32,7 +33,7 @@ const FLAGS: &[(i32, i32)] = &[
     (msg::CTRUNC, libc::MSG_CTRUNC),
     (msg::WAITALL, libc::MSG_WAITALL),
     (msg::DONTWAIT, libc::MSG_DONTWAIT),
-    (msg::NOSIGNAL, libc::MSG_NOSIGNAL),
+    (msg::NOSIGNAL, super::host::MSG_NOSIGNAL),
 ];
 
 fn flags_to_host(darwin: i32) -> i32 {
@@ -71,10 +72,10 @@ const SOCK_NONBLOCK: i32 = 0x2000_0000;
 fn kind_to_host(darwin: i32) -> i32 {
     let mut host = darwin & !(SOCK_CLOEXEC | SOCK_NONBLOCK);
     if darwin & SOCK_CLOEXEC != 0 {
-        host |= libc::SOCK_CLOEXEC;
+        host |= host::SOCK_CLOEXEC;
     }
     if darwin & SOCK_NONBLOCK != 0 {
-        host |= libc::SOCK_NONBLOCK;
+        host |= host::SOCK_NONBLOCK;
     }
     host
 }
@@ -147,10 +148,8 @@ unsafe extern "C" fn bind(fd: i32, address: *const c_void, len: u32) -> i32 {
     // SAFETY: the address's own bytes, `len` of them.
     let family = unsafe { (*host.as_ptr()).sa_family } as i32;
     if rc == 0 && family == libc::AF_UNIX {
-        // SAFETY: as above; the path follows the two-byte family.
-        let bytes =
-            unsafe { std::slice::from_raw_parts(host.as_ptr().cast::<u8>(), host.len() as usize) };
-        crate::sockpath::bound(&bytes[2..]);
+        let path = core::mem::offset_of!(libc::sockaddr_un, sun_path);
+        crate::sockpath::bound(&host.as_bytes()[path..host.len() as usize]);
     }
     rc
 }
@@ -362,7 +361,7 @@ unsafe extern "C" fn send(fd: i32, buf: *const c_void, len: usize, flags: i32) -
 fn sending_flags(fd: i32, darwin: i32) -> i32 {
     let mut host = flags_to_host(darwin);
     if super::sockopt::suppresses_sigpipe(fd) {
-        host |= libc::MSG_NOSIGNAL;
+        host |= super::host::MSG_NOSIGNAL;
     }
     host
 }
@@ -682,7 +681,7 @@ unsafe extern "C" fn write(fd: i32, buf: *const c_void, len: usize) -> isize {
         let previous_errno = crate::errno::get();
         // SAFETY: the caller's buffer. A `send` with no flags is a `write` on
         // a socket.
-        let sent = unsafe { libc::send(fd, buf, len, libc::MSG_NOSIGNAL) };
+        let sent = unsafe { libc::send(fd, buf, len, super::host::MSG_NOSIGNAL) };
         if sent >= 0 || crate::errno::get() != libc::ENOTSOCK {
             return sent;
         }
@@ -718,7 +717,7 @@ unsafe extern "C" fn writev(fd: i32, iov: *const libc::iovec, iovcnt: i32) -> is
         host.msg_iov = iov.cast_mut();
         host.msg_iovlen = iovcnt.max(0) as _;
         // SAFETY: a `msghdr` this function built over the caller's iovecs.
-        let sent = unsafe { libc::sendmsg(fd, &host, libc::MSG_NOSIGNAL) };
+        let sent = unsafe { libc::sendmsg(fd, &host, super::host::MSG_NOSIGNAL) };
         if sent >= 0 || crate::errno::get() != libc::ENOTSOCK {
             return sent;
         }
@@ -768,7 +767,7 @@ unsafe fn sendfile_iovecs(
         let mut remaining = part.iov_len.min(left as usize);
         while remaining != 0 {
             let flags = if super::sockopt::suppresses_sigpipe(socket) {
-                libc::MSG_NOSIGNAL
+                super::host::MSG_NOSIGNAL
             } else {
                 0
             };
@@ -874,43 +873,14 @@ unsafe extern "C" fn sendfile(
             Some(left) => left.min(0x7fff_f000) as usize,
             None => 0x7fff_f000,
         };
-        #[cfg(not(target_os = "freebsd"))]
         // SAFETY: a local offset slot; the kernel validates both descriptors.
-        let wrote = unsafe { libc::sendfile(socket, file, &raw mut host_offset, count) };
-        #[cfg(target_os = "freebsd")]
-        // SAFETY: a local count slot; the kernel validates both descriptors.
-        let wrote = unsafe {
-            // FreeBSD takes the descriptors the other way round, takes the
-            // offset by value, and reports the count through `sbytes` rather
-            // than as its result - which is zero on success. A send that stops
-            // short still moved the bytes it reports, so those are kept and the
-            // failure is left for the next pass to run into.
-            let mut moved: libc::off_t = 0;
-            let rc = libc::sendfile(
-                file,
-                socket,
-                host_offset,
-                count,
-                core::ptr::null_mut(),
-                &raw mut moved,
-                0,
-            );
-            match rc < 0 && moved == 0 {
-                true => -1,
-                false => moved as isize,
-            }
-        };
+        let wrote = unsafe { host::sendfile(file, socket, &mut host_offset, count) };
         if wrote < 0 {
             unsafe { len.write_unaligned(sent) };
             return -1;
         }
         if wrote == 0 {
             break;
-        }
-        // The offset slot Linux advances is a value argument on FreeBSD.
-        #[cfg(target_os = "freebsd")]
-        {
-            host_offset += wrote as libc::off_t;
         }
         sent = sent.saturating_add(wrote as i64);
         if let Some(left) = &mut file_left {
@@ -1164,15 +1134,19 @@ mod tests {
     }
 
     fn memory_file(bytes: &[u8]) -> i32 {
-        // SAFETY: a static C string and flags accepted by `memfd_create`.
-        let fd = unsafe { libc::memfd_create(c"darwin-sendfile-test".as_ptr(), 0) };
-        assert!(fd >= 0);
-        // SAFETY: `bytes` is readable for its length and `fd` is the new file.
-        assert_eq!(
-            unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) },
-            bytes.len() as isize
-        );
-        fd
+        use std::io::Write;
+        use std::os::fd::IntoRawFd;
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "darwin-sendfile-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::File::create_new(&path).unwrap();
+        // Unlinked at once, as an anonymous file is: nothing is left behind.
+        std::fs::remove_file(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.into_raw_fd()
     }
 
     /// A regular file whose number was most recently used by a socket carrying

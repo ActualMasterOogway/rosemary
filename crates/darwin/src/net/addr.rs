@@ -36,14 +36,75 @@ pub fn family_from_host(host: i32) -> Option<i32> {
     })
 }
 
+/// Bytes before the address proper in every `struct sockaddr`: Darwin's
+/// `sa_len` and `sa_family`, or the host's one sixteen-bit family. The two are
+/// the same size, which is what lets everything past them be copied as it is.
+const HEADER: usize = 2;
+const _: () = assert!(core::mem::offset_of!(libc::sockaddr, sa_data) == HEADER);
+const _: () = assert!(core::mem::size_of::<libc::sockaddr_storage>() == STORAGE);
+
+/// A guest's `struct sockaddr`: Darwin's layout, whatever the host's is.
+///
+/// Sized as `sockaddr_storage`, so any address Darwin defines fits.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+pub struct DarwinSockaddr {
+    pub len: u8,
+    pub family: u8,
+    pub data: [u8; STORAGE - HEADER],
+}
+
+impl DarwinSockaddr {
+    /// The `len` bytes at `addr` (at most `STORAGE`) as an address, zero
+    /// padded.
+    ///
+    /// # Safety
+    ///
+    /// `addr` is `len` readable bytes.
+    unsafe fn read(addr: *const c_void, len: usize) -> DarwinSockaddr {
+        let mut out = DarwinSockaddr {
+            len: 0,
+            family: 0,
+            data: [0; STORAGE - HEADER],
+        };
+        // SAFETY: the caller's readable bytes, into a buffer bounded by `STORAGE`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                addr.cast::<u8>(),
+                (&raw mut out).cast::<u8>(),
+                len.min(STORAGE),
+            )
+        };
+        out
+    }
+}
+
+impl core::ops::Deref for DarwinSockaddr {
+    type Target = [u8; STORAGE];
+
+    fn deref(&self) -> &[u8; STORAGE] {
+        // SAFETY: `repr(C)` with no padding: two bytes and `STORAGE - 2` more.
+        unsafe { &*(self as *const DarwinSockaddr).cast::<[u8; STORAGE]>() }
+    }
+}
+
+/// Darwin's `struct sockaddr_un`, the one family whose payload is rewritten.
+#[repr(C)]
+struct DarwinSockaddrUn {
+    len: u8,
+    family: u8,
+    path: [u8; 104],
+}
+const _: () = assert!(core::mem::offset_of!(DarwinSockaddrUn, path) == HEADER);
+
 /// A socket address in this host's shape, with the length the host wants.
 ///
 /// Owned by value so a caller can hand `libc` a pointer to it without a second
-/// allocation; `STORAGE` bytes is what `struct sockaddr_storage` reserves and is
-/// the most any address either side defines needs.
-#[repr(C, align(8))]
+/// allocation; `sockaddr_storage` is what the host reserves for the largest
+/// address it defines, and the most any address either side defines needs.
+#[repr(C)]
 pub struct HostAddr {
-    bytes: [u8; STORAGE],
+    storage: libc::sockaddr_storage,
     len: libc::socklen_t,
 }
 
@@ -51,17 +112,19 @@ impl HostAddr {
     /// Room for an address the host is about to fill in.
     pub fn empty() -> HostAddr {
         HostAddr {
-            bytes: [0; STORAGE],
+            // SAFETY: all-zero is a valid `sockaddr_storage`, with family
+            // `AF_UNSPEC`.
+            storage: unsafe { core::mem::zeroed() },
             len: STORAGE as libc::socklen_t,
         }
     }
 
     pub fn as_ptr(&self) -> *const libc::sockaddr {
-        self.bytes.as_ptr().cast()
+        (&raw const self.storage).cast()
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut libc::sockaddr {
-        self.bytes.as_mut_ptr().cast()
+        (&raw mut self.storage).cast()
     }
 
     pub fn len(&self) -> libc::socklen_t {
@@ -72,6 +135,24 @@ impl HostAddr {
     pub fn len_mut(&mut self) -> *mut libc::socklen_t {
         &mut self.len
     }
+
+    /// The address's bytes, as they are in memory.
+    pub fn as_bytes(&self) -> &[u8; STORAGE] {
+        // SAFETY: `sockaddr_storage` is `STORAGE` bytes (asserted above) and
+        // every bit pattern is a valid `u8`.
+        unsafe { &*self.as_ptr().cast::<[u8; STORAGE]>() }
+    }
+
+    /// The host's family and, where it keeps one, `sa_len`, for `len` bytes.
+    fn set_header(&mut self, family: i32, len: usize) {
+        self.storage.ss_family = family as _;
+        // A BSD's `sa_len` is the byte before the family; Linux's family is
+        // sixteen bits and has no such byte, so writing one would clobber it.
+        if cfg!(not(target_os = "linux")) {
+            // SAFETY: the first byte of the storage this value owns.
+            unsafe { self.as_mut_ptr().cast::<u8>().write(len as u8) };
+        }
+    }
 }
 
 /// A guest's `sockaddr` as this host's, or `None` for a family this host has not
@@ -81,40 +162,47 @@ impl HostAddr {
 ///
 /// `addr` is `len` readable bytes, or is null with `len` zero.
 pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
-    if addr.is_null() || (len as usize) < 2 || len as usize > STORAGE {
+    if addr.is_null() || (len as usize) < HEADER || len as usize > STORAGE {
         return None;
     }
-    let mut out = HostAddr {
-        bytes: [0; STORAGE],
-        len: len as libc::socklen_t,
-    };
-    // SAFETY: the caller's `len` readable bytes, into a buffer of `STORAGE`
-    // which `len` was just checked against.
-    unsafe {
-        core::ptr::copy_nonoverlapping(addr.cast::<u8>(), out.bytes.as_mut_ptr(), len as usize)
-    };
-    // Byte 0 is Darwin's `sa_len`, which the host has no field for; byte 1 is
-    // the family, which the host reads as the low half of a sixteen-bit one.
-    let host = family_to_host(i32::from(out.bytes[1]))?;
-    if host == libc::AF_UNIX && len as usize > 2 {
+    let len = len as usize;
+    // SAFETY: the caller's `len` readable bytes, which `len` was just checked
+    // against `STORAGE`.
+    let guest = unsafe { DarwinSockaddr::read(addr, len) };
+    let host_family = family_to_host(i32::from(guest.family))?;
+    let mut out = HostAddr::empty();
+    out.len = len as libc::socklen_t;
+    // Everything past the header is laid out alike on both sides, for the
+    // families this module knows.
+    out.as_bytes_mut()[HEADER..len].copy_from_slice(&guest.data[..len - HEADER]);
+    if host_family == libc::AF_UNIX && len > HEADER {
+        // SAFETY: `DarwinSockaddrUn` is `repr(C)` of plain bytes, and `guest`
+        // is at least as large.
+        let un = unsafe { &*(&raw const guest).cast::<DarwinSockaddrUn>() };
         // FIXME (ACCURACY): a path the prefix pushes past `sun_path` is refused
         // as an unknown family rather than with ENAMETOOLONG.
-        let path = crate::sockpath::to_host(&out.bytes[2..len as usize]).ok()?;
-        if 2 + path.len() > STORAGE {
+        let path = crate::sockpath::to_host(&un.path[..(len - HEADER).min(un.path.len())]).ok()?;
+        // SAFETY: the storage this value owns is a `sockaddr_un`'s size or more.
+        let host_un = unsafe { &mut *(&raw mut out.storage).cast::<libc::sockaddr_un>() };
+        if path.len() > host_un.sun_path.len() {
             return None;
         }
-        out.bytes[2..].fill(0);
-        out.bytes[2..2 + path.len()].copy_from_slice(&path);
-        out.len = (2 + path.len()) as libc::socklen_t;
+        host_un.sun_path.fill(0);
+        for (slot, byte) in host_un.sun_path.iter_mut().zip(&path) {
+            *slot = *byte as _;
+        }
+        out.len =
+            (core::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len()) as libc::socklen_t;
     }
-    #[cfg(target_os = "linux")]
-    out.bytes[..2].copy_from_slice(&(host as u16).to_ne_bytes());
-    #[cfg(not(target_os = "linux"))]
-    {
-        out.bytes[0] = len as u8;
-        out.bytes[1] = host as u8;
-    }
+    out.set_header(host_family, out.len as usize);
     Some(out)
+}
+
+impl HostAddr {
+    fn as_bytes_mut(&mut self) -> &mut [u8; STORAGE] {
+        // SAFETY: as `as_bytes`.
+        unsafe { &mut *self.as_mut_ptr().cast::<[u8; STORAGE]>() }
+    }
 }
 
 /// A host `sockaddr` in Darwin's shape, as bytes and the length that goes with
@@ -128,20 +216,19 @@ pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
 /// # Safety
 ///
 /// `addr` is `len` readable bytes.
-pub unsafe fn darwin_from_host(addr: *const c_void, len: u32) -> Option<([u8; STORAGE], usize)> {
-    if addr.is_null() || (len as usize) < 2 {
+pub unsafe fn darwin_from_host(addr: *const c_void, len: u32) -> Option<(DarwinSockaddr, usize)> {
+    if addr.is_null() || (len as usize) < HEADER {
         return None;
     }
     let real = (len as usize).min(STORAGE);
-    let mut out = [0u8; STORAGE];
+    let mut host = HostAddr::empty();
     // SAFETY: the caller's readable bytes, bounded by `STORAGE`.
-    unsafe { core::ptr::copy_nonoverlapping(addr.cast::<u8>(), out.as_mut_ptr(), real) };
-    #[cfg(target_os = "linux")]
-    let family = u16::from_ne_bytes([out[0], out[1]]) as i32;
-    #[cfg(not(target_os = "linux"))]
-    let family = out[1] as i32;
-    out[0] = real.min(u8::MAX as usize) as u8;
-    out[1] = family_from_host(family).unwrap_or(family::UNSPEC) as u8;
+    unsafe { core::ptr::copy_nonoverlapping(addr.cast::<u8>(), host.as_mut_ptr().cast(), real) };
+    let family = i32::from(host.storage.ss_family);
+    // SAFETY: `host` holds `STORAGE` bytes, `real` of them the caller's.
+    let mut out = unsafe { DarwinSockaddr::read(host.as_ptr().cast(), real) };
+    out.len = real.min(u8::MAX as usize) as u8;
+    out.family = family_from_host(family).unwrap_or(family::UNSPEC) as u8;
     Some((out, real))
 }
 
@@ -209,7 +296,7 @@ mod tests {
         // SAFETY: sixteen readable bytes, and the length says sixteen.
         let host = unsafe { to_host(guest.as_ptr().cast(), 16) }.expect("a known family");
         assert_eq!(unsafe { (*host.as_ptr()).sa_family } as i32, libc::AF_INET);
-        assert_eq!(&host.bytes[2..8], &guest[2..8]);
+        assert_eq!(&host.as_bytes()[2..8], &guest[2..8]);
 
         let mut back = [0u8; 16];
         let mut len = 16u32;
@@ -231,7 +318,7 @@ mod tests {
         }
         // SAFETY: twenty-eight readable bytes, and the length matches.
         let host = unsafe { to_host(guest.as_ptr().cast(), 28) }.expect("a known family");
-        assert_eq!(&host.bytes[2..28], &guest[2..28]);
+        assert_eq!(&host.as_bytes()[2..28], &guest[2..28]);
 
         let mut back = [0u8; 28];
         let mut len = 28u32;

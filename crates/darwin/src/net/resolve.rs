@@ -55,10 +55,6 @@ const ERRORS: &[(i32, i32)] = &[
     (4, libc::EAI_FAIL),
     (5, libc::EAI_FAMILY),
     (6, libc::EAI_MEMORY),
-    // FreeBSD dropped `EAI_NODATA` with RFC 3493; Darwin's 7 has no
-    // counterpart there and falls through to the default.
-    #[cfg(not(target_os = "freebsd"))]
-    (7, libc::EAI_NODATA),
     (8, libc::EAI_NONAME),
     (9, libc::EAI_SERVICE),
     (10, libc::EAI_SOCKTYPE),
@@ -66,22 +62,32 @@ const ERRORS: &[(i32, i32)] = &[
     (14, libc::EAI_OVERFLOW),
 ];
 
+/// [`ERRORS`] and the codes only some hosts have: `EAI_NODATA` was dropped
+/// from RFC 3493, so Darwin's 7 has no counterpart on FreeBSD and falls through
+/// to the default.
+fn errors() -> impl Iterator<Item = (i32, i32)> {
+    ERRORS
+        .iter()
+        .copied()
+        .chain(super::host::EAI_NODATA.map(|host| (7, host)))
+}
+
 /// This host's resolver error as a guest's.
 ///
 /// `EAI_FAIL` for a code with no Darwin spelling: a permanent failure is the
 /// honest summary of "this host reported something Darwin has no word for", and
 /// it is not one a caller retries forever.
 fn error_from_host(host: i32) -> i32 {
-    match ERRORS.iter().find(|(_, ours)| *ours == host) {
-        Some((theirs, _)) => *theirs,
+    match errors().find(|(_, ours)| *ours == host) {
+        Some((theirs, _)) => theirs,
         None => 4,
     }
 }
 
 /// A guest's resolver error as this host's, for [`gai_strerror`].
 fn error_to_host(darwin: i32) -> i32 {
-    match ERRORS.iter().find(|(theirs, _)| *theirs == darwin) {
-        Some((_, ours)) => *ours,
+    match errors().find(|(theirs, _)| *theirs == darwin) {
+        Some((_, ours)) => ours,
         None => libc::EAI_FAIL,
     }
 }

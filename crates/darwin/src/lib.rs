@@ -331,9 +331,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     pam::MODULE,
     sip::MODULE,
     dispatch::MODULE,
-    // Linux answers these in `net`, with every other address conversion.
-    #[cfg(target_os = "macos")]
-    sockpath::MODULE,
+    net::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -352,7 +350,6 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     vmmap::MODULE,
     poll::MODULE,
     select::MODULE,
-    net::MODULE,
     uuid::MODULE,
     callback::MODULE,
     rlimit::MODULE,

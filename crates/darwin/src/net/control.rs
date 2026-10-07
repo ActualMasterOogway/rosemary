@@ -1,5 +1,8 @@
 use std::ffi::c_void;
 
+use super::host;
+use crate::clock::Timeval;
+
 /// Darwin's `struct cmsghdr`.
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -33,10 +36,24 @@ fn darwin_align(len: usize) -> usize {
     len.next_multiple_of(4)
 }
 
-/// This host's `CMSG_ALIGN`, which rounds to `sizeof(size_t)`.
-fn host_align(len: usize) -> usize {
-    len.next_multiple_of(core::mem::size_of::<usize>())
+/// Darwin's `struct in_pktinfo`, the payload of its `IP_PKTINFO`.
+#[repr(C)]
+struct DarwinInPktinfo {
+    interface: u32,
+    local: [u8; 4],
+    destination: [u8; 4],
 }
+
+/// Darwin's `struct in6_pktinfo`, the payload of its `IPV6_PKTINFO`.
+#[repr(C)]
+struct DarwinIn6Pktinfo {
+    address: [u8; 16],
+    interface: u32,
+}
+
+const IN_PKTINFO_LEN: usize = core::mem::size_of::<DarwinInPktinfo>();
+const IN6_PKTINFO_LEN: usize = core::mem::size_of::<DarwinIn6Pktinfo>();
+const _: () = assert!(IN_PKTINFO_LEN == 12 && IN6_PKTINFO_LEN == 20);
 
 /// Darwin's `SOL_SOCKET`.
 const DARWIN_SOL_SOCKET: i32 = 0xffff;
@@ -99,13 +116,14 @@ pub unsafe fn to_host(control: *const c_void, len: u32) -> Result<Vec<u8>, Untra
         let host_kind = match (level, kind, payload.len()) {
             (DARWIN_SOL_SOCKET, SCM_RIGHTS, _) => SCM_RIGHTS,
             (libc::IPPROTO_IP, DARWIN_IP_TOS, 1 | 4) => libc::IP_TOS,
-            // FreeBSD has no `IP_PKTINFO`, and nothing there carries Darwin's
-            // `struct in_pktinfo`, so the message is refused rather than
-            // rewritten into a different shape.
-            #[cfg(not(target_os = "freebsd"))]
-            (libc::IPPROTO_IP, DARWIN_IP_PKTINFO, 12) => libc::IP_PKTINFO,
+            // A host with no `IP_PKTINFO` carries nothing in Darwin's `struct
+            // in_pktinfo`, so the message is refused rather than rewritten
+            // into a different shape.
+            (libc::IPPROTO_IP, DARWIN_IP_PKTINFO, IN_PKTINFO_LEN) => {
+                host::IP_PKTINFO.ok_or(Untranslatable { level, kind })?
+            }
             (libc::IPPROTO_IPV6, DARWIN_IPV6_TCLASS, 4) => libc::IPV6_TCLASS,
-            (libc::IPPROTO_IPV6, DARWIN_IPV6_PKTINFO, 20) => libc::IPV6_PKTINFO,
+            (libc::IPPROTO_IPV6, DARWIN_IPV6_PKTINFO, IN6_PKTINFO_LEN) => libc::IPV6_PKTINFO,
             _ => return Err(Untranslatable { level, kind }),
         };
         let host_level = if level == DARWIN_SOL_SOCKET {
@@ -113,33 +131,41 @@ pub unsafe fn to_host(control: *const c_void, len: u32) -> Result<Vec<u8>, Untra
         } else {
             level
         };
-        push_host(&mut out, host_level, host_kind, |into| {
-            into.extend_from_slice(payload);
-        });
+        push_host(&mut out, host_level, host_kind, payload);
         at += darwin_align(message_len);
     }
     Ok(out)
 }
 
-/// Append one host control message, whose payload `fill` writes.
-fn push_host(out: &mut Vec<u8>, level: i32, kind: i32, fill: impl FnOnce(&mut Vec<u8>)) {
+/// Append one host control message with `payload`.
+///
+/// Laid out by the host's own `CMSG_*` arithmetic, which is not Darwin's: the
+/// header, where the data starts and what the padding rounds to all differ.
+fn push_host(out: &mut Vec<u8>, level: i32, kind: i32, payload: &[u8]) {
+    // SAFETY: pure arithmetic on a length.
+    let (data_at, len, space) = unsafe {
+        (
+            libc::CMSG_LEN(0) as usize,
+            libc::CMSG_LEN(payload.len() as u32) as usize,
+            libc::CMSG_SPACE(payload.len() as u32) as usize,
+        )
+    };
     let header = out.len();
-    out.extend_from_slice(&[0; core::mem::size_of::<libc::cmsghdr>()]);
-    fill(out);
-    let len = out.len() - header;
+    out.resize(header + space, 0);
+    // SAFETY: a zeroed `cmsghdr` is valid.
     let mut value: libc::cmsghdr = unsafe { core::mem::zeroed() };
     value.cmsg_len = len as _;
     value.cmsg_level = level;
     value.cmsg_type = kind;
-    // SAFETY: the placeholder above reserved a complete host header. A byte
-    // buffer provides no alignment guarantee, so write the structure unaligned.
+    // SAFETY: `space` bytes were just reserved, which holds the header. A byte
+    // buffer provides no alignment guarantee, so write it unaligned.
     unsafe {
         out.as_mut_ptr()
             .add(header)
             .cast::<libc::cmsghdr>()
             .write_unaligned(value)
     };
-    out.resize(header + host_align(len), 0);
+    out[header + data_at..header + data_at + payload.len()].copy_from_slice(payload);
 }
 
 /// This host's control messages in Darwin's shape.
@@ -154,14 +180,18 @@ fn message_from_host(level: i32, kind: i32, payload: &[u8]) -> Option<Message> {
             kind: SCM_RIGHTS,
             payload: payload.to_vec(),
         }),
-        (libc::SOL_SOCKET, libc::SCM_TIMESTAMP) if payload.len() >= 16 => {
+        (libc::SOL_SOCKET, libc::SCM_TIMESTAMP) => {
             // Darwin's `tv_usec` is a 32-bit `int` followed by four bytes of
-            // padding where this host's is a 64-bit `long`.
-            let seconds = &payload[0..8];
-            let micros = i64::from_ne_bytes(payload[8..16].try_into().ok()?) as i32;
-            let mut darwin = seconds.to_vec();
-            darwin.extend_from_slice(&micros.to_ne_bytes());
-            darwin.extend_from_slice(&[0; 4]);
+            // padding; the host's width is whatever its `timeval` says.
+            if payload.len() < core::mem::size_of::<libc::timeval>() {
+                return None;
+            }
+            // SAFETY: a full `timeval` of readable bytes, just checked; read
+            // unaligned because the payload is a byte buffer.
+            let host = unsafe { payload.as_ptr().cast::<libc::timeval>().read_unaligned() };
+            let mut darwin = vec![0u8; core::mem::size_of::<Timeval>()];
+            // SAFETY: room for one Darwin `timeval`, written unaligned.
+            unsafe { Timeval::from_host(host).write(darwin.as_mut_ptr().cast()) };
             Some(Message {
                 level: DARWIN_SOL_SOCKET,
                 kind: DARWIN_SCM_TIMESTAMP,
@@ -174,23 +204,28 @@ fn message_from_host(level: i32, kind: i32, payload: &[u8]) -> Option<Message> {
             kind: DARWIN_IP_RECVTOS,
             payload: payload.to_vec(),
         }),
-        // As above; there is no FreeBSD message to recognise here.
-        #[cfg(not(target_os = "freebsd"))]
-        (libc::IPPROTO_IP, libc::IP_PKTINFO) if payload.len() == 12 => Some(Message {
-            level,
-            kind: DARWIN_IP_PKTINFO,
-            payload: payload.to_vec(),
-        }),
+        // As above; a host without the option has no message to recognise.
+        (libc::IPPROTO_IP, host_kind)
+            if payload.len() == IN_PKTINFO_LEN && host::IP_PKTINFO == Some(host_kind) =>
+        {
+            Some(Message {
+                level,
+                kind: DARWIN_IP_PKTINFO,
+                payload: payload.to_vec(),
+            })
+        }
         (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) if payload.len() == 4 => Some(Message {
             level,
             kind: DARWIN_IPV6_TCLASS,
             payload: payload.to_vec(),
         }),
-        (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) if payload.len() == 20 => Some(Message {
-            level,
-            kind: DARWIN_IPV6_PKTINFO,
-            payload: payload.to_vec(),
-        }),
+        (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) if payload.len() == IN6_PKTINFO_LEN => {
+            Some(Message {
+                level,
+                kind: DARWIN_IPV6_PKTINFO,
+                payload: payload.to_vec(),
+            })
+        }
         _ => None,
     }
 }
@@ -288,6 +323,13 @@ pub fn host_capacity(capacity: u32) -> usize {
 mod tests {
     use super::*;
 
+    /// The first control message's header, read out of host bytes.
+    fn host_header(host: &[u8]) -> libc::cmsghdr {
+        assert!(host.len() >= core::mem::size_of::<libc::cmsghdr>());
+        // SAFETY: a full header of readable bytes, read unaligned.
+        unsafe { host.as_ptr().cast::<libc::cmsghdr>().read_unaligned() }
+    }
+
     fn guest_message(level: i32, kind: i32, payload: &[u8]) -> Vec<u8> {
         let len = DARWIN_HDR + payload.len();
         let mut out = (len as u32).to_ne_bytes().to_vec();
@@ -308,13 +350,12 @@ mod tests {
                 libc::IP_TOS,
                 vec![3],
             ),
-            // No FreeBSD counterpart; see `to_host`.
-            #[cfg(not(target_os = "freebsd"))]
+            // Not on every host; see `to_host`.
             (
                 libc::IPPROTO_IP,
                 DARWIN_IP_PKTINFO,
                 DARWIN_IP_PKTINFO,
-                libc::IP_PKTINFO,
+                host::IP_PKTINFO.unwrap_or(-1),
                 vec![1, 0, 0, 0, 127, 0, 0, 1, 127, 0, 0, 2],
             ),
             (
@@ -332,15 +373,16 @@ mod tests {
                 (0..20).collect(),
             ),
         ] {
+            if host_kind < 0 {
+                continue;
+            }
             let guest = guest_message(level, send_kind, &payload);
             // SAFETY: guest is a complete control buffer.
             let host = unsafe { to_host(guest.as_ptr().cast(), guest.len() as u32) }.unwrap();
-            assert_eq!(i32::from_ne_bytes(host[8..12].try_into().unwrap()), level);
-            assert_eq!(
-                i32::from_ne_bytes(host[12..16].try_into().unwrap()),
-                host_kind
-            );
-            assert_eq!(&host[16..16 + payload.len()], payload);
+            let header = host_header(&host);
+            assert_eq!((header.cmsg_level, header.cmsg_type), (level, host_kind));
+            let data = unsafe { libc::CMSG_LEN(0) } as usize;
+            assert_eq!(&host[data..data + payload.len()], payload);
             let received = message_from_host(level, host_kind, &payload).unwrap();
             assert_eq!((received.level, received.kind), (level, recv_kind));
             assert_eq!(received.payload, payload);
@@ -366,13 +408,10 @@ mod tests {
                 DARWIN_IPV6_PKTINFO,
             ));
         }
-        #[cfg(target_os = "freebsd")]
-        return None;
-        #[cfg(not(target_os = "freebsd"))]
         Some((
             libc::IPPROTO_IP,
-            libc::IP_RECVTOS,
-            libc::IP_PKTINFO,
+            host::IP_RECVTOS,
+            host::IP_PKTINFO?,
             DARWIN_IP_TOS,
             DARWIN_IP_RECVTOS,
             DARWIN_IP_PKTINFO,
@@ -457,11 +496,13 @@ mod tests {
     #[test]
     fn the_guests_cmsghdr_is_not_the_hosts() {
         assert_eq!(DARWIN_HDR, 12);
-        assert_eq!(core::mem::size_of::<libc::cmsghdr>(), 16);
         assert_eq!(darwin_align(13), 16);
-        assert_eq!(host_align(13), 16);
         assert_eq!(darwin_align(20), 20);
-        assert_eq!(host_align(20), 24);
+        // The host's own arithmetic is the only authority on its layout; what
+        // matters is that it is asked, not assumed equal to Darwin's.
+        let space = unsafe { libc::CMSG_SPACE(0) } as usize;
+        assert_eq!(space, unsafe { libc::CMSG_LEN(0) } as usize);
+        assert!(space >= core::mem::size_of::<libc::cmsghdr>());
     }
 
     /// A type Darwin numbers and this host numbers differently is refused by
@@ -497,18 +538,15 @@ mod tests {
         // SAFETY: sixteen readable bytes of a twenty-byte array.
         let host = unsafe { to_host(guest.as_ptr().cast(), 16) }.expect("SCM_RIGHTS converts");
         assert_eq!(host.len(), unsafe { libc::CMSG_SPACE(4) } as usize);
+        let header = host_header(&host);
+        assert_eq!(header.cmsg_len as usize, unsafe { libc::CMSG_LEN(4) }
+            as usize);
+        assert_eq!(header.cmsg_level, libc::SOL_SOCKET);
+        assert_eq!(header.cmsg_type, SCM_RIGHTS);
+        let data = unsafe { libc::CMSG_LEN(0) } as usize;
         assert_eq!(
-            usize::from_ne_bytes(host[0..8].try_into().unwrap()),
-            unsafe { libc::CMSG_LEN(4) } as usize
+            i32::from_ne_bytes(host[data..data + 4].try_into().unwrap()),
+            7
         );
-        assert_eq!(
-            i32::from_ne_bytes(host[8..12].try_into().unwrap()),
-            libc::SOL_SOCKET
-        );
-        assert_eq!(
-            i32::from_ne_bytes(host[12..16].try_into().unwrap()),
-            SCM_RIGHTS
-        );
-        assert_eq!(i32::from_ne_bytes(host[16..20].try_into().unwrap()), 7);
     }
 }

@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 
+use super::host;
 use crate::errno;
 
 /// Darwin's `SOL_SOCKET`.
@@ -119,35 +120,23 @@ const SOCKET_OPTIONS: &[(i32, i32)] = &[
 /// The numbering agrees with this host's up to `IP_RECVOPTS` and then stops:
 /// Darwin's 26 is `IP_PKTINFO` (spelled `IP_RECVPKTINFO` when it is asked for
 /// on receive) where this host's is 8, and Darwin's 27 is `IP_RECVTOS`.
-/// FreeBSD's two, which its headers have and the `libc` crate does not declare.
-#[cfg(target_os = "freebsd")]
-mod bsd_ip {
-    pub const IP_OPTIONS: i32 = 1;
-    pub const IP_RECVOPTS: i32 = 5;
-}
-#[cfg(not(target_os = "freebsd"))]
-use libc as bsd_ip;
-
 const IP_OPTIONS: &[(i32, i32)] = &[
-    (ip::OPTIONS, bsd_ip::IP_OPTIONS),
+    (ip::OPTIONS, host::IP_OPTIONS),
     (ip::HDRINCL, libc::IP_HDRINCL),
     (ip::TOS, libc::IP_TOS),
     (ip::TTL, libc::IP_TTL),
-    (ip::RECVOPTS, bsd_ip::IP_RECVOPTS),
+    (ip::RECVOPTS, host::IP_RECVOPTS),
     (ip::MULTICAST_IF, libc::IP_MULTICAST_IF),
     (ip::MULTICAST_TTL, libc::IP_MULTICAST_TTL),
     (ip::MULTICAST_LOOP, libc::IP_MULTICAST_LOOP),
     (ip::ADD_MEMBERSHIP, libc::IP_ADD_MEMBERSHIP),
     (ip::DROP_MEMBERSHIP, libc::IP_DROP_MEMBERSHIP),
     (ip::RECVTTL, libc::IP_RECVTTL),
-    // FreeBSD has no `IP_PKTINFO` at all - it splits the answer into
-    // `IP_RECVDSTADDR` and `IP_RECVIF`, neither of which fills Darwin's
-    // `struct in_pktinfo` - so the option is refused rather than aimed at
-    // something that would answer with a different shape.
-    #[cfg(not(target_os = "freebsd"))]
-    (ip::PKTINFO, libc::IP_PKTINFO),
-    (ip::RECVTOS, libc::IP_RECVTOS),
+    (ip::RECVTOS, host::IP_RECVTOS),
 ];
+
+/// Entries only some hosts can answer; a `None` is refused, not approximated.
+const IP_OPTIONAL: &[(i32, Option<i32>)] = &[(ip::PKTINFO, host::IP_PKTINFO)];
 
 /// Darwin's `IPV6_*`, paired with the host's.
 ///
@@ -162,14 +151,8 @@ const IPV6_OPTIONS: &[(i32, i32)] = &[
     (ipv6::MULTICAST_LOOP, libc::IPV6_MULTICAST_LOOP),
     // The BSDs spell these `IPV6_JOIN_GROUP`/`IPV6_LEAVE_GROUP`; same numbers,
     // same payload.
-    #[cfg(target_os = "freebsd")]
-    (ipv6::ADD_MEMBERSHIP, libc::IPV6_JOIN_GROUP),
-    #[cfg(target_os = "freebsd")]
-    (ipv6::DROP_MEMBERSHIP, libc::IPV6_LEAVE_GROUP),
-    #[cfg(not(target_os = "freebsd"))]
-    (ipv6::ADD_MEMBERSHIP, libc::IPV6_ADD_MEMBERSHIP),
-    #[cfg(not(target_os = "freebsd"))]
-    (ipv6::DROP_MEMBERSHIP, libc::IPV6_DROP_MEMBERSHIP),
+    (ipv6::ADD_MEMBERSHIP, host::IPV6_JOIN_GROUP),
+    (ipv6::DROP_MEMBERSHIP, host::IPV6_LEAVE_GROUP),
     (ipv6::V6ONLY, libc::IPV6_V6ONLY),
     (ipv6::RECVTCLASS, libc::IPV6_RECVTCLASS),
     (ipv6::TCLASS, libc::IPV6_TCLASS),
@@ -189,19 +172,16 @@ const IPV6_OPTIONS: &[(i32, i32)] = &[
 const TCP_OPTIONS: &[(i32, i32)] = &[
     (tcp::NODELAY, libc::TCP_NODELAY),
     (tcp::MAXSEG, libc::TCP_MAXSEG),
-    // FreeBSD has Darwin's own `TCP_NOPUSH`, with Darwin's own advisory
-    // meaning, so there the mapping is exact and none of the above applies.
-    #[cfg(target_os = "freebsd")]
-    (tcp::NOPUSH, libc::TCP_NOPUSH),
-    #[cfg(not(target_os = "freebsd"))]
-    (tcp::NOPUSH, libc::TCP_CORK),
-    (tcp::KEEPALIVE, libc::TCP_KEEPIDLE),
+    // Darwin's own meaning on the BSDs, so the mapping is exact there; see
+    // `host::TCP_NOPUSH`.
+    (tcp::NOPUSH, host::TCP_NOPUSH),
+    (tcp::KEEPALIVE, host::TCP_KEEPIDLE),
     (tcp::KEEPINTVL, libc::TCP_KEEPINTVL),
     (tcp::KEEPCNT, libc::TCP_KEEPCNT),
-    // No FreeBSD counterpart; refused rather than mapped to a nearby option.
-    #[cfg(not(target_os = "freebsd"))]
-    (tcp::NOTSENT_LOWAT, libc::TCP_NOTSENT_LOWAT),
 ];
+
+/// As [`IP_OPTIONAL`].
+const TCP_OPTIONAL: &[(i32, Option<i32>)] = &[(tcp::NOTSENT_LOWAT, host::TCP_NOTSENT_LOWAT)];
 
 /// Darwin's `SO_NOSIGPIPE`, which this host has no option for.
 ///
@@ -242,13 +222,18 @@ unsafe fn queued_bytes(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let request = match name {
-        so::NREAD => libc::FIONREAD,
-        _ => libc::TIOCOUTQ,
+    let request = match (name, host::QUEUED_WRITE_IOCTL) {
+        (so::NREAD, _) => libc::FIONREAD as libc::c_ulong,
+        (_, Some(request)) => request,
+        // The host has `SO_NWRITE` as an option of its own, in Darwin's number.
+        // SAFETY: the caller's buffer and length slot, checked above.
+        (_, None) => {
+            return unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, so::NWRITE, value, len) };
+        }
     };
     let mut bytes: i32 = 0;
     // SAFETY: both requests write one `int` through the pointer they are given.
-    if unsafe { libc::ioctl(fd, request, &raw mut bytes) } < 0 {
+    if unsafe { libc::ioctl(fd, request as _, &raw mut bytes) } < 0 {
         return -1;
     }
     // SAFETY: at least an `int` of the caller's, just checked.
@@ -351,6 +336,16 @@ unsafe fn set_nosigpipe(fd: i32, value: *const c_void, len: u32) -> i32 {
     }
     // SAFETY: at least an `int` of the caller's, just checked.
     let wanted = unsafe { value.cast::<i32>().read_unaligned() } != 0;
+    if let Some(option) = host::NOSIGPIPE_SOCKOPT {
+        // A host with no `MSG_NOSIGNAL` is told on the socket itself.
+        let on = wanted as i32;
+        // SAFETY: an `int` this function owns, with its own size.
+        let rc =
+            unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, option, (&raw const on).cast(), 4) };
+        if rc < 0 {
+            return -1;
+        }
+    }
     with_suppressed_mut(|held| match wanted {
         true => held.insert(fd),
         false => held.remove(&fd),
@@ -397,7 +392,16 @@ fn option_to_host(level: i32, name: i32) -> Option<(i32, i32)> {
             IPPROTO_TCP => (IPPROTO_TCP, TCP_OPTIONS),
             _ => return None,
         };
-        let host_name = table.iter().find(|(theirs, _)| *theirs == name)?.1;
+        let optional = match level {
+            IPPROTO_IP => IP_OPTIONAL,
+            IPPROTO_TCP => TCP_OPTIONAL,
+            _ => &[],
+        };
+        let host_name = table
+            .iter()
+            .find(|(theirs, _)| *theirs == name)
+            .map(|entry| entry.1)
+            .or_else(|| optional.iter().find(|(theirs, _)| *theirs == name)?.1)?;
         Some((host_level, host_name))
     };
     let found = translated();
@@ -504,7 +508,17 @@ struct Xucred {
     version: u32,
     uid: u32,
     ngroups: i16,
+    /// The two bytes of padding Darwin's layout has here, spelled out so the
+    /// struct has none Rust could leave uninitialised.
+    _pad: u16,
     groups: [u32; 16],
+}
+
+impl Xucred {
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `repr(C)` of plain integers with no padding (see `_pad`).
+        unsafe { core::slice::from_raw_parts((self as *const Xucred).cast(), size_of::<Xucred>()) }
+    }
 }
 
 /// The `SOL_LOCAL` options, which this host has none of: Linux says the same
@@ -518,44 +532,37 @@ unsafe fn local_option(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
         crate::errno::set(libc::EFAULT);
         return -1;
     }
-    let (bytes, size): ([u8; size_of::<Xucred>()], usize) = match name {
+    let cred;
+    let pid;
+    let answer: &[u8] = match name {
         LOCAL_PEERCRED | LOCAL_PEERPID | LOCAL_PEEREPID => {
             let Some(peer) = super::socket::peer_ids(fd) else {
                 return -1;
             };
             if name == LOCAL_PEERCRED {
-                let mut cred = Xucred {
+                let mut value = Xucred {
                     version: 0,
                     uid: peer.euid,
                     ngroups: 0,
+                    _pad: 0,
                     groups: [0; 16],
                 };
                 // The effective gid leads, as a Mac's `cr_groups[0]` does.
                 let list = std::iter::once(peer.egid)
                     .chain(peer.groups.iter().copied().filter(|g| *g != peer.egid));
-                for (slot, gid) in cred.groups.iter_mut().zip(list) {
+                for (slot, gid) in value.groups.iter_mut().zip(list) {
                     *slot = gid;
-                    cred.ngroups += 1;
+                    value.ngroups += 1;
                 }
-                let mut bytes = [0; size_of::<Xucred>()];
-                // SAFETY: `Xucred` is plain data; its padding bytes are
-                // copied along, which a guest never reads.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        (&raw const cred).cast::<u8>(),
-                        bytes.as_mut_ptr(),
-                        bytes.len(),
-                    )
-                };
-                (bytes, size_of::<Xucred>())
+                cred = value;
+                cred.as_bytes()
             } else {
-                let Some(pid) = peer.pid else {
+                let Some(found) = peer.pid else {
                     crate::errno::set(libc::ENOTCONN);
                     return -1;
                 };
-                let mut bytes = [0; size_of::<Xucred>()];
-                bytes[..4].copy_from_slice(&pid.to_ne_bytes());
-                (bytes, size_of::<i32>())
+                pid = found.to_ne_bytes();
+                &pid
             }
         }
         _ => {
@@ -568,8 +575,8 @@ unsafe fn local_option(fd: i32, name: i32, value: *mut c_void, len: *mut u32) ->
     // `getsockopt` gives.
     unsafe {
         let room = *len as usize;
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), value.cast::<u8>(), size.min(room));
-        *len = size as u32;
+        core::ptr::copy_nonoverlapping(answer.as_ptr(), value.cast::<u8>(), answer.len().min(room));
+        *len = answer.len() as u32;
     }
     0
 }
@@ -755,15 +762,12 @@ mod tests {
             libc::IPV6_UNICAST_HOPS,
             "the collision being avoided"
         );
-        // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`. FreeBSD has
-        // no counterpart at all, and the option is refused there.
-        #[cfg(not(target_os = "freebsd"))]
+        // Darwin's `IP_PKTINFO` is 26; 27 there is `IP_RECVTOS`. A host with no
+        // counterpart refuses the option.
         assert_eq!(
             option_to_host(IPPROTO_IP, ip::PKTINFO),
-            Some((IPPROTO_IP, libc::IP_PKTINFO))
+            host::IP_PKTINFO.map(|name| (IPPROTO_IP, name))
         );
-        #[cfg(target_os = "freebsd")]
-        assert_eq!(option_to_host(IPPROTO_IP, ip::PKTINFO), None);
     }
 
     /// `TCP_NOPUSH` is corking, which is the closest thing this host has, and
@@ -771,16 +775,9 @@ mod tests {
     /// one. See [`TCP_OPTIONS`].
     #[test]
     fn tcp_nopush_corks_rather_than_being_refused() {
-        #[cfg(target_os = "freebsd")]
-        // FreeBSD has Darwin's own option, so nothing is being approximated.
         assert_eq!(
             option_to_host(IPPROTO_TCP, tcp::NOPUSH),
-            Some((IPPROTO_TCP, libc::TCP_NOPUSH))
-        );
-        #[cfg(not(target_os = "freebsd"))]
-        assert_eq!(
-            option_to_host(IPPROTO_TCP, tcp::NOPUSH),
-            Some((IPPROTO_TCP, libc::TCP_CORK))
+            Some((IPPROTO_TCP, host::TCP_NOPUSH))
         );
     }
 
