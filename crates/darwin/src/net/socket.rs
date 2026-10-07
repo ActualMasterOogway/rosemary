@@ -233,6 +233,35 @@ pub(super) struct PeerIds {
     pub groups: Vec<u32>,
 }
 
+/// launchd runs as virtual root but only ever as the host user, and its
+/// control socket answers peers whose uid equals its own. The user who owns
+/// the prefix is that account's owner, so launchd sees them as itself; a Mac
+/// would let that user's `launchctl` talk to their own launchd the same way.
+///
+/// FIXME (ACCURACY): a Mac reports the peer's real uid, 501 for a user's
+/// `launchctl`, and MiniDarwin's launchd would refuse it. This answers root
+/// instead so `launchctl` works unprivileged; remove it once launchd accepts
+/// the prefix owner itself.
+///
+/// `host_uid` is the peer's real uid, and only a peer still running as it, not
+/// one that became another virtual user, is answered this way.
+fn as_launchd_owner(ids: PeerIds, host_uid: u32) -> PeerIds {
+    // SAFETY: `getpid` and `getuid` take nothing and cannot fail.
+    let (me, owner) = unsafe { (libc::getpid(), libc::getuid()) };
+    if server::client::launchd() != Some(me) || host_uid != owner || ids.euid != owner {
+        return ids;
+    }
+    let Some(launchd) = server::client::process(me) else {
+        return ids;
+    };
+    PeerIds {
+        euid: launchd.euid,
+        egid: launchd.egid,
+        groups: launchd.groups,
+        ..ids
+    }
+}
+
 /// The peer of `fd`, or `None` with `errno` set.
 ///
 /// The peer is usually another guest, whose ids are the server's to say - a
@@ -274,12 +303,15 @@ pub(super) fn peer_ids(fd: i32) -> Option<PeerIds> {
         return None;
     };
     Some(match peer.pid.and_then(server::client::process) {
-        Some(process) => PeerIds {
-            pid: peer.pid,
-            euid: process.euid,
-            egid: process.egid,
-            groups: process.groups,
-        },
+        Some(process) => {
+            let ids = PeerIds {
+                pid: peer.pid,
+                euid: process.euid,
+                egid: process.egid,
+                groups: process.groups,
+            };
+            as_launchd_owner(ids, peer.uid)
+        }
         None => {
             // SAFETY: `getgid` takes nothing and cannot fail.
             let gid = unsafe { libc::getgid() };
