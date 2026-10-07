@@ -109,6 +109,20 @@ pub fn is_translated() -> bool {
     IS_TRANSLATED.load(Ordering::SeqCst)
 }
 
+/// `sysctl.proc_translated`, or `None` where macOS has no such key.
+///
+/// Only Apple silicon has Rosetta, so an Intel Mac answers `ENOENT`; a program
+/// reads that as "native x86-64". An arm64 host is Apple silicon, where
+/// a native process reads 0. A translated guest reads 1 on every host, because
+/// that is what an x86-64 binary sees on the only Macs that translate.
+fn proc_translated() -> Option<u32> {
+    match is_translated() {
+        true => Some(1),
+        false if cfg!(target_arch = "aarch64") => Some(0),
+        false => None,
+    }
+}
+
 /// The guest's architecture, defaulting to this host's when no program said.
 ///
 /// The default matters for the runtime's own start-up, which may ask before a program
@@ -125,7 +139,6 @@ pub fn guest_arch() -> GuestArch {
 /// One key's answer.
 ///
 /// Numeric guest properties are answered here on every host.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 enum Value {
     Str(String),
     U32(u32),
@@ -158,9 +171,7 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
     match mib {
         [CTL_HW, HW_MACHINE] => Some(Value::Str(arch.machine().to_string())),
         [CTL_HW, HW_MACHINE_ARCH] => Some(Value::Str(arch.machine_arch().to_string())),
-        [CTL_SYSCTL, SYSCTL_PROC_TRANSLATED] => {
-            Some(Value::U32(u32::from(IS_TRANSLATED.load(Ordering::SeqCst))))
-        }
+        [CTL_SYSCTL, SYSCTL_PROC_TRANSLATED] => proc_translated().map(Value::U32),
         [CTL_HW, HW_OPTIONAL, 144] => Some(Value::U32(u32::from(arch == GuestArch::Arm64))),
         [CTL_HW, HW_CPUTYPE] => Some(Value::U32(arch.cpu_type() as u32)),
         // Without a pid, the asking process's own.
@@ -189,7 +200,6 @@ fn guest_value(mib: &[i32]) -> Option<Value> {
 /// Only reached on a host with no Darwin `sysctl` behind it. Deliberately narrow: a
 /// key nobody has needed yet is better as an `ENOENT` naming itself under
 /// `ROSEMARY_TRACE_SYSCTL` than as a plausible invention.
-#[cfg(not(target_os = "macos"))]
 fn host_value(mib: &[i32]) -> Option<Value> {
     match mib {
         [CTL_KERN, KERN_HOSTNAME] => Some(Value::Str(hostname())),
@@ -265,7 +275,6 @@ fn version() -> String {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
 fn model() -> String {
     env_or("ROSEMARY_DARWIN_MODEL", "Mac15,3")
 }
@@ -274,7 +283,6 @@ fn env_or(key: &str, fallback: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| fallback.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
 fn hostname() -> String {
     // `c_char` rather than `i8`: it is unsigned on aarch64 Linux and signed on x86-64
     // and on macOS, so spelling the sign is a portability bug on one host or another.
@@ -293,7 +301,6 @@ pub(crate) fn ncpu() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-#[cfg(not(target_os = "macos"))]
 fn page_size() -> u32 {
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u32
 }
@@ -365,7 +372,6 @@ unsafe fn copy_out(value: &Value, oldp: *mut libc::c_void, oldlenp: *mut libc::s
 ///
 /// The list above is narrow on purpose, so the way it grows is by a program naming
 /// what it wanted - which it cannot do through an `ENOENT` alone.
-#[cfg(not(target_os = "macos"))]
 fn say_unanswered(what: &std::fmt::Arguments<'_>) {
     if std::env::var_os("ROSEMARY_TRACE_SYSCTL").is_none() {
         return;
@@ -394,6 +400,17 @@ unsafe extern "C" fn sysctl(
     // SAFETY: the caller states `name` holds `namelen` integers.
     let mib = unsafe { std::slice::from_raw_parts(name, namelen as usize) };
 
+    // Not the host's: on a Mac this number is in the range the kernel hands
+    // out to dynamically registered keys, so forwarding it would answer some
+    // other key.
+    if mib == [CTL_SYSCTL, SYSCTL_PROC_TRANSLATED] && proc_translated().is_none() {
+        crate::errno::set(libc::ENOENT);
+        return -1;
+    }
+    // SAFETY: every argument is the caller's, forwarded unchanged.
+    if let Some(rc) = unsafe { describe_tree(mib, oldp, oldlenp, newp, newlen) } {
+        return rc;
+    }
     if let Some(value) = guest_value(mib) {
         // SAFETY: the caller's own `oldp`/`oldlenp`, unmodified.
         return unsafe { copy_out(&value, oldp, oldlenp) };
@@ -413,12 +430,101 @@ unsafe extern "C" fn sysctl(
     unsafe { fallback(mib, oldp, oldlenp, newp, newlen) }
 }
 
+/// `CTL_SYSCTL` nodes that describe the tree itself. The `sysctl` command
+/// resolves every name through `NAME2OID` and asks `OIDFMT` how to print it,
+/// so without these it calls every key unknown.
+const SYSCTL_NAME: i32 = 1;
+const SYSCTL_NAME2OID: i32 = 3;
+const SYSCTL_OIDFMT: i32 = 4;
+
+/// `CTLTYPE_*` and `CTLFLAG_RD`, as `<sys/sysctl.h>` numbers them.
+const CTLTYPE_INT: u32 = 2;
+const CTLTYPE_STRING: u32 = 3;
+const CTLTYPE_QUAD: u32 = 4;
+const CTLTYPE_OPAQUE: u32 = 5;
+const CTLFLAG_RD: u32 = 0x8000_0000;
+
+/// Whether a key this module does not answer goes to the host's own `sysctl`.
+///
+/// Only a Mac has one to ask, and only the native libc asks it: builtin is
+/// meant to behave the same on every host, so it keeps to this module's table.
+fn passes_through() -> bool {
+    cfg!(target_os = "macos") && !crate::libc_backend::using_builtin()
+}
+
+/// A leaf this module answers by itself, without asking a host kernel.
+fn own_value(mib: &[i32]) -> Option<Value> {
+    if let Some(value) = guest_value(mib) {
+        return Some(value);
+    }
+    match passes_through() {
+        true => None,
+        false => host_value(mib),
+    }
+}
+
+/// The tree-introspection nodes, for the keys [`own_value`] answers.
+///
+/// `None` for anything else, which a Mac's kernel then answers about its own
+/// keys when [`passes_through`]. A key that is absent here is absent from these nodes too, so the
+/// `sysctl` command reports it as an unknown OID rather than printing a value.
+///
+/// # Safety
+///
+/// As [`sysctl`].
+unsafe fn describe_tree(
+    mib: &[i32],
+    oldp: *mut libc::c_void,
+    oldlenp: *mut libc::size_t,
+    newp: *mut libc::c_void,
+    newlen: libc::size_t,
+) -> Option<i32> {
+    let answer = match *mib {
+        [CTL_SYSCTL, SYSCTL_NAME2OID] => {
+            if newp.is_null() {
+                return None;
+            }
+            // SAFETY: the caller states `newp` is readable for `newlen` bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(newp as *const u8, newlen) };
+            // The command passes `strlen`, but a terminator is harmless.
+            let name = bytes.split(|&b| b == 0).next().unwrap_or_default();
+            let name = std::str::from_utf8(name).ok()?;
+            if name == "sysctl.proc_translated" && proc_translated().is_none() {
+                crate::errno::set(libc::ENOENT);
+                return Some(-1);
+            }
+            let (_, oid) = BY_NAME.iter().find(|(known, _)| *known == name)?;
+            own_value(oid)?;
+            Value::Bytes(oid.iter().flat_map(|n| n.to_ne_bytes()).collect())
+        }
+        [CTL_SYSCTL, SYSCTL_NAME, ref oid @ ..] => {
+            let (name, _) = BY_NAME.iter().find(|(_, known)| *known == oid)?;
+            own_value(oid)?;
+            Value::Str(name.to_string())
+        }
+        [CTL_SYSCTL, SYSCTL_OIDFMT, ref oid @ ..] => {
+            let (kind, format) = match own_value(oid)? {
+                Value::Str(_) => (CTLTYPE_STRING, "A"),
+                Value::U32(_) => (CTLTYPE_INT, "I"),
+                Value::U64(_) => (CTLTYPE_QUAD, "Q"),
+                Value::Bytes(_) => (CTLTYPE_OPAQUE, ""),
+            };
+            let mut bytes = (kind | CTLFLAG_RD).to_ne_bytes().to_vec();
+            bytes.extend_from_slice(format.as_bytes());
+            bytes.push(0);
+            Value::Bytes(bytes)
+        }
+        _ => return None,
+    };
+    // SAFETY: the caller's own `oldp`/`oldlenp`.
+    Some(unsafe { copy_out(&answer, oldp, oldlenp) })
+}
+
 /// Everything [`guest_value`] did not claim.
 ///
 /// # Safety
 ///
 /// As [`sysctl`].
-#[cfg(target_os = "macos")]
 unsafe fn fallback(
     mib: &[libc::c_int],
     oldp: *mut libc::c_void,
@@ -426,30 +532,21 @@ unsafe fn fallback(
     newp: *mut libc::c_void,
     newlen: libc::size_t,
 ) -> i32 {
-    // SAFETY: the host's own `sysctl`, given the caller's arguments unchanged.
-    unsafe {
-        libc::sysctl(
-            mib.as_ptr() as *mut libc::c_int,
-            mib.len() as libc::c_uint,
-            oldp,
-            oldlenp,
-            newp,
-            newlen,
-        )
+    #[cfg(target_os = "macos")]
+    if passes_through() {
+        // SAFETY: the host's own `sysctl`, given the caller's arguments unchanged.
+        return unsafe {
+            libc::sysctl(
+                mib.as_ptr() as *mut libc::c_int,
+                mib.len() as libc::c_uint,
+                oldp,
+                oldlenp,
+                newp,
+                newlen,
+            )
+        };
     }
-}
-
-/// # Safety
-///
-/// As [`sysctl`].
-#[cfg(not(target_os = "macos"))]
-unsafe fn fallback(
-    mib: &[libc::c_int],
-    oldp: *mut libc::c_void,
-    oldlenp: *mut libc::size_t,
-    _newp: *mut libc::c_void,
-    _newlen: libc::size_t,
-) -> i32 {
+    let _ = (newp, newlen);
     match host_value(mib) {
         // SAFETY: the caller's own `oldp`/`oldlenp`.
         Some(value) => unsafe { copy_out(&value, oldp, oldlenp) },
@@ -570,7 +667,6 @@ const BY_NAME: &[(&str, &[i32])] = &[
 ];
 
 /// Values supplied on non-macOS hosts after resolving a name or MIB.
-#[cfg(not(target_os = "macos"))]
 fn named(name: &str) -> Option<Value> {
     match name {
         "machdep.cpu.brand_string" => Some(Value::Str(brand_string())),
@@ -582,7 +678,6 @@ fn named(name: &str) -> Option<Value> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn optional_feature(name: &str) -> Option<Value> {
     // FIXME (ACCURACY): make this match what `cpuid` reports
 
@@ -617,18 +712,15 @@ fn optional_feature(name: &str) -> Option<Value> {
 
 /// Whether the guest's instructions are this CPU's own, and so whether
 /// `hw.optional` may report what this CPU has. See [`optional_feature`].
-#[cfg(not(target_os = "macos"))]
 static RUNS_HOST_INSTRUCTIONS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Say that the program executes this CPU's instructions directly, which is what
 /// the native backend does and the emulated one does not.
-#[cfg(not(target_os = "macos"))]
 pub fn set_runs_host_instructions(native: bool) {
     RUNS_HOST_INSTRUCTIONS.store(native, Ordering::Release);
 }
 
-#[cfg(not(target_os = "macos"))]
 fn host_has(feature: &str) -> bool {
     if !RUNS_HOST_INSTRUCTIONS.load(Ordering::Acquire) {
         return false;
@@ -656,14 +748,12 @@ fn host_has(feature: &str) -> bool {
 }
 
 /// `machdep.cpu.brand_string` - the CPU's marketing name.
-#[cfg(not(target_os = "macos"))]
 fn brand_string() -> String {
     env_or_else("ROSEMARY_CPU_BRAND", || {
         starnix::system::cpu_brand().unwrap_or_else(|| "Unknown CPU".to_string())
     })
 }
 
-#[cfg(not(target_os = "macos"))]
 fn env_or_else(key: &str, fallback: impl FnOnce() -> String) -> String {
     std::env::var(key).unwrap_or_else(|_| fallback())
 }
@@ -714,7 +804,6 @@ unsafe extern "C" fn sysctlbyname(
 /// # Safety
 ///
 /// As [`sysctlbyname`].
-#[cfg(target_os = "macos")]
 unsafe fn by_name_fallback(
     key: &str,
     oldp: *mut libc::c_void,
@@ -722,25 +811,16 @@ unsafe fn by_name_fallback(
     newp: *mut libc::c_void,
     newlen: libc::size_t,
 ) -> i32 {
-    let Ok(c) = std::ffi::CString::new(key) else {
-        crate::errno::set(libc::EINVAL);
-        return -1;
-    };
-    // SAFETY: `c` outlives the call; the rest is the caller's.
-    unsafe { libc::sysctlbyname(c.as_ptr(), oldp, oldlenp, newp, newlen) }
-}
-
-/// # Safety
-///
-/// As [`sysctlbyname`].
-#[cfg(not(target_os = "macos"))]
-unsafe fn by_name_fallback(
-    key: &str,
-    oldp: *mut libc::c_void,
-    oldlenp: *mut libc::size_t,
-    _newp: *mut libc::c_void,
-    _newlen: libc::size_t,
-) -> i32 {
+    #[cfg(target_os = "macos")]
+    if passes_through() {
+        let Ok(c) = std::ffi::CString::new(key) else {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        };
+        // SAFETY: `c` outlives the call; the rest is the caller's.
+        return unsafe { libc::sysctlbyname(c.as_ptr(), oldp, oldlenp, newp, newlen) };
+    }
+    let _ = (newp, newlen);
     match named(key) {
         // SAFETY: the caller's own `oldp`/`oldlenp`.
         Some(value) => unsafe { copy_out(&value, oldp, oldlenp) },
@@ -775,15 +855,18 @@ unsafe extern "C" fn sysctlnametomib(
     if key == "sysctl.proc_cputype" && !crate::libc_backend::using_builtin() {
         return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
     }
+    if key == "sysctl.proc_translated" && proc_translated().is_none() {
+        crate::errno::set(libc::ENOENT);
+        return -1;
+    }
     let Some((_, mib)) = BY_NAME.iter().find(|(n, _)| *n == key) else {
         #[cfg(target_os = "macos")]
-        return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
-        #[cfg(not(target_os = "macos"))]
-        {
-            say_unanswered(&format_args!("name {key:?} as a mib"));
-            crate::errno::set(libc::ENOENT);
-            return -1;
+        if passes_through() {
+            return unsafe { libc::sysctlnametomib(name, mibp, sizep) };
         }
+        say_unanswered(&format_args!("name {key:?} as a mib"));
+        crate::errno::set(libc::ENOENT);
+        return -1;
     };
     // SAFETY: the caller states `sizep` is a writable `size_t`.
     let available = unsafe { *sizep };
@@ -994,6 +1077,7 @@ mod tests {
     #[test]
     fn proc_translated_agrees_by_name_and_resolved_mib() {
         let _held = ARCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_is_translated(true);
         let name = std::ffi::CString::new("sysctl.proc_translated").unwrap();
         let mut mib = [0i32; 24];
         let mut len = mib.len();
@@ -1003,13 +1087,90 @@ mod tests {
         );
         assert_eq!(&mib[..len], &[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED]);
 
-        for translated in [false, true] {
-            set_is_translated(translated);
-            let expected = u32::from(translated).to_ne_bytes().to_vec();
-            assert_eq!(ask_name("sysctl.proc_translated"), Some(expected.clone()));
-            assert_eq!(ask(&mib[..len]), Some(expected));
-        }
+        let one = Some(1u32.to_ne_bytes().to_vec());
+        assert_eq!(ask_name("sysctl.proc_translated"), one);
+        assert_eq!(ask(&mib[..len]), one);
         set_is_translated(false);
+    }
+
+    #[test]
+    fn a_native_process_is_untranslated_only_where_rosetta_exists() {
+        let _held = ARCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_is_translated(false);
+        let answer = ask_name("sysctl.proc_translated");
+        let by_mib = ask(&[CTL_SYSCTL, SYSCTL_PROC_TRANSLATED]);
+        let name = std::ffi::CString::new("sysctl.proc_translated").unwrap();
+        let mut mib = [0i32; 4];
+        let mut len = mib.len();
+        let resolved = unsafe { sysctlnametomib(name.as_ptr(), mib.as_mut_ptr(), &mut len) };
+        match cfg!(target_arch = "aarch64") {
+            true => {
+                assert_eq!(answer, Some(0u32.to_ne_bytes().to_vec()));
+                assert_eq!(by_mib, answer);
+                assert_eq!(resolved, 0);
+            }
+            // An Intel Mac has no such key.
+            false => {
+                assert_eq!(answer, None);
+                assert_eq!(by_mib, None);
+                assert_eq!(resolved, -1);
+            }
+        }
+        crate::errno::set(0);
+    }
+
+    /// Resolve a name the way the `sysctl` command does, through `NAME2OID`,
+    /// and read back its name and format.
+    fn ask_tree(name: &str) -> Option<(Vec<i32>, String, u32, String)> {
+        let mut oid = [0i32; 24];
+        let mut len = size_of_val(&oid);
+        let rc = unsafe {
+            sysctl(
+                [CTL_SYSCTL, SYSCTL_NAME2OID].as_ptr(),
+                2,
+                oid.as_mut_ptr().cast(),
+                &mut len,
+                name.as_ptr() as *mut libc::c_void,
+                name.len(),
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let oid = oid[..len / size_of::<i32>()].to_vec();
+        let query = |node: i32| {
+            let mut mib = vec![CTL_SYSCTL, node];
+            mib.extend_from_slice(&oid);
+            ask(&mib).unwrap()
+        };
+        let mut named = query(SYSCTL_NAME);
+        named.pop();
+        let format = query(SYSCTL_OIDFMT);
+        let kind = u32::from_ne_bytes(format[..4].try_into().unwrap());
+        let spelled = String::from_utf8(format[4..format.len() - 1].to_vec()).unwrap();
+        Some((oid, String::from_utf8(named).unwrap(), kind, spelled))
+    }
+
+    #[test]
+    fn the_sysctl_command_can_resolve_and_format_a_key() {
+        let _held = lock_guest_arch(GuestArch::X86_64);
+        set_is_translated(true);
+        assert_eq!(
+            ask_tree("sysctl.proc_translated"),
+            Some((
+                vec![CTL_SYSCTL, SYSCTL_PROC_TRANSLATED],
+                "sysctl.proc_translated".to_string(),
+                CTLTYPE_INT | CTLFLAG_RD,
+                "I".to_string(),
+            ))
+        );
+        let (_, _, kind, format) = ask_tree("hw.machine").unwrap();
+        assert_eq!((kind, format.as_str()), (CTLTYPE_STRING | CTLFLAG_RD, "A"));
+
+        set_is_translated(false);
+        let native = ask_tree("sysctl.proc_translated");
+        assert_eq!(native.is_some(), cfg!(target_arch = "aarch64"));
+        crate::errno::set(0);
     }
 
     #[test]

@@ -196,7 +196,6 @@ impl Native {
             true => darwin::sysctl::GuestArch::Arm64,
             false => darwin::sysctl::GuestArch::X86_64,
         });
-        #[cfg(not(target_os = "macos"))]
         darwin::sysctl::set_runs_host_instructions(true);
 
         let mut report = Loader::new(HOST_SPEC)
