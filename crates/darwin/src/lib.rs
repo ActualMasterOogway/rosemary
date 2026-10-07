@@ -66,7 +66,6 @@ pub mod locale;
 pub mod mach;
 pub mod malloc;
 pub mod math;
-#[cfg(not(target_os = "macos"))]
 pub mod modes;
 pub mod net;
 mod oslog;
@@ -333,6 +332,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     dispatch::MODULE,
     net::MODULE,
     kqueue::MODULE,
+    modes::MODULE,
 ];
 
 /// Builtin modules whose guest exports are not yet ported to macOS.
@@ -362,9 +362,7 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     acl::MODULE,
     fmtcheck::MODULE,
     langinfo::MODULE,
-    modes::MODULE,
     #[cfg(target_os = "linux")]
-    stream::MODULE,
     utmpx::MODULE,
     vis::MODULE,
     wait::MODULE,

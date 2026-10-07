@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 
 const S_IFMT: u32 = 0o170000;
