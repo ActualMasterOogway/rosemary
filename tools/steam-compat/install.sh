@@ -6,10 +6,12 @@
 # The tool calls the rosemary binary found now (PATH, or --rosemary), by
 # absolute path. Restart Steam afterwards, then pick "Rosemary (macOS)" under a
 # game's Properties > Compatibility.
+#
+# The Steam bridge (steamclient.dylib) is expected to ship with the rosemary
+# binary, as the Nix package does; set ROSEMARY_STEAM_CLIENT to override it.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
 steam_root=
 rosemary=
 uninstall=
@@ -50,12 +52,7 @@ cp "$here/compatibilitytool.vdf" "$here/toolmanifest.vdf" "$dest/"
 cp "$here/rosemary-steam" "$dest/"
 chmod +x "$dest/rosemary-steam"
 
-{
-    echo "ROSEMARY_BIN='$rosemary'"
-    # The Nix package may not ship the generated Steam bridge; use a checkout's.
-    client="$repo/tools/steamclient/generated/steamclient.dylib"
-    [ -f "$client" ] && echo "ROSEMARY_STEAM_CLIENT='$client'; export ROSEMARY_STEAM_CLIENT"
-} >"$dest/rosemary-steam.env"
+echo "ROSEMARY_BIN='$rosemary'" >"$dest/rosemary-steam.env"
 
 echo "installed to $dest (rosemary: $rosemary)"
 echo "restart Steam to pick it up"
