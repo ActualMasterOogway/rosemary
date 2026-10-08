@@ -192,7 +192,10 @@ impl Parser<'_> {
             return Ok(());
         }
         if stage.is_some() {
-            return Err(syntax_error(line, "a stage qualifier on something not a function"));
+            return Err(syntax_error(
+                line,
+                "a stage qualifier on something not a function",
+            ));
         }
         if space != Some(Space::Constant) {
             return Err(syntax_error(
@@ -424,10 +427,16 @@ impl Parser<'_> {
             return Ok(Ty::Struct(index));
         }
         if word.starts_with("packed_") {
-            return Err(syntax_error(line, format!("packed type {word} is not supported")));
+            return Err(syntax_error(
+                line,
+                format!("packed type {word} is not supported"),
+            ));
         }
         if word.contains('x') && word.starts_with(|c: char| c == 'f' || c == 'h') {
-            return Err(syntax_error(line, format!("matrix type {word} is not supported")));
+            return Err(syntax_error(
+                line,
+                format!("matrix type {word} is not supported"),
+            ));
         }
         Err(syntax_error(line, format!("unknown type {word}")))
     }
@@ -452,24 +461,35 @@ impl Parser<'_> {
                 "write" => Access::Write,
                 "read_write" => Access::ReadWrite,
                 other => {
-                    return Err(syntax_error(line, format!("unknown texture access {other}")));
+                    return Err(syntax_error(
+                        line,
+                        format!("unknown texture access {other}"),
+                    ));
                 }
             };
         }
         self.expect(">")?;
+        // Vulkan's sampled type is a 32-bit scalar, so a `half` or `short`
+        // texture reads and writes 32-bit texels, which an assignment or a
+        // constructor then narrows.
+        // FIXME (ACCURACY): arithmetic directly on a `half` texture's result
+        // runs at float precision rather than half.
         let (texel, signed) = match element {
-            Ty::Scalar(Scalar::Float { bits }) => (Type::Float { bits }, false),
+            Ty::Scalar(Scalar::Float { .. }) => (Type::Float { bits: 32 }, false),
             Ty::Scalar(Scalar::Int { signed, bits }) if bits >= 16 => (
                 Type::Int {
-                    bits,
+                    bits: 32,
                     signed: false,
                 },
                 signed,
             ),
             _ => return Err(syntax_error(line, "unsupported texture element type")),
         };
-        if depth && !matches!(texel, Type::Float { bits: 32 }) {
-            return Err(syntax_error(line, "a depth texture's element must be float"));
+        if depth && element != Ty::Scalar(Scalar::FLOAT) {
+            return Err(syntax_error(
+                line,
+                "a depth texture's element must be float",
+            ));
         }
         Ok(Ty::Texture(TextureType {
             dimension,
@@ -614,7 +634,21 @@ impl Parser<'_> {
             let mark = self.at;
             let ty = self.ty()?;
             if matches!(self.peek(), Some(Kind::Ident(_))) {
-                if matches!(space, Some(Space::Threadgroup | Space::Device)) {
+                if space == Some(Space::Threadgroup) {
+                    loop {
+                        let line = self.line();
+                        let name = self.ident()?;
+                        let ty = self.array_suffix(ty.clone())?;
+                        if self.is_punct("=") || self.is_punct("(") {
+                            return Err(syntax_error(line, "an initialized threadgroup variable"));
+                        }
+                        out.push(Stmt::Threadgroup { ty, name, line });
+                        if !self.eat(",") {
+                            return Ok(());
+                        }
+                    }
+                }
+                if space == Some(Space::Device) {
                     return Err(syntax_error(line, "a local in a non-thread address space"));
                 }
                 loop {
@@ -680,7 +714,11 @@ impl Parser<'_> {
         let lhs = self.ternary()?;
         let op = match self.peek() {
             Some(Kind::Punct("=")) => None,
-            Some(Kind::Punct(op)) if op.len() >= 2 && op.ends_with('=') && !matches!(*op, "==" | "!=" | "<=" | ">=") => {
+            Some(Kind::Punct(op))
+                if op.len() >= 2
+                    && op.ends_with('=')
+                    && !matches!(*op, "==" | "!=" | "<=" | ">=") =>
+            {
                 Some(&op[..op.len() - 1])
             }
             _ => return Ok(lhs),
@@ -744,7 +782,7 @@ impl Parser<'_> {
 
     fn unary(&mut self) -> Result<Expr> {
         let line = self.line();
-        for op in ["-", "+", "!", "~", "++", "--"] {
+        for op in ["-", "+", "!", "~", "++", "--", "&"] {
             if self.eat(op) {
                 let operand = self.unary()?;
                 return Ok(Expr {
@@ -831,7 +869,9 @@ impl Parser<'_> {
                     line,
                 };
             } else if self.is_punct("++") || self.is_punct("--") {
-                let op = if self.eat("++") { "++" } else {
+                let op = if self.eat("++") {
+                    "++"
+                } else {
                     self.at += 1;
                     "--"
                 };
@@ -890,7 +930,35 @@ impl Parser<'_> {
                 if self.eat("::") {
                     return self.primary();
                 }
-                if self.is_punct("<") && matches!(word.as_str(), "as_type" | "static_cast" | "reinterpret_cast") {
+                if word == "reinterpret_cast" && self.is_punct("<") {
+                    let mark = self.at;
+                    self.at += 1;
+                    self.skip_qualifiers();
+                    let scalar = match self.peek() {
+                        Some(Kind::Ident(name)) if name == "atomic_uint" => Some(Scalar::UINT),
+                        Some(Kind::Ident(name)) if name == "atomic_int" => Some(Scalar::INT),
+                        _ => None,
+                    };
+                    if let Some(scalar) = scalar {
+                        self.at += 1;
+                        self.expect("*")?;
+                        self.expect(">")?;
+                        self.expect("(")?;
+                        let pointer = self.expression()?;
+                        self.expect(")")?;
+                        return Ok(Expr {
+                            kind: ExprKind::AtomicCast(scalar, Box::new(pointer)),
+                            line,
+                        });
+                    }
+                    self.at = mark;
+                }
+                if self.is_punct("<")
+                    && matches!(
+                        word.as_str(),
+                        "as_type" | "static_cast" | "reinterpret_cast"
+                    )
+                {
                     self.at += 1;
                     let template = self.ty()?;
                     self.expect(">")?;

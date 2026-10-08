@@ -555,11 +555,17 @@ fn source_msl_compiles_unity_style_vertex_and_fragment_functions() {
     };
     assert_eq!(
         varyings(vertex),
-        [("user(TEXCOORD0)".to_owned(), 0), ("user(COLOR0)".to_owned(), 1)]
+        [
+            ("user(TEXCOORD0)".to_owned(), 0),
+            ("user(COLOR0)".to_owned(), 1)
+        ]
     );
     assert_eq!(
         varyings(fragment),
-        [("user(COLOR0)".to_owned(), 0), ("user(TEXCOORD0)".to_owned(), 1)]
+        [
+            ("user(COLOR0)".to_owned(), 0),
+            ("user(TEXCOORD0)".to_owned(), 1)
+        ]
     );
 }
 
@@ -567,7 +573,10 @@ fn source_msl_compiles_unity_style_vertex_and_fragment_functions() {
 fn source_msl_preprocessor_macros_replace_defaults() {
     let module = metal_translate::msl::parse_msl_with_macros(
         UNITY_STYLE,
-        &[("XLT_REMAP_O".to_owned(), "{3, 0, 0, 0, 0, 0, 0, 0}".to_owned())],
+        &[(
+            "XLT_REMAP_O".to_owned(),
+            "{3, 0, 0, 0, 0, 0, 0, 0}".to_owned(),
+        )],
     )
     .unwrap();
     let fragment = &module.entries[1];
@@ -600,6 +609,74 @@ fn source_msl_compiles_a_compound_literal_and_half_values() {
     // An unattributed member is a varying named by the member.
     assert_eq!(library.entries[0].varyings[0].name, "user(color)");
     assert_eq!(library.entries[1].varyings[0].name, "user(color)");
+}
+
+#[test]
+fn source_msl_threadgroup_atomics_reach_workgroup_and_buffer_memory() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct Bin { uint value[1]; };\n\
+        kernel void histogram(device Bin *out [[ buffer(0) ]],\n\
+            uint3 local [[ thread_position_in_threadgroup ]])\n\
+        {\n\
+            threadgroup Bin bins[64];\n\
+            bins[local.x].value[0] = 0u;\n\
+            threadgroup_barrier(mem_flags::mem_threadgroup);\n\
+            atomic_fetch_add_explicit(reinterpret_cast<threadgroup atomic_uint *>(&bins[local.x & 63u].value[0]), 1, memory_order::memory_order_relaxed);\n\
+            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);\n\
+            int count = int(bins[local.x].value[0]);\n\
+            atomic_fetch_max_explicit(reinterpret_cast<device atomic_int *>(&out[local.x].value[0]), count, memory_order::memory_order_relaxed);\n\
+        }\0";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    let module = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let workgroup = module
+        .types_global_values
+        .iter()
+        .filter(|instruction| instruction.class.opcode == Op::Variable)
+        .filter(|instruction| {
+            instruction.operands.first()
+                == Some(&rspirv::dr::Operand::StorageClass(
+                    rspirv::spirv::StorageClass::Workgroup,
+                ))
+        })
+        .count();
+    assert_eq!(workgroup, 1);
+    assert_eq!(body_instructions(&module, Op::ControlBarrier).len(), 2);
+    assert_eq!(body_instructions(&module, Op::AtomicIAdd).len(), 1);
+    // `atomic_int` makes the maximum signed, whatever the place declared.
+    assert_eq!(body_instructions(&module, Op::AtomicSMax).len(), 1);
+}
+
+#[test]
+fn source_msl_a_half_texture_samples_through_a_32_bit_image() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct Varyings { float4 pos [[position]]; float2 uv; };\n\
+        fragment half4 shade(Varyings input [[stage_in]],\n\
+            texture2d<half, access::sample> tex [[ texture(0) ]],\n\
+            sampler s [[ sampler(0) ]])\n\
+        {\n\
+            half4 color = tex.sample(s, input.uv);\n\
+            return color;\n\
+        }\0";
+    let target = TargetProfile {
+        shader_float16: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let library = translate_msl(source, &target).unwrap();
+    let module = rspirv::dr::load_words(&library.entries[0].words).unwrap();
+    let image = module
+        .types_global_values
+        .iter()
+        .find(|instruction| instruction.class.opcode == Op::TypeImage)
+        .expect("an image type");
+    let sampled = image.operands[0].unwrap_id_ref();
+    let float32 = module.types_global_values.iter().any(|instruction| {
+        instruction.result_id == Some(sampled)
+            && instruction.class.opcode == Op::TypeFloat
+            && instruction.operands[0] == rspirv::dr::Operand::LiteralBit32(32)
+    });
+    assert!(float32, "Vulkan requires a 32-bit sampled type");
 }
 
 #[test]

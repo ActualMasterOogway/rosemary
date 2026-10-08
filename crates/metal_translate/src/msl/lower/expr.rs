@@ -13,7 +13,10 @@ impl Lowerer<'_, '_> {
             // `discard_fragment()` and other void calls have no value.
             ExprKind::Call { name, args, .. } if name == "discard_fragment" => {
                 if !args.is_empty() || self.stage != Stage::Fragment {
-                    return Err(syntax_error(expr.line, "discard_fragment() outside a fragment function"));
+                    return Err(syntax_error(
+                        expr.line,
+                        "discard_fragment() outside a fragment function",
+                    ));
                 }
                 self.emit_void(InstructionKind::DiscardFragment);
                 Ok(())
@@ -21,6 +24,11 @@ impl Lowerer<'_, '_> {
             ExprKind::Method { name, .. } if name == "write" => {
                 self.texture_method(expr)?;
                 Ok(())
+            }
+            ExprKind::Call { name, args, .. }
+                if name == "threadgroup_barrier" || name == "simdgroup_barrier" =>
+            {
+                self.barrier(name, args, expr.line)
             }
             _ => self.rvalue(expr).map(|_| ()),
         }
@@ -32,7 +40,9 @@ impl Lowerer<'_, '_> {
         if value.ty.lanes() != Some(1) {
             return Err(syntax_error(expr.line, "a condition must be a scalar"));
         }
-        Ok(self.convert(value, &Ty::Scalar(Scalar::Bool), expr.line)?.op)
+        Ok(self
+            .convert(value, &Ty::Scalar(Scalar::Bool), expr.line)?
+            .op)
     }
 
     /// The place an expression names, where it names one.
@@ -90,9 +100,13 @@ impl Lowerer<'_, '_> {
                 Ok(fields[position].clone())
             }
             LValue::Memory(place) if matches!(place.ty, Ty::Struct(_)) => {
-                let Ty::Struct(index) = place.ty else { unreachable!() };
+                let Ty::Struct(index) = place.ty else {
+                    unreachable!()
+                };
                 let position = self.field_position(index, member, line)?;
-                let ty = self.context.program.structs[index].fields[position].ty.clone();
+                let ty = self.context.program.structs[index].fields[position]
+                    .ty
+                    .clone();
                 let mut indices = place.indices;
                 if indices.is_empty() {
                     indices.push(Operand::u32(0));
@@ -141,12 +155,19 @@ impl Lowerer<'_, '_> {
                     if !(0..i64::from(lanes)).contains(&lane) {
                         return Err(syntax_error(line, "a vector index out of range"));
                     }
-                    return Ok(LValue::Lanes(Box::new(object), vec![lane as u32], Ty::Scalar(scalar)));
+                    return Ok(LValue::Lanes(
+                        Box::new(object),
+                        vec![lane as u32],
+                        Ty::Scalar(scalar),
+                    ));
                 }
                 let index = self.index_operand(index)?;
                 Ok(LValue::Dynamic(Box::new(object), index, Ty::Scalar(scalar)))
             }
-            _ => Err(syntax_error(line, "indexing something not an array or vector")),
+            _ => Err(syntax_error(
+                line,
+                "indexing something not an array or vector",
+            )),
         }
     }
 
@@ -159,7 +180,7 @@ impl Lowerer<'_, '_> {
     }
 
     /// A pointer to a place, materialized.
-    fn address(&mut self, place: &Place) -> Operand {
+    pub fn address(&mut self, place: &Place) -> Operand {
         if place.indices.is_empty()
             || (place.indices.len() == 1
                 && matches!(place.indices[0], Operand::Integer { value: 0, .. })
@@ -191,7 +212,10 @@ impl Lowerer<'_, '_> {
                     return Err(syntax_error(line, "a structure in thread memory"));
                 }
                 let pointer = self.address(place);
-                let op = self.emit(self.context.ir(&place.ty), InstructionKind::Load { pointer });
+                let op = self.emit(
+                    self.context.ir(&place.ty),
+                    InstructionKind::Load { pointer },
+                );
                 Ok(Value {
                     op,
                     ty: place.ty.clone(),
@@ -351,7 +375,9 @@ impl Lowerer<'_, '_> {
             ExprKind::Ident(name) => match self.lookup(name) {
                 Some(Binding::Value(value)) => Ok(value),
                 Some(Binding::LValue(lvalue)) => self.load(&lvalue, line),
-                Some(Binding::Pointer(_)) => Err(syntax_error(line, "a buffer pointer used as a value")),
+                Some(Binding::Pointer(_)) => {
+                    Err(syntax_error(line, "a buffer pointer used as a value"))
+                }
                 None => Err(syntax_error(line, format!("unknown name {name}"))),
             },
             ExprKind::Member(object, member) => {
@@ -367,7 +393,9 @@ impl Lowerer<'_, '_> {
                     }
                     Ty::Struct(index) => {
                         let position = self.field_position(index, member, line)?;
-                        let ty = self.context.program.structs[index].fields[position].ty.clone();
+                        let ty = self.context.program.structs[index].fields[position]
+                            .ty
+                            .clone();
                         let op = self.emit(
                             self.context.ir(&ty),
                             InstructionKind::CompositeExtract {
@@ -428,6 +456,10 @@ impl Lowerer<'_, '_> {
                 args,
             } => self.call(name, template.as_ref(), args, line),
             ExprKind::Method { .. } => self.texture_method(expr),
+            ExprKind::AtomicCast(..) => Err(syntax_error(
+                line,
+                "an atomic pointer used other than by an atomic function",
+            )),
         }
     }
 
@@ -541,7 +573,13 @@ impl Lowerer<'_, '_> {
                     },
                 )
             }
-            (Scalar::Int { signed, bits: from_bits }, Scalar::Int { bits: to_bits, .. }) => {
+            (
+                Scalar::Int {
+                    signed,
+                    bits: from_bits,
+                },
+                Scalar::Int { bits: to_bits, .. },
+            ) => {
                 if from_bits == to_bits {
                     return op;
                 }
@@ -552,7 +590,13 @@ impl Lowerer<'_, '_> {
                 } else {
                     ConvertOp::ZeroExtend
                 };
-                self.emit(result, InstructionKind::Convert { op: convert, value: op })
+                self.emit(
+                    result,
+                    InstructionKind::Convert {
+                        op: convert,
+                        value: op,
+                    },
+                )
             }
             (Scalar::Int { signed, .. }, Scalar::Float { .. }) => self.emit(
                 result,
@@ -589,7 +633,8 @@ impl Lowerer<'_, '_> {
 
     /// The type two operands of an arithmetic operator meet at.
     pub fn common(&self, a: &Ty, b: &Ty, line: usize) -> Result<Ty> {
-        let (Some(sa), Some(la), Some(sb), Some(lb)) = (a.scalar(), a.lanes(), b.scalar(), b.lanes())
+        let (Some(sa), Some(la), Some(sb), Some(lb)) =
+            (a.scalar(), a.lanes(), b.scalar(), b.lanes())
         else {
             return Err(syntax_error(
                 line,
@@ -602,7 +647,9 @@ impl Lowerer<'_, '_> {
         let lanes = la.max(lb);
         let vector = lanes > 1;
         let scalar = match (sa, sb) {
-            (Scalar::Float { bits: x }, Scalar::Float { bits: y }) => Scalar::Float { bits: x.max(y) },
+            (Scalar::Float { bits: x }, Scalar::Float { bits: y }) => {
+                Scalar::Float { bits: x.max(y) }
+            }
             // A vector's element type wins over a scalar's.
             (Scalar::Float { .. }, _) if !vector || la > 1 => sa,
             (_, Scalar::Float { .. }) if !vector || lb > 1 => sb,
@@ -635,9 +682,18 @@ impl Lowerer<'_, '_> {
         if op == "++" || op == "--" {
             return self.increment(op, operand, true, line);
         }
+        if op == "&" {
+            return Err(syntax_error(
+                line,
+                "a pointer used other than by an atomic function",
+            ));
+        }
         let value = self.rvalue(operand)?;
         let (Some(scalar), Some(lanes)) = (value.ty.scalar(), value.ty.lanes()) else {
-            return Err(syntax_error(line, format!("unary {op} on a non-numeric value")));
+            return Err(syntax_error(
+                line,
+                format!("unary {op} on a non-numeric value"),
+            ));
         };
         match op {
             "+" => Ok(value),
@@ -777,10 +833,21 @@ impl Lowerer<'_, '_> {
             return Ok(Value { op, ty: bool_ty });
         }
         let result = LValue::Memory(self.local(&bool_ty));
-        self.store(&result, Value { op: a.clone(), ty: bool_ty.clone() }, line)?;
+        self.store(
+            &result,
+            Value {
+                op: a.clone(),
+                ty: bool_ty.clone(),
+            },
+            line,
+        )?;
         let evaluate = self.new_block("rhs");
         let merge = self.new_block("endlogical");
-        let (true_block, false_block) = if op == "&&" { (evaluate, merge) } else { (merge, evaluate) };
+        let (true_block, false_block) = if op == "&&" {
+            (evaluate, merge)
+        } else {
+            (merge, evaluate)
+        };
         self.terminate(Terminator::CondBranch {
             condition: a,
             true_block,
@@ -859,7 +926,12 @@ impl Lowerer<'_, '_> {
                     "-" => FloatBinaryOp::Subtract,
                     "*" => FloatBinaryOp::Multiply,
                     "/" => FloatBinaryOp::Divide,
-                    _ => return Err(syntax_error(line, format!("operator {op} on floating values"))),
+                    _ => {
+                        return Err(syntax_error(
+                            line,
+                            format!("operator {op} on floating values"),
+                        ));
+                    }
                 };
                 InstructionKind::FloatBinary {
                     op: float_op,
@@ -963,7 +1035,9 @@ impl Lowerer<'_, '_> {
             None => {
                 if let (Ty::Struct(index), LValue::Fields(..)) = (&ty, &lvalue) {
                     let fields = self.struct_fields(rhs, *index, line)?;
-                    let LValue::Fields(_, places) = &lvalue else { unreachable!() };
+                    let LValue::Fields(_, places) = &lvalue else {
+                        unreachable!()
+                    };
                     for (place, field) in places.clone().iter().zip(fields) {
                         self.store(place, field, line)?;
                     }
@@ -987,14 +1061,22 @@ impl Lowerer<'_, '_> {
         if !has_effect(yes) && !has_effect(no) {
             let a = self.rvalue(yes)?;
             let b = self.rvalue(no)?;
-            let ty = if a.ty == b.ty { a.ty.clone() } else { self.common(&a.ty, &b.ty, line)? };
+            let ty = if a.ty == b.ty {
+                a.ty.clone()
+            } else {
+                self.common(&a.ty, &b.ty, line)?
+            };
             let a = self.convert(a, &ty, line)?;
             let b = self.convert(b, &ty, line)?;
             // A vector condition selects lane by lane.
             let condition = match condition_value.ty.lanes() {
-                Some(1) => self.convert(condition_value, &Ty::Scalar(Scalar::Bool), line)?.op,
+                Some(1) => {
+                    self.convert(condition_value, &Ty::Scalar(Scalar::Bool), line)?
+                        .op
+                }
                 Some(lanes) if Some(lanes) == ty.lanes() => {
-                    self.convert(condition_value, &Ty::of(Scalar::Bool, lanes), line)?.op
+                    self.convert(condition_value, &Ty::of(Scalar::Bool, lanes), line)?
+                        .op
                 }
                 _ => return Err(syntax_error(line, "a ?: condition of the wrong shape")),
             };
@@ -1008,7 +1090,9 @@ impl Lowerer<'_, '_> {
             );
             return Ok(Value { op, ty });
         }
-        let condition = self.convert(condition_value, &Ty::Scalar(Scalar::Bool), line)?.op;
+        let condition = self
+            .convert(condition_value, &Ty::Scalar(Scalar::Bool), line)?
+            .op;
         let yes_block = self.new_block("then");
         let no_block = self.new_block("else");
         let merge = self.new_block("endternary");
@@ -1047,7 +1131,10 @@ impl Lowerer<'_, '_> {
                     op: number_operand(ty.scalar().expect("scalar"), Number::Int(0)),
                     ty: ty.clone(),
                 }),
-                _ => Err(syntax_error(line, "a scalar constructed from several values")),
+                _ => Err(syntax_error(
+                    line,
+                    "a scalar constructed from several values",
+                )),
             },
             Ty::Vector(scalar, lanes) => {
                 if args.is_empty() {
@@ -1068,24 +1155,33 @@ impl Lowerer<'_, '_> {
                 let mut elements = Vec::new();
                 for value in values {
                     match value.ty {
-                        Ty::Scalar(_) => elements.push(self.convert(value, &Ty::Scalar(*scalar), line)?.op),
+                        Ty::Scalar(_) => {
+                            elements.push(self.convert(value, &Ty::Scalar(*scalar), line)?.op)
+                        }
                         Ty::Vector(_, n) => {
                             let value = self.convert(value, &Ty::Vector(*scalar, n), line)?;
                             for lane in 0..u32::from(n) {
-                                elements.push(if let Operand::Composite { elements, .. } = &value.op {
-                                    elements[lane as usize].clone()
-                                } else {
-                                    self.emit(
-                                        scalar_ir(*scalar),
-                                        InstructionKind::CompositeExtract {
-                                            composite: value.op.clone(),
-                                            index: lane,
-                                        },
-                                    )
-                                });
+                                elements.push(
+                                    if let Operand::Composite { elements, .. } = &value.op {
+                                        elements[lane as usize].clone()
+                                    } else {
+                                        self.emit(
+                                            scalar_ir(*scalar),
+                                            InstructionKind::CompositeExtract {
+                                                composite: value.op.clone(),
+                                                index: lane,
+                                            },
+                                        )
+                                    },
+                                );
                             }
                         }
-                        _ => return Err(syntax_error(line, "a vector constructed from a non-numeric value")),
+                        _ => {
+                            return Err(syntax_error(
+                                line,
+                                "a vector constructed from a non-numeric value",
+                            ));
+                        }
                     }
                 }
                 if elements.len() != usize::from(*lanes) {
@@ -1115,15 +1211,26 @@ impl Lowerer<'_, '_> {
                 Ok(Value { op, ty: ty.clone() })
             }
             Ty::Struct(index) => {
-                let items = args.iter().map(|arg| (None, arg.clone())).collect::<Vec<_>>();
+                let items = args
+                    .iter()
+                    .map(|arg| (None, arg.clone()))
+                    .collect::<Vec<_>>();
                 self.compound_literal(&Ty::Struct(*index), &items, line)
             }
-            _ => Err(syntax_error(line, format!("cannot construct a {}", describe(ty)))),
+            _ => Err(syntax_error(
+                line,
+                format!("cannot construct a {}", describe(ty)),
+            )),
         }
     }
 
     /// `(T){ .a = x }`: a structure value; a field not named is zero.
-    fn compound_literal(&mut self, ty: &Ty, items: &[(Option<String>, Expr)], line: usize) -> Result<Value> {
+    fn compound_literal(
+        &mut self,
+        ty: &Ty,
+        items: &[(Option<String>, Expr)],
+        line: usize,
+    ) -> Result<Value> {
         let Ty::Struct(index) = ty else {
             if let [(None, item)] = items {
                 let value = self.rvalue(item)?;
@@ -1169,7 +1276,10 @@ impl Lowerer<'_, '_> {
         match ty {
             Ty::Scalar(scalar) => Ok(number_operand(*scalar, Number::Int(0))),
             Ty::Vector(scalar, lanes) => Ok(self.constant_of(*scalar, *lanes, Number::Int(0))),
-            _ => Err(syntax_error(line, "a field left out of a compound literal must be numeric")),
+            _ => Err(syntax_error(
+                line,
+                "a field left out of a compound literal must be numeric",
+            )),
         }
     }
 }
@@ -1182,7 +1292,11 @@ pub(super) fn swizzle_lanes(name: &str, lanes: u8) -> Option<Vec<u32>> {
     let sets = ["xyzw", "rgba"];
     sets.iter().find_map(|set| {
         name.chars()
-            .map(|c| set.find(c).map(|lane| lane as u32).filter(|lane| *lane < u32::from(lanes)))
+            .map(|c| {
+                set.find(c)
+                    .map(|lane| lane as u32)
+                    .filter(|lane| *lane < u32::from(lanes))
+            })
             .collect::<Option<Vec<_>>>()
     })
 }
@@ -1190,21 +1304,28 @@ pub(super) fn swizzle_lanes(name: &str, lanes: u8) -> Option<Vec<u32>> {
 pub(super) fn is_constant(op: &Operand) -> bool {
     matches!(
         op,
-        Operand::Integer { .. } | Operand::Float { .. } | Operand::Bool(_) | Operand::Composite { .. }
+        Operand::Integer { .. }
+            | Operand::Float { .. }
+            | Operand::Bool(_)
+            | Operand::Composite { .. }
     )
 }
 
 fn constant_number(op: &Operand) -> Option<Number> {
     match op {
-        Operand::Integer { ty: Type::Int { bits, .. }, value } => {
+        Operand::Integer {
+            ty: Type::Int { bits, .. },
+            value,
+        } => {
             // A signless constant reads back as the signed value of its width.
             let shift = 64 - u32::from(*bits);
             Some(Number::Int(((*value << shift) as i64) >> shift))
         }
         Operand::Bool(value) => Some(Number::Int(i64::from(*value))),
-        Operand::Float { ty: Type::Float { bits: 32 }, bits } => {
-            Some(Number::Float(f64::from(f32::from_bits(*bits as u32))))
-        }
+        Operand::Float {
+            ty: Type::Float { bits: 32 },
+            bits,
+        } => Some(Number::Float(f64::from(f32::from_bits(*bits as u32)))),
         _ => None,
     }
 }
@@ -1215,17 +1336,27 @@ pub(super) fn has_effect(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Assign(..) | ExprKind::Postfix(..) => true,
         ExprKind::Unary(op, inner) => matches!(*op, "++" | "--") || has_effect(inner),
-        ExprKind::Call { name, args, .. } => name == "discard_fragment" || args.iter().any(has_effect),
+        ExprKind::Call { name, args, .. } => {
+            matches!(
+                name.as_str(),
+                "discard_fragment" | "threadgroup_barrier" | "simdgroup_barrier"
+            ) || name.starts_with("atomic_")
+                || args.iter().any(has_effect)
+        }
         ExprKind::Method { name, object, args } => {
             name == "write" || has_effect(object) || args.iter().any(has_effect)
         }
         ExprKind::Binary(_, a, b) => has_effect(a) || has_effect(b),
         ExprKind::Ternary(a, b, c) => has_effect(a) || has_effect(b) || has_effect(c),
         ExprKind::Construct(_, args) | ExprKind::InitList(args) => args.iter().any(has_effect),
-        ExprKind::Cast(_, inner) | ExprKind::Member(inner, _) => has_effect(inner),
+        ExprKind::Cast(_, inner) | ExprKind::AtomicCast(_, inner) | ExprKind::Member(inner, _) => {
+            has_effect(inner)
+        }
         ExprKind::Index(a, b) => has_effect(a) || has_effect(b),
         ExprKind::CompoundLiteral(_, items) => items.iter().any(|(_, item)| has_effect(item)),
-        ExprKind::Ident(_) | ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) => false,
+        ExprKind::Ident(_) | ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) => {
+            false
+        }
     }
 }
 

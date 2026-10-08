@@ -43,7 +43,13 @@ pub(super) fn lower(program: &Program) -> Result<Module> {
                 ),
             ));
         };
-        let (lowered, entry) = Lowerer::entry(&context, function, stage, module.functions.len())?;
+        let (lowered, entry) = Lowerer::entry(
+            &context,
+            function,
+            stage,
+            module.functions.len(),
+            &mut module.globals,
+        )?;
         module.functions.push(lowered);
         module.entries.push(entry);
     }
@@ -191,7 +197,10 @@ impl<'p> Context<'p> {
             (Ty::Struct(index), ExprKind::InitList(items)) => {
                 let fields = &self.program.structs[*index].fields;
                 if items.len() != fields.len() {
-                    return Err(syntax_error(line, "a structure initializer of the wrong length"));
+                    return Err(syntax_error(
+                        line,
+                        "a structure initializer of the wrong length",
+                    ));
                 }
                 Ok(Operand::Composite {
                     ty: self.ir(ty),
@@ -208,7 +217,10 @@ impl<'p> Context<'p> {
                     match &arg.kind {
                         ExprKind::Construct(Ty::Vector(_, inner), inner_args) => {
                             if inner_args.len() != usize::from(*inner) {
-                                return Err(syntax_error(line, "a constant vector must spell every lane"));
+                                return Err(syntax_error(
+                                    line,
+                                    "a constant vector must spell every lane",
+                                ));
                             }
                             scalars.extend(inner_args.iter());
                         }
@@ -216,12 +228,20 @@ impl<'p> Context<'p> {
                     }
                 }
                 let elements = match scalars.len() {
-                    1 => vec![self.constant(scalars[0], &Ty::Scalar(*scalar), line)?; usize::from(*lanes)],
+                    1 => vec![
+                        self.constant(scalars[0], &Ty::Scalar(*scalar), line)?;
+                        usize::from(*lanes)
+                    ],
                     n if n == usize::from(*lanes) => scalars
                         .iter()
                         .map(|arg| self.constant(arg, &Ty::Scalar(*scalar), line))
                         .collect::<Result<_>>()?,
-                    _ => return Err(syntax_error(line, "a constant vector with the wrong lane count")),
+                    _ => {
+                        return Err(syntax_error(
+                            line,
+                            "a constant vector with the wrong lane count",
+                        ));
+                    }
                 };
                 Ok(Operand::Composite {
                     ty: self.ir(ty),
@@ -263,7 +283,11 @@ impl<'p> Context<'p> {
                 let ExprKind::Ident(name) = &array.kind else {
                     return None;
                 };
-                let global = self.program.globals.iter().find(|global| &global.name == name)?;
+                let global = self
+                    .program
+                    .globals
+                    .iter()
+                    .find(|global| &global.name == name)?;
                 let Number::Int(index) = self.const_number(index)? else {
                     return None;
                 };
@@ -298,9 +322,13 @@ impl<'p> Context<'p> {
     /// A constant integer, as an attribute's argument must be.
     fn const_index(&self, expr: &Expr) -> Result<u32> {
         match self.const_number(expr) {
-            Some(Number::Int(value)) => u32::try_from(value)
-                .map_err(|_| syntax_error(expr.line, "an index out of range")),
-            _ => Err(syntax_error(expr.line, "an attribute argument must be a constant integer")),
+            Some(Number::Int(value)) => {
+                u32::try_from(value).map_err(|_| syntax_error(expr.line, "an index out of range"))
+            }
+            _ => Err(syntax_error(
+                expr.line,
+                "an attribute argument must be a constant integer",
+            )),
         }
     }
 }
@@ -332,7 +360,11 @@ pub(super) fn number_operand(scalar: Scalar, value: Number) -> Operand {
                 Number::Int(value) => value,
                 Number::Float(value) => value as i64,
             };
-            let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            let mask = if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
             Operand::Integer {
                 ty: scalar_ir(scalar),
                 value: (value as u64) & mask,
@@ -423,15 +455,25 @@ pub(super) struct Lowerer<'c, 'p> {
     /// result.
     returns: Returns,
     result: Type,
+    /// The `threadgroup` variables this function declares, which are module
+    /// globals numbered from `globals_base`.
+    globals: Vec<GlobalVariable>,
+    globals_base: u32,
 }
 
 /// How a `return` builds the entry point's result.
 enum Returns {
     Void,
     /// One value, widened to the interface type.
-    Single { source: Ty, interface: Ty },
+    Single {
+        source: Ty,
+        interface: Ty,
+    },
     /// A structure, each field widened to its interface type.
-    Struct { index: usize, interface: Vec<Ty> },
+    Struct {
+        index: usize,
+        interface: Vec<Ty>,
+    },
 }
 
 impl<'c, 'p> Lowerer<'c, 'p> {
@@ -453,6 +495,8 @@ impl<'c, 'p> Lowerer<'c, 'p> {
             loops: Vec::new(),
             returns: Returns::Void,
             result: Type::Void,
+            globals: Vec::new(),
+            globals_base: 0,
         }
     }
 
@@ -539,7 +583,10 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     .collect::<Vec<_>>();
                 LValue::Fields(
                     *index,
-                    fields.iter().map(|field| self.local_lvalue(field)).collect(),
+                    fields
+                        .iter()
+                        .map(|field| self.local_lvalue(field))
+                        .collect(),
                 )
             }
             ty => LValue::Memory(self.local(ty)),
@@ -619,6 +666,44 @@ impl<'c, 'p> Lowerer<'c, 'p> {
 
     fn statement(&mut self, statement: &Stmt) -> Result<()> {
         match statement {
+            Stmt::Threadgroup { ty, name, line } => {
+                if self.stage != Stage::Kernel {
+                    return Err(syntax_error(
+                        *line,
+                        "a threadgroup variable outside a kernel",
+                    ));
+                }
+                if matches!(ty, Ty::Texture(_) | Ty::Sampler | Ty::Void) {
+                    return Err(syntax_error(
+                        *line,
+                        "a threadgroup variable of a non-data type",
+                    ));
+                }
+                let index = self.globals_base + self.globals.len() as u32;
+                let pointee = self.context.ir(ty);
+                self.globals.push(GlobalVariable {
+                    name: name.clone(),
+                    space: AddressSpace::Threadgroup,
+                    ty: pointee.clone(),
+                    initializer: None,
+                    function_constant: None,
+                });
+                self.bind(
+                    name,
+                    Binding::LValue(LValue::Memory(Place {
+                        root: Operand::Global {
+                            index,
+                            ty: Type::Pointer {
+                                space: AddressSpace::Threadgroup,
+                                pointee: Box::new(pointee),
+                            },
+                        },
+                        space: AddressSpace::Threadgroup,
+                        indices: vec![Operand::u32(0)],
+                        ty: ty.clone(),
+                    })),
+                );
+            }
             Stmt::Decl {
                 ty,
                 name,
@@ -812,7 +897,13 @@ impl<'c, 'p> Lowerer<'c, 'p> {
     /// one check block, which alone leaves the loop: a natural loop holds
     /// only blocks which reach its back edge, so a `break` straight to the
     /// exit would make every breaking block an exit of its own.
-    fn loop_body(&mut self, body: &[Stmt], flag: Place, next: BlockId, exit: BlockId) -> Result<()> {
+    fn loop_body(
+        &mut self,
+        body: &[Stmt],
+        flag: Place,
+        next: BlockId,
+        exit: BlockId,
+    ) -> Result<()> {
         let check = self.new_block("loopcheck");
         self.loops.push((check, flag.clone()));
         self.statements(body)?;
@@ -833,8 +924,13 @@ impl<'c, 'p> Lowerer<'c, 'p> {
     fn return_value(&mut self, value: Option<&Expr>, line: usize) -> Result<Option<Operand>> {
         match (&self.returns, value) {
             (Returns::Void, None) => Ok(None),
-            (Returns::Void, Some(_)) => Err(syntax_error(line, "a value returned from a void function")),
-            (_, None) => Err(syntax_error(line, "no value returned from a non-void function")),
+            (Returns::Void, Some(_)) => {
+                Err(syntax_error(line, "a value returned from a void function"))
+            }
+            (_, None) => Err(syntax_error(
+                line,
+                "no value returned from a non-void function",
+            )),
             (Returns::Single { source, interface }, Some(value)) => {
                 let (source, interface) = (source.clone(), interface.clone());
                 let value = self.rvalue(value)?;
@@ -845,7 +941,8 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 let (index, interface) = (*index, interface.clone());
                 let fields = self.struct_fields(value, index, line)?;
                 let mut result = Operand::Undef(self.result.clone());
-                for (position, (field, interface)) in fields.into_iter().zip(&interface).enumerate() {
+                for (position, (field, interface)) in fields.into_iter().zip(&interface).enumerate()
+                {
                     let field = self.convert(field, interface, line)?;
                     result = self.emit(
                         self.result.clone(),
@@ -902,8 +999,10 @@ impl<'c, 'p> Lowerer<'c, 'p> {
         function: &FunctionDef,
         stage: Stage,
         index: usize,
+        globals: &mut Vec<GlobalVariable>,
     ) -> Result<(Function, EntryPoint)> {
         let mut lowerer = Lowerer::new(context, stage);
+        lowerer.globals_base = globals.len() as u32;
         let mut parameters = Vec::new();
         let mut entry = EntryPoint {
             function: index,
@@ -929,12 +1028,18 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 lowerer.terminate(Terminator::Unreachable);
             }
         }
+        globals.append(&mut lowerer.globals);
         let lowered = lowerer.finish(&function.name, parameters);
         Ok((lowered, entry))
     }
 
     /// Add an IR parameter of `ty`, answering its value.
-    fn add_parameter(&mut self, parameters: &mut Vec<Parameter>, name: &str, ty: Type) -> (u32, Operand) {
+    fn add_parameter(
+        &mut self,
+        parameters: &mut Vec<Parameter>,
+        name: &str,
+        ty: Type,
+    ) -> (u32, Operand) {
         let value = self.value(ty.clone());
         parameters.push(Parameter {
             value,
@@ -971,7 +1076,12 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 let space = match param.space {
                     Some(Space::Constant) => AddressSpace::Constant,
                     Some(Space::Device) => AddressSpace::Device,
-                    _ => return Err(syntax_error(line, "a buffer outside the constant or device address space")),
+                    _ => {
+                        return Err(syntax_error(
+                            line,
+                            "a buffer outside the constant or device address space",
+                        ));
+                    }
                 };
                 let ty = Type::Pointer {
                     space,
@@ -1016,7 +1126,10 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     _ => return Err(syntax_error(line, "a resource attribute on the wrong type")),
                 };
                 if param.indirection != Indirection::Value {
-                    return Err(syntax_error(line, "a texture or sampler passed by reference"));
+                    return Err(syntax_error(
+                        line,
+                        "a texture or sampler passed by reference",
+                    ));
                 }
                 let ty = self.context.ir(&param.ty);
                 let (argument, op) = self.add_parameter(parameters, &param.name, ty.clone());
@@ -1039,7 +1152,10 @@ impl<'c, 'p> Lowerer<'c, 'p> {
             }
             "stage_in" => {
                 let Ty::Struct(index) = param.ty else {
-                    return Err(syntax_error(line, "a [[stage_in]] parameter must be a structure"));
+                    return Err(syntax_error(
+                        line,
+                        "a [[stage_in]] parameter must be a structure",
+                    ));
                 };
                 let fields = self.context.program.structs[index].fields.clone();
                 let mut lvalues = Vec::new();
@@ -1103,7 +1219,11 @@ impl<'c, 'p> Lowerer<'c, 'p> {
     }
 
     /// Where a field of a `[[stage_in]]` structure comes from, and its name.
-    fn stage_input(&self, field: &Field, next_location: &mut u32) -> Result<(StageBinding, String)> {
+    fn stage_input(
+        &self,
+        field: &Field,
+        next_location: &mut u32,
+    ) -> Result<(StageBinding, String)> {
         let mut binding = None;
         let mut interpolation = None;
         for attribute in &field.attributes {
@@ -1124,12 +1244,17 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 "center_perspective" => interpolation = Some((Sampling::Center, true, false)),
                 "center_no_perspective" => interpolation = Some((Sampling::Center, false, false)),
                 "centroid_perspective" => interpolation = Some((Sampling::Centroid, true, false)),
-                "centroid_no_perspective" => interpolation = Some((Sampling::Centroid, false, false)),
+                "centroid_no_perspective" => {
+                    interpolation = Some((Sampling::Centroid, false, false))
+                }
                 "sample_perspective" => interpolation = Some((Sampling::Sample, true, false)),
                 "sample_no_perspective" => interpolation = Some((Sampling::Sample, false, false)),
                 name => {
                     let builtin = builtin_named(name, self.stage).ok_or_else(|| {
-                        syntax_error(attribute.line, format!("unsupported stage input [[{name}]]"))
+                        syntax_error(
+                            attribute.line,
+                            format!("unsupported stage input [[{name}]]"),
+                        )
                     })?;
                     binding = Some((StageBinding::Builtin(builtin), field.name.clone()));
                 }
@@ -1168,7 +1293,11 @@ impl<'c, 'p> Lowerer<'c, 'p> {
         Ok((binding, name))
     }
 
-    fn varying(&self, next_location: &mut u32, interpolation: Option<Interpolation>) -> StageBinding {
+    fn varying(
+        &self,
+        next_location: &mut u32,
+        interpolation: Option<Interpolation>,
+    ) -> StageBinding {
         let location = *next_location;
         *next_location += 1;
         StageBinding::Location {
@@ -1236,7 +1365,11 @@ impl<'c, 'p> Lowerer<'c, 'p> {
         Ok(())
     }
 
-    fn stage_output(&self, field: &Field, next_location: &mut u32) -> Result<(StageBinding, String)> {
+    fn stage_output(
+        &self,
+        field: &Field,
+        next_location: &mut u32,
+    ) -> Result<(StageBinding, String)> {
         let mut found = None;
         for attribute in &field.attributes {
             let binding = match (attribute.name.as_str(), self.stage) {
@@ -1245,23 +1378,33 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 }
                 ("color", Stage::Fragment) => (
                     StageBinding::RenderTarget {
-                        index: self.context.const_index(
-                            attribute
-                                .args
-                                .first()
-                                .ok_or_else(|| syntax_error(attribute.line, "color() needs an index"))?,
-                        )?,
+                        index: self.context.const_index(attribute.args.first().ok_or_else(
+                            || syntax_error(attribute.line, "color() needs an index"),
+                        )?)?,
                     },
                     field.name.clone(),
                 ),
                 // Fragment interpolation qualifiers matter on the input side.
-                ("flat" | "center_perspective" | "center_no_perspective" | "centroid_perspective"
-                | "centroid_no_perspective" | "sample_perspective" | "sample_no_perspective"
-                | "invariant", Stage::Vertex) => continue,
-                ("depth", Stage::Fragment) => (StageBinding::Builtin(Builtin::Depth), field.name.clone()),
+                (
+                    "flat"
+                    | "center_perspective"
+                    | "center_no_perspective"
+                    | "centroid_perspective"
+                    | "centroid_no_perspective"
+                    | "sample_perspective"
+                    | "sample_no_perspective"
+                    | "invariant",
+                    Stage::Vertex,
+                ) => continue,
+                ("depth", Stage::Fragment) => {
+                    (StageBinding::Builtin(Builtin::Depth), field.name.clone())
+                }
                 (name, stage) => {
                     let builtin = builtin_named(name, stage).ok_or_else(|| {
-                        syntax_error(attribute.line, format!("unsupported stage output [[{name}]]"))
+                        syntax_error(
+                            attribute.line,
+                            format!("unsupported stage output [[{name}]]"),
+                        )
                     })?;
                     (StageBinding::Builtin(builtin), field.name.clone())
                 }
@@ -1314,7 +1457,10 @@ fn interface_ty(ty: &Ty, line: usize) -> Result<Ty> {
     match ty {
         Ty::Scalar(scalar) => Ok(Ty::Scalar(widen(*scalar))),
         Ty::Vector(scalar, lanes) => Ok(Ty::Vector(widen(*scalar), *lanes)),
-        _ => Err(syntax_error(line, "a stage interface value must be a scalar or vector")),
+        _ => Err(syntax_error(
+            line,
+            "a stage interface value must be a scalar or vector",
+        )),
     }
 }
 
@@ -1357,4 +1503,3 @@ fn builtin_ty(builtin: Builtin) -> Ty {
         _ => Ty::Scalar(Scalar::UINT),
     }
 }
-
