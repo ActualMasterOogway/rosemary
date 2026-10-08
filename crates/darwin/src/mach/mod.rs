@@ -99,6 +99,7 @@ exports::exports! {
         "host_info" => info::host_info,
         "host_get_clock_service" => clock::host_get_clock_service,
         "clock_get_time" => clock::clock_get_time,
+        "clock_sleep" => clock::clock_sleep,
         "task_get_special_port" => task::task_get_special_port,
 
         // Other tasks, by way of the process server. Every flavour of task

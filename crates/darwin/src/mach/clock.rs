@@ -83,6 +83,80 @@ pub unsafe extern "C" fn clock_get_time(clock: Name, out: *mut MachTimespec) -> 
     KERN_SUCCESS
 }
 
+/// `sleep_type_t` values from `<mach/clock_types.h>`.
+const TIME_ABSOLUTE: i32 = 0;
+const TIME_RELATIVE: i32 = 1;
+
+/// `kern_return_t clock_sleep(mach_port_t, sleep_type_t, mach_timespec_t,
+/// mach_timespec_t *)`
+///
+/// `mach_timespec_t` travels by value in one integer register on the guest
+/// ABI, so it is a `u64` here as in `semaphore_timedwait`: seconds in the low
+/// half, nanoseconds in the high half. A relative sleep is turned into an
+/// absolute deadline up front so that retrying after a signal does not stretch
+/// it. `remaining` is the out-parameter the kernel fills with the clock's
+/// value at wake-up; it may be null.
+///
+/// # Safety
+///
+/// `remaining` is null or a writable `mach_timespec_t`.
+pub unsafe extern "C" fn clock_sleep(
+    clock: Name,
+    sleep_type: i32,
+    sleep_time: u64,
+    remaining: *mut MachTimespec,
+) -> i32 {
+    let Some(host) = host_clock(clock) else {
+        return match space::with_right(clock, |_| ()) {
+            Some(()) => KERN_INVALID_ARGUMENT,
+            None => MACH_SEND_INVALID_DEST,
+        };
+    };
+    let sec = sleep_time as u32;
+    let nsec = (sleep_time >> 32) as i32;
+    if !(0..1_000_000_000).contains(&nsec) || !matches!(sleep_type, TIME_ABSOLUTE | TIME_RELATIVE) {
+        return KERN_INVALID_VALUE;
+    }
+    let mut deadline = libc::timespec {
+        tv_sec: sec as libc::time_t,
+        tv_nsec: nsec as _,
+    };
+    if sleep_type == TIME_RELATIVE {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `clock_gettime` writes the `timespec` it is given and nothing else.
+        if unsafe { libc::clock_gettime(host, &mut now) } != 0 {
+            return KERN_FAILURE;
+        }
+        deadline.tv_sec = now.tv_sec.saturating_add(deadline.tv_sec);
+        deadline.tv_nsec += now.tv_nsec;
+        if deadline.tv_nsec >= 1_000_000_000 {
+            deadline.tv_nsec -= 1_000_000_000;
+            deadline.tv_sec = deadline.tv_sec.saturating_add(1);
+        }
+    }
+    loop {
+        // SAFETY: `deadline` is a live local; the remainder is unused for an
+        // absolute sleep.
+        let rc = unsafe {
+            libc::clock_nanosleep(host, libc::TIMER_ABSTIME, &deadline, core::ptr::null_mut())
+        };
+        match rc {
+            0 => break,
+            libc::EINTR => {}
+            _ => return KERN_FAILURE,
+        }
+    }
+    if !remaining.is_null() {
+        // SAFETY: `remaining` is writable per the contract, and `clock_get_time`
+        // writes it whole.
+        return unsafe { clock_get_time(clock, remaining) };
+    }
+    KERN_SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +232,55 @@ mod tests {
         unsafe {
             assert_eq!(clock_get_time(HOST_SELF, &mut ts), KERN_INVALID_ARGUMENT);
             assert_eq!(clock_get_time(0xdead_0003, &mut ts), MACH_SEND_INVALID_DEST);
+        }
+    }
+
+    fn pack(sec: u32, nsec: i32) -> u64 {
+        u64::from(sec) | (u64::from(nsec as u32) << 32)
+    }
+
+    #[test]
+    fn relative_sleep_waits_and_reports_the_wake_time() {
+        let clock = service(SYSTEM_CLOCK);
+        let before = read(clock);
+        let mut woke = MachTimespec { sec: 0, nsec: -1 };
+        let start = std::time::Instant::now();
+        // SAFETY: a live local `mach_timespec_t`.
+        let rc = unsafe { clock_sleep(clock, TIME_RELATIVE, pack(0, 30_000_000), &mut woke) };
+        assert_eq!(rc, KERN_SUCCESS);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(30));
+        assert!((woke.sec, woke.nsec) > (before.sec, before.nsec));
+    }
+
+    #[test]
+    fn absolute_sleep_in_the_past_returns_at_once() {
+        let clock = service(CALENDAR_CLOCK);
+        let start = std::time::Instant::now();
+        // SAFETY: a null remainder is allowed.
+        let rc = unsafe { clock_sleep(clock, TIME_ABSOLUTE, pack(1, 0), core::ptr::null_mut()) };
+        assert_eq!(rc, KERN_SUCCESS);
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn sleep_refuses_bad_arguments() {
+        let clock = service(SYSTEM_CLOCK);
+        let null = core::ptr::null_mut();
+        // SAFETY: a null remainder is allowed, and none of these reach the sleep.
+        unsafe {
+            assert_eq!(clock_sleep(clock, 2, 0, null), KERN_INVALID_VALUE);
+            assert_eq!(
+                clock_sleep(clock, TIME_RELATIVE, pack(0, 1_000_000_000), null),
+                KERN_INVALID_VALUE
+            );
+            assert_eq!(
+                clock_sleep(HOST_SELF, TIME_RELATIVE, 0, null),
+                KERN_INVALID_ARGUMENT
+            );
+            assert_eq!(
+                clock_sleep(0xdead_0003, TIME_RELATIVE, 0, null),
+                MACH_SEND_INVALID_DEST
+            );
         }
     }
 }
