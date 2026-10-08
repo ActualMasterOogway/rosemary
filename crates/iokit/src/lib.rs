@@ -4,6 +4,7 @@ pub mod api;
 pub mod hid;
 pub mod manager;
 pub mod power;
+pub mod queue;
 pub mod registry;
 mod schedule;
 pub mod value;
@@ -24,6 +25,15 @@ pub fn available() -> bool {
 exports::exports! {
     functions {
         "IOHIDManagerCreate" => api::IOHIDManagerCreate,
+        "IOHIDQueueCreate" => queue::IOHIDQueueCreate,
+        "IOHIDQueueAddElement" => queue::IOHIDQueueAddElement,
+        "IOHIDQueueRemoveElement" => queue::IOHIDQueueRemoveElement,
+        "IOHIDQueueContainsElement" => queue::IOHIDQueueContainsElement,
+        "IOHIDQueueStart" => queue::IOHIDQueueStart,
+        "IOHIDQueueStop" => queue::IOHIDQueueStop,
+        "IOHIDQueueCopyNextValue" => queue::IOHIDQueueCopyNextValue,
+        "IOHIDQueueCopyNextValueWithTimeout" => queue::IOHIDQueueCopyNextValueWithTimeout,
+        "IOHIDDeviceSetProperty" => queue::IOHIDDeviceSetProperty,
         "IOHIDManagerOpen" => api::IOHIDManagerOpen,
         "IOHIDManagerClose" => api::IOHIDManagerClose,
         "IOHIDManagerGetTypeID" => api::IOHIDManagerGetTypeID,

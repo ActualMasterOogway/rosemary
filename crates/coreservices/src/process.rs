@@ -161,6 +161,15 @@ pub unsafe extern "C" fn GetMacOSStatusErrorString(status: OSStatus) -> *const c
     described(status)
 }
 
+/// `OSErr UpdateSystemActivity(UInt8 activity)`
+///
+/// Tells macOS the user is still there, so it does not dim or sleep. A game
+/// calls it every frame. The host's own idle policy is not this process's to
+/// reset, so it is answered and dropped.
+pub extern "C" fn UpdateSystemActivity(_activity: u8) -> i16 {
+    NO_ERR as i16
+}
+
 /// The text for `status`, in storage that outlives the call.
 ///
 /// One slot per thread, because the string is read after the call returns and
@@ -196,6 +205,7 @@ exports::exports! {
         "GetProcessBundleLocation" => GetProcessBundleLocation,
         "GetMacOSStatusCommentString" => GetMacOSStatusCommentString,
         "GetMacOSStatusErrorString" => GetMacOSStatusErrorString,
+        "UpdateSystemActivity" => UpdateSystemActivity,
     }
 }
 

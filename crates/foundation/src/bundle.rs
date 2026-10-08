@@ -23,7 +23,7 @@ fn spelled(path: &Path) -> Option<PathBuf> {
 /// The way back in, for `+bundleWithPath:` and `CFBundleCreate` - the two
 /// places a guest hands a path to this module rather than being given one.
 fn opened(path: &Path) -> PathBuf {
-    prefix::ns::host_path(&path.to_string_lossy())
+    prefix::ns::existing_host_path(&path.to_string_lossy())
 }
 
 /// A `.app` on disk, and what its `Info.plist` says.
@@ -124,10 +124,14 @@ impl Layout {
         let root = absolute.as_deref().unwrap_or(root);
         let contents = root.join("Contents");
         let info_path = contents.join("Info.plist");
-        if !info_path.is_file() {
-            return None;
-        }
-        let info = plist::parse(&std::fs::read(&info_path).ok()?).ok()?;
+        // CFBundle takes a bundle with no `Info.plist` at all, as an empty
+        // dictionary: plug-in `.bundle`s built outside Xcode are often only
+        // `Contents/MacOS/<name>`, and Unity loads every native plug-in that way.
+        let info = match info_path.is_file() {
+            true => plist::parse(&std::fs::read(&info_path).ok()?).ok()?,
+            false if contents.is_dir() => Value::Dictionary(Default::default()),
+            false => return None,
+        };
         // CFBundle's rule: an empty or missing name falls back to the bundle's
         // own, extension stripped. Roblox Studio's protocol handler ships
         // `CFBundleExecutable` as an empty string.
@@ -649,12 +653,10 @@ pub mod cf {
         };
         // The guest named it, so it is compared at the spelling this crate
         // keeps rather than the one the guest used.
-        let object = match super::main() {
-            Some(bundle) if super::opened(std::path::Path::new(&path)) == bundle.root => {
-                super::class::main_object()
-            }
-            _ => super::class::provided(&path),
+        let Some(class) = objc::class::lookup(c"NSBundle") else {
+            return std::ptr::null_mut();
         };
+        let object = super::class::at_path(objc::class::ptr(class) as Id, &path);
         // A `Create`, so the caller owns a reference to the interned object.
         if !object.is_null() {
             objc::arc::retain(object);
@@ -1059,13 +1061,19 @@ pub(crate) mod class {
         let Ok(guest) = std::str::from_utf8(&path) else {
             return std::ptr::null_mut();
         };
+        at_path(class, guest)
+    }
+
+    /// The bundle at the guest path `guest`, unretained: the main one, one on
+    /// disk, or one this runtime provides - nil for anything else. What
+    /// `+bundleWithPath:` and `CFBundleCreate` both answer.
+    pub(crate) fn at_path(class: Id, guest: &str) -> Id {
         // The guest named it, so it is opened at this crate's spelling.
         let path = super::opened(std::path::Path::new(guest));
         if super::main().is_some_and(|main| main.root == path) {
             return main_object();
         }
         let Some(layout) = super::Layout::at(&path) else {
-            // A `+` getter, so the interned object is handed out unretained.
             return provided(guest);
         };
         // Interned, and never freed: a `-dealloc` would leave every string this

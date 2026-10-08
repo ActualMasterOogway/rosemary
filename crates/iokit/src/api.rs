@@ -143,6 +143,9 @@ pub unsafe extern "C" fn IOHIDManagerSetDeviceMatchingMultiple(
         let entry = unsafe { cf::CFArrayGetValueAtIndex(matching, i) };
         criteria.push(unsafe { criterion_of(entry) });
     }
+    crate::trace_hid(format_args!(
+        "IOHIDManagerSetDeviceMatchingMultiple manager={manager:p} criteria={criteria:?}"
+    ));
     m.set_criteria(criteria);
 }
 

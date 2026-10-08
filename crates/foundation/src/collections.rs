@@ -405,6 +405,25 @@ unsafe extern "C" fn replace_object_at_index(receiver: Id, _sel: Sel, index: usi
     a.policy.release(old);
 }
 
+/// `-setObject:atIndexedSubscript:`, the `array[i] = x` spelling: a replace,
+/// or an append when `index` is one past the end.
+unsafe extern "C" fn set_object_at_indexed_subscript(
+    receiver: Id,
+    sel: Sel,
+    object: Id,
+    index: usize,
+) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    // SAFETY: the same receiver and arguments, in the order each one takes.
+    match index == a.values.len() {
+        true => unsafe { insert_object_at_index(receiver, sel, object, index) },
+        false => unsafe { replace_object_at_index(receiver, sel, index, object) },
+    }
+}
+
 unsafe extern "C" fn add_objects_from_array(receiver: Id, _sel: Sel, other: Id) {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -644,7 +663,7 @@ unsafe extern "C" fn data_with_contents_of_file(_class: Id, _sel: Sel, path: Id)
         return std::ptr::null_mut();
     };
     // The guest named it, so it is read at this host's spelling.
-    let Ok(bytes) = std::fs::read(prefix::ns::host_path(&path)) else {
+    let Ok(bytes) = std::fs::read(prefix::ns::existing_host_path(&path)) else {
         return std::ptr::null_mut();
     };
     let data = collections::new_data(bytes);
@@ -2113,6 +2132,7 @@ pub(crate) fn install() {
         "removeLastObject" => remove_last_object, c"v16@0:8";
         "insertObject:atIndex:" => insert_object_at_index, c"v32@0:8@16Q24";
         "replaceObjectAtIndex:withObject:" => replace_object_at_index, c"v32@0:8Q16@24";
+        "setObject:atIndexedSubscript:" => set_object_at_indexed_subscript, c"v32@0:8@16Q24";
         "sortUsingFunction:context:" => sort_using_function, c"v32@0:8^?16^v24";
         "removeAllObjects" => remove_all_objects, c"v16@0:8";
     });

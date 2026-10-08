@@ -238,3 +238,12 @@ pub unsafe fn set_context(raw: *mut c_void, context: &Context) {
         uc.sigmask = context.mask;
     }
 }
+
+/// None: a macOS host has the real Mach calls this would stand in for.
+pub fn private_signal(_index: u8) -> Option<c_int> {
+    None
+}
+
+pub fn send_to_thread(_tid: i32, _signo: c_int) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}

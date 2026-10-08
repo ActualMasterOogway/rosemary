@@ -693,6 +693,18 @@ pub unsafe extern "C" fn CGDisplayModeIsUsableForDesktopGUI(mode: *const c_void)
     sdl_mode_of(mode).is_some() as u8
 }
 
+/// `CFStringRef CGDisplayModeCopyPixelEncoding(CGDisplayModeRef)`
+///
+/// `IO32BitDirectPixels`, eight bits a channel, which is what every mode a
+/// host compositor offers is to a program choosing among them.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayModeCopyPixelEncoding(mode: *const c_void) -> CFTypeRef {
+    if sdl_mode_of(mode).is_none() {
+        return std::ptr::null_mut();
+    }
+    corefoundation::string::from_bytes(b"--------RRRRRRRRGGGGGGGGBBBBBBBB", false)
+}
+
 /// `void CGDisplayModeRelease(CGDisplayModeRef)` and its retain.
 ///
 /// A no-op: the handle is leaked for the life of the process, as every opaque

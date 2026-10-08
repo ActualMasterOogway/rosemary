@@ -181,3 +181,50 @@ pub unsafe extern "C" fn CGEventPost(_tap: u32, event: CFTypeRef) {
         });
     }
 }
+
+/// Pointer motion since `CGGetLastMouseDelta` last read it, in whole points.
+static DELTA: std::sync::Mutex<(f32, f32)> = std::sync::Mutex::new((0.0, 0.0));
+
+/// Record a host motion event's relative movement.
+pub fn note_mouse_delta(dx: f32, dy: f32) {
+    let mut delta = DELTA.lock().unwrap_or_else(|e| e.into_inner());
+    delta.0 += dx;
+    delta.1 += dy;
+}
+
+/// `void CGGetLastMouseDelta(int32_t *deltaX, int32_t *deltaY)`
+///
+/// CoreGraphics answers with the last event's movement. A game reads it once
+/// a frame to turn a locked cursor into camera motion, and the host delivers
+/// several events a frame, so the movement since the last read is what it
+/// gets here - the same total, without losing all but one event's share. The
+/// fraction that does not make a whole point is kept for the next read.
+///
+/// # Safety
+///
+/// Both pointers are null or writable.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGGetLastMouseDelta(dx: *mut i32, dy: *mut i32) {
+    let mut delta = DELTA.lock().unwrap_or_else(|e| e.into_inner());
+    let (x, y) = (delta.0.trunc(), delta.1.trunc());
+    delta.0 -= x;
+    delta.1 -= y;
+    // SAFETY: the caller's out-parameters.
+    unsafe {
+        if !dx.is_null() {
+            *dx = x as i32;
+        }
+        if !dy.is_null() {
+            *dy = y as i32;
+        }
+    }
+}
+
+/// `CGEventFlags CGEventSourceFlagsState(CGEventSourceStateID)`
+///
+/// The keyboard's modifiers now. The flags are NSEvent's modifier bits, which
+/// is how AppKit defines them, so the same translation answers both.
+#[allow(non_snake_case)]
+pub extern "C" fn CGEventSourceFlagsState(_state: u32) -> u64 {
+    crate::keymap::modifiers(sdl3::video::keyboard_modifiers())
+}

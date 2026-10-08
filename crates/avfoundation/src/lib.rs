@@ -113,7 +113,10 @@ unsafe extern "C" fn request_access_for_media_type(
     media_type: Id,
     handler: Id,
 ) {
-    eprintln!("DEBUG avfoundation: requestAccess granted={}", authorized(media_type));
+    eprintln!(
+        "DEBUG avfoundation: requestAccess granted={}",
+        authorized(media_type)
+    );
     if handler.is_null() {
         return;
     }
@@ -153,11 +156,42 @@ unsafe extern "C" fn answer(context: *mut std::ffi::c_void) {
     objc::block::release(pending.handler);
 }
 
-/// The Objective-C class objects exported by AVFoundation.framework.
+/// AVFoundation's string constants whose text is their own name.
+///
+/// Programs read these from static initializers, long before they decide
+/// whether to capture or play anything, so an unbound one faults at load.
+const NAMED_STRINGS: &[&str] = &[
+    "AVCaptureSessionPresetLow",
+    "AVCaptureSessionPresetMedium",
+    "AVCaptureSessionPresetHigh",
+    "AVCaptureSessionPresetPhoto",
+    "AVCaptureSessionPreset320x240",
+    "AVCaptureSessionPreset352x288",
+    "AVCaptureSessionPreset640x480",
+    "AVCaptureSessionPreset960x540",
+    "AVCaptureSessionPreset1280x720",
+    "AVCaptureSessionPreset1920x1080",
+    "AVPlayerItemDidPlayToEndTimeNotification",
+    "AVPlayerItemFailedToPlayToEndTimeNotification",
+    "AVPlayerItemFailedToPlayToEndTimeErrorKey",
+    "AVPlayerItemPlaybackStalledNotification",
+    "AVURLAssetPreferPreciseDurationAndTimingKey",
+];
+
+/// AVFoundation's string constants whose text differs from their name.
+const STRINGS: &[(&str, &str)] = &[
+    ("_AVAudioTimePitchAlgorithmSpectral", "Spectral"),
+    ("_AVAudioTimePitchAlgorithmTimeDomain", "TimeDomain"),
+    ("_AVAudioTimePitchAlgorithmVarispeed", "Varispeed"),
+];
+
+/// The Objective-C class objects and constants exported by AVFoundation.framework.
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     let class = objc::class::lookup(c"AVCaptureDevice").expect("AVCaptureDevice is registered");
-    vec![
+    let mut out = corefoundation::base::named_string_globals(NAMED_STRINGS);
+    out.extend(corefoundation::base::string_globals(STRINGS));
+    out.extend([
         (
             "_OBJC_CLASS_$_AVCaptureDevice".to_string(),
             objc::class::ptr(class) as usize as u64,
@@ -166,7 +200,8 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             "_OBJC_METACLASS_$_AVCaptureDevice".to_string(),
             objc::class::ptr(class.metaclass()) as usize as u64,
         ),
-    ]
+    ]);
+    out
 }
 
 #[cfg(test)]

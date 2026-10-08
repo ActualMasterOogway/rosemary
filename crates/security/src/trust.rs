@@ -156,6 +156,115 @@ pub unsafe extern "C" fn SecCertificateCreateWithData(
     new(Payload::Certificate(bytes))
 }
 
+/// The host's root certificates, DER-encoded, read once.
+///
+/// From the bundle the host's own TLS libraries trust, so a program running
+/// its own stack trusts the same servers the rest of the machine does.
+/// `SSL_CERT_FILE` first, as OpenSSL reads it, then where Debian, Fedora,
+/// NixOS and the BSDs keep theirs.
+fn host_anchors() -> &'static [Vec<u8>] {
+    static ANCHORS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    ANCHORS.get_or_init(|| {
+        use rustls_pki_types::pem::PemObject;
+        const BUNDLES: &[&str] = &[
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+            "/etc/ssl/cert.pem",
+            "/usr/local/share/certs/ca-root-nss.crt",
+        ];
+        let named = std::env::var_os("SSL_CERT_FILE").map(std::path::PathBuf::from);
+        let pem = named
+            .into_iter()
+            .chain(BUNDLES.iter().map(std::path::PathBuf::from))
+            .find_map(|path| std::fs::read(path).ok())
+            .unwrap_or_default();
+        CertificateDer::pem_slice_iter(&pem)
+            .filter_map(Result::ok)
+            .map(|der| der.to_vec())
+            .collect()
+    })
+}
+
+/// `OSStatus SecTrustCopyAnchorCertificates(CFArrayRef *anchors)`.
+///
+/// # Safety
+///
+/// `anchors` is null or writable.
+pub unsafe extern "C" fn SecTrustCopyAnchorCertificates(anchors: *mut CFTypeRef) -> OSStatus {
+    if anchors.is_null() {
+        return PARAM;
+    }
+    let certificates: Vec<CFTypeRef> = host_anchors()
+        .iter()
+        .map(|der| new(Payload::Certificate(der.clone())))
+        .filter(|certificate| !certificate.is_null())
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &certificates,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for certificate in certificates {
+        // SAFETY: the array took its own reference.
+        unsafe { corefoundation::api::CFRelease(certificate) };
+    }
+    // SAFETY: writable, per the caller.
+    unsafe { anchors.write(array) };
+    SUCCESS
+}
+
+/// The DER bytes of a certificate handle.
+///
+/// # Safety
+///
+/// As [`payload`].
+unsafe fn der_of<'a>(certificate: CFTypeRef) -> Option<&'a [u8]> {
+    // SAFETY: the caller's guarantee.
+    match unsafe { payload(certificate) } {
+        Some(Payload::Certificate(der)) => Some(der),
+        _ => None,
+    }
+}
+
+/// `CFDataRef SecCertificateCopyData(SecCertificateRef)`.
+///
+/// # Safety
+///
+/// `certificate` is null or a live object.
+pub unsafe extern "C" fn SecCertificateCopyData(certificate: CFTypeRef) -> CFTypeRef {
+    // SAFETY: the caller's guarantee.
+    match unsafe { der_of(certificate) } {
+        Some(der) => corefoundation::collections::new_data(der.to_vec()),
+        None => std::ptr::null(),
+    }
+}
+
+/// `OSStatus SecCertificateGetData(SecCertificateRef, CSSM_DATA *)`.
+///
+/// `CSSM_DATA` is a length and a pointer, `size_t` wide on LP64. The pointer is
+/// into the certificate, which is what Apple hands back too: valid for as long
+/// as the caller holds the certificate.
+///
+/// # Safety
+///
+/// `certificate` is null or a live object, and `data` is null or writable.
+pub unsafe extern "C" fn SecCertificateGetData(
+    certificate: CFTypeRef,
+    data: *mut (usize, *const u8),
+) -> OSStatus {
+    // SAFETY: the caller's guarantee.
+    let Some(der) = (unsafe { der_of(certificate) }) else {
+        return PARAM;
+    };
+    if data.is_null() {
+        return PARAM;
+    }
+    // SAFETY: writable, per the caller.
+    unsafe { data.write((der.len(), der.as_ptr())) };
+    SUCCESS
+}
+
 /// `SecPolicyRef SecPolicyCreateBasicX509(void)`.
 ///
 /// # Safety
@@ -327,12 +436,38 @@ exports::exports! {
         "SecTrustSetOptions" => SecTrustSetOptions,
         "SecTrustEvaluate" => SecTrustEvaluate,
         "SecRandomCopyBytes" => SecRandomCopyBytes,
+        "SecTrustCopyAnchorCertificates" => SecTrustCopyAnchorCertificates,
+        "SecCertificateCopyData" => SecCertificateCopyData,
+        "SecCertificateGetData" => SecCertificateGetData,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every anchor reads back as the bytes it was made from, through both
+    /// spellings of the question.
+    #[test]
+    fn anchors_read_back_as_their_der() {
+        let mut array: CFTypeRef = std::ptr::null();
+        assert_eq!(
+            unsafe { SecTrustCopyAnchorCertificates(&mut array) },
+            SUCCESS
+        );
+        let count = unsafe { corefoundation::api::CFArrayGetCount(array) };
+        if count == 0 {
+            // A host with no CA bundle, which is a host and not a failure.
+            return;
+        }
+        let first = unsafe { corefoundation::api::CFArrayGetValueAtIndex(array, 0) };
+        let data = unsafe { SecCertificateCopyData(first) };
+        let length = unsafe { corefoundation::api::CFDataGetLength(data) } as usize;
+        let mut cssm = (0usize, std::ptr::null::<u8>());
+        assert_eq!(unsafe { SecCertificateGetData(first, &mut cssm) }, SUCCESS);
+        assert_eq!(cssm.0, length);
+        assert_eq!(host_anchors()[0].len(), length);
+    }
 
     /// A certificate that chains to nothing: well formed, so it is accepted as a
     /// certificate, but evaluation must not call it trusted.

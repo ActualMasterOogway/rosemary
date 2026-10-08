@@ -216,6 +216,7 @@ struct Api {
     SDL_GL_GetCurrentWindow: Option<unsafe extern "C" fn() -> Window>,
     SDL_GL_SwapWindow: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_GL_SetAttribute: Option<unsafe extern "C" fn(c_int, c_int) -> bool>,
+    SDL_GL_ResetAttributes: Option<unsafe extern "C" fn()>,
     SDL_GL_SetSwapInterval: Option<unsafe extern "C" fn(c_int) -> bool>,
     SDL_GL_GetProcAddress: Option<unsafe extern "C" fn(*const c_char) -> *mut c_void>,
     SDL_GL_ExtensionSupported: Option<unsafe extern "C" fn(*const c_char) -> bool>,
@@ -450,6 +451,7 @@ fn api() -> Option<&'static Api> {
             SDL_GL_GetCurrentWindow,
             SDL_GL_SwapWindow,
             SDL_GL_SetAttribute,
+            SDL_GL_ResetAttributes,
             SDL_GL_SetSwapInterval,
             SDL_GL_GetProcAddress,
             SDL_GL_ExtensionSupported,
@@ -2509,6 +2511,14 @@ pub mod video {
         };
         // SAFETY: SDL's own enumerator and an integer.
         unsafe { f(attribute, value) }
+    }
+
+    /// Put every `gl_set_attribute` back to SDL's default.
+    pub fn gl_reset_attributes() {
+        if let Some(f) = api().and_then(|a| a.SDL_GL_ResetAttributes) {
+            // SAFETY: takes nothing.
+            unsafe { f() }
+        }
     }
 
     pub fn gl_set_swap_interval(interval: i32) -> bool {

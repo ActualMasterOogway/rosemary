@@ -164,14 +164,12 @@ unsafe extern "C" fn window_number(receiver: Id, _sel: Sel) -> isize {
     }
 }
 
-/// `-timestamp`: seconds since this process started, which is what the same
-/// method means on Apple's - the value is only ever differenced.
+/// `-timestamp`: seconds since the machine started, on the clock
+/// `mach_absolute_time` reads - which is what Apple's is. Programs compare it
+/// with their own reading of that clock: Unity's input system times its events
+/// against it, and treats an event from a different epoch as days old.
 unsafe extern "C" fn timestamp(_receiver: Id, _sel: Sel) -> CGFloat {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs_f64()
+    darwin::mach::media_time()
 }
 
 /// `+[NSEvent doubleClickInterval]`, in seconds.

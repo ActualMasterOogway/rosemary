@@ -57,7 +57,7 @@ unsafe fn make_file_url(path: Id, directory: Option<bool>) -> Id {
         };
         cwd.join(path).to_string_lossy().into_owned()
     };
-    let directory = directory.unwrap_or_else(|| prefix::ns::host_path(&path).is_dir());
+    let directory = directory.unwrap_or_else(|| prefix::ns::existing_host_path(&path).is_dir());
     corefoundation::url::new_file_url(&path, directory) as Id
 }
 
@@ -493,7 +493,7 @@ unsafe extern "C" fn check_resource_is_reachable(receiver: Id, _sel: Sel, error:
         }
         return 0;
     };
-    let Err(cause) = std::fs::symlink_metadata(prefix::ns::host_path(&path)) else {
+    let Err(cause) = std::fs::symlink_metadata(prefix::ns::existing_host_path(&path)) else {
         return 1;
     };
     if error.is_null() {
@@ -555,7 +555,7 @@ fn resource_value(path: &str, key: &str) -> Option<corefoundation::base::CFTypeR
         corefoundation::collections::new_number(corefoundation::collections::Number::Integer(value))
     };
     let modified = || {
-        let time = std::fs::symlink_metadata(prefix::ns::host_path(path))
+        let time = std::fs::symlink_metadata(prefix::ns::existing_host_path(path))
             .ok()?
             .modified()
             .ok()?;

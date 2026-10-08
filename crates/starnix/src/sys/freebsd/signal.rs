@@ -241,3 +241,19 @@ mod machine {
 }
 
 pub use machine::{context, set_context};
+
+/// `SIGRTMAX` in `<sys/signal.h>`, which the `libc` crate does not carry.
+const SIGRTMAX: c_int = 126;
+
+/// The realtime signals, counted down from the top.
+pub fn private_signal(index: u8) -> Option<c_int> {
+    Some(SIGRTMAX - 2 - c_int::from(index))
+}
+
+pub fn send_to_thread(tid: i32, signo: c_int) -> std::io::Result<()> {
+    // SAFETY: plain integers; `thr_kill` only reaches this process's threads.
+    match unsafe { libc::thr_kill(libc::c_long::from(tid), signo) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}

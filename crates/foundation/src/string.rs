@@ -309,7 +309,7 @@ unsafe extern "C" fn string_with_contents_of_file(
 ///
 /// `error` is null or a writable `NSError **`.
 unsafe fn read_file(path: &str, ns: usize, error: *mut Id) -> Id {
-    let bytes = match std::fs::read(prefix::ns::host_path(path)) {
+    let bytes = match std::fs::read(prefix::ns::existing_host_path(path)) {
         Ok(bytes) => bytes,
         Err(why) => {
             if !error.is_null() {

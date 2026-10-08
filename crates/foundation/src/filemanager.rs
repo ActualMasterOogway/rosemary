@@ -33,7 +33,7 @@ unsafe fn path_of(path: Id) -> Option<std::path::PathBuf> {
     // The guest named it, so it is opened at this host's spelling. Every caller
     // below asks the filesystem something; none hands the string back, so the
     // translation belongs here rather than at eleven call sites.
-    Some(prefix::ns::host_path(&guest))
+    Some(prefix::ns::existing_host_path(&guest))
 }
 
 /// Write nil through an `NSError **`, which is what "no error" looks like.
@@ -421,7 +421,7 @@ unsafe extern "C" fn contents_of_directory_at_url(
     else {
         return std::ptr::null_mut();
     };
-    let host = prefix::ns::host_path(&directory);
+    let host = prefix::ns::existing_host_path(&directory);
     let Some(names) = directory_names(&host) else {
         return std::ptr::null_mut();
     };
@@ -433,7 +433,7 @@ unsafe extern "C" fn contents_of_directory_at_url(
             // Through the namespace again: a mount point listed here is not
             // in the host directory.
             let child = format!("{base}/{name}");
-            let is_directory = prefix::ns::host_path(&child).is_dir();
+            let is_directory = prefix::ns::existing_host_path(&child).is_dir();
             corefoundation::url::new_file_url(&child, is_directory)
         })
         .collect();
@@ -728,9 +728,27 @@ unsafe extern "C" fn is_executable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
     u8::from(unsafe { libc::access(path.as_ptr(), libc::X_OK) } == 0)
 }
 
+/// `-currentDirectoryPath`, in the guest's spelling so that it round-trips
+/// through `-changeCurrentDirectoryPath:`.
 unsafe extern "C" fn current_directory(_receiver: Id, _sel: Sel) -> Id {
-    let path = std::env::current_dir().unwrap_or_default();
+    let mut buffer = [0 as std::ffi::c_char; 1024];
+    // SAFETY: `buffer` is writable for its length.
+    if unsafe { darwin::fs::getcwd(buffer.as_mut_ptr(), buffer.len()) }.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `getcwd` wrote a NUL-terminated path.
+    let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
     crate::string::from_str(&path.to_string_lossy())
+}
+
+/// `-changeCurrentDirectoryPath:`, which is `chdir` with the guest's path.
+unsafe extern "C" fn change_current_directory(_receiver: Id, _sel: Sel, path: Id) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    let Ok(path) = std::ffi::CString::new(unsafe { crate::string::bytes(path) }) else {
+        return 0;
+    };
+    // SAFETY: a NUL-terminated string.
+    (unsafe { darwin::fs::chdir(path.as_ptr()) } == 0) as u8
 }
 
 /// `-URLForUbiquityContainerIdentifier:` and `-ubiquityIdentityToken`: nil,
@@ -768,6 +786,7 @@ pub(crate) fn install() {
         "isReadableFileAtPath:" => file_exists, c"B24@0:8@16";
         "isExecutableFileAtPath:" => is_executable, c"B24@0:8@16";
         "currentDirectoryPath" => current_directory, c"@16@0:8";
+        "changeCurrentDirectoryPath:" => change_current_directory, c"B24@0:8@16";
         "stringWithFileSystemRepresentation:length:"
             => string_with_file_system_representation, c"@32@0:8*16Q24";
         "createDirectoryAtURL:withIntermediateDirectories:attributes:error:"

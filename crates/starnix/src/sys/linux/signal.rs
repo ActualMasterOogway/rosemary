@@ -245,3 +245,20 @@ mod machine {
 }
 
 pub use machine::{context, set_context};
+
+/// Linux's realtime signals, counted down from the top, where glibc's own
+/// two at the bottom are not.
+pub fn private_signal(index: u8) -> Option<c_int> {
+    let signo = libc::SIGRTMAX() - 2 - c_int::from(index);
+    (signo > libc::SIGRTMIN()).then_some(signo)
+}
+
+pub fn send_to_thread(tid: i32, signo: c_int) -> std::io::Result<()> {
+    // SAFETY: plain integers; `tgkill` names this process so a recycled tid
+    // in another one is never signalled.
+    let rc = unsafe { libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, signo) };
+    match rc {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}

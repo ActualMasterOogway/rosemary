@@ -269,6 +269,18 @@ pub unsafe fn set_context(raw: *mut c_void, context: &Context) {
     unsafe { sys::signal::set_context(raw, context) }
 }
 
+/// The `index`th host signal set aside for the runtime: one no guest can
+/// name, so no guest handler or mask ever touches it. `None` where the host
+/// has none to spare.
+pub fn private_signal(index: u8) -> Option<c_int> {
+    sys::signal::private_signal(index)
+}
+
+/// Send `signo` to thread `tid` of this process, and only to it.
+pub fn send_to_thread(tid: i32, signo: c_int) -> std::io::Result<()> {
+    sys::signal::send_to_thread(tid, signo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

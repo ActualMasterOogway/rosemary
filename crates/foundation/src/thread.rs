@@ -73,6 +73,66 @@ unsafe extern "C" fn is_main_thread(_receiver: Id, _sel: Sel) -> bool {
     unsafe { darwin::pthread::main_np() != 0 }
 }
 
+/// The calling thread's `NSThread`, made the first time it is asked for.
+///
+/// Never released: a thread's object outlives every reference a program could
+/// have kept to it, and nothing here learns when a foreign thread ends.
+fn current() -> Id {
+    thread_local! {
+        static CURRENT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    CURRENT.with(|current| {
+        if current.get() == 0 {
+            // SAFETY: this asks about the calling thread.
+            let object = match unsafe { darwin::pthread::main_np() } != 0 {
+                true => main(),
+                false => new_thread(),
+            };
+            current.set(object as usize);
+        }
+        current.get() as Id
+    })
+}
+
+/// The main thread's `NSThread`, which any thread may ask for.
+fn main() -> Id {
+    static MAIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAIN.get_or_init(|| new_thread() as usize) as Id
+}
+
+fn new_thread() -> Id {
+    let class = objc::class::lookup(c"NSThread").expect("declared abstract by this crate");
+    objc::object::create_instance(class, 0)
+}
+
+unsafe extern "C" fn current_thread(_class: Id, _sel: Sel) -> Id {
+    current()
+}
+
+unsafe extern "C" fn main_thread(_class: Id, _sel: Sel) -> Id {
+    main()
+}
+
+/// `-threadDictionary`, one mutable dictionary per thread object.
+///
+/// Kept beside the object rather than in it, since a guest's own subclass
+/// allocates instances this crate did not size.
+unsafe extern "C" fn thread_dictionary(receiver: Id, _sel: Sel) -> Id {
+    static DICTIONARIES: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    let mut dictionaries = DICTIONARIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, dictionary)) = dictionaries.iter().find(|(t, _)| *t == receiver as usize) {
+        return *dictionary as Id;
+    }
+    let dictionary = corefoundation::collections::new_dictionary(
+        &[],
+        corefoundation::callbacks::Policy::from_key_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        true,
+    );
+    dictionaries.push((receiver as usize, dictionary as usize));
+    dictionary as Id
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSThread").expect("declared abstract by this crate");
     class_methods!(class, {
@@ -80,8 +140,11 @@ pub(crate) fn install() {
         "sleepForTimeInterval:" => sleep_for_interval, c"v24@0:8d16";
         "isMultiThreaded" => is_multi_threaded, c"B16@0:8";
         "isMainThread" => is_main_thread, c"B16@0:8";
+        "currentThread" => current_thread, c"@16@0:8";
+        "mainThread" => main_thread, c"@16@0:8";
     });
     methods!(class, {
         "isMainThread" => is_main_thread, c"B16@0:8";
+        "threadDictionary" => thread_dictionary, c"@16@0:8";
     });
 }

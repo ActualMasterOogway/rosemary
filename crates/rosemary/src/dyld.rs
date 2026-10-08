@@ -1519,6 +1519,57 @@ fn load_command_in(header: u64, segment: &[u8], section: Option<&[u8]>) -> u64 {
     0
 }
 
+/// The main image's slide, which libmacho's unslid answers have to be moved by.
+fn main_slide() -> u64 {
+    EXECUTABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map_or(0, |(_, slide)| *slide)
+}
+
+/// The end of the main image's highest mapped segment, slid.
+///
+/// libmacho counts `__LINKEDIT` too. It is left out here: a collector treats
+/// `get_etext()..get_end()` as roots to scan, and the symbol tables are not
+/// guaranteed to be mapped in full the way a segment the image writes is.
+fn main_image_end() -> u64 {
+    const SEGMENT_64: u32 = 0x19;
+    const HEADER: usize = 32;
+    const SEGMENT: usize = 72;
+    let base = MAIN_HEADER.load(Ordering::Acquire) as *const u8;
+    if base.is_null() {
+        return 0;
+    }
+    let mut end = 0;
+    // SAFETY: as in `load_command_in`, bounded by `ncmds` and `cmdsize`.
+    unsafe {
+        let ncmds = base.add(16).cast::<u32>().read_unaligned();
+        let mut cmd = base.add(HEADER);
+        for _ in 0..ncmds {
+            let kind = cmd.cast::<u32>().read_unaligned();
+            let cmdsize = cmd.add(4).cast::<u32>().read_unaligned() as usize;
+            if cmdsize < 8 {
+                break;
+            }
+            if kind == SEGMENT_64 && cmdsize >= SEGMENT {
+                let name = core::slice::from_raw_parts(cmd.add(8), 16);
+                let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
+                let vmaddr = cmd.add(24).cast::<u64>().read_unaligned();
+                let vmsize = cmd.add(32).cast::<u64>().read_unaligned();
+                if name != b"__LINKEDIT" && name != b"__PAGEZERO" {
+                    end = end.max(vmaddr + vmsize);
+                }
+            }
+            cmd = cmd.add(cmdsize);
+        }
+    }
+    match end {
+        0 => 0,
+        end => end.wrapping_add(main_slide()),
+    }
+}
+
 /// What [`dladdr`] found: the four `Dl_info` fields, as host addresses.
 struct Described {
     fname: u64,
@@ -1767,6 +1818,53 @@ pub(crate) mod entry {
         )
     }
 
+    /// `const struct section_64 *getsectbynamefromheader_64(const struct
+    /// mach_header_64 *, const char *, const char *)`
+    ///
+    /// # Safety
+    ///
+    /// `header` is a mapped image's header, and both names are NUL-terminated.
+    pub unsafe extern "C" fn getsectbynamefromheader_64(
+        header: u64,
+        segment: *const c_char,
+        section: *const c_char,
+    ) -> u64 {
+        if segment.is_null() || section.is_null() {
+            return 0;
+        }
+        // SAFETY: the caller states both are NUL-terminated.
+        let (segment, section) = unsafe { (CStr::from_ptr(segment), CStr::from_ptr(section)) };
+        super::load_command_in(header, segment.to_bytes(), Some(section.to_bytes()))
+    }
+
+    /// `unsigned long get_etext(void)`: the end of the main image's
+    /// `__TEXT,__text`, slid - which is where its writable data starts as far
+    /// as a collector registering roots is concerned.
+    pub extern "C" fn get_etext() -> u64 {
+        let section = super::load_command_in(
+            super::MAIN_HEADER.load(Ordering::Acquire),
+            b"__TEXT",
+            Some(b"__text"),
+        ) as *const u8;
+        if section.is_null() {
+            return 0;
+        }
+        // SAFETY: a `section_64` inside the mapped header; `addr` and `size`
+        // are its two words at 32 and 40.
+        let (addr, size) = unsafe {
+            (
+                section.add(32).cast::<u64>().read_unaligned(),
+                section.add(40).cast::<u64>().read_unaligned(),
+            )
+        };
+        (addr + size).wrapping_add(super::main_slide())
+    }
+
+    /// `unsigned long get_end(void)`: the end of the main image, slid.
+    pub extern "C" fn get_end() -> u64 {
+        super::main_image_end()
+    }
+
     /// `void *dlopen(const char *path, int mode)`
     ///
     /// The mode is ignored: nothing is unloaded and every image is global. That
@@ -1889,7 +1987,7 @@ pub(crate) mod entry {
 }
 
 /// Every name [`provider`] defines, and the function it binds to.
-fn entries() -> [(&'static str, *const ()); 15] {
+fn entries() -> [(&'static str, *const ()); 18] {
     [
         ("_dlopen", entry::dlopen as *const ()),
         ("_dlsym", entry::dlsym as *const ()),
@@ -1927,6 +2025,12 @@ fn entries() -> [(&'static str, *const ()); 15] {
         ),
         ("_getsegbyname", entry::getsegbyname as *const ()),
         ("_getsectbyname", entry::getsectbyname as *const ()),
+        (
+            "_getsectbynamefromheader_64",
+            entry::getsectbynamefromheader_64 as *const (),
+        ),
+        ("_get_etext", entry::get_etext as *const ()),
+        ("_get_end", entry::get_end as *const ()),
     ]
 }
 

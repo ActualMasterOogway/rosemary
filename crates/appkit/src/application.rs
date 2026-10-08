@@ -39,6 +39,7 @@ pub const INSTANCE_SIZE: usize = size_of::<Application>();
 pub const WILL_FINISH_LAUNCHING: &str = "NSApplicationWillFinishLaunchingNotification";
 pub const DID_FINISH_LAUNCHING: &str = "NSApplicationDidFinishLaunchingNotification";
 pub const WILL_TERMINATE: &str = "NSApplicationWillTerminateNotification";
+pub const WILL_BECOME_ACTIVE: &str = "NSApplicationWillBecomeActiveNotification";
 pub const DID_BECOME_ACTIVE: &str = "NSApplicationDidBecomeActiveNotification";
 pub const WILL_RESIGN_ACTIVE: &str = "NSApplicationWillResignActiveNotification";
 /// Posted when a display is added, removed or resized.
@@ -194,7 +195,11 @@ unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
 }
 
 /// `-finishLaunching`: the two notifications, in the order Apple sends them,
-/// with the launch Apple Event between them.
+/// with the launch Apple Event between them - and then the pair that says the
+/// application became active, which a Mac sends as the launched application
+/// comes to the front. [`is_active`] has answered YES all along; a program that
+/// tracks focus from the notifications instead - Unity does, and drops keyboard
+/// input until it hears - needs them said once.
 ///
 /// The delegate is sent each directly as well as through the notification
 /// center, because AppKit registers a delegate for the notifications it declares
@@ -212,6 +217,8 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
     for (name, selector) in [
         (WILL_FINISH_LAUNCHING, "applicationWillFinishLaunching:"),
         (DID_FINISH_LAUNCHING, "applicationDidFinishLaunching:"),
+        (WILL_BECOME_ACTIVE, "applicationWillBecomeActive:"),
+        (DID_BECOME_ACTIVE, "applicationDidBecomeActive:"),
     ] {
         if name == DID_FINISH_LAUNCHING {
             // SAFETY: an application, and a delegate the program set.

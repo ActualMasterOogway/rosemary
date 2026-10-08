@@ -28,6 +28,8 @@ pub struct Context {
     /// What it takes to be current on more than one thread at once, allocated
     /// on first use by [`shared_of`]. Leaked with the object.
     shared: *mut Cell,
+    /// The context this one shares its objects with, retained, or null.
+    share: Id,
 }
 
 /// Storage added by `NSOpenGLView` after its `NSView` body.
@@ -362,8 +364,12 @@ unsafe extern "C" fn get_values(
 /// diagnostic anywhere.
 ///
 /// Whether the format asks for a core profile.
+///
+/// SDL's defaults are put back first: the attributes are global, and one
+/// format's stencil buffer left set would be read as the next one's request.
 fn apply(format: Id) -> bool {
     use sdl3::video::attr;
+    sdl3::video::gl_reset_attributes();
     let Some(list) = (match format.is_null() {
         true => None,
         // SAFETY: a pixel format this crate made; the pointer is its own.
@@ -478,10 +484,50 @@ fn request_core(major: i32, minor: i32) -> bool {
         && sdl3::video::gl_set_attribute(attr::CONTEXT_MINOR_VERSION, minor)
 }
 
-unsafe extern "C" fn init_with_format(receiver: Id, _sel: Sel, format: Id, _share: Id) -> Id {
+unsafe extern "C" fn init_with_format(receiver: Id, _sel: Sel, format: Id, share: Id) -> Id {
     let context = context_of(receiver);
     context.format = objc::arc::retain(format);
+    context.share = objc::arc::retain(share);
     receiver
+}
+
+/// The first context of `receiver`'s share group, which is the one every
+/// other member was ultimately made to share with.
+fn share_root(mut receiver: Id) -> Id {
+    while !context_of(receiver).share.is_null() {
+        receiver = context_of(receiver).share;
+    }
+    receiver
+}
+
+/// The GL version and profile to ask a context sharing with `share` for:
+/// what `share` came back as, or - before anything has made it current - the
+/// core 4.1 a format asking for core is given.
+fn version_for_sharing(share: Id, core: bool) -> Option<(i32, i32, i32)> {
+    /// `EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT`.
+    const CORE_PROFILE: i32 = 1;
+    let state = shared_of(context_of(share))
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match state.probed {
+        true => state.version,
+        false => core.then_some((4, 1, CORE_PROFILE)),
+    }
+}
+
+/// `-initWithCGLContextObj:`.
+///
+/// A `CGLContextObj` here is the `NSOpenGLContext` that [`CGLCreateContext`]
+/// made, so the wrapper AppKit would build around it is that object itself:
+/// the fresh receiver is let go and the context handed back, retained as an
+/// initializer's result is. A handle this crate never gave out is nil.
+unsafe extern "C" fn init_with_cgl_context(receiver: Id, _sel: Sel, cgl: *mut c_void) -> Id {
+    objc::arc::release(receiver);
+    match handle_in(cgl) {
+        Some(context) => objc::arc::retain(context),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// `-[NSOpenGLView initWithFrame:pixelFormat:]`.
@@ -606,23 +652,56 @@ fn drawable(context: &Context) -> sdl3::Window {
 /// context made against it may still be current when the real window arrives -
 /// a context can be made current against a different window later, which is
 /// what `drawable_window` relies on.
-fn holding_window() -> sdl3::Window {
-    static WINDOW: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *WINDOW.get_or_init(|| {
-        let flags = sdl3::video::flags::OPENGL | sdl3::video::flags::HIDDEN;
-        sdl3::video::create_window(c"rosemary offscreen GL", 1, 1, flags)
-            .map_or(0, |window| window as usize)
-    }) as sdl3::Window
+///
+/// One per pixel format, made after [`apply`] has set that format's attributes:
+/// SDL chooses an EGL config whenever it makes a GL window, and a context
+/// created next takes that config. EGL will not bind a context to a surface of
+/// another config, so the window a context is born against has to have been
+/// made from the format the guest's real window will be remade from.
+fn holding_window(format: Id) -> sdl3::Window {
+    static WINDOWS: std::sync::Mutex<Vec<(Vec<u32>, usize)>> = std::sync::Mutex::new(Vec::new());
+    let key = match format.is_null() {
+        true => Vec::new(),
+        // SAFETY: a pixel format this crate made; the pointer is its own.
+        false => unsafe { format_of(format).attributes.as_ref() }
+            .cloned()
+            .unwrap_or_default(),
+    };
+    let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, window)) = windows.iter().find(|(held, _)| *held == key) {
+        return *window as sdl3::Window;
+    }
+    let flags = sdl3::video::flags::OPENGL | sdl3::video::flags::HIDDEN;
+    let Some(window) = sdl3::video::create_window(c"rosemary offscreen GL", 1, 1, flags) else {
+        return std::ptr::null_mut();
+    };
+    windows.push((key, window as usize));
+    window
 }
 
 /// Make the SDL context, if it is not there yet.
 fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
+    // A context sharing with another can only be made once that one exists,
+    // and making it takes the creation lock below - so it goes first.
+    let share = context_of(receiver).share;
+    if context_of(receiver).sdl.is_null() && !share.is_null() && context_of(share).sdl.is_null() {
+        ensure(share, sent);
+    }
     let context = context_of(receiver);
     let object = drawable_window(context);
     // SAFETY: null or a window this crate made.
-    let window = match unsafe { crate::window::sdl_window(object) }.is_null() {
+    let sdl_window = unsafe { crate::window::sdl_window(object) };
+    // Whether a GL window or context is about to be made, which is when SDL's
+    // global attributes are read - and so when they have to be this format's.
+    let creating = context.sdl.is_null()
+        || (!sdl_window.is_null()
+            && sdl3::video::window_flags(sdl_window) & sdl3::video::flags::OPENGL == 0);
+    static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = creating.then(|| CREATION.lock().unwrap_or_else(|e| e.into_inner()));
+    let core = creating && apply(context.format);
+    let window = match sdl_window.is_null() {
         true => {
-            let holding = holding_window();
+            let holding = holding_window(context.format);
             if holding.is_null() {
                 objc::fail!(
                     "-[NSOpenGLContext {sent}]: this context has no view yet, and SDL could \
@@ -651,17 +730,36 @@ fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
         }
     };
     if context.sdl.is_null() {
-        // SDL's format attributes are global, including across contexts.
-        static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = CREATION.lock().unwrap_or_else(|e| e.into_inner());
-        let core = apply(context.format);
         // A host that has no 4.1 is a Mac that has none either, and that Mac
         // hands a core request 3.2 instead.
-        let created = sdl3::video::gl_create_context(window).or_else(|| {
-            (core && request_core(3, 2))
-                .then(|| sdl3::video::gl_create_context(window))
-                .flatten()
+        let shared = (!context.share.is_null()).then(|| {
+            let share = context_of(context.share).sdl;
+            sdl3::video::egl::create_shared(share, version_for_sharing(context.share, core))
         });
+        let created = match shared {
+            Some(Ok(sdl)) => Some(sdl),
+            Some(Err(why)) => {
+                // Said rather than refused: an unshared context still draws
+                // what it made itself, which on a GLX host is all there was.
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    eprintln!(
+                        "rosemary: appkit: a GL context asked to share objects with another, \
+                         and SDL could not make one that does ({why}); objects made through \
+                         one will not be visible through the other"
+                    )
+                });
+                None
+            }
+            None => None,
+        };
+        let created = created
+            .or_else(|| sdl3::video::gl_create_context(window))
+            .or_else(|| {
+                (core && request_core(3, 2))
+                    .then(|| sdl3::video::gl_create_context(window))
+                    .flatten()
+            });
         let Some(sdl) = created else {
             objc::fail!(
                 "-[NSOpenGLContext {sent}]: SDL could not create a GL context: {}",
@@ -711,10 +809,72 @@ fn gl_debug() -> bool {
     *DEBUG
 }
 
+/// Which window each thread has bound, and through which context.
+///
+/// EGL lets a window surface be current on one thread at a time, whatever the
+/// context; AppKit lets two contexts on two threads draw to one view. The
+/// per-context handover in [`Shared`] does not see the second case, so this
+/// does: a thread binding a window another thread still has bound - often only
+/// lingering, see [`clear_current_context`] - asks that thread's context to be
+/// let go first.
+static BOUND: std::sync::Mutex<Vec<(std::thread::ThreadId, usize, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Record that this thread now has `window` bound through `receiver`.
+fn note_bound(receiver: Id, window: sdl3::Window) {
+    let me = std::thread::current().id();
+    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    bound.retain(|(thread, _, _)| *thread != me);
+    bound.push((me, window as usize, receiver as usize));
+}
+
+/// Unbind whatever SDL has current on this thread.
+fn unbind_here() {
+    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    let me = std::thread::current().id();
+    BOUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(thread, _, _)| *thread != me);
+}
+
+/// Wait for any other thread that has `window` bound through a context other
+/// than `receiver` to let it go, asking it to first.
+///
+/// Bounded by [`HANDOFF`], after which the bind is attempted anyway and fails
+/// by name if the other thread still has it.
+fn claim_window(receiver: Id, window: sdl3::Window) {
+    let me = std::thread::current().id();
+    let holder = BOUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(thread, held, context)| {
+            *thread != me && *held == window as usize && *context != receiver as usize
+        })
+        .map(|(thread, _, context)| (*thread, *context as Id));
+    let Some((thread, context)) = holder else {
+        return;
+    };
+    let cell = shared_of(context_of(context));
+    let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.owner != Some(thread) {
+        return;
+    }
+    state.wanted = true;
+    let (mut state, wait) = cell
+        .released
+        .wait_timeout_while(state, HANDOFF, |state| state.owner == Some(thread))
+        .unwrap_or_else(|e| e.into_inner());
+    if wait.timed_out() {
+        state.wanted = false;
+    }
+}
+
 /// Unbind whatever SDL has current on this thread, and give `receiver`'s SDL
 /// context back if this thread held it, waking a thread waiting for it.
 fn let_go(receiver: Id) {
-    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    unbind_here();
     let _ = BINDING.try_with(|binding| binding.0.set(std::ptr::null_mut()));
     let cell = shared_of(context_of(receiver));
     let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -809,7 +969,7 @@ pub fn release_for_other_threads() {
     if !state.wanted || state.owner != Some(std::thread::current().id()) {
         return;
     }
-    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+    unbind_here();
     BINDING.with(|binding| binding.0.set(std::ptr::null_mut()));
     state.owner = None;
     state.wanted = false;
@@ -845,6 +1005,15 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
     let previous = CURRENT.replace(std::ptr::null_mut());
     if !previous.is_null() && previous != receiver {
         let_go(previous);
+    }
+    // Before this context's own lock: the thread being asked may be waiting
+    // for this context in turn.
+    {
+        let context = context_of(receiver);
+        let window = drawable(context);
+        if !window.is_null() {
+            claim_window(receiver, window);
+        }
     }
     // Serialize lazy creation as well as subsequent ownership changes.
     let cell = shared_of(context_of(receiver));
@@ -884,7 +1053,8 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
 
     if gl_debug() {
         eprintln!(
-            "rosemary: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, owner={:?}",
+            "rosemary: gl: make current on {thread:?}: primary={primary:p}, selected={sdl:p}, \
+             window={window:p}, owner={:?}",
             state.owner
         );
     }
@@ -899,6 +1069,7 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
             sdl3::error()
         );
     }
+    note_bound(receiver, window);
     chrome_blit::fit_viewport(drawable_window(context), window, sdl);
 
     if holds_primary {
@@ -1306,17 +1477,15 @@ pub unsafe extern "C" fn CGLUnlockContext(ctx: CGLContextObj) -> i32 {
 /// `CGLShareGroupObj CGLGetShareGroup(CGLContextObj ctx)`
 ///
 /// The group of contexts whose textures, buffers and programs are the same
-/// objects. Every context this crate hands out is its own group: a
-/// `-initWithFormat:shareContext:` here makes a context SDL did not share with
-/// anything, and the siblings [`Shared`] makes are the same `NSOpenGLContext`
-/// seen from another thread rather than a second one. So the group is the
-/// context, which is the answer a caller comparing two of them needs.
+/// objects, named by its first member - see [`share_root`]. The siblings
+/// [`Shared`] makes are the same `NSOpenGLContext` seen from another thread,
+/// so they are in it already.
 ///
 /// # Safety
 ///
 /// As [`CGLSetCurrentContext`].
 pub unsafe extern "C" fn CGLGetShareGroup(ctx: CGLContextObj) -> *mut c_void {
-    handle_in(ctx).map_or(std::ptr::null_mut(), |receiver| receiver.cast())
+    handle_in(ctx).map_or(std::ptr::null_mut(), |receiver| share_root(receiver).cast())
 }
 
 /// `CGLError CGLChoosePixelFormat(const CGLPixelFormatAttribute *attribs,
@@ -1367,15 +1536,15 @@ pub unsafe extern "C" fn CGLDestroyPixelFormat(pix: *mut c_void) -> i32 {
 /// `CGLError CGLCreateContext(CGLPixelFormatObj, CGLContextObj share, CGLContextObj *)`.
 ///
 /// The context is the `NSOpenGLContext` AppKit would have made, and stays lazy at
-/// the SDL layer until it is made current. `share` is not honoured, for the
-/// reason [`CGLGetShareGroup`] gives.
+/// the SDL layer until it is made current. A `share` context makes the new one
+/// share its objects, as `-initWithFormat:shareContext:` does.
 ///
 /// # Safety
 ///
 /// `pix` is a handle [`CGLChoosePixelFormat`] made; `ctx` is null or writable.
 pub unsafe extern "C" fn CGLCreateContext(
     pix: *mut c_void,
-    _share: CGLContextObj,
+    share: CGLContextObj,
     ctx: *mut CGLContextObj,
 ) -> i32 {
     if pix.is_null() {
@@ -1392,7 +1561,7 @@ pub unsafe extern "C" fn CGLCreateContext(
             context,
             objc::sel::get("initWithFormat:shareContext:"),
             pix.cast(),
-            std::ptr::null_mut(),
+            handle_in(share).unwrap_or(std::ptr::null_mut()),
         )
     };
     // SAFETY: the caller's out-parameter.
@@ -1411,6 +1580,49 @@ pub unsafe extern "C" fn CGLDestroyContext(ctx: CGLContextObj) -> i32 {
     }
     objc::arc::release(receiver);
     0
+}
+
+/// `void CGLReleaseContext(CGLContextObj)`.
+///
+/// The handle is the `NSOpenGLContext`, so this is its release. The common
+/// caller is the one that wrapped the context in `-initWithCGLContextObj:`,
+/// which retained it, and then gives up its own creation reference - leaving
+/// the wrapper holding it, as on a Mac.
+pub unsafe extern "C" fn CGLReleaseContext(ctx: CGLContextObj) {
+    if let Some(receiver) = handle_in(ctx) {
+        objc::arc::release(receiver);
+    }
+}
+
+/// `CGLContextObj CGLRetainContext(CGLContextObj)`.
+pub unsafe extern "C" fn CGLRetainContext(ctx: CGLContextObj) -> CGLContextObj {
+    match handle_in(ctx) {
+        Some(receiver) => objc::arc::retain(receiver).cast(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `CGLPixelFormatObj CGLGetPixelFormat(CGLContextObj)`, not retained.
+pub unsafe extern "C" fn CGLGetPixelFormat(ctx: CGLContextObj) -> *mut c_void {
+    match handle_in(ctx) {
+        Some(receiver) => context_of(receiver).format.cast(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `const char *CGLErrorString(CGLError)`.
+#[allow(non_upper_case_globals)]
+pub extern "C" fn CGLErrorString(error: CGLError) -> *const std::ffi::c_char {
+    let text: &'static std::ffi::CStr = match error {
+        0 => c"no error",
+        kCGLBadPixelFormat => c"invalid pixel format",
+        kCGLBadContext => c"invalid context",
+        kCGLBadValue => c"invalid numerical value",
+        kCGLBadEnumeration => c"invalid enumerant",
+        kCGLBadAddress => c"invalid pointer",
+        _ => c"unknown error",
+    };
+    text.as_ptr()
 }
 
 /// `CGLError CGLGetVersion(GLint *major, GLint *minor)`: CGL 1.2, which is what
@@ -1458,7 +1670,7 @@ unsafe extern "C" fn clear_current_context(_class: Id, _sel: Sel) {
         if LINGERING.get().is_null() && !sdl3::video::gl_current_context().is_null() {
             // Whatever is bound is not a context of this crate's, and clearing
             // it is what the guest asked.
-            sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
+            unbind_here();
         }
         return;
     }
@@ -1571,6 +1783,7 @@ pub(crate) fn install() {
     });
     methods!(context, {
         "initWithFormat:shareContext:" => init_with_format, c"@32@0:8@16@24";
+        "initWithCGLContextObj:" => init_with_cgl_context, c"@24@0:8^v16";
         "setView:" => set_view, c"v24@0:8@16";
         "view" => view, c"@16@0:8";
         "clearDrawable" => clear_drawable, c"v16@0:8";

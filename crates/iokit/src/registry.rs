@@ -420,6 +420,23 @@ pub unsafe extern "C" fn IORegistryEntryCreateCFProperty(
     value
 }
 
+/// `CFTypeRef IORegistryEntrySearchCFProperty(entry, plane, key, allocator,
+/// options)`.
+///
+/// The search would go on to the entry's parents or children in `plane`; the
+/// entries here have no relatives that carry properties, so it ends at the
+/// entry itself.
+pub unsafe extern "C" fn IORegistryEntrySearchCFProperty(
+    entry: IoObject,
+    _plane: *const std::ffi::c_char,
+    key: CFTypeRef,
+    allocator: CFTypeRef,
+    options: u32,
+) -> CFTypeRef {
+    // SAFETY: the caller's own arguments.
+    unsafe { IORegistryEntryCreateCFProperty(entry, key, allocator, options) }
+}
+
 pub unsafe extern "C" fn IORegistryEntryCreateCFProperties(
     entry: IoObject,
     properties: *mut CFTypeRef,
@@ -717,6 +734,7 @@ exports::exports! {
         "IORegistryEntryGetRegistryEntryID" => IORegistryEntryGetRegistryEntryID,
         "IORegistryEntryCreateCFProperty" => IORegistryEntryCreateCFProperty,
         "IORegistryEntryCreateCFProperties" => IORegistryEntryCreateCFProperties,
+        "IORegistryEntrySearchCFProperty" => IORegistryEntrySearchCFProperty,
         "IONotificationPortCreate" => IONotificationPortCreate,
         "IONotificationPortDestroy" => IONotificationPortDestroy,
         "IONotificationPortGetMachPort" => IONotificationPortGetMachPort,

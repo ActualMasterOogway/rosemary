@@ -170,6 +170,10 @@ impl Manager {
             if !self.delivering() {
                 return;
             }
+            crate::trace_hid(format_args!(
+                "manager {:p} matched device id={} {:?}",
+                self as *const Manager, device.id, device.name
+            ));
             let r = *self.matched.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(callback) = r.callback {
                 unsafe {

@@ -195,6 +195,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("rosemary_steamclient_dispatch", I32, U32, P),
     sig!("getsegbyname", P, P),
     sig!("getsectbyname", P, P, P),
+    sig!("get_etext", U64),
+    sig!("get_end", U64),
     // OpenAL 1.1. Its scalar typedefs are fixed-width even on Darwin.
     sig!("alBufferData", V, U32, I32, P, I32, I32),
     sig!("alDeleteBuffers", V, I32, P),
@@ -1129,7 +1131,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("IOHIDQueueAddElement", V, P, P),
     sig!("IOHIDQueueContainsElement", BOOL, P, P),
     sig!("IOHIDQueueCopyNextValueWithTimeout", P, P, F64),
+    sig!("IOHIDQueueCopyNextValue", P, P),
     sig!("IOHIDQueueCreate", P, P, P, I64, U32),
+    sig!("IOHIDQueueRemoveElement", V, P, P),
     sig!("IOHIDQueueStart", V, P),
     sig!("IOHIDQueueStop", V, P),
     sig!("IOHIDValueGetElement", P, P),

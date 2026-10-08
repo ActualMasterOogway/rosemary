@@ -9,6 +9,7 @@ pub mod space;
 pub mod sync;
 pub mod task;
 pub mod tasks;
+pub mod thread;
 pub mod vm;
 pub mod wire;
 
@@ -114,6 +115,12 @@ exports::exports! {
         "processor_set_tasks_with_flavor" => tasks::processor_set_tasks_with_flavor,
         "task_threads" => tasks::task_threads,
         "thread_info" => tasks::thread_info,
+        "thread_suspend" => thread::thread_suspend,
+        "thread_resume" => thread::thread_resume,
+        "thread_get_state" => thread::thread_get_state,
+        "thread_set_state" => thread::thread_set_state,
+        "thread_abort" | "thread_abort_safely" => thread::thread_abort,
+        "thread_policy_set" => thread::thread_policy_set,
         "mach_port_space_basic_info" => tasks::mach_port_space_basic_info,
         "task_policy_get" => tasks::task_policy_get,
         "task_set_special_port" => task::task_set_special_port,

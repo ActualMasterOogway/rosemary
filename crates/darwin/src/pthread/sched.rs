@@ -54,10 +54,10 @@ pub unsafe extern "C" fn pthread_setschedparam(
         return super::consts::err::EINVAL;
     }
     // SAFETY: the caller supplied a readable scheduling parameter.
+    let darwin_priority = unsafe { (*param).sched_priority };
+    // SAFETY: a plain C struct, for which all zeroes is valid.
     let mut host_param: libc::sched_param = unsafe { std::mem::zeroed() };
-    let Some(priority) =
-        super::consts::sched_priority_to_host(host_param.sched_priority, host_policy)
-    else {
+    let Some(priority) = super::consts::sched_priority_to_host(darwin_priority, host_policy) else {
         return super::consts::err::EINVAL;
     };
     host_param.sched_priority = priority;

@@ -16,6 +16,7 @@ pub const KERN_UREFS_OVERFLOW: i32 = 19;
 pub const KERN_INVALID_CAPABILITY: i32 = 20;
 pub const KERN_RIGHT_EXISTS: i32 = 21;
 pub const KERN_NOT_IN_SET: i32 = 23;
+pub const KERN_TERMINATED: i32 = 37;
 pub const KERN_OPERATION_TIMED_OUT: i32 = 49;
 
 /// The `mach_msg` half of the numbering. `0x1000_0xxx` is a send failure and

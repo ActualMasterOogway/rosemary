@@ -436,6 +436,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             if take_warp_echo(x, y) {
                 return;
             }
+            crate::cgevent::note_mouse_delta(dx, dy);
             crate::screen::hold_at_edge(id, x, y, dx, dy);
             let on_chrome = crate::decor::pointer_moved(id, x, y);
             crate::cursor::set_over_chrome(on_chrome);

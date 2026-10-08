@@ -1636,6 +1636,30 @@ unsafe extern "C" fn backing_scale_factor(receiver: Id, _sel: Sel) -> CGFloat {
     }
 }
 
+fn scale_rect(rect: NSRect, scale: CGFloat) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: rect.origin.x * scale,
+            y: rect.origin.y * scale,
+        },
+        size: NSSize {
+            width: rect.size.width * scale,
+            height: rect.size.height * scale,
+        },
+    }
+}
+
+/// `-convertRectToBacking:`, the window's own spelling of the view's.
+unsafe extern "C" fn convert_rect_to_backing(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    // SAFETY: the receiver is a window.
+    scale_rect(rect, unsafe { backing_scale_factor(receiver, sel) })
+}
+
+unsafe extern "C" fn convert_rect_from_backing(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    // SAFETY: the receiver is a window.
+    scale_rect(rect, 1.0 / unsafe { backing_scale_factor(receiver, sel) })
+}
+
 unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     let window = window_of(receiver);
     objc::arc::release(window.background);
@@ -2294,8 +2318,13 @@ pub(crate) fn install() {
         "isVisible" => is_visible, c"c16@0:8";
         // No window is ever attached as a sheet: nothing implements -beginSheet:.
         "isSheet" => no, c"c16@0:8";
+        "attachedSheet" => nil, c"@16@0:8";
         "screen" => screen, c"@16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
+        "convertRectToBacking:" => convert_rect_to_backing,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "convertRectFromBacking:" => convert_rect_from_backing,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "backgroundColor" => background_color, c"@16@0:8";
         "setBackgroundColor:" => set_background_color, c"v24@0:8@16";
         "acceptsMouseMovedEvents" => accepts_mouse_moved, c"c16@0:8";

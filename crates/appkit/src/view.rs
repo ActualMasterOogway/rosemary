@@ -1209,6 +1209,18 @@ unsafe extern "C" fn convert_size_to_backing(receiver: Id, _sel: Sel, size: NSSi
     }
 }
 
+/// `-mouse:inRect:`, which is `NSMouseInRect` with the view's own flippedness:
+/// the edge a point on it counts as inside is the top one either way up.
+unsafe extern "C" fn mouse_in_rect(receiver: Id, _sel: Sel, point: NSPoint, rect: NSRect) -> u8 {
+    let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
+    let x = point.x >= rect.origin.x && point.x < rect.origin.x + rect.size.width;
+    let y = match is_flipped(receiver) {
+        true => point.y >= min_y && point.y < max_y,
+        false => point.y > min_y && point.y <= max_y,
+    };
+    (x && y) as u8
+}
+
 /// A point from `from`'s coordinates to `to`'s, through their window; `nil`
 /// on either side is the window itself.
 fn convert_point(point: NSPoint, from: Id, to: Id) -> NSPoint {
@@ -1843,6 +1855,8 @@ pub(crate) fn install() {
         "convertSizeToBacking:" => convert_size_to_backing, c"{CGSize=dd}32@0:8{CGSize=dd}16";
         "convertPoint:fromView:" => convert_point_from_view, c"{CGPoint=dd}40@0:8{CGPoint=dd}16@32";
         "convertPoint:toView:" => convert_point_to_view, c"{CGPoint=dd}40@0:8{CGPoint=dd}16@32";
+        "mouse:inRect:" => mouse_in_rect,
+            c"c56@0:8{CGPoint=dd}16{CGRect={CGPoint=dd}{CGSize=dd}}32";
         "convertRect:fromView:" => convert_rect_from_view,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "convertRect:toView:" => convert_rect_to_view,
@@ -1910,6 +1924,8 @@ pub(crate) fn install() {
         "addCursorRect:cursor:" => add_cursor_rect,
             c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "discardCursorRects" => discard_cursor_rects, c"v16@0:8";
+        // AppKit's own is empty; subclasses override it and may call super.
+        "resetCursorRects" => ignored, c"v16@0:8";
         "updateTrackingAreas" => ignored, c"v16@0:8";
         "addTrackingArea:" => add_tracking_area, c"v24@0:8@16";
         "removeTrackingArea:" => remove_tracking_area, c"v24@0:8@16";

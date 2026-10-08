@@ -35,6 +35,7 @@ pub mod paths;
 pub mod plist;
 pub mod pool;
 pub mod processinfo;
+pub mod proxy;
 pub mod runtime;
 mod signature;
 pub mod string;
@@ -108,6 +109,7 @@ exports::group! {
     formatter::cf,
     timer::cf,
     appleevent,
+    proxy,
 }
 
 /// This user's home directory, as the guest spells it.
@@ -304,6 +306,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         formatter::cf::KEYS,
         kvo::KEYS,
         decimal::KEYS,
+        proxy::KEYS,
         STRING_GLOBALS,
     ] {
         out.extend(corefoundation::base::string_globals(table));

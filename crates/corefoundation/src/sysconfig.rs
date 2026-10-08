@@ -500,6 +500,35 @@ pub unsafe extern "C" fn SCDynamicStoreCreate(
     store as CFTypeRef
 }
 
+/// `CFStringRef SCDynamicStoreCopyComputerName(SCDynamicStoreRef, CFStringEncoding *)`
+///
+/// The host's name without its domain, which is the closest thing it has to
+/// the Sharing pane's computer name. `encoding`, when asked for, is UTF-8.
+pub unsafe extern "C" fn SCDynamicStoreCopyComputerName(
+    _store: CFTypeRef,
+    encoding: *mut u32,
+) -> CFTypeRef {
+    /// `kCFStringEncodingUTF8`.
+    const UTF8: u32 = 0x0800_0100;
+    let mut buffer = [0u8; 256];
+    // SAFETY: a buffer described by its own length, one byte kept for the NUL.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } != 0 {
+        return std::ptr::null();
+    }
+    let end = buffer
+        .iter()
+        .position(|b| *b == 0 || *b == b'.')
+        .unwrap_or(0);
+    if end == 0 {
+        return std::ptr::null();
+    }
+    if !encoding.is_null() {
+        // SAFETY: writable, per the caller.
+        unsafe { encoding.write(UTF8) };
+    }
+    crate::string::from_bytes(&buffer[..end], false)
+}
+
 /// `CFStringRef SCDynamicStoreKeyCreateNetworkGlobalEntity(CFAllocatorRef, CFStringRef domain, CFStringRef entity)`
 ///
 /// The key is a path, and its spelling is the interface: `State:` and `IPv4`
@@ -717,6 +746,7 @@ exports::exports! {
         "SCNetworkReachabilityUnscheduleFromRunLoop" => SCNetworkReachabilityUnscheduleFromRunLoop,
         "SCDynamicStoreCopyProxies" => SCDynamicStoreCopyProxies,
         "SCDynamicStoreCreate" => SCDynamicStoreCreate,
+        "SCDynamicStoreCopyComputerName" => SCDynamicStoreCopyComputerName,
         "SCDynamicStoreKeyCreateNetworkGlobalEntity" => SCDynamicStoreKeyCreateNetworkGlobalEntity,
         "SCDynamicStoreCopyValue" => SCDynamicStoreCopyValue,
         "SCPreferencesCreate" => SCPreferencesCreate,

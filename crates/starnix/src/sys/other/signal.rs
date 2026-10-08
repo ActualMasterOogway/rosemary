@@ -14,3 +14,11 @@ pub unsafe fn context(_: *const c_void) -> Option<Context> {
 }
 
 pub unsafe fn set_context(_: *mut c_void, _: &Context) {}
+
+pub fn private_signal(_index: u8) -> Option<c_int> {
+    None
+}
+
+pub fn send_to_thread(_tid: i32, _signo: c_int) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}

@@ -186,6 +186,26 @@ pub fn host_path(guest: &str) -> PathBuf {
     }
 }
 
+/// [`host_path`], spelled the way the filesystem spells it when only a
+/// case-insensitive reading of it exists.
+///
+/// For callers that open with `std::fs` rather than through the libc shims,
+/// which fold on their own `ENOENT`: a Mac volume is case-insensitive, and a
+/// program that hard-codes `Contents/PlugIns` finds a bundle's `Plugins` there.
+/// A path that does not exist in any case comes back as `host_path` spells it,
+/// so creating one is unaffected.
+pub fn existing_host_path(guest: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let host = host_path(guest);
+    let folded = CString::new(host.as_os_str().as_bytes())
+        .ok()
+        .and_then(|exact| fold(&exact));
+    match folded {
+        Some(found) => PathBuf::from(std::ffi::OsStr::from_bytes(found.as_bytes())),
+        None => host,
+    }
+}
+
 /// The guest spelling of a host path.
 ///
 /// `None` means no mount reaches it, and the caller must report the failure it

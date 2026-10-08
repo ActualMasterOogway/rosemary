@@ -249,6 +249,17 @@ fn autoreleased(text: &str) -> Id {
     unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
 }
 
+/// `-beginActivityWithOptions:reason:`: a token for `-endActivity:`.
+///
+/// An activity only tells macOS not to App Nap or idle-sleep the process,
+/// neither of which a host here does to it, so the token stands for nothing.
+unsafe extern "C" fn begin_activity(_receiver: Id, _sel: Sel, _options: u64, _reason: Id) -> Id {
+    let class = objc::class::lookup(c"NSObject").expect("the runtime's own NSObject");
+    objc::arc::autorelease(objc::object::create_instance(class, 0))
+}
+
+unsafe extern "C" fn end_activity(_receiver: Id, _sel: Sel, _activity: Id) {}
+
 pub(crate) fn install() {
     let class =
         corefoundation::base::register(c"NSProcessInfo", None, std::mem::size_of::<usize>(), false);
@@ -273,6 +284,8 @@ pub(crate) fn install() {
         "isLowPowerModeEnabled" => low_power_mode, c"c16@0:8";
         "globallyUniqueString" => globally_unique_string, c"@16@0:8";
         "hostName" => host_name, c"@16@0:8";
+        "beginActivityWithOptions:reason:" => begin_activity, c"@32@0:8Q16@24";
+        "endActivity:" => end_activity, c"v24@0:8@16";
     });
 }
 

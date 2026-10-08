@@ -1,0 +1,751 @@
+//! `thread_suspend`, `thread_resume`, `thread_get_state`, `thread_set_state`
+//! and `thread_abort` for the threads of this process.
+//!
+//! No host besides Darwin has a call that stops another thread and hands over
+//! its registers, so a suspension is a private signal: the target's handler
+//! saves the context it interrupted, says so, and waits to be let go - writing
+//! back whatever `thread_set_state` changed in the meantime. The callers this
+//! exists for are garbage collectors stopping the world (Boehm's Darwin port,
+//! which Mono uses), which then read every thread's stack pointer. Nothing on
+//! the target's side takes a lock, since it may have been stopped holding any.
+//!
+//! The registers are the ones the thread was interrupted with. Under the
+//! `native` backend that is guest code or a host function it called, on the
+//! same stack either way, which is all a collector scanning that stack needs.
+
+use std::cell::UnsafeCell;
+use std::ffi::c_void;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+
+use super::kern::*;
+use super::space::{self, Name};
+
+/// Threads this process may have suspended at some point, which is a bound
+/// on its threads alive at once rather than over its lifetime: a slot is
+/// reused once its thread is gone.
+const SLOTS: usize = 4096;
+
+const RUNNING: u32 = 0;
+/// The signal is on its way and the handler has not yet saved the context.
+const REQUESTED: u32 = 1;
+const PARKED: u32 = 2;
+/// Let go, and the handler has not yet returned.
+const RELEASED: u32 = 3;
+
+struct Slot {
+    /// Zero when free.
+    tid: AtomicI32,
+    /// Serializes the threads controlling this one; the target never takes it.
+    control: std::sync::Mutex<()>,
+    /// Mach's suspend count. Only the 0 -> 1 and 1 -> 0 edges signal.
+    count: AtomicU32,
+    phase: AtomicU32,
+    /// Whether `context` was changed while parked and has to be restored.
+    dirty: AtomicBool,
+    /// A `thread_abort` that arrived while suspended, sent on the last resume.
+    abort: AtomicBool,
+    parked: Semaphore,
+    released: Semaphore,
+    /// Written by the target before `PARKED`, read and changed by its
+    /// controller under `control` until `RELEASED`.
+    context: UnsafeCell<Option<starnix::signal::Context>>,
+}
+
+// SAFETY: `context` is handed between the target and its controller by `phase`,
+// as described on the field.
+unsafe impl Sync for Slot {}
+
+/// An unnamed POSIX semaphore: the one wait whose post is async-signal-safe.
+struct Semaphore(UnsafeCell<libc::sem_t>);
+
+impl Semaphore {
+    fn new() -> Semaphore {
+        // SAFETY: all zeroes is a valid `sem_t` to hand to `sem_init`.
+        let sem = Semaphore(UnsafeCell::new(unsafe { std::mem::zeroed() }));
+        // SAFETY: a process-private semaphore at an address that never moves,
+        // since every `Slot` lives in one leaked allocation.
+        unsafe { libc::sem_init(sem.0.get(), 0, 0) };
+        sem
+    }
+
+    fn post(&self) {
+        // SAFETY: initialized by `new`.
+        unsafe { libc::sem_post(self.0.get()) };
+    }
+
+    /// Wait for a post; `false` if `timeout` passed first.
+    fn wait(&self, timeout: Option<std::time::Duration>) -> bool {
+        loop {
+            // SAFETY: initialized by `new`; `deadline` is a valid timespec.
+            let rc = unsafe {
+                match timeout {
+                    None => libc::sem_wait(self.0.get()),
+                    Some(timeout) => {
+                        let deadline = deadline(timeout);
+                        libc::sem_timedwait(self.0.get(), &deadline)
+                    }
+                }
+            };
+            if rc == 0 {
+                return true;
+            }
+            if starnix::errno::get() != libc::EINTR {
+                return false;
+            }
+        }
+    }
+
+    fn try_wait(&self) -> bool {
+        // SAFETY: initialized by `new`.
+        unsafe { libc::sem_trywait(self.0.get()) == 0 }
+    }
+}
+
+/// `CLOCK_REALTIME` plus `timeout`, which is the clock `sem_timedwait` reads.
+fn deadline(timeout: std::time::Duration) -> libc::timespec {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a writable timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) };
+    let nanos = now.tv_nsec as u64 + u64::from(timeout.subsec_nanos());
+    libc::timespec {
+        tv_sec: now.tv_sec
+            + timeout.as_secs() as libc::time_t
+            + (nanos / 1_000_000_000) as libc::time_t,
+        tv_nsec: (nanos % 1_000_000_000) as _,
+    }
+}
+
+fn slots() -> &'static [Slot] {
+    static SLOTS_TABLE: OnceLock<&'static [Slot]> = OnceLock::new();
+    SLOTS_TABLE.get_or_init(|| {
+        let table: Vec<Slot> = (0..SLOTS)
+            .map(|_| Slot {
+                tid: AtomicI32::new(0),
+                control: std::sync::Mutex::new(()),
+                count: AtomicU32::new(0),
+                phase: AtomicU32::new(RUNNING),
+                dirty: AtomicBool::new(false),
+                abort: AtomicBool::new(false),
+                parked: Semaphore::new(),
+                released: Semaphore::new(),
+                context: UnsafeCell::new(None),
+            })
+            .collect();
+        Box::leak(table.into_boxed_slice())
+    })
+}
+
+/// `tid`'s slot, without claiming one. Lock-free, for the signal handler.
+fn find(tid: i32) -> Option<&'static Slot> {
+    slots()
+        .iter()
+        .find(|slot| slot.tid.load(Ordering::Acquire) == tid)
+}
+
+/// `tid`'s slot, claiming a free one - or one whose thread has ended - if it
+/// has none yet.
+fn claim(tid: i32) -> Option<&'static Slot> {
+    // Two controllers claiming for one thread at once would give it two slots.
+    static CLAIMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _claiming = CLAIMING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = find(tid) {
+        return Some(slot);
+    }
+    for slot in slots() {
+        let held = slot.tid.load(Ordering::Acquire);
+        let free = held == 0
+            || (slot.count.load(Ordering::Acquire) == 0
+                && slot.phase.load(Ordering::Acquire) == RUNNING
+                && !starnix::process::has_thread(held));
+        if free
+            && slot
+                .tid
+                .compare_exchange(held, tid, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            return Some(slot);
+        }
+    }
+    // Lost every race above, or the table is full of live threads.
+    find(tid)
+}
+
+/// The signal that parks a thread.
+fn suspend_signal() -> Option<i32> {
+    starnix::signal::private_signal(0)
+}
+
+/// The signal `thread_abort` interrupts a blocking call with.
+fn abort_signal() -> Option<i32> {
+    starnix::signal::private_signal(1)
+}
+
+/// Install both handlers, once. `None` where the host has no signal to spare.
+fn install() -> Option<()> {
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+    let installed = *INSTALLED.get_or_init(|| {
+        let (Some(suspend), Some(abort)) = (suspend_signal(), abort_signal()) else {
+            return false;
+        };
+        // Build the table now: the handler must never be the one to allocate it.
+        slots();
+        // SAFETY: handlers of this module's own on signals no guest can name.
+        unsafe {
+            // Restarting, so that a call the thread was blocked in carries on
+            // after a resume as it does after a Mach one; and everything
+            // blocked, so nothing runs on the thread while it is parked.
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = park as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART | libc::SA_ONSTACK;
+            libc::sigfillset(&mut action.sa_mask);
+            libc::sigaction(suspend, &action, std::ptr::null_mut());
+            // Not restarting: interrupting the call is the whole point.
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO;
+            libc::sigaction(abort, &action, std::ptr::null_mut());
+        }
+        true
+    });
+    installed.then_some(())
+}
+
+/// The suspend signal's handler, on the thread being suspended.
+extern "C" fn park(_signo: i32, _info: *mut libc::siginfo_t, raw: *mut c_void) {
+    let errno = starnix::errno::get();
+    let tid = crate::pthread::id() as i32;
+    // A signal from a suspension that gave up on this thread finds no request.
+    if let Some(slot) = find(tid)
+        && slot.phase.load(Ordering::Acquire) == REQUESTED
+    {
+        // SAFETY: the kernel's context for this handler, and `context` is this
+        // thread's to write until `PARKED` is published.
+        unsafe { *slot.context.get() = starnix::signal::context(raw) };
+        slot.phase.store(PARKED, Ordering::Release);
+        slot.parked.post();
+        slot.released.wait(None);
+        if slot.dirty.swap(false, Ordering::AcqRel) {
+            // SAFETY: the controller is done with `context` once it released
+            // this thread, and `raw` is this handler's own.
+            if let Some(context) = unsafe { &*slot.context.get() } {
+                unsafe { starnix::signal::set_context(raw, context) };
+            }
+        }
+        slot.phase.store(RUNNING, Ordering::Release);
+    }
+    starnix::errno::set(errno);
+}
+
+/// The abort signal's handler: being delivered is all it is for.
+extern "C" fn interrupt(_signo: i32, _info: *mut libc::siginfo_t, _raw: *mut c_void) {}
+
+/// The thread `thread` names, if it is one of this process's.
+fn local_thread(thread: Name) -> Option<i32> {
+    let (pid, tid) = space::thread_of(thread)?;
+    (pid == starnix::process::me()).then_some(tid)
+}
+
+/// How long to wait for a thread to park before checking it still exists.
+const PARK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `kern_return_t thread_suspend(thread_act_t)`
+pub extern "C" fn thread_suspend(thread: Name) -> i32 {
+    let Some(tid) = local_thread(thread) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    let (Some(()), Some(signal)) = (install(), suspend_signal()) else {
+        return KERN_FAILURE;
+    };
+    let Some(slot) = claim(tid) else {
+        return KERN_RESOURCE_SHORTAGE;
+    };
+    let guard = slot.control.lock().unwrap_or_else(|e| e.into_inner());
+    let count = slot.count.load(Ordering::Acquire);
+    if count > 0 {
+        slot.count.store(count + 1, Ordering::Release);
+        return KERN_SUCCESS;
+    }
+    // A thread resumed a moment ago may still be on its way out of the handler.
+    while slot.phase.load(Ordering::Acquire) != RUNNING {
+        std::thread::yield_now();
+    }
+    slot.count.store(1, Ordering::Release);
+    slot.phase.store(REQUESTED, Ordering::Release);
+    if tid == crate::pthread::id() as i32 {
+        // The handler runs before the signal call returns, and parks until
+        // another thread resumes this one - which needs `control`.
+        drop(guard);
+        if starnix::signal::send_to_thread(tid, signal).is_err() {
+            slot.count.store(0, Ordering::Release);
+            slot.phase.store(RUNNING, Ordering::Release);
+            return KERN_FAILURE;
+        }
+        slot.parked.try_wait();
+        return KERN_SUCCESS;
+    }
+    if starnix::signal::send_to_thread(tid, signal).is_err() {
+        slot.count.store(0, Ordering::Release);
+        slot.phase.store(RUNNING, Ordering::Release);
+        return KERN_TERMINATED;
+    }
+    // Mach's suspension is done when the call returns, and a collector reads
+    // the registers straight after: wait until they are saved.
+    while !slot.parked.wait(Some(PARK_POLL)) {
+        if !starnix::process::has_thread(tid) {
+            slot.count.store(0, Ordering::Release);
+            slot.phase.store(RUNNING, Ordering::Release);
+            return KERN_TERMINATED;
+        }
+    }
+    KERN_SUCCESS
+}
+
+/// `kern_return_t thread_resume(thread_act_t)`
+pub extern "C" fn thread_resume(thread: Name) -> i32 {
+    let Some(tid) = local_thread(thread) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    let Some(slot) = find(tid) else {
+        return KERN_FAILURE;
+    };
+    let _guard = slot.control.lock().unwrap_or_else(|e| e.into_inner());
+    let count = slot.count.load(Ordering::Acquire);
+    if count == 0 {
+        return KERN_FAILURE;
+    }
+    slot.count.store(count - 1, Ordering::Release);
+    if count == 1 {
+        slot.phase.store(RELEASED, Ordering::Release);
+        slot.released.post();
+        if slot.abort.swap(false, Ordering::AcqRel) {
+            send_abort(tid);
+        }
+    }
+    KERN_SUCCESS
+}
+
+fn send_abort(tid: i32) {
+    if let Some(signal) = abort_signal() {
+        let _ = starnix::signal::send_to_thread(tid, signal);
+    }
+}
+
+/// `kern_return_t thread_abort(thread_act_t)` and `thread_abort_safely`.
+///
+/// Darwin's makes the call the thread is blocked in return early. Here that
+/// is a signal without `SA_RESTART`, which does the same to a host call; a
+/// suspended thread gets it when it is resumed, which is when Darwin's would
+/// see its call fail.
+pub extern "C" fn thread_abort(thread: Name) -> i32 {
+    let Some(tid) = local_thread(thread) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    if install().is_none() {
+        return KERN_FAILURE;
+    }
+    if let Some(slot) = find(tid) {
+        let _guard = slot.control.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.count.load(Ordering::Acquire) > 0 {
+            slot.abort.store(true, Ordering::Release);
+            return KERN_SUCCESS;
+        }
+    }
+    send_abort(tid);
+    KERN_SUCCESS
+}
+
+/// `kern_return_t thread_policy_set(thread_act_t, thread_policy_flavor_t,
+/// thread_policy_t, mach_msg_type_number_t)`
+///
+/// Every flavour is a scheduling hint - affinity tags, precedence, time
+/// constraints - and a scheduler that ignores one is within its rights, so
+/// each is accepted and dropped.
+pub extern "C" fn thread_policy_set(
+    thread: Name,
+    _flavor: u32,
+    _policy: *const u32,
+    _count: u32,
+) -> i32 {
+    match space::thread_of(thread) {
+        Some(_) => KERN_SUCCESS,
+        None => KERN_INVALID_ARGUMENT,
+    }
+}
+
+/// Run `f` on the saved context of `thread`, which must be suspended.
+fn with_context(thread: Name, f: impl FnOnce(&mut starnix::signal::Context, &Slot) -> i32) -> i32 {
+    let Some(tid) = local_thread(thread) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    let Some(slot) = find(tid) else {
+        return KERN_FAILURE;
+    };
+    let _guard = slot.control.lock().unwrap_or_else(|e| e.into_inner());
+    // A running thread has no saved context; `thread_get_state` suspends one
+    // briefly rather than come here without it.
+    if slot.count.load(Ordering::Acquire) == 0 || slot.phase.load(Ordering::Acquire) != PARKED {
+        return KERN_FAILURE;
+    }
+    // SAFETY: parked, and `control` is held.
+    match unsafe { &mut *slot.context.get() } {
+        Some(context) => f(context, slot),
+        None => KERN_FAILURE,
+    }
+}
+
+/// `kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t,
+/// thread_state_t, mach_msg_type_number_t *)`
+///
+/// # Safety
+///
+/// `out` is writable for `*count` 32-bit words, and `count` is writable.
+pub unsafe extern "C" fn thread_get_state(
+    thread: Name,
+    flavor: i32,
+    out: *mut u32,
+    count: *mut u32,
+) -> i32 {
+    if out.is_null() || count.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // Darwin answers for a running thread too, with a snapshot that is stale
+    // as soon as it is read - and Boehm's collector asks for one after it has
+    // already resumed the world. A snapshot is what a brief suspension gives.
+    let calling = local_thread(thread) == Some(crate::pthread::id() as i32);
+    let snapshot = !calling && !suspended(thread) && thread_suspend(thread) == KERN_SUCCESS;
+    let rc = with_context(thread, |context, _| {
+        let Some(words) = state::get(&context.machine, flavor) else {
+            return KERN_INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller's obligation.
+        unsafe {
+            if (*count as usize) < words.len() {
+                return KERN_INVALID_ARGUMENT;
+            }
+            std::ptr::copy_nonoverlapping(words.as_ptr(), out, words.len());
+            *count = words.len() as u32;
+        }
+        KERN_SUCCESS
+    });
+    if snapshot {
+        thread_resume(thread);
+    }
+    rc
+}
+
+/// Whether `thread` is one of this process's and suspended now.
+fn suspended(thread: Name) -> bool {
+    local_thread(thread)
+        .and_then(find)
+        .is_some_and(|slot| slot.count.load(Ordering::Acquire) > 0)
+}
+
+/// `kern_return_t thread_set_state(thread_act_t, thread_state_flavor_t,
+/// thread_state_t, mach_msg_type_number_t)`
+///
+/// # Safety
+///
+/// `state` is readable for `count` 32-bit words.
+pub unsafe extern "C" fn thread_set_state(
+    thread: Name,
+    flavor: i32,
+    words: *const u32,
+    count: u32,
+) -> i32 {
+    if words.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller's obligation.
+    let words = unsafe { std::slice::from_raw_parts(words, count as usize) };
+    with_context(thread, |context, slot| {
+        if !state::set(&mut context.machine, flavor, words) {
+            return KERN_INVALID_ARGUMENT;
+        }
+        slot.dirty.store(true, Ordering::Release);
+        KERN_SUCCESS
+    })
+}
+
+/// Darwin's x86-64 thread-state flavours, from `<mach/i386/thread_status.h>`.
+#[cfg(target_arch = "x86_64")]
+mod state {
+    use starnix::signal::Machine;
+
+    const X86_THREAD_STATE64: i32 = 4;
+    const X86_FLOAT_STATE64: i32 = 5;
+    const X86_THREAD_STATE: i32 = 7;
+    const X86_FLOAT_STATE: i32 = 8;
+
+    /// `x86_thread_state64_t`: 21 registers of 64 bits.
+    const THREAD_WORDS: usize = 42;
+    /// `x86_float_state64_t`: two reserved words, the `FXSAVE` image, one more.
+    const FLOAT_WORDS: usize = 131;
+
+    /// Darwin's register order, as indices into [`Machine::gpr`]'s.
+    const ORDER: [usize; 16] = [0, 3, 1, 2, 7, 6, 5, 4, 8, 9, 10, 11, 12, 13, 14, 15];
+
+    /// The image `FNINIT` and a fresh `MXCSR` leave, for a context the host
+    /// saved none for.
+    fn initial_fxsave() -> [u8; 512] {
+        let mut image = [0u8; 512];
+        image[0..2].copy_from_slice(&0x037fu16.to_le_bytes());
+        image[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+        image
+    }
+
+    fn words_of(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn bytes_of(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    fn thread(machine: &Machine) -> Vec<u32> {
+        let mut bytes = Vec::with_capacity(THREAD_WORDS * 4);
+        for index in ORDER {
+            bytes.extend_from_slice(&machine.gpr[index].to_le_bytes());
+        }
+        for value in [
+            machine.rip,
+            machine.rflags,
+            u64::from(machine.cs),
+            u64::from(machine.fs),
+            u64::from(machine.gs),
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        words_of(&bytes)
+    }
+
+    fn float(machine: &Machine) -> Vec<u32> {
+        let mut bytes = vec![0u8; 8];
+        bytes.extend_from_slice(&machine.fxsave.unwrap_or_else(initial_fxsave));
+        bytes.extend_from_slice(&[0; 4]);
+        words_of(&bytes)
+    }
+
+    /// The flavour's words, header included for the two that carry one.
+    pub fn get(machine: &Machine, flavor: i32) -> Option<Vec<u32>> {
+        Some(match flavor {
+            X86_THREAD_STATE64 => thread(machine),
+            X86_FLOAT_STATE64 => float(machine),
+            X86_THREAD_STATE => {
+                let mut words = vec![X86_THREAD_STATE64 as u32, THREAD_WORDS as u32];
+                words.extend(thread(machine));
+                words
+            }
+            X86_FLOAT_STATE => {
+                let mut words = vec![X86_FLOAT_STATE64 as u32, FLOAT_WORDS as u32];
+                words.extend(float(machine));
+                words
+            }
+            _ => return None,
+        })
+    }
+
+    /// Write a flavour's words into `machine`. The segment selectors are
+    /// read-only, as Darwin's are to `thread_set_state` in practice.
+    pub fn set(machine: &mut Machine, flavor: i32, words: &[u32]) -> bool {
+        match flavor {
+            X86_THREAD_STATE64 if words.len() >= THREAD_WORDS => {
+                let bytes = bytes_of(&words[..THREAD_WORDS]);
+                let reg =
+                    |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                for (at, index) in ORDER.iter().enumerate() {
+                    machine.gpr[*index] = reg(at);
+                }
+                machine.rip = reg(16);
+                machine.rflags = reg(17);
+                true
+            }
+            X86_FLOAT_STATE64 if words.len() >= FLOAT_WORDS => {
+                let bytes = bytes_of(&words[..FLOAT_WORDS]);
+                let mut image = [0u8; 512];
+                image.copy_from_slice(&bytes[8..520]);
+                machine.fxsave = Some(image);
+                true
+            }
+            X86_THREAD_STATE | X86_FLOAT_STATE if words.len() >= 2 => {
+                let (inner, count) = (words[0] as i32, words[1] as usize);
+                matches!(inner, X86_THREAD_STATE64 | X86_FLOAT_STATE64)
+                    && words.len() >= 2 + count
+                    && set(machine, inner, &words[2..2 + count])
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn machine() -> Machine {
+            Machine {
+                gpr: std::array::from_fn(|i| 0x100 + i as u64),
+                rip: 0xdead,
+                rflags: 0x202,
+                cs: 0x33,
+                fs: 0,
+                gs: 0,
+                trapno: 0,
+                err: 0,
+                fault_address: 0,
+                fxsave: None,
+            }
+        }
+
+        #[test]
+        fn thread_state_is_in_darwins_register_order() {
+            let words = get(&machine(), X86_THREAD_STATE64).unwrap();
+            assert_eq!(words.len(), THREAD_WORDS);
+            let reg = |i: usize| u64::from(words[i * 2]) | (u64::from(words[i * 2 + 1]) << 32);
+            // rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp
+            assert_eq!(
+                (0..8).map(reg).collect::<Vec<_>>(),
+                [0x100, 0x103, 0x101, 0x102, 0x107, 0x106, 0x105, 0x104]
+            );
+            assert_eq!(reg(16), 0xdead);
+            assert_eq!(reg(17), 0x202);
+        }
+
+        #[test]
+        fn a_state_written_back_reads_the_same() {
+            let mut target = machine();
+            let mut words = get(&target, X86_THREAD_STATE).unwrap();
+            assert_eq!(words.len(), 44);
+            // rsp, after the two header words.
+            words[2 + 14] = 0x1234;
+            assert!(set(&mut target, X86_THREAD_STATE, &words));
+            assert_eq!(target.gpr[4], 0x1234);
+            assert_eq!(get(&target, X86_THREAD_STATE).unwrap(), words);
+        }
+
+        #[test]
+        fn float_state_carries_the_fxsave_image() {
+            let words = get(&machine(), X86_FLOAT_STATE64).unwrap();
+            assert_eq!(words.len(), FLOAT_WORDS);
+            // fcw, then mxcsr, after the two reserved words.
+            assert_eq!(words[2] & 0xffff, 0x037f);
+            assert_eq!(words[2 + 6], 0x1f80);
+        }
+
+        #[test]
+        fn a_short_buffer_or_unknown_flavor_is_refused() {
+            let mut target = machine();
+            assert!(!set(&mut target, X86_THREAD_STATE64, &[0; 10]));
+            assert!(get(&target, 99).is_none());
+        }
+    }
+}
+
+/// Other architectures' flavours are not translated yet.
+#[cfg(not(target_arch = "x86_64"))]
+mod state {
+    use starnix::signal::Machine;
+
+    pub fn get(_machine: &Machine, _flavor: i32) -> Option<Vec<u32>> {
+        None
+    }
+
+    pub fn set(_machine: &mut Machine, _flavor: i32, _words: &[u32]) -> bool {
+        false
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    /// A thread spinning on a counter stops advancing it while suspended, its
+    /// state names a stack pointer inside its own stack, and it carries on
+    /// after a resume.
+    #[test]
+    fn a_suspended_thread_stops_and_reports_its_stack() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let marker = 0u8;
+            tx.send((crate::pthread::id() as i32, &marker as *const u8 as u64))
+                .unwrap();
+            while !STOP.load(Ordering::Relaxed) {
+                COUNTER.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let (tid, stack) = rx.recv().unwrap();
+        let name = space::insert_thread(starnix::process::me(), tid);
+
+        assert_eq!(thread_suspend(name), KERN_SUCCESS);
+        let before = COUNTER.load(Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(COUNTER.load(Ordering::Relaxed), before, "still running");
+
+        let mut words = [0u32; 42];
+        let mut count = words.len() as u32;
+        let rc = unsafe { thread_get_state(name, 4, words.as_mut_ptr(), &mut count) };
+        assert_eq!(rc, KERN_SUCCESS);
+        assert_eq!(count, 42);
+        let rsp = u64::from(words[14]) | (u64::from(words[15]) << 32);
+        assert!(
+            rsp < stack && stack - rsp < 1 << 20,
+            "rsp {rsp:#x} vs {stack:#x}"
+        );
+
+        // Nested: two suspends need two resumes.
+        assert_eq!(thread_suspend(name), KERN_SUCCESS);
+        assert_eq!(thread_resume(name), KERN_SUCCESS);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(COUNTER.load(Ordering::Relaxed), before, "resumed too early");
+        assert_eq!(thread_resume(name), KERN_SUCCESS);
+        assert_eq!(thread_resume(name), KERN_FAILURE);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while COUNTER.load(Ordering::Relaxed) == before && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_ne!(COUNTER.load(Ordering::Relaxed), before, "never resumed");
+        STOP.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+    }
+
+    /// A running thread can be asked too, as on Darwin, and is left running.
+    #[test]
+    fn a_running_thread_reports_a_snapshot() {
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(crate::pthread::id() as i32).unwrap();
+            while !STOP.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        });
+        let tid = rx.recv().unwrap();
+        let name = space::insert_thread(starnix::process::me(), tid);
+        let mut words = [0u32; 42];
+        let mut count = words.len() as u32;
+        let rc = unsafe { thread_get_state(name, 4, words.as_mut_ptr(), &mut count) };
+        assert_eq!(rc, KERN_SUCCESS);
+        assert!(!suspended(name));
+        STOP.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+    }
+
+    /// Except the caller itself, which cannot stop to be read.
+    #[test]
+    fn the_calling_thread_has_no_state_to_read() {
+        let name = space::insert_thread(starnix::process::me(), crate::pthread::id() as i32);
+        let mut words = [0u32; 42];
+        let mut count = words.len() as u32;
+        let rc = unsafe { thread_get_state(name, 4, words.as_mut_ptr(), &mut count) };
+        assert_eq!(rc, KERN_FAILURE);
+    }
+}
