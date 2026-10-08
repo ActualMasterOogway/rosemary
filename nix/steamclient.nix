@@ -44,6 +44,8 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm644 generated/steamclient.dylib $out/lib/steamclient.dylib
+    # The host half reads the table from beside the dylib.
+    install -Dm644 generated/steamclient_dispatch.bin $out/lib/steamclient_dispatch.bin
     runHook postInstall
   '';
 
