@@ -1102,6 +1102,99 @@ fn replaced_texels_reach_the_next_command_buffer() {
     }
 }
 
+/// `-getBytes:` reads back what `-replaceRegion:` wrote, without a command
+/// buffer in between, and lays the rows out at the guest's stride.
+#[test]
+fn get_bytes_reads_back_replaced_texels() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const SIZE: u64 = 8;
+    let gpu = gpu_of(device).expect("a Vulkan device");
+    let texture = resource::new_texture(
+        gpu,
+        resource::TextureDescriptor {
+            texture_type: 2,
+            pixel_format: 70, // RGBA8Unorm
+            width: SIZE,
+            height: SIZE,
+            depth: 1,
+            mipmap_level_count: 1,
+            sample_count: 1,
+            array_length: 1,
+            storage_mode: 0,
+            usage: gpu::USAGE_SHADER_READ,
+        },
+    );
+    assert!(!texture.is_null());
+    let whole: Vec<u8> = (0..SIZE * SIZE * 4).map(|byte| byte as u8).collect();
+    // SAFETY: a texture this test made, and bytes covering it. The short form
+    // is the one most guests call.
+    unsafe {
+        let sel = objc::sel::get("replaceRegion:mipmapLevel:withBytes:bytesPerRow:");
+        let method = objc::object::class_of(texture)
+            .and_then(|class| class.method(sel))
+            .expect("the selector is registered");
+        let call: unsafe extern "C" fn(Id, Sel, [u64; 6], u64, *const u8, u64) =
+            std::mem::transmute(method.implementation());
+        call(
+            texture,
+            sel,
+            [0, 0, 0, SIZE, SIZE, 1],
+            0,
+            whole.as_ptr(),
+            SIZE * 4,
+        );
+    }
+
+    // A 3x2 region at (2, 5), read at a row stride with four bytes of padding.
+    const STRIDE: usize = 3 * 4 + 4;
+    let mut read = [0xEE_u8; STRIDE * 2];
+    // SAFETY: the buffer covers two rows at `STRIDE`.
+    unsafe { get_bytes(texture, [2, 5, 3, 2], &mut read, STRIDE as u64) };
+    for row in 0..2 {
+        let at = (((5 + row) * SIZE + 2) * 4) as usize;
+        let line = &read[row as usize * STRIDE..][..STRIDE];
+        assert_eq!(&line[..12], &whole[at..at + 12], "row {row}");
+        assert_eq!(&line[12..], &[0xEE; 4], "padding of row {row} was written");
+    }
+    objc::arc::release(texture);
+}
+
+/// # Safety
+///
+/// `texture` must be an `RosemaryMTLTexture`, and `bytes` must cover the
+/// region at `bytes_per_row`.
+unsafe fn get_bytes(texture: Id, region: [u64; 4], bytes: &mut [u8], bytes_per_row: u64) {
+    #[repr(C)]
+    struct Region {
+        origin: [u64; 3],
+        size: [u64; 3],
+    }
+    let sel = objc::sel::get("getBytes:bytesPerRow:fromRegion:mipmapLevel:");
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(texture) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the registered signature.
+    let call: unsafe extern "C" fn(Id, Sel, *mut u8, u64, Region, u64) =
+        unsafe { std::mem::transmute(method.implementation()) };
+    let [x, y, width, height] = region;
+    unsafe {
+        call(
+            texture,
+            sel,
+            bytes.as_mut_ptr(),
+            bytes_per_row,
+            Region {
+                origin: [x, y, 0],
+                size: [width, height, 1],
+            },
+            0,
+        )
+    };
+}
+
 /// A texture released while a copy into it is still waiting for a
 /// submission must outlive that copy rather than be destroyed under it.
 #[test]

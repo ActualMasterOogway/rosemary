@@ -350,6 +350,19 @@ pub(super) unsafe extern "C" fn set_descriptor_resource_options(
     unsafe { object::body::<TextureDescriptor>(receiver) }.storage_mode = (options >> 4) & 0xf;
 }
 
+/// `-[MTLTexture replaceRegion:mipmapLevel:withBytes:bytesPerRow:]`: the
+/// first slice, one image.
+pub(super) unsafe extern "C" fn replace_region_level(
+    receiver: Id,
+    sel: Sel,
+    region: Region,
+    level: u64,
+    bytes: *const u8,
+    bytes_per_row: u64,
+) {
+    unsafe { replace_region(receiver, sel, region, level, 0, bytes, bytes_per_row, 0) }
+}
+
 /// `-[MTLTexture replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:]`.
 ///
 /// Metal copies immediately, outside any command buffer. The bytes are staged
@@ -473,6 +486,179 @@ pub(super) unsafe extern "C" fn replace_region(
     if let Err(reason) = result {
         gpu::trace(format!("replaceRegion: copy failed: {reason}"));
     }
+}
+
+/// `-[MTLTexture getBytes:bytesPerRow:fromRegion:mipmapLevel:]`: the
+/// first slice, one image.
+pub(super) unsafe extern "C" fn get_bytes(
+    receiver: Id,
+    sel: Sel,
+    bytes: *mut u8,
+    bytes_per_row: u64,
+    region: Region,
+    level: u64,
+) {
+    unsafe { get_bytes_slice(receiver, sel, bytes, bytes_per_row, 0, region, level, 0) }
+}
+
+/// `-[MTLTexture getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:]`.
+///
+/// Metal copies on the spot and leaves ordering against GPU writes to the
+/// guest, which must have waited for them. The copy here is submitted and
+/// waited for at once, behind the deferred uploads `Gpu::submit` flushes, so
+/// a `-replaceRegion:` made before this call is read back.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn get_bytes_slice(
+    receiver: Id,
+    _sel: Sel,
+    bytes: *mut u8,
+    bytes_per_row: u64,
+    bytes_per_image: u64,
+    region: Region,
+    level: u64,
+    slice: u64,
+) {
+    if bytes.is_null() {
+        return;
+    }
+    // SAFETY: a texture of this crate's.
+    let texture = unsafe { object::body::<Texture>(receiver) };
+    let image = &texture.image;
+    if image.samples != vk::SampleCountFlags::TYPE_1 {
+        return gpu::trace("getBytes: of a multisampled texture".to_string());
+    }
+    // Vulkan copies one aspect at a time and Metal defines no interleaved
+    // layout for both, so a combined depth/stencil read is refused.
+    if image
+        .aspect
+        .contains(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL)
+    {
+        return gpu::trace(format!(
+            "getBytes: of a combined depth/stencil texture ({:?})",
+            image.format
+        ));
+    }
+    let checked = match image.region(gpu::Region {
+        level,
+        slice,
+        origin: region.origin,
+        size: region.size,
+    }) {
+        Ok(checked) => checked,
+        Err(reason) => return gpu::trace(format!("getBytes: {reason}")),
+    };
+    let (block_width, block_height) = gpu::block_extent(image.format);
+    let texel = u64::from(gpu::texel_size(image.format)).max(1);
+    // The staging copy is tightly packed; the guest's strides apply only when
+    // the rows are copied out, so a stride which is not a whole number of
+    // texels still works.
+    let tight_row = u64::from(checked.size[0].div_ceil(block_width)) * texel;
+    let rows = u64::from(checked.size[1].div_ceil(block_height));
+    let images = u64::from(checked.size[2]);
+    let tight_image = tight_row * rows;
+    let row_stride = if bytes_per_row != 0 {
+        bytes_per_row
+    } else {
+        tight_row
+    };
+    // As for `-replaceRegion:`, `bytesPerImage` only means something with
+    // more than one image to the copy.
+    let image_stride = if bytes_per_image != 0 && images > 1 {
+        bytes_per_image
+    } else {
+        row_stride * rows
+    };
+    if row_stride < tight_row || image_stride < row_stride * rows {
+        return gpu::trace(format!(
+            "getBytes: {bytes_per_row} bytes a row and {bytes_per_image} an image do not \
+             describe a {}x{}x{images} region",
+            checked.size[0], checked.size[1]
+        ));
+    }
+    let staging = match texture.gpu.create_staging_buffer(tight_image * images) {
+        Ok(staging) => staging,
+        Err(reason) => return gpu::trace(format!("getBytes: staging failed: {reason}")),
+    };
+    let copy = vk::BufferImageCopy::default()
+        .buffer_offset(0)
+        .buffer_row_length(0)
+        .buffer_image_height(0)
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: image.aspect,
+            mip_level: checked.level,
+            base_array_layer: checked.slice,
+            layer_count: 1,
+        })
+        .image_offset(vk::Offset3D {
+            x: checked.origin[0] as i32,
+            y: checked.origin[1] as i32,
+            z: checked.origin[2] as i32,
+        })
+        .image_extent(vk::Extent3D {
+            width: checked.size[0],
+            height: checked.size[1],
+            depth: checked.size[2],
+        });
+    let (vk_image, buffer) = (image.image, staging.buffer);
+    let result = texture.gpu.one_shot(|device, command_buffer| {
+        let before = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+        let after = vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::HOST_READ);
+        // SAFETY: recording into the immediate command buffer, which the call
+        // owns; every image this runtime makes stays in GENERAL.
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[before],
+                &[],
+                &[],
+            );
+            device.cmd_copy_image_to_buffer(
+                command_buffer,
+                vk_image,
+                vk::ImageLayout::GENERAL,
+                buffer,
+                &[copy],
+            );
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[after],
+                &[],
+                &[],
+            );
+        }
+    });
+    match result {
+        Err(reason) => gpu::trace(format!("getBytes: copy failed: {reason}")),
+        Ok(()) => {
+            for image in 0..images {
+                for row in 0..rows {
+                    let from = (image * tight_image + row * tight_row) as usize;
+                    let to = (image * image_stride + row * row_stride) as usize;
+                    // SAFETY: the copy completed into coherent memory covering
+                    // the tight layout, and the guest promised its region at
+                    // its own strides.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            staging.contents.add(from),
+                            bytes.add(to),
+                            tight_row as usize,
+                        )
+                    };
+                }
+            }
+        }
+    }
+    texture.gpu.destroy_buffer(staging);
 }
 
 fn lcm(a: u64, b: u64) -> u64 {

@@ -158,6 +158,12 @@ pub(crate) fn install() {
         "replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"
             => replace_region,
                 c"v104@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64Q72^v80Q88Q96";
+        "replaceRegion:mipmapLevel:withBytes:bytesPerRow:" => replace_region_level,
+            c"v88@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64^v72Q80";
+        "getBytes:bytesPerRow:fromRegion:mipmapLevel:" => get_bytes,
+            c"v88@0:8^v16Q24{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}32Q80";
+        "getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:" => get_bytes_slice,
+            c"v104@0:8^v16Q24Q32{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}40Q88Q96";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
         "newTextureViewWithPixelFormat:" => new_texture_view, c"@24@0:8Q16";
         "newTextureViewWithPixelFormat:textureType:levels:slices:" => new_texture_view_range,
