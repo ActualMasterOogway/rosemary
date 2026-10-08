@@ -56,9 +56,11 @@ struct Slot {
 // as described on the field.
 unsafe impl Sync for Slot {}
 
+#[cfg(not(target_os = "macos"))]
 /// An unnamed POSIX semaphore: the one wait whose post is async-signal-safe.
 struct Semaphore(UnsafeCell<libc::sem_t>);
 
+#[cfg(not(target_os = "macos"))]
 impl Semaphore {
     fn new() -> Semaphore {
         // SAFETY: all zeroes is a valid `sem_t` to hand to `sem_init`.
@@ -102,6 +104,57 @@ impl Semaphore {
     }
 }
 
+/// macOS rejects unnamed POSIX semaphores, so use a dispatch semaphore, whose
+/// signal is likewise async-signal-safe.
+#[cfg(target_os = "macos")]
+struct Semaphore(*mut core::ffi::c_void);
+
+// SAFETY: dispatch semaphores are thread-safe; the handle is never released.
+#[cfg(target_os = "macos")]
+unsafe impl Send for Semaphore {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for Semaphore {}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn dispatch_semaphore_create(value: isize) -> *mut core::ffi::c_void;
+    fn dispatch_semaphore_signal(sem: *mut core::ffi::c_void) -> isize;
+    fn dispatch_semaphore_wait(sem: *mut core::ffi::c_void, timeout: u64) -> isize;
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+}
+
+#[cfg(target_os = "macos")]
+const DISPATCH_TIME_NOW: u64 = 0;
+#[cfg(target_os = "macos")]
+const DISPATCH_TIME_FOREVER: u64 = !0;
+
+#[cfg(target_os = "macos")]
+impl Semaphore {
+    fn new() -> Semaphore {
+        Semaphore(unsafe { dispatch_semaphore_create(0) })
+    }
+
+    fn post(&self) {
+        unsafe { dispatch_semaphore_signal(self.0) };
+    }
+
+    /// Wait for a post; `false` if `timeout` passed first.
+    fn wait(&self, timeout: Option<std::time::Duration>) -> bool {
+        let when = match timeout {
+            None => DISPATCH_TIME_FOREVER,
+            Some(t) => unsafe {
+                dispatch_time(DISPATCH_TIME_NOW, t.as_nanos().min(i64::MAX as u128) as i64)
+            },
+        };
+        unsafe { dispatch_semaphore_wait(self.0, when) == 0 }
+    }
+
+    fn try_wait(&self) -> bool {
+        unsafe { dispatch_semaphore_wait(self.0, DISPATCH_TIME_NOW) == 0 }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 /// `CLOCK_REALTIME` plus `timeout`, which is the clock `sem_timedwait` reads.
 fn deadline(timeout: std::time::Duration) -> libc::timespec {
     let mut now = libc::timespec {

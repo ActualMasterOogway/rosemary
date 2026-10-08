@@ -137,6 +137,7 @@ pub unsafe extern "C" fn clock_sleep(
             deadline.tv_sec = deadline.tv_sec.saturating_add(1);
         }
     }
+    #[cfg(not(target_os = "macos"))]
     loop {
         // SAFETY: `deadline` is a live local; the remainder is unused for an
         // absolute sleep.
@@ -147,6 +148,37 @@ pub unsafe extern "C" fn clock_sleep(
             0 => break,
             libc::EINTR => {}
             _ => return KERN_FAILURE,
+        }
+    }
+    // macOS has no `clock_nanosleep`; sleep the relative gap and recheck.
+    #[cfg(target_os = "macos")]
+    loop {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `clock_gettime` writes the `timespec` it is given and nothing else.
+        if unsafe { libc::clock_gettime(host, &mut now) } != 0 {
+            return KERN_FAILURE;
+        }
+        let mut gap_sec = deadline.tv_sec - now.tv_sec;
+        let mut gap_nsec = deadline.tv_nsec - now.tv_nsec;
+        if gap_nsec < 0 {
+            gap_nsec += 1_000_000_000;
+            gap_sec -= 1;
+        }
+        if gap_sec < 0 {
+            break;
+        }
+        let gap = libc::timespec {
+            tv_sec: gap_sec,
+            tv_nsec: gap_nsec,
+        };
+        // SAFETY: `gap` is a live local; the remainder is unused since we recompute.
+        if unsafe { libc::nanosleep(&gap, core::ptr::null_mut()) } != 0
+            && starnix::errno::get() != libc::EINTR
+        {
+            return KERN_FAILURE;
         }
     }
     if !remaining.is_null() {
