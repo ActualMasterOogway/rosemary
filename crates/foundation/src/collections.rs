@@ -511,6 +511,36 @@ unsafe extern "C" fn sorted_array_using_function(
     }
 }
 
+unsafe extern "C" fn sorted_array_using_comparator(receiver: Id, _sel: Sel, block: Id) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: null or a block.
+    let Some(invoke) = (unsafe { block_invoke(block) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: the block is `NSComparisonResult (^)(id, id)`.
+    let call: unsafe extern "C" fn(Id, Id, Id) -> isize = unsafe { std::mem::transmute(invoke) };
+    // Sorted out of place: the block may read the array it is sorting.
+    let mut values = array.values.clone();
+    values.sort_by(
+        |a, b| match unsafe { call(block, *a as Id, *b as Id) } {
+            ..0 => std::cmp::Ordering::Less,
+            0 => std::cmp::Ordering::Equal,
+            _ => std::cmp::Ordering::Greater,
+        },
+    );
+    // SAFETY: a fresh array follows the convenience-constructor rule.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
 unsafe extern "C" fn sort_using_function(
     receiver: Id,
     _sel: Sel,
@@ -2097,6 +2127,7 @@ pub(crate) fn install() {
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
         "valueForKey:" => array_value_for_key, c"@24@0:8@16";
         "sortedArrayUsingSelector:" => sorted_array_using_selector, c"@24@0:8:16";
+        "sortedArrayUsingComparator:" => sorted_array_using_comparator, c"@24@0:8@?16";
         "sortedArrayUsingFunction:context:" => sorted_array_using_function, c"@32@0:8^?16^v24";
         "filteredArrayUsingPredicate:" => filtered_array_using_predicate, c"@24@0:8@16";
         "indexOfObjectWithOptions:passingTest:" => index_of_object_with_options_passing_test, c"Q32@0:8Q16@?24";
