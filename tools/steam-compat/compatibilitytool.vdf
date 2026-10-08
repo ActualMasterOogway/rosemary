@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "Rosemary"
+    {
+      "install_path" "."
+      "display_name" "Rosemary (macOS)"
+      "from_oslist" "macos"
+      "to_oslist" "linux"
+    }
+  }
+}

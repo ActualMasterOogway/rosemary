@@ -1,0 +1,50 @@
+#!/bin/sh
+# Steam compatibility-tool entry point: `rosemary-steam <verb> <exe> [args...]`.
+# Installed beside compatibilitytool.vdf by install.sh, which also writes
+# rosemary-steam.env with the absolute paths this script needs.
+set -eu
+
+# Steam runs tools inside its runtime: LD_LIBRARY_PATH and PATH point at old
+# libraries that outrank a Nix binary's RUNPATH and break host tools, and
+# LD_PRELOAD carries the 32-bit overlay. Undo that first, with builtins only,
+# since even dirname fails under the runtime's libraries.
+if [ -n "${STEAM_RUNTIME:-}" ]; then
+    LD_LIBRARY_PATH=${SYSTEM_LD_LIBRARY_PATH:-}
+    [ -n "${SYSTEM_PATH:-}" ] && PATH=$SYSTEM_PATH
+    [ -n "$LD_LIBRARY_PATH" ] || unset LD_LIBRARY_PATH
+    unset LD_PRELOAD STEAM_RUNTIME_LIBRARY_PATH
+fi
+
+here=${0%/*}
+# Steam's runtime may not have the user's PATH, so install.sh records paths.
+[ -f "$here/rosemary-steam.env" ] && . "$here/rosemary-steam.env"
+rosemary=${ROSEMARY_BIN:-rosemary}
+
+[ $# -ge 1 ] || { echo "usage: $0 <verb> <exe> [args...]" >&2; exit 2; }
+verb=$1
+shift
+
+case "$verb" in
+run | waitforexitandrun) ;;
+# No path translation: guest paths are host paths.
+getnativepath | getcompatpath)
+    printf '%s\n' "$1"
+    exit 0
+    ;;
+*)
+    echo "rosemary-steam: unsupported verb '$verb'" >&2
+    exit 1
+    ;;
+esac
+
+[ $# -ge 1 ] || { echo "rosemary-steam: no executable given" >&2; exit 2; }
+
+# One prefix per game, kept with Steam's other per-game compat data.
+if [ -z "${ROSEMARY_PREFIX:-}" ] && [ -n "${STEAM_COMPAT_DATA_PATH:-}" ]; then
+    ROSEMARY_PREFIX=$STEAM_COMPAT_DATA_PATH/pfx
+    export ROSEMARY_PREFIX
+fi
+# A Steam launch has nobody to ask about downloading the Darwin base.
+export ROSEMARY_PREFIX_SETUP=${ROSEMARY_PREFIX_SETUP:-download}
+
+exec "$rosemary" run "$@"
