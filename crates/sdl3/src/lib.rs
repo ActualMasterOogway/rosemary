@@ -283,6 +283,7 @@ struct Api {
     SDL_PauseAudioStreamDevice: Option<unsafe extern "C" fn(AudioStream) -> bool>,
     SDL_GetAudioDeviceFormat: Option<unsafe extern "C" fn(u32, *mut AudioSpec, *mut c_int) -> bool>,
     SDL_GetAudioDeviceName: Option<unsafe extern "C" fn(u32) -> *const c_char>,
+    SDL_GetAudioRecordingDevices: Option<unsafe extern "C" fn(*mut c_int) -> *mut u32>,
     SDL_CreateAudioStream:
         Option<unsafe extern "C" fn(*const AudioSpec, *const AudioSpec) -> AudioStream>,
     SDL_SetAudioStreamFormat:
@@ -501,6 +502,7 @@ fn api() -> Option<&'static Api> {
             SDL_PauseAudioStreamDevice,
             SDL_GetAudioDeviceFormat,
             SDL_GetAudioDeviceName,
+            SDL_GetAudioRecordingDevices,
             SDL_CreateAudioStream,
             SDL_SetAudioStreamFormat,
             SDL_GetAudioStreamData,
@@ -3208,7 +3210,7 @@ pub mod video {
     }
 }
 
-/// Playback, as much of it as an `AudioUnit` needs.
+/// Playback and recording, as much of them as an `AudioUnit` and the HAL need.
 ///
 /// The pull model is SDL's too: a stream opened with a callback asks for more
 /// bytes when the device is short of them, which is what an `AURenderCallback`
@@ -3226,6 +3228,8 @@ pub mod audio {
 
     /// `SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK`.
     const DEFAULT_PLAYBACK: u32 = 0xFFFF_FFFF;
+    /// `SDL_AUDIO_DEVICE_DEFAULT_RECORDING`.
+    const DEFAULT_RECORDING: u32 = 0xFFFF_FFFE;
 
     /// Start the audio subsystem, once - see `video::init_video` for why this is
     /// not done at load.
@@ -3250,18 +3254,58 @@ pub mod audio {
         callback: AudioStreamCallback,
         userdata: *mut c_void,
     ) -> Option<AudioStream> {
+        // SAFETY: the caller's obligation.
+        unsafe { open_device(DEFAULT_PLAYBACK, spec, callback, userdata) }
+    }
+
+    /// Open the default recording device, converting from whatever it runs at
+    /// to `spec`. Paused, as [`open_playback`]'s is.
+    ///
+    /// The callback is told when captured bytes have arrived in the stream,
+    /// rather than asked for more.
+    ///
+    /// # Safety
+    ///
+    /// As [`open_playback`].
+    pub unsafe fn open_recording(
+        spec: AudioSpec,
+        callback: AudioStreamCallback,
+        userdata: *mut c_void,
+    ) -> Option<AudioStream> {
+        // SAFETY: the caller's obligation.
+        unsafe { open_device(DEFAULT_RECORDING, spec, callback, userdata) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`open_playback`].
+    unsafe fn open_device(
+        device: u32,
+        spec: AudioSpec,
+        callback: AudioStreamCallback,
+        userdata: *mut c_void,
+    ) -> Option<AudioStream> {
         if !init_audio() {
             return None;
         }
         let open = api()?.SDL_OpenAudioDeviceStream?;
         // SAFETY: a live spec for the duration of the call, and the caller's
         // obligation for the callback.
-        let stream = unsafe { open(DEFAULT_PLAYBACK, &spec, callback, userdata) };
+        let stream = unsafe { open(device, &spec, callback, userdata) };
         (!stream.is_null()).then_some(stream)
     }
 
     /// What the default playback device is actually running at.
     pub fn device_format() -> Option<AudioSpec> {
+        format_of(DEFAULT_PLAYBACK)
+    }
+
+    /// What the default recording device is actually running at.
+    pub fn recording_format() -> Option<AudioSpec> {
+        format_of(DEFAULT_RECORDING)
+    }
+
+    fn format_of(device: u32) -> Option<AudioSpec> {
         if !init_audio() {
             return None;
         }
@@ -3272,7 +3316,31 @@ pub mod audio {
             freq: 48000,
         };
         // SAFETY: a writable spec; the frame count is not wanted.
-        unsafe { f(DEFAULT_PLAYBACK, &mut spec, std::ptr::null_mut()) }.then_some(spec)
+        unsafe { f(device, &mut spec, std::ptr::null_mut()) }.then_some(spec)
+    }
+
+    /// Whether the host has anything to record from. The default recording
+    /// device opens whichever one that is, so only whether there is one matters.
+    pub fn has_recording_device() -> bool {
+        if !init_audio() {
+            return false;
+        }
+        let Some(api) = api() else {
+            return false;
+        };
+        let (Some(get), Some(free)) = (api.SDL_GetAudioRecordingDevices, api.SDL_free) else {
+            return false;
+        };
+        let mut count: c_int = 0;
+        // SAFETY: SDL writes the count and returns an array from its own
+        // allocator, freed below.
+        unsafe {
+            let ids = get(&mut count);
+            if !ids.is_null() {
+                free(ids.cast());
+            }
+        }
+        count > 0
     }
 
     /// # Safety
@@ -3327,12 +3395,21 @@ pub mod audio {
     /// The default playback device's name, for a caller that shows the user
     /// which device it is using.
     pub fn device_name() -> Option<String> {
+        name_of(DEFAULT_PLAYBACK)
+    }
+
+    /// The default recording device's name.
+    pub fn recording_name() -> Option<String> {
+        name_of(DEFAULT_RECORDING)
+    }
+
+    fn name_of(device: u32) -> Option<String> {
         if !init_audio() {
             return None;
         }
         let f = api()?.SDL_GetAudioDeviceName?;
         // SAFETY: SDL owns the string and it outlives this call.
-        let name = unsafe { f(DEFAULT_PLAYBACK) };
+        let name = unsafe { f(device) };
         match name.is_null() {
             true => None,
             // SAFETY: a NUL-terminated string of SDL's.

@@ -6,7 +6,7 @@ use crate::Unit;
 const FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
 
 /// `AudioFormatFlags`, the four an output stream can carry.
-mod flags {
+pub(crate) mod flags {
     pub const IS_FLOAT: u32 = 1 << 0;
     pub const IS_BIG_ENDIAN: u32 = 1 << 1;
     pub const IS_SIGNED_INTEGER: u32 = 1 << 2;

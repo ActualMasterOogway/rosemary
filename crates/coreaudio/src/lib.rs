@@ -231,6 +231,15 @@ pub unsafe extern "C" fn AudioComponentFindNext(
         return std::ptr::null_mut();
     }
     let wanted = unsafe { *description };
+    trace::say(
+        format_args!(
+            "find component {} {} {}",
+            trace::code(wanted.kind),
+            trace::code(wanted.subtype),
+            trace::code(wanted.manufacturer)
+        ),
+        SUCCESS,
+    );
     if describes_default_output(&wanted) {
         return output_component();
     }

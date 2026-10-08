@@ -1,18 +1,22 @@
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::render::{AudioBuffer, AudioBufferList, MAX_BUFFERS, TimeStamp};
 use crate::status::SUCCESS;
 
-/// `AudioObjectID`. Apple's are opaque; these are two constants, because a
-/// program compares them and passes them back and does nothing else with them.
+/// `AudioObjectID`. Apple's are opaque; these are constants, because a program
+/// compares them and passes them back and does nothing else with them.
 pub type ObjectId = u32;
 
 /// `kAudioObjectSystemObject`.
 const SYSTEM_OBJECT: ObjectId = 1;
-/// The one device this crate has. Not 0: `kAudioObjectUnknown` is 0, and a
-/// caller checks for it.
+/// The playback device. Not 0: `kAudioObjectUnknown` is 0, and a caller checks
+/// for it.
 pub(crate) const OUTPUT_DEVICE: ObjectId = 2;
+/// The recording device, present only when the host has something to record
+/// from.
+pub(crate) const INPUT_DEVICE: ObjectId = 3;
 
 /// `kAudioHardwareUnknownPropertyError`, `'who?'`.
 const UNKNOWN_PROPERTY: i32 = i32::from_be_bytes(*b"who?");
@@ -40,6 +44,9 @@ mod selector {
 
     // On a device.
     pub const NAME: u32 = fourcc(b"lnam");
+    /// `kAudioDevicePropertyDeviceName`: the deprecated C-string name, which
+    /// WebRTC still lists devices by.
+    pub const C_NAME: u32 = fourcc(b"name");
     pub const MANUFACTURER: u32 = fourcc(b"lmak");
     pub const DEVICE_UID: u32 = fourcc(b"uid ");
     pub const MODEL_UID: u32 = fourcc(b"muid");
@@ -50,6 +57,10 @@ mod selector {
     pub const STREAMS: u32 = fourcc(b"stm#");
     pub const BUFFER_FRAME_SIZE: u32 = fourcc(b"fsiz");
     pub const BUFFER_FRAME_SIZE_RANGE: u32 = fourcc(b"fsz#");
+    /// `kAudioDevicePropertyBufferSize` and its range: the same size in bytes.
+    pub const BUFFER_SIZE: u32 = fourcc(b"bsiz");
+    pub const BUFFER_SIZE_RANGE: u32 = fourcc(b"bsz#");
+    pub const HOG_MODE: u32 = fourcc(b"oink");
     pub const DEVICE_IS_ALIVE: u32 = fourcc(b"livn");
     pub const DEVICE_IS_RUNNING: u32 = fourcc(b"goin");
     pub const LATENCY: u32 = fourcc(b"ltnc");
@@ -90,41 +101,118 @@ struct ValueRange {
     maximum: f64,
 }
 
-/// What this device is, as SDL reports it.
+/// What a device is, as SDL reports it.
 ///
-/// Read once: SDL's default device does not change under this process, and a
+/// Read once: SDL's default devices do not change under this process, and a
 /// program that asked twice and got two answers would have no way to tell which
 /// one its buffers were sized for.
 struct Device {
+    id: ObjectId,
+    /// The scope this device has its one stream on.
+    side: u32,
     sample_rate: f64,
     channels: u32,
     name: String,
+    uid: &'static str,
+    /// The buffer size an `IOProc` is called with, in frames.
+    ///
+    /// Settable, because `kAudioDevicePropertyBufferFrameSize` is settable on a
+    /// real device and a program that sets it sizes its own buffers to match.
+    /// Nothing else reads it until the next `AudioDeviceStart`.
+    buffer_frames: AtomicU32,
 }
 
-fn device() -> &'static Device {
-    static DEVICE: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
-    DEVICE.get_or_init(|| {
-        let spec = sdl3::audio::device_format();
+impl Device {
+    fn new(
+        id: ObjectId,
+        side: u32,
+        spec: Option<sdl3::AudioSpec>,
+        name: Option<String>,
+        fallback: &str,
+        uid: &'static str,
+    ) -> Device {
         Device {
+            id,
+            side,
             // 48 kHz stereo when SDL declines to say, which is what it opens a
             // device at by default - so the fallback is the same number the
             // device would have run at rather than a guess.
             sample_rate: spec.map_or(48_000.0, |s| s.freq as f64),
             channels: spec.map_or(2, |s| s.channels.max(1) as u32),
-            name: sdl3::audio::device_name().unwrap_or_else(|| "Default Output".to_string()),
+            name: name.unwrap_or_else(|| fallback.to_string()),
+            uid,
+            buffer_frames: AtomicU32::new(512),
         }
+    }
+
+    fn frame_bytes(&self) -> usize {
+        4 * self.channels as usize
+    }
+
+    fn buffer_frames(&self) -> u32 {
+        self.buffer_frames.load(Ordering::Relaxed)
+    }
+
+    fn spec(&self) -> sdl3::AudioSpec {
+        sdl3::AudioSpec {
+            format: sdl3::audio::format::F32,
+            channels: self.channels as i32,
+            freq: self.sample_rate as i32,
+        }
+    }
+}
+
+fn output() -> &'static Device {
+    static DEVICE: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
+    DEVICE.get_or_init(|| {
+        Device::new(
+            OUTPUT_DEVICE,
+            scope::OUTPUT,
+            sdl3::audio::device_format(),
+            sdl3::audio::device_name(),
+            "Default Output",
+            "rosemary:default-output",
+        )
     })
 }
 
-/// The buffer size an `IOProc` is called with, in frames.
-///
-/// Settable, because `kAudioDevicePropertyBufferFrameSize` is settable on a
-/// real device and a program that sets it sizes its own mixing buffers to
-/// match. Nothing else reads it until the next `AudioDeviceStart`.
-static BUFFER_FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(512);
+/// The recording device, or `None` on a host with nothing to record from - the
+/// answer a Mac without a microphone gives, which callers already handle.
+fn input() -> Option<&'static Device> {
+    static DEVICE: std::sync::OnceLock<Option<Device>> = std::sync::OnceLock::new();
+    DEVICE
+        .get_or_init(|| {
+            sdl3::audio::has_recording_device().then(|| {
+                Device::new(
+                    INPUT_DEVICE,
+                    scope::INPUT,
+                    sdl3::audio::recording_format(),
+                    sdl3::audio::recording_name(),
+                    "Default Input",
+                    "rosemary:default-input",
+                )
+            })
+        })
+        .as_ref()
+}
+
+fn device(object: ObjectId) -> Option<&'static Device> {
+    match object {
+        OUTPUT_DEVICE => Some(output()),
+        INPUT_DEVICE => input(),
+        _ => None,
+    }
+}
+
+/// The buffer sizes a device accepts, in frames.
+const MINIMUM_FRAMES: u32 = 64;
+const MAXIMUM_FRAMES: u32 = 4096;
 
 /// What one registered `AudioDeviceIOProc` is.
 struct Proc {
+    /// The device it was registered on, which decides whether it is handed
+    /// captured frames or asked for frames to play.
+    device: &'static Device,
     /// The guest's function, as a host-callable pointer.
     call: IoProc,
     client_data: *mut c_void,
@@ -216,29 +304,30 @@ fn string_property(text: &str) -> Vec<u8> {
     as_bytes(&(string as usize)).to_vec()
 }
 
-/// The stream description this device runs at, for the deprecated
-/// `kAudioDevicePropertyStreamFormat`.
-fn device_format() -> crate::stream::Format {
-    let device = device();
+/// The stream description a device runs at, for the deprecated
+/// `kAudioDevicePropertyStreamFormat`: one interleaved buffer of floats, which
+/// is what an `IOProc` is handed.
+fn device_format(device: &Device) -> crate::stream::Format {
     let bytes_per_frame = 4 * device.channels;
+    let canonical = crate::stream::Format::default();
     crate::stream::Format {
         sample_rate: device.sample_rate,
+        format_flags: canonical.format_flags & !crate::stream::flags::IS_NON_INTERLEAVED,
         channels_per_frame: device.channels,
         bytes_per_frame,
         bytes_per_packet: bytes_per_frame,
-        ..crate::stream::Format::default()
+        ..canonical
     }
 }
 
 /// The channel layout, as the `AudioBufferList` `kAudioDevicePropertyStream‑
-/// Configuration` answers with: one interleaved buffer on the output side and
-/// none at all on the input side, because this device does not record.
+/// Configuration` answers with: one interleaved buffer on the device's own
+/// side and none at all on the other.
 ///
-/// The *number of buffers* is what a caller counts channels from, so an input
-/// scope that answered the output's layout would have a program open a capture
-/// path against a device that has none.
-fn stream_configuration(scope: u32) -> Vec<u8> {
-    let device = device();
+/// The *number of buffers* is what a caller counts channels from, so a side
+/// that answered the other's layout would have a program open a capture path
+/// against a speaker, or play to a microphone.
+fn stream_configuration(device: &Device, scope: u32) -> Vec<u8> {
     let mut list = AudioBufferList {
         count: 0,
         buffers: [AudioBuffer {
@@ -247,11 +336,10 @@ fn stream_configuration(scope: u32) -> Vec<u8> {
             data: std::ptr::null_mut(),
         }; MAX_BUFFERS],
     };
-    if scope != scope::INPUT {
+    if on_side(device, scope) {
         list.count = 1;
         list.buffers[0].channels = device.channels;
-        list.buffers[0].byte_size =
-            BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed) * 4 * device.channels;
+        list.buffers[0].byte_size = device.buffer_frames() * device.frame_bytes() as u32;
     }
     // Only the buffers that are declared: the header's trailing array is one
     // element long and a caller reads `mNumberBuffers` of them.
@@ -261,6 +349,12 @@ fn stream_configuration(scope: u32) -> Vec<u8> {
         bytes.extend_from_slice(as_bytes(buffer));
     }
     bytes
+}
+
+/// Whether `scope` names the side of `device` that has a stream. The global
+/// scope counts as either.
+fn on_side(device: &Device, scope: u32) -> bool {
+    scope == device.side || scope == scope::GLOBAL
 }
 
 /// `kAudioChannelLabel_*` for each channel SDL's default order puts in a frame
@@ -311,8 +405,8 @@ fn channel_labels(channels: u32) -> &'static [u32] {
 ///
 /// Programs size their speaker setup from this rather than from the stream
 /// configuration, and one refused falls back to whatever was on its stack.
-fn preferred_channel_layout() -> Vec<u8> {
-    let channels = device().channels;
+fn preferred_channel_layout(device: &Device) -> Vec<u8> {
+    let channels = device.channels;
     let labels = channel_labels(channels);
     let count = (channels as usize).min(labels.len());
     // mChannelLayoutTag, mChannelBitmap, mNumberChannelDescriptions.
@@ -332,84 +426,119 @@ fn preferred_channel_layout() -> Vec<u8> {
 /// have.
 fn property(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
     let answer = described(object, address);
-    if answer.is_none() && crate::trace::on() {
+    if crate::trace::on() {
         eprintln!(
-            "audio: object {object} has no property {} scope {}",
+            "audio: object {object} {} property {} scope {} element {}",
+            match answer {
+                Some(_) => "has",
+                None => "has no",
+            },
             crate::trace::code(address.selector),
             crate::trace::code(address.scope),
+            address.element,
         );
     }
     answer
 }
 
 fn described(object: ObjectId, address: &Address) -> Option<Vec<u8>> {
-    let device = device();
-    Some(match (object, address.selector) {
-        (SYSTEM_OBJECT, selector::DEVICES) => as_bytes(&OUTPUT_DEVICE).to_vec(),
-        (SYSTEM_OBJECT, selector::DEFAULT_OUTPUT_DEVICE)
-        | (SYSTEM_OBJECT, selector::DEFAULT_SYSTEM_OUTPUT_DEVICE) => {
+    match object {
+        SYSTEM_OBJECT => system_property(address.selector),
+        _ => device_property(device(object)?, address),
+    }
+}
+
+fn system_property(selector: u32) -> Option<Vec<u8>> {
+    Some(match selector {
+        selector::DEVICES => {
+            let mut ids = as_bytes(&OUTPUT_DEVICE).to_vec();
+            if let Some(input) = input() {
+                ids.extend_from_slice(as_bytes(&input.id));
+            }
+            ids
+        }
+        selector::DEFAULT_OUTPUT_DEVICE | selector::DEFAULT_SYSTEM_OUTPUT_DEVICE => {
             as_bytes(&OUTPUT_DEVICE).to_vec()
         }
-        // There is no capture device here, and `kAudioObjectUnknown` is how the
-        // HAL says so - a caller checks for it before opening an input unit.
-        (SYSTEM_OBJECT, selector::DEFAULT_INPUT_DEVICE) => as_bytes(&0u32).to_vec(),
-        (OUTPUT_DEVICE, selector::NAME) => string_property(&device.name),
-        (OUTPUT_DEVICE, selector::MANUFACTURER) => string_property("SDL"),
-        (OUTPUT_DEVICE, selector::DEVICE_UID) | (OUTPUT_DEVICE, selector::MODEL_UID) => {
-            string_property("rosemary:default-output")
+        // `kAudioObjectUnknown` when there is nothing to record from: a caller
+        // checks for it before opening an input.
+        selector::DEFAULT_INPUT_DEVICE => as_bytes(&input().map_or(0, |d| d.id)).to_vec(),
+        _ => return None,
+    })
+}
+
+fn device_property(device: &'static Device, address: &Address) -> Option<Vec<u8>> {
+    let mine = on_side(device, address.scope);
+    Some(match address.selector {
+        selector::NAME => string_property(&device.name),
+        selector::C_NAME => {
+            let mut name = device.name.clone().into_bytes();
+            name.push(0);
+            name
         }
+        selector::MANUFACTURER => string_property("SDL"),
+        selector::DEVICE_UID | selector::MODEL_UID => string_property(device.uid),
         // `kAudioDeviceTransportTypeBuiltIn`. A program checks this to decide
         // whether the device may vanish - USB and Bluetooth ones do.
-        (OUTPUT_DEVICE, selector::TRANSPORT_TYPE) => as_bytes(&fourcc(b"bltn")).to_vec(),
-        (OUTPUT_DEVICE, selector::NOMINAL_SAMPLE_RATE) => as_bytes(&device.sample_rate).to_vec(),
-        (OUTPUT_DEVICE, selector::AVAILABLE_NOMINAL_SAMPLE_RATES) => as_bytes(&ValueRange {
+        selector::TRANSPORT_TYPE => as_bytes(&fourcc(b"bltn")).to_vec(),
+        selector::NOMINAL_SAMPLE_RATE => as_bytes(&device.sample_rate).to_vec(),
+        selector::AVAILABLE_NOMINAL_SAMPLE_RATES => as_bytes(&ValueRange {
             minimum: device.sample_rate,
             maximum: device.sample_rate,
         })
         .to_vec(),
-        (OUTPUT_DEVICE, selector::STREAM_CONFIGURATION) => stream_configuration(address.scope),
-        // One stream on the output side, none on the input side, matching the
-        // configuration above.
-        (OUTPUT_DEVICE, selector::STREAMS) => match address.scope == scope::INPUT {
-            true => Vec::new(),
-            false => as_bytes(&OUTPUT_DEVICE).to_vec(),
+        selector::STREAM_CONFIGURATION => stream_configuration(device, address.scope),
+        // One stream on the device's own side and none on the other, matching
+        // the configuration above. The stream is the device's own id, so a
+        // stream property asked of it is answered by the device.
+        selector::STREAMS => match mine {
+            true => as_bytes(&device.id).to_vec(),
+            false => Vec::new(),
         },
-        (OUTPUT_DEVICE, selector::STREAM_FORMAT) => as_bytes(&device_format()).to_vec(),
-        // An output-only device: the input side has no channels to lay out.
-        (OUTPUT_DEVICE, selector::PREFERRED_CHANNEL_LAYOUT) if address.scope != scope::INPUT => {
-            preferred_channel_layout()
-        }
+        selector::STREAM_FORMAT => as_bytes(&device_format(device)).to_vec(),
+        selector::PREFERRED_CHANNEL_LAYOUT if mine => preferred_channel_layout(device),
         // Channel numbers are 1-based; a mono device plays both on its one.
-        (OUTPUT_DEVICE, selector::PREFERRED_CHANNELS_FOR_STEREO)
-            if address.scope != scope::INPUT =>
-        {
+        selector::PREFERRED_CHANNELS_FOR_STEREO if mine => {
             let right = device.channels.min(2);
             [as_bytes(&1u32), as_bytes(&right)].concat()
         }
-        (OUTPUT_DEVICE, selector::BUFFER_FRAME_SIZE) => {
-            as_bytes(&BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed)).to_vec()
-        }
-        (OUTPUT_DEVICE, selector::BUFFER_FRAME_SIZE_RANGE) => as_bytes(&ValueRange {
-            minimum: 64.0,
-            maximum: 4096.0,
+        selector::BUFFER_FRAME_SIZE => as_bytes(&device.buffer_frames()).to_vec(),
+        selector::BUFFER_FRAME_SIZE_RANGE => as_bytes(&ValueRange {
+            minimum: MINIMUM_FRAMES as f64,
+            maximum: MAXIMUM_FRAMES as f64,
         })
         .to_vec(),
-        (OUTPUT_DEVICE, selector::DEVICE_IS_ALIVE) => as_bytes(&1u32).to_vec(),
-        (OUTPUT_DEVICE, selector::DEVICE_IS_RUNNING) => {
+        selector::BUFFER_SIZE => {
+            as_bytes(&(device.buffer_frames() * device.frame_bytes() as u32)).to_vec()
+        }
+        selector::BUFFER_SIZE_RANGE => {
+            let frame = device.frame_bytes() as f64;
+            as_bytes(&ValueRange {
+                minimum: MINIMUM_FRAMES as f64 * frame,
+                maximum: MAXIMUM_FRAMES as f64 * frame,
+            })
+            .to_vec()
+        }
+        // The `pid_t` holding the device exclusively, -1 for nobody. WebRTC
+        // refuses a device it cannot read this from.
+        selector::HOG_MODE => as_bytes(&-1i32).to_vec(),
+        selector::DEVICE_IS_ALIVE => as_bytes(&1u32).to_vec(),
+        selector::DEVICE_IS_RUNNING => {
             let running = PROCS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .any(|(_, p)| !p.lock().unwrap_or_else(|e| e.into_inner()).stream.is_null());
+                .any(|(_, p)| {
+                    let p = p.lock().unwrap_or_else(|e| e.into_inner());
+                    p.device.id == device.id && !p.stream.is_null()
+                });
             as_bytes(&u32::from(running)).to_vec()
         }
         // Latency and safety offset are what a program *adds* to its own
         // scheduling, so zero is a real answer rather than a missing one: SDL
         // does not report the device's, and claiming a number would move every
         // sound the program schedules.
-        (OUTPUT_DEVICE, selector::LATENCY) | (OUTPUT_DEVICE, selector::SAFETY_OFFSET) => {
-            as_bytes(&0u32).to_vec()
-        }
+        selector::LATENCY | selector::SAFETY_OFFSET => as_bytes(&0u32).to_vec(),
         _ => return None,
     })
 }
@@ -480,7 +609,11 @@ pub unsafe extern "C" fn AudioObjectGetPropertyDataSize(
 }
 
 fn known(object: ObjectId) -> bool {
-    object == SYSTEM_OBJECT || object == OUTPUT_DEVICE
+    let known = object == SYSTEM_OBJECT || device(object).is_some();
+    if !known && crate::trace::on() {
+        eprintln!("audio: no object {object}");
+    }
+    known
 }
 
 /// `Boolean AudioObjectHasProperty(AudioObjectID, const
@@ -524,11 +657,12 @@ pub unsafe extern "C" fn AudioObjectIsPropertySettable(
     SUCCESS
 }
 
-/// The one property a caller may change. The sample rate is *not* one of them:
-/// SDL opened the device at its own rate and converts to it, so accepting a new
-/// one would be agreeing to something the device is not doing.
+/// The one size a caller may change, in frames or in bytes. The sample rate is
+/// *not* settable: SDL opened the device at its own rate and converts to it, so
+/// accepting a new one would be agreeing to something the device is not doing.
 fn is_settable(object: ObjectId, selector: u32) -> bool {
-    object == OUTPUT_DEVICE && selector == selector::BUFFER_FRAME_SIZE
+    device(object).is_some()
+        && matches!(selector, selector::BUFFER_FRAME_SIZE | selector::BUFFER_SIZE)
 }
 
 /// `OSStatus AudioObjectSetPropertyData(...)`
@@ -561,8 +695,17 @@ pub unsafe extern "C" fn AudioObjectSetPropertyData(
     if (size as usize) < size_of::<u32>() {
         return crate::status::PARAM_ERROR;
     }
-    let frames = unsafe { *(data as *const u32) };
-    BUFFER_FRAMES.store(frames.clamp(64, 4096), std::sync::atomic::Ordering::Relaxed);
+    let Some(device) = device(object) else {
+        return BAD_OBJECT;
+    };
+    let value = unsafe { *(data as *const u32) };
+    let frames = match address.selector {
+        selector::BUFFER_SIZE => value / device.frame_bytes() as u32,
+        _ => value,
+    };
+    device
+        .buffer_frames
+        .store(frames.clamp(MINIMUM_FRAMES, MAXIMUM_FRAMES), Ordering::Relaxed);
     SUCCESS
 }
 
@@ -653,7 +796,7 @@ pub unsafe extern "C" fn AudioHardwareUnload() -> i32 {
 /// `call` must be a host-callable `AudioDeviceIOProc`, and `out` null or a
 /// writable pointer-sized slot.
 pub unsafe extern "C" fn AudioDeviceCreateIOProcID(
-    device: ObjectId,
+    object: ObjectId,
     call: Option<IoProc>,
     client_data: *mut c_void,
     out: *mut *mut c_void,
@@ -665,10 +808,11 @@ pub unsafe extern "C" fn AudioDeviceCreateIOProcID(
     let Some(call) = call else {
         return crate::status::PARAM_ERROR;
     };
-    if device != OUTPUT_DEVICE {
+    let Some(device) = device(object) else {
         return BAD_OBJECT;
-    }
+    };
     let registration = Arc::new(Mutex::new(Proc {
+        device,
         call,
         client_data,
         stream: std::ptr::null_mut(),
@@ -680,16 +824,30 @@ pub unsafe extern "C" fn AudioDeviceCreateIOProcID(
         .unwrap_or_else(|e| e.into_inner())
         .push((handle as usize, registration));
     unsafe { *out = handle };
+    crate::trace::say(format_args!("create IOProc on device {object}"), SUCCESS);
     SUCCESS
 }
 
-/// `OSStatus AudioDeviceDestroyIOProcID(AudioObjectID, AudioDeviceIOProcID)`
-pub unsafe extern "C" fn AudioDeviceDestroyIOProcID(device: ObjectId, id: *mut c_void) -> i32 {
-    if device != OUTPUT_DEVICE {
-        return BAD_OBJECT;
+/// The registration `id` names on `object`. A proc passed back with a device it
+/// was not created on is refused as Apple's does, rather than started on the
+/// device it belongs to.
+fn registered(object: ObjectId, id: *mut c_void) -> Result<Arc<Mutex<Proc>>, i32> {
+    if device(object).is_none() {
+        return Err(BAD_OBJECT);
     }
-    let Some(registration) = proc_for(id) else {
-        return crate::status::INVALID_PARAMETER;
+    let registration = proc_for(id).ok_or(crate::status::INVALID_PARAMETER)?;
+    let device = registration.lock().unwrap_or_else(|e| e.into_inner()).device;
+    match device.id == object {
+        true => Ok(registration),
+        false => Err(crate::status::INVALID_PARAMETER),
+    }
+}
+
+/// `OSStatus AudioDeviceDestroyIOProcID(AudioObjectID, AudioDeviceIOProcID)`
+pub unsafe extern "C" fn AudioDeviceDestroyIOProcID(object: ObjectId, id: *mut c_void) -> i32 {
+    let registration = match registered(object, id) {
+        Ok(registration) => registration,
+        Err(status) => return status,
     };
     // SAFETY: `stop` owns the stream and leaves none behind.
     unsafe { stop(&mut registration.lock().unwrap_or_else(|e| e.into_inner())) };
@@ -701,42 +859,40 @@ pub unsafe extern "C" fn AudioDeviceDestroyIOProcID(device: ObjectId, id: *mut c
 }
 
 /// `OSStatus AudioDeviceStart(AudioObjectID, AudioDeviceIOProcID)`
-pub unsafe extern "C" fn AudioDeviceStart(device: ObjectId, id: *mut c_void) -> i32 {
-    if device != OUTPUT_DEVICE {
-        return BAD_OBJECT;
-    }
-    let Some(registration) = proc_for(id) else {
-        return crate::status::INVALID_PARAMETER;
+pub unsafe extern "C" fn AudioDeviceStart(object: ObjectId, id: *mut c_void) -> i32 {
+    let registration = match registered(object, id) {
+        Ok(registration) => registration,
+        Err(status) => return status,
     };
     let mut started = registration.lock().unwrap_or_else(|e| e.into_inner());
     if !started.stream.is_null() {
         return SUCCESS;
     }
-    let opened = self::device();
-    let spec = sdl3::AudioSpec {
-        format: sdl3::audio::format::F32,
-        channels: opened.channels as i32,
-        freq: opened.sample_rate as i32,
+    let device = started.device;
+    // SAFETY: `drive` and `capture` have SDL's callback prototype, and `id` is
+    // a key into a table that outlives the process rather than a borrow.
+    let stream = unsafe {
+        match device.id {
+            INPUT_DEVICE => sdl3::audio::open_recording(device.spec(), Some(capture), id),
+            _ => sdl3::audio::open_playback(device.spec(), Some(drive), id),
+        }
     };
-    // SAFETY: `drive` has SDL's callback prototype, and `id` is a key into a
-    // table that outlives the process rather than a borrow.
-    let stream = unsafe { sdl3::audio::open_playback(spec, Some(drive), id) };
     let Some(stream) = stream else {
+        crate::trace::say(format_args!("start device {object}"), UNSUPPORTED);
         return UNSUPPORTED;
     };
     started.stream = stream;
     // SAFETY: a stream this crate just opened.
     unsafe { sdl3::audio::resume(stream) };
+    crate::trace::say(format_args!("start device {object}"), SUCCESS);
     SUCCESS
 }
 
 /// `OSStatus AudioDeviceStop(AudioObjectID, AudioDeviceIOProcID)`
-pub unsafe extern "C" fn AudioDeviceStop(device: ObjectId, id: *mut c_void) -> i32 {
-    if device != OUTPUT_DEVICE {
-        return BAD_OBJECT;
-    }
-    let Some(registration) = proc_for(id) else {
-        return crate::status::INVALID_PARAMETER;
+pub unsafe extern "C" fn AudioDeviceStop(object: ObjectId, id: *mut c_void) -> i32 {
+    let registration = match registered(object, id) {
+        Ok(registration) => registration,
+        Err(status) => return status,
     };
     // SAFETY: SDL's destroy waits for its own callback, which is the only other
     // caller.
@@ -754,6 +910,39 @@ unsafe fn stop(registration: &mut Proc) {
     // SAFETY: the caller's obligation; the handle came from `AudioDeviceStart`.
     unsafe { sdl3::audio::destroy(registration.stream) };
     registration.stream = std::ptr::null_mut();
+}
+
+fn empty_list() -> AudioBufferList {
+    AudioBufferList {
+        count: 0,
+        buffers: [AudioBuffer {
+            channels: 0,
+            byte_size: 0,
+            data: std::ptr::null_mut(),
+        }; MAX_BUFFERS],
+    }
+}
+
+/// One interleaved buffer over `bytes`.
+fn list_over(channels: u32, bytes: &mut [u8]) -> AudioBufferList {
+    let mut list = empty_list();
+    list.count = 1;
+    list.buffers[0].channels = channels;
+    list.buffers[0].byte_size = bytes.len() as u32;
+    list.buffers[0].data = bytes.as_mut_ptr().cast();
+    list
+}
+
+/// The time an `IOProc` is told it is, `frames` into its stream.
+fn timestamp(frames: u64) -> TimeStamp {
+    TimeStamp {
+        sample_time: frames as f64,
+        host_time: crate::host_time(),
+        rate_scalar: 1.0,
+        // `kAudioTimeStampSampleTimeValid | kAudioTimeStampHostTimeValid`.
+        flags: 1 | 2,
+        ..TimeStamp::default()
+    }
 }
 
 /// SDL wants more bytes: call the guest's `IOProc` for them.
@@ -786,42 +975,27 @@ unsafe extern "C" fn drive(
     if registration.stream.is_null() {
         return;
     }
-    let device = device();
-    let frame_bytes = 4 * device.channels as usize;
-    let per_call = BUFFER_FRAMES.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    let device = registration.device;
+    let frame_bytes = device.frame_bytes();
+    let per_call = device.buffer_frames() as usize;
     let mut wanted = additional as usize;
     let mut scratch = vec![0u8; per_call * frame_bytes];
+    let empty = empty_list();
     while wanted > 0 {
         let frames = (wanted / frame_bytes).clamp(1, per_call);
         let filled = &mut scratch[..frames * frame_bytes];
         filled.fill(0);
-        let mut list = AudioBufferList {
-            count: 1,
-            buffers: [AudioBuffer {
-                channels: 0,
-                byte_size: 0,
-                data: std::ptr::null_mut(),
-            }; MAX_BUFFERS],
-        };
-        list.buffers[0].channels = device.channels;
-        list.buffers[0].byte_size = filled.len() as u32;
-        list.buffers[0].data = filled.as_mut_ptr().cast();
-        let now = TimeStamp {
-            sample_time: registration.rendered as f64,
-            host_time: crate::host_time(),
-            rate_scalar: 1.0,
-            flags: 1 | 2,
-            ..TimeStamp::default()
-        };
+        let mut list = list_over(device.channels, filled);
+        let now = timestamp(registration.rendered);
         // SAFETY: `call` is a host-callable pointer this runtime was handed for
         // the guest's function, and every structure it is given outlives the
-        // call. The input list is null, which is what a device with no input
-        // stream passes.
+        // call. The input list is empty, as it is for a device with no input
+        // stream.
         let status = unsafe {
             (registration.call)(
-                OUTPUT_DEVICE,
+                device.id,
                 &now,
-                std::ptr::null(),
+                &empty,
                 &now,
                 &mut list,
                 &now,
@@ -835,6 +1009,59 @@ unsafe extern "C" fn drive(
         // SAFETY: a stream this crate opened, and a live slice.
         unsafe { sdl3::audio::put(stream, filled) };
         wanted = wanted.saturating_sub(filled.len());
+    }
+}
+
+/// SDL has captured more bytes: hand the guest's `IOProc` every whole buffer of
+/// them.
+///
+/// Whole buffers only, of the size the program set: it sized its own ring
+/// buffer and converter to that, and a short one would be read as a dropout.
+/// What is left over stays in SDL's stream until the next call.
+///
+/// # Safety
+///
+/// As [`drive`].
+unsafe extern "C" fn capture(
+    userdata: *mut c_void,
+    stream: sdl3::AudioStream,
+    _additional: i32,
+    _total: i32,
+) {
+    let Some(registration) = proc_for(userdata) else {
+        return;
+    };
+    // Held across the guest's call, as in `drive`.
+    let mut registration = registration.lock().unwrap_or_else(|e| e.into_inner());
+    if registration.stream.is_null() {
+        return;
+    }
+    let device = registration.device;
+    let frames = device.buffer_frames() as usize;
+    let mut captured = vec![0u8; frames * device.frame_bytes()];
+    // SAFETY: a stream this crate opened.
+    while unsafe { sdl3::audio::available(stream) } >= captured.len() {
+        // SAFETY: as above, and a live buffer.
+        if unsafe { sdl3::audio::get(stream, &mut captured) } < captured.len() {
+            break;
+        }
+        let list = list_over(device.channels, &mut captured);
+        let mut output = empty_list();
+        let now = timestamp(registration.rendered);
+        // SAFETY: as in `drive`. The output list is empty, as it is for a
+        // device with no output stream.
+        unsafe {
+            (registration.call)(
+                device.id,
+                &now,
+                &list,
+                &now,
+                &mut output,
+                &now,
+                registration.client_data,
+            )
+        };
+        registration.rendered += frames as u64;
     }
 }
 
@@ -945,7 +1172,7 @@ mod tests {
         )
         .expect("answered");
         let word = |at: usize| u32::from_ne_bytes(layout[at..at + 4].try_into().unwrap());
-        let channels = device().channels;
+        let channels = output().channels;
         assert_eq!(word(0), 0, "kAudioChannelLayoutTag_UseChannelDescriptions");
         assert_eq!(word(8), channels);
         assert_eq!(layout.len(), 12 + 20 * channels as usize);
@@ -962,18 +1189,97 @@ mod tests {
         );
     }
 
-    /// The input side of an output-only device has no buffers, and that is how
-    /// a caller counts its channels.
+    /// Each device has buffers on its own side only, and that is how a caller
+    /// counts its channels - and so tells a speaker from a microphone.
     #[test]
-    fn the_input_scope_reports_no_channels() {
-        let input = stream_configuration(scope::INPUT);
-        assert_eq!(input[..4], *as_bytes(&0u32), "no buffers on the input side");
-        let output = stream_configuration(scope::OUTPUT);
-        assert_eq!(output[..4], *as_bytes(&1u32));
+    fn each_device_reports_channels_on_its_own_side_only() {
+        let speaker = output();
+        assert_eq!(
+            stream_configuration(speaker, scope::INPUT)[..4],
+            *as_bytes(&0u32)
+        );
+        assert_eq!(
+            stream_configuration(speaker, scope::OUTPUT)[..4],
+            *as_bytes(&1u32)
+        );
+        let microphone = Device::new(
+            INPUT_DEVICE,
+            scope::INPUT,
+            None,
+            None,
+            "Default Input",
+            "test",
+        );
+        assert_eq!(
+            stream_configuration(&microphone, scope::OUTPUT)[..4],
+            *as_bytes(&0u32)
+        );
+        assert_eq!(
+            stream_configuration(&microphone, scope::INPUT)[..4],
+            *as_bytes(&1u32)
+        );
     }
 
-    /// The buffer size is the one property a program may set, and it reads back
-    /// as what was set.
+    /// The default input is the recording device when the host has one, and
+    /// `kAudioObjectUnknown` when it does not; either way the device list
+    /// agrees with it.
+    #[test]
+    fn the_default_input_device_is_listed_when_present() {
+        let default = ask(SYSTEM_OBJECT, selector::DEFAULT_INPUT_DEVICE, scope::GLOBAL)
+            .expect("answered");
+        let devices = ask(SYSTEM_OBJECT, selector::DEVICES, scope::GLOBAL).expect("answered");
+        match input() {
+            Some(_) => {
+                assert_eq!(default, as_bytes(&INPUT_DEVICE));
+                assert_eq!(devices[4..8], *as_bytes(&INPUT_DEVICE));
+                assert_eq!(
+                    ask(INPUT_DEVICE, selector::STREAMS, scope::INPUT),
+                    Some(as_bytes(&INPUT_DEVICE).to_vec())
+                );
+            }
+            None => {
+                assert_eq!(default, as_bytes(&0u32));
+                assert_eq!(devices.len(), 4);
+            }
+        }
+    }
+
+    /// WebRTC refuses a device whose hog mode it cannot read.
+    #[test]
+    fn nobody_hogs_the_output_device() {
+        assert_eq!(
+            ask(OUTPUT_DEVICE, selector::HOG_MODE, scope::OUTPUT),
+            Some(as_bytes(&-1i32).to_vec())
+        );
+    }
+
+    /// An `IOProc` passed back with a device it was not created on is refused
+    /// rather than started on its own.
+    #[test]
+    fn an_ioproc_belongs_to_its_device() {
+        unsafe extern "C" fn silent(
+            _: ObjectId,
+            _: *const TimeStamp,
+            _: *const AudioBufferList,
+            _: *const TimeStamp,
+            _: *mut AudioBufferList,
+            _: *const TimeStamp,
+            _: *mut c_void,
+        ) -> i32 {
+            SUCCESS
+        }
+        let mut id = std::ptr::null_mut();
+        // SAFETY: a host function and a writable slot.
+        let status = unsafe {
+            AudioDeviceCreateIOProcID(OUTPUT_DEVICE, Some(silent), std::ptr::null_mut(), &mut id)
+        };
+        assert_eq!(status, SUCCESS);
+        assert_ne!(unsafe { AudioDeviceStop(INPUT_DEVICE, id) }, SUCCESS);
+        assert_eq!(unsafe { AudioDeviceDestroyIOProcID(OUTPUT_DEVICE, id) }, SUCCESS);
+    }
+
+    /// The buffer size is the one property a program may set, in frames or in
+    /// bytes, and it reads back as what was set.
     #[test]
     fn the_buffer_size_is_settable_and_reads_back() {
         let address = Address {
@@ -997,6 +1303,27 @@ mod tests {
         assert_eq!(
             ask(OUTPUT_DEVICE, selector::BUFFER_FRAME_SIZE, scope::OUTPUT),
             Some(as_bytes(&wanted).to_vec())
+        );
+        // The same size in bytes is the same setting.
+        let bytes = 256 * output().frame_bytes() as u32;
+        let in_bytes = Address {
+            selector: selector::BUFFER_SIZE,
+            ..address
+        };
+        let status = unsafe {
+            AudioObjectSetPropertyData(
+                OUTPUT_DEVICE,
+                &in_bytes,
+                0,
+                std::ptr::null(),
+                4,
+                (&bytes as *const u32).cast(),
+            )
+        };
+        assert_eq!(status, SUCCESS);
+        assert_eq!(
+            ask(OUTPUT_DEVICE, selector::BUFFER_FRAME_SIZE, scope::OUTPUT),
+            Some(as_bytes(&256u32).to_vec())
         );
         // And back, so the order tests run in cannot matter.
         let default = 512u32;
