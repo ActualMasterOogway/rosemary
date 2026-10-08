@@ -23,6 +23,14 @@ pub(super) fn encode(key: &[u8; 32], library: &TranslatedLibrary) -> Vec<u8> {
         }
         write_strings(&mut payload, &entry.required.capabilities);
         write_strings(&mut payload, &entry.required.extensions);
+        for variables in [&entry.vertex_inputs, &entry.varyings] {
+            write_u32(&mut payload, variables.len() as u32);
+            for variable in variables {
+                write_string(&mut payload, &variable.name);
+                write_u32(&mut payload, variable.location);
+                payload.extend_from_slice(&variable.data_type.to_le_bytes());
+            }
+        }
     }
     write_u32(&mut payload, library.function_constants.len() as u32);
     for constant in &library.function_constants {
@@ -86,15 +94,30 @@ pub(super) fn decode(bytes: &[u8], key: &[u8; 32]) -> Option<TranslatedLibrary> 
                 sampled: reader.boolean()?,
             });
         }
+        let required = RequiredFeatures {
+            capabilities: reader.strings()?,
+            extensions: reader.strings()?,
+        };
+        let mut lists = [Vec::new(), Vec::new()];
+        for list in &mut lists {
+            let count = reader.u32()? as usize;
+            for _ in 0..count.min(4096) {
+                list.push(StageVariable {
+                    name: reader.string()?,
+                    location: reader.u32()?,
+                    data_type: reader.u64()?,
+                });
+            }
+        }
+        let [vertex_inputs, varyings] = lists;
         entries.push(EntryArtifact {
             name,
             stage,
             words,
             resources,
-            required: RequiredFeatures {
-                capabilities: reader.strings()?,
-                extensions: reader.strings()?,
-            },
+            required,
+            vertex_inputs,
+            varyings,
         });
     }
     let count = reader.u32()? as usize;

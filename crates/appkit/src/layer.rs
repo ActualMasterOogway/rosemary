@@ -524,6 +524,12 @@ pub(crate) fn install() {
         "layoutIfNeeded" => layout_if_needed, c"v16@0:8";
         "actionForKey:" => action_for_key, c"@24@0:8@16";
         "dealloc" => dealloc, c"v16@0:8";
+        // Accepted and not kept. A filter only matters when contents are
+        // scaled to the bounds, and the compositor here scales with its own;
+        // asynchronous drawing is a scheduling hint.
+        "setMagnificationFilter:" => ignore_object, c"v24@0:8@16";
+        "setMinificationFilter:" => ignore_object, c"v24@0:8@16";
+        "setDrawsAsynchronously:" => ignore_flag, c"v20@0:8c16";
     });
     let metal = objc::class::lookup(c"CAMetalLayer").expect("declared before its methods");
     methods!(metal, {
@@ -537,8 +543,16 @@ pub(crate) fn install() {
         "framebufferOnly" => framebuffer_only, c"c16@0:8";
         "setDisplaySyncEnabled:" => set_display_sync_enabled, c"v20@0:8c16";
         "displaySyncEnabled" => display_sync_enabled, c"c16@0:8";
+        // Presentation here never joins a Core Animation transaction, and
+        // every drawable is presented in the colour space it was drawn in.
+        "setPresentsWithTransaction:" => ignore_flag, c"v20@0:8c16";
+        "setColorspace:" => ignore_object, c"v24@0:8^{CGColorSpace=}16";
     });
 }
+
+unsafe extern "C" fn ignore_object(_receiver: Id, _sel: Sel, _value: Id) {}
+
+unsafe extern "C" fn ignore_flag(_receiver: Id, _sel: Sel, _value: u8) {}
 
 #[cfg(test)]
 mod tests {

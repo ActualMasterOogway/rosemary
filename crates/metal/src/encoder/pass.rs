@@ -149,8 +149,8 @@ pub(super) fn resolve_attachment(
         ));
         return None;
     }
-    let level = color.resolve_level as u32;
-    let slice = color.resolve_slice as u32;
+    let level = color.resolve_level as u32 + texture.image.base_level;
+    let slice = color.resolve_slice as u32 + texture.image.base_layer;
     Some(ResolveTarget {
         format: texture.image.format,
         view: texture.attachment_view(level, slice),
@@ -331,8 +331,8 @@ fn depth_resolve(
             return None;
         }
     };
-    let level = named.resolve_level as u32;
-    let slice = named.resolve_slice as u32;
+    let level = named.resolve_level as u32 + destination.image.base_level;
+    let slice = named.resolve_slice as u32 + destination.image.base_layer;
     Some(DepthResolveTarget {
         resolve: DepthResolve {
             format: destination.image.format,
@@ -435,8 +435,10 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
         let format = texture.image.format;
         let first = key.colors.is_empty();
         samples(&mut key, texture.image.samples, first);
-        let level = color.level as u32;
-        views.push(texture.attachment_view(level, color.slice as u32));
+        // Absolute in the underlying image, which a texture view's are not.
+        let level = color.level as u32 + texture.image.base_level;
+        let color_slice = color.slice as u32 + texture.image.base_layer;
+        views.push(texture.attachment_view(level, color_slice));
         let (base_width, base_height) = (texture.image.width, texture.image.height);
         let source_image = texture.image.image;
         let multisampled = texture.image.samples != vk::SampleCountFlags::TYPE_1;
@@ -458,7 +460,7 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
                 copies.push(PendingCopy {
                     source: source_image,
                     source_level: level,
-                    source_slice: color.slice as u32,
+                    source_slice: color_slice,
                     destination: target.image,
                     destination_level: target.level,
                     destination_slice: target.slice,
@@ -473,7 +475,7 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
                 image: source_image,
                 aspect: vk::ImageAspectFlags::COLOR,
                 level,
-                slice: color.slice as u32,
+                slice: color_slice,
                 width: level_extent(base_width, level),
                 height: level_extent(base_height, level),
                 format,
@@ -542,8 +544,9 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
         }
         let first = key.colors.is_empty();
         samples(&mut key, texture.image.samples, first);
-        let level = attachment.level as u32;
-        views.push(texture.attachment_view(level, attachment.slice as u32));
+        let level = attachment.level as u32 + texture.image.base_level;
+        let depth_slice = attachment.slice as u32 + texture.image.base_layer;
+        views.push(texture.attachment_view(level, depth_slice));
         let (format, aspect) = (texture.image.format, texture.image.aspect);
         let multisampled = texture.image.samples != vk::SampleCountFlags::TYPE_1;
         let (base_width, base_height) = (texture.image.width, texture.image.height);
@@ -560,7 +563,7 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
                 copies.push(PendingCopy {
                     source: source_image,
                     source_level: level,
-                    source_slice: attachment.slice as u32,
+                    source_slice: depth_slice,
                     destination: resolve.image,
                     destination_level: resolve.level,
                     destination_slice: resolve.slice,
@@ -596,7 +599,7 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
                 image: texture.image.image,
                 aspect: vk::ImageAspectFlags::DEPTH,
                 level,
-                slice: attachment.slice as u32,
+                slice: depth_slice,
                 width: level_extent(texture.image.width, level),
                 height: level_extent(texture.image.height, level),
                 format: texture.image.format,
@@ -621,7 +624,45 @@ fn gather_attachments(gpu: &Gpu, descriptor: &RenderPassDescriptor) -> Attachmen
     }
 }
 
-pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescriptor) {
+/// Metal's default render state for a pass, which a Vulkan command buffer
+/// has to be told: dynamic state is not inherited by a secondary one.
+pub(super) fn record_pass_defaults(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    area: vk::Rect2D,
+) {
+    let (width, height) = (area.extent.width, area.extent.height);
+    // SAFETY: recording into a command buffer inside the pass.
+    unsafe {
+        // Metal's default viewport and scissor cover the attachments, and the
+        // viewport is flipped for the same reason `-setViewport:` flips.
+        device.cmd_set_viewport(
+            command_buffer,
+            0,
+            &[vk::Viewport {
+                x: 0.0,
+                y: height as f32,
+                width: width as f32,
+                height: -(height as f32),
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }],
+        );
+        device.cmd_set_scissor(command_buffer, 0, &[area]);
+        device.cmd_set_depth_bias(command_buffer, 0.0, 0.0, 0.0);
+        device.cmd_set_blend_constants(command_buffer, &[0.0; 4]);
+        device.cmd_set_stencil_reference(command_buffer, vk::StencilFaceFlags::FRONT_AND_BACK, 0);
+    }
+}
+
+/// Begin the pass `descriptor` describes on `encoder_object`'s command
+/// buffer. A parallel encoder's pass is begun for secondary command buffers,
+/// so nothing else is recorded into it here.
+pub(crate) fn begin_render_pass(
+    encoder_object: Id,
+    descriptor: &RenderPassDescriptor,
+    secondary: bool,
+) {
     // SAFETY: an encoder this crate just made.
     let encoder = unsafe { object::body::<Encoder>(encoder_object) };
     let command = encoder.command();
@@ -683,39 +724,21 @@ pub(crate) fn begin_render_pass(encoder_object: Id, descriptor: &RenderPassDescr
         .framebuffer(framebuffer)
         .render_area(area)
         .clear_values(&clears);
+    let contents = if secondary {
+        vk::SubpassContents::SECONDARY_COMMAND_BUFFERS
+    } else {
+        vk::SubpassContents::INLINE
+    };
     // SAFETY: recording into this command buffer.
     unsafe {
-        gpu.device.cmd_begin_render_pass(
-            command.command_buffer,
-            &begin,
-            vk::SubpassContents::INLINE,
-        );
-        // Metal's default viewport and scissor cover the attachments, and the
-        // viewport is flipped for the same reason `-setViewport:` flips.
-        gpu.device.cmd_set_viewport(
-            command.command_buffer,
-            0,
-            &[vk::Viewport {
-                x: 0.0,
-                y: height as f32,
-                width: width as f32,
-                height: -(height as f32),
-                min_depth: 0.0,
-                max_depth: 1.0,
-            }],
-        );
         gpu.device
-            .cmd_set_scissor(command.command_buffer, 0, &[area]);
-        gpu.device
-            .cmd_set_depth_bias(command.command_buffer, 0.0, 0.0, 0.0);
-        gpu.device
-            .cmd_set_blend_constants(command.command_buffer, &[0.0; 4]);
-        gpu.device.cmd_set_stencil_reference(
-            command.command_buffer,
-            vk::StencilFaceFlags::FRONT_AND_BACK,
-            0,
-        );
+            .cmd_begin_render_pass(command.command_buffer, &begin, contents)
     };
+    if secondary {
+        encoder.inheritance = Some((pass, framebuffer, area));
+    } else {
+        record_pass_defaults(&gpu.device, command.command_buffer, area);
+    }
     gpu::milestone("render pass");
     encoder.in_render_pass = true;
     encoder.resolve_mask = resolve_mask;
@@ -805,6 +828,18 @@ pub(super) unsafe extern "C" fn set_pass_visibility_result_buffer(
     objc::arc::release(previous);
 }
 
+/// `-setRenderTargetArrayLength:`. A pass here attaches the one slice each
+/// attachment names, which is a layered pass of one layer.
+pub(super) unsafe extern "C" fn set_render_target_array_length(
+    _receiver: Id,
+    _sel: Sel,
+    length: u64,
+) {
+    if length > 1 {
+        gpu::trace_once("a layered render pass is unsupported; only one slice is rendered");
+    }
+}
+
 /// `+[MTLRenderPassDescriptor renderPassDescriptor]`.
 pub(super) unsafe extern "C" fn new_render_pass_descriptor(_class: Id, _sel: Sel) -> Id {
     let object = object::make(c"MTLRenderPassDescriptor", RenderPassDescriptor::default());
@@ -817,6 +852,21 @@ pub(super) unsafe extern "C" fn new_render_pass_descriptor(_class: Id, _sel: Sel
 pub(crate) struct AttachmentElement {
     pub owner: Id,
     pub slot: AttachmentSlot,
+    /// The attachment of an element with no owner: a standalone
+    /// `MTLRenderPass...AttachmentDescriptor`, or one whose descriptor has
+    /// gone. Its textures are retained, and released by the element's
+    /// `-dealloc`.
+    pub local: AttachmentDescriptor,
+}
+
+impl AttachmentElement {
+    fn new(owner: Id, slot: AttachmentSlot) -> Self {
+        Self {
+            owner,
+            slot,
+            local: AttachmentDescriptor::default(),
+        }
+    }
 }
 
 impl crate::resource::Element for AttachmentElement {
@@ -832,13 +882,12 @@ pub(crate) enum AttachmentSlot {
     Stencil,
 }
 
-/// The attachment one element names, or `None` once the descriptor which
-/// vended the element has gone and orphaned it.
+/// The attachment one element names: its descriptor's, or its own.
 pub(super) fn attachment_of<'a>(element: Id) -> Option<&'a mut AttachmentDescriptor> {
     // SAFETY: an attachment element of this crate's.
-    let element = *unsafe { object::body::<AttachmentElement>(element) };
+    let element = unsafe { object::body::<AttachmentElement>(element) };
     if element.owner.is_null() {
-        return None;
+        return Some(&mut element.local);
     }
     // SAFETY: the element holds the descriptor which made it, which orphans
     // every element it vended before it goes.
@@ -860,10 +909,7 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
         .map(|index| {
             object::make(
                 c"RosemaryMTLRenderPassAttachmentDescriptor",
-                AttachmentElement {
-                    owner: receiver,
-                    slot: AttachmentSlot::Color(index),
-                },
+                AttachmentElement::new(receiver, AttachmentSlot::Color(index)),
             )
         })
         .collect::<Vec<_>>();
@@ -875,6 +921,11 @@ pub(super) unsafe extern "C" fn pass_color_attachments(receiver: Id, _sel: Sel) 
             // `RosemaryMTLRenderPassAttachmentDescriptor`.
             orphan: |element| unsafe {
                 crate::resource::orphan_element::<AttachmentElement>(element)
+            },
+            assign: |element, source| {
+                if let Some(destination) = attachment_of(element) {
+                    assign_attachment(destination, source);
+                }
             },
         },
     );
@@ -897,14 +948,14 @@ pub(super) unsafe extern "C" fn pass_single_attachment(receiver: Id, sel: Sel) -
     }
     let element = object::make(
         c"RosemaryMTLRenderPassAttachmentDescriptor",
-        AttachmentElement {
-            owner: receiver,
-            slot: if depth {
+        AttachmentElement::new(
+            receiver,
+            if depth {
                 AttachmentSlot::Depth
             } else {
                 AttachmentSlot::Stencil
             },
-        },
+        ),
     );
     let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
     if depth {
@@ -967,6 +1018,118 @@ pub(super) unsafe extern "C" fn set_attachment_clear_depth(receiver: Id, _sel: S
     }
 }
 
+/// Whether `object` is an attachment element of any of this crate's classes.
+fn is_attachment(object: Id) -> bool {
+    ATTACHMENT_CLASSES
+        .iter()
+        .any(|name| crate::object::is_kind(object, name))
+}
+
+pub(super) const ATTACHMENT_CLASSES: [&std::ffi::CStr; 5] = [
+    c"RosemaryMTLRenderPassAttachmentDescriptor",
+    c"MTLRenderPassAttachmentDescriptor",
+    c"MTLRenderPassColorAttachmentDescriptor",
+    c"MTLRenderPassDepthAttachmentDescriptor",
+    c"MTLRenderPassStencilAttachmentDescriptor",
+];
+
+/// Copy `source`'s attachment, or the defaults where it is nil, over
+/// `destination`, which keeps its own references to the textures.
+pub(super) fn assign_attachment(destination: &mut AttachmentDescriptor, source: Id) {
+    let value = if is_attachment(source) {
+        attachment_of(source).map_or_else(AttachmentDescriptor::default, |a| *a)
+    } else {
+        AttachmentDescriptor::default()
+    };
+    objc::arc::retain(value.texture);
+    objc::arc::retain(value.resolve_texture);
+    let previous = std::mem::replace(destination, value);
+    objc::arc::release(previous.texture);
+    objc::arc::release(previous.resolve_texture);
+}
+
+/// `-[MTLRenderPassDescriptor setDepthAttachment:]` and its stencil twin.
+pub(super) unsafe extern "C" fn set_pass_single_attachment(receiver: Id, sel: Sel, value: Id) {
+    // SAFETY: a render pass descriptor of this crate's.
+    let descriptor = unsafe { object::body::<RenderPassDescriptor>(receiver) };
+    // SAFETY: a selector the runtime owns.
+    let depth = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() == b"setDepthAttachment:";
+    assign_attachment(
+        if depth {
+            &mut descriptor.depth
+        } else {
+            &mut descriptor.stencil
+        },
+        value,
+    );
+}
+
+/// `-init` of a standalone attachment descriptor.
+pub(super) unsafe extern "C" fn attachment_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a freshly allocated element; its body is not yet established.
+    unsafe {
+        object::init(
+            receiver,
+            AttachmentElement::new(std::ptr::null_mut(), AttachmentSlot::Color(0)),
+        )
+    };
+    receiver
+}
+
+/// An element's own textures: a standalone one holds them, and an orphaned
+/// one may have been given some after its descriptor went.
+pub(super) unsafe extern "C" fn attachment_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: an attachment element of this crate's.
+    let element = unsafe { object::body::<AttachmentElement>(receiver) };
+    objc::arc::release(element.local.texture);
+    objc::arc::release(element.local.resolve_texture);
+    objc::arc::finalize(receiver);
+}
+
+pub(super) unsafe extern "C" fn attachment_object(receiver: Id, sel: Sel) -> Id {
+    let Some(attachment) = attachment_of(receiver) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"texture" => attachment.texture,
+        b"resolveTexture" => attachment.resolve_texture,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+pub(super) unsafe extern "C" fn attachment_number(receiver: Id, sel: Sel) -> u64 {
+    let Some(attachment) = attachment_of(receiver) else {
+        return 0;
+    };
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"level" => attachment.level,
+        b"slice" => attachment.slice,
+        b"loadAction" => attachment.load_action,
+        b"storeAction" => attachment.store_action,
+        b"clearStencil" => u64::from(attachment.clear_stencil),
+        b"resolveLevel" => attachment.resolve_level,
+        b"resolveSlice" => attachment.resolve_slice,
+        b"depthResolveFilter" | b"stencilResolveFilter" => attachment.resolve_filter,
+        _ => 0,
+    }
+}
+
+pub(super) unsafe extern "C" fn attachment_clear_color(receiver: Id, _sel: Sel) -> ClearColor {
+    let [red, green, blue, alpha] = attachment_of(receiver).map_or([0.0; 4], |a| a.clear_color);
+    ClearColor {
+        red,
+        green,
+        blue,
+        alpha,
+    }
+}
+
+pub(super) unsafe extern "C" fn attachment_clear_depth(receiver: Id, _sel: Sel) -> f64 {
+    attachment_of(receiver).map_or(1.0, |a| a.clear_depth)
+}
+
 pub(super) unsafe extern "C" fn new_compute_encoder(receiver: Id, _sel: Sel) -> Id {
     new_encoder(receiver, Kind::Compute)
 }
@@ -985,7 +1148,7 @@ pub(super) unsafe extern "C" fn new_render_encoder(receiver: Id, _sel: Sel, desc
     }
     // SAFETY: `MTLRenderPassDescriptor` is this crate's class.
     let described = unsafe { object::body::<RenderPassDescriptor>(descriptor) };
-    begin_render_pass(encoder, described);
+    begin_render_pass(encoder, described, false);
     encoder
 }
 

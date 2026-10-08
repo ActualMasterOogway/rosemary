@@ -52,6 +52,7 @@ impl Emitter {
                 gradient,
                 bias,
                 gather,
+                compare,
             } => {
                 let result = instruction
                     .result
@@ -101,6 +102,29 @@ impl Emitter {
                         ImageOperands::CONST_OFFSET
                     };
                     extra.push(SpirvOperand::IdRef(self.operand(&offset, values)?));
+                }
+                if let Some(reference) = compare {
+                    let reference = self.operand(reference, values)?;
+                    if lod.is_some() || gradient.is_some() {
+                        self.builder
+                            .image_sample_dref_explicit_lod(
+                                ty, result_id, sampled, coordinate, reference, mask, extra,
+                            )
+                            .map_err(build_error)?;
+                    } else {
+                        self.builder
+                            .image_sample_dref_implicit_lod(
+                                ty,
+                                result_id,
+                                sampled,
+                                coordinate,
+                                reference,
+                                Some(mask),
+                                extra,
+                            )
+                            .map_err(build_error)?;
+                    }
+                    return Ok(());
                 }
                 match gather {
                     Some(component) => {

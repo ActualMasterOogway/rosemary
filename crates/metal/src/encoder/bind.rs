@@ -22,6 +22,8 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
             fill_mode: 0,
             depth_clip: 0,
             in_render_pass: false,
+            sub_encoder: false,
+            inheritance: None,
             resolve_mask: 0,
             depth_resolve: None,
             pending_copies: Vec::new(),
@@ -71,6 +73,16 @@ pub(super) fn bind_point_slot(bind_point: vk::PipelineBindPoint) -> usize {
 pub(super) unsafe extern "C" fn end_encoding(receiver: Id, _sel: Sel) {
     // SAFETY: an encoder of this crate's.
     let encoder = unsafe { object::body::<Encoder>(receiver) };
+    if encoder.sub_encoder {
+        // The pass belongs to the parallel encoder, which ends it; this
+        // encoder's recording is a secondary command buffer, closed here so
+        // the parallel encoder only has to execute it.
+        if encoder.in_render_pass {
+            encoder.in_render_pass = false;
+            close_secondary(encoder.command());
+        }
+        return;
+    }
     if encoder.in_render_pass {
         let command = encoder.command();
         // SAFETY: a render pass began when the encoder was made.

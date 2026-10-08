@@ -122,6 +122,8 @@ pub(crate) struct Submission {
     pub(super) retained: Vec<OwnedObjcRef>,
     pub(super) uploads: Vec<GpuBuffer>,
     pub(super) framebuffers: Vec<vk::Framebuffer>,
+    /// The parallel render sub-encoders' command buffers this one executed.
+    pub(super) secondaries: Vec<gpu::SecondaryContext>,
     pub(super) captures: Vec<crate::capture::Capture>,
     pub(super) completed_handlers: Vec<OwnedBlock>,
     pub(super) presents: Vec<OwnedObjcRef>,
@@ -207,6 +209,9 @@ impl Submission {
         }
         for chunk in self.uploads.drain(..) {
             self.gpu.release_upload_chunk(chunk);
+        }
+        for secondary in self.secondaries.drain(..) {
+            self.gpu.release_secondary(secondary);
         }
         self.retained.clear();
         // The submission finished, or never reached the queue.

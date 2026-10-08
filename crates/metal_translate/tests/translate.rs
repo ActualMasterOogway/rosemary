@@ -442,12 +442,12 @@ fn source_msl_rejects_unimplemented_operations() {
     let error = parse_msl(
         "\n\
          kernel void f(device uint* output [[buffer(0)]]) {\n\
-             output[1] = 1;\n\
+             switch (output[0]) { default: break; }\n\
          }",
     )
     .unwrap_err();
     assert_eq!(error.diagnostics[0].phase, Phase::AirSyntax);
-    assert_eq!(error.diagnostics[0].line, Some(2));
+    assert_eq!(error.diagnostics[0].line, Some(3));
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn source_msl_translation_errors_include_nearby_source() {
     let source = "// Prelude\n\
                   // More prelude\n\
                   kernel void f(\n\
-                      texturecube<float, access::write> output [[texture(0)]]\n\
+                      device uint* output [[raster_order_group(0)]]\n\
                   ) { return; }\n\
                   // Epilogue";
     let error = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap_err();
@@ -464,24 +464,157 @@ fn source_msl_translation_errors_include_nearby_source() {
     assert_eq!(
         error.to_string(),
         concat!(
-            "AirSyntax at line 4: unsupported MSL texture type\n\n",
+            "AirSyntax at line 4: unsupported parameter attribute [[raster_order_group]]\n\n",
             "MSL source context:\n",
             "  2 | // More prelude\n",
             "  3 | kernel void f(\n",
-            "> 4 | texturecube<float, access::write> output [[texture(0)]]\n",
+            "> 4 | device uint* output [[raster_order_group(0)]]\n",
             "  5 | ) { return; }\n",
             "  6 | // Epilogue",
         )
     );
 }
 
+/// A vertex and a fragment function as Unity's shader compiler writes them:
+/// a uniform structure, a `[[stage_in]]` structure, swizzles, `fma`, and a
+/// varying linked by its `user()` name.
+const UNITY_STYLE: &str = "#include <metal_stdlib>\n\
+    using namespace metal;\n\
+    #if !(__HAVE_FMA__)\n\
+    #define fma(a,b,c) ((a) * (b) + (c))\n\
+    #endif\n\
+    #ifndef XLT_REMAP_O\n\
+    #define XLT_REMAP_O {0, 1, 2, 3, 4, 5, 6, 7}\n\
+    #endif\n\
+    constexpr constant uint xlt_remap_o[] = XLT_REMAP_O;\n\
+    struct Globals_Type { float4 _Color; float3 _Offset; float4 hlslcc_mtx4x4M[4]; int _Count; };\n\
+    struct VIn { float4 POSITION0 [[ attribute(0) ]]; float2 TEXCOORD0 [[ attribute(3) ]]; };\n\
+    struct VOut { float4 mtl_Position [[ position ]]; float2 TEXCOORD0 [[ user(TEXCOORD0) ]]; float4 COLOR0 [[ user(COLOR0) ]]; };\n\
+    vertex VOut vmain(constant Globals_Type& Globals [[ buffer(0) ]], VIn input [[ stage_in ]]) {\n\
+        VOut output;\n\
+        float4 u_xlat0;\n\
+        int u_xlati1;\n\
+        u_xlat0 = input.POSITION0.yyyy * Globals.hlslcc_mtx4x4M[1];\n\
+        u_xlat0 = fma(Globals.hlslcc_mtx4x4M[0], input.POSITION0.xxxx, u_xlat0);\n\
+        u_xlat0.xyz = u_xlat0.xyz + Globals._Offset.xyz;\n\
+        u_xlati1 = 0x0;\n\
+        while(true){\n\
+            if(u_xlati1>=Globals._Count){break;}\n\
+            u_xlat0.x = u_xlat0.x * 0.5;\n\
+            u_xlati1 = u_xlati1 + 0x1;\n\
+        }\n\
+        output.mtl_Position = u_xlat0;\n\
+        output.TEXCOORD0.xy = input.TEXCOORD0.xy;\n\
+        output.COLOR0 = Globals._Color;\n\
+        return output;\n\
+    }\n\
+    struct FIn { float4 COLOR0 [[ user(COLOR0) ]]; float2 TEXCOORD0 [[ user(TEXCOORD0) ]]; };\n\
+    struct FOut { float4 SV_Target0 [[ color(xlt_remap_o[0]) ]]; };\n\
+    fragment FOut fmain(texture2d<float, access::sample > _MainTex [[ texture(0) ]],\n\
+        sampler sampler_MainTex [[ sampler (0) ]], FIn input [[ stage_in ]]) {\n\
+        FOut output;\n\
+        float4 u_xlat0;\n\
+        bool u_xlatb1;\n\
+        u_xlat0 = _MainTex.sample(sampler_MainTex, input.TEXCOORD0.xy);\n\
+        u_xlatb1 = u_xlat0.w<0.5;\n\
+        if(((int(u_xlatb1) * int(0xffffffffu)))!=0){discard_fragment();}\n\
+        output.SV_Target0 = u_xlat0 * input.COLOR0;\n\
+        return output;\n\
+    }\n";
+
 #[test]
-fn source_msl_rejects_texture_shapes_without_an_ir_type() {
-    let error = parse_msl(
-        "kernel void f(texturecube<float, access::write> output [[texture(0)]]) { return; }",
+fn source_msl_compiles_unity_style_vertex_and_fragment_functions() {
+    let target = TargetProfile {
+        demote_to_helper_invocation: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let library = translate_msl(UNITY_STYLE, &target).unwrap();
+    let names = library
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["vmain", "fmain"]);
+    let vertex = &library.entries[0];
+    let fragment = &library.entries[1];
+    // The attributes keep the indices the source gave them.
+    let attributes = vertex
+        .vertex_inputs
+        .iter()
+        .map(|input| (input.name.as_str(), input.location, input.data_type))
+        .collect::<Vec<_>>();
+    assert_eq!(attributes, [("POSITION0", 0, 6), ("TEXCOORD0", 3, 4)]);
+    // Each stage numbers its varyings in its own order; the names are what
+    // links them.
+    let varyings = |entry: &metal_translate::EntryArtifact| {
+        entry
+            .varyings
+            .iter()
+            .map(|varying| (varying.name.clone(), varying.location))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        varyings(vertex),
+        [("user(TEXCOORD0)".to_owned(), 0), ("user(COLOR0)".to_owned(), 1)]
+    );
+    assert_eq!(
+        varyings(fragment),
+        [("user(COLOR0)".to_owned(), 0), ("user(TEXCOORD0)".to_owned(), 1)]
+    );
+}
+
+#[test]
+fn source_msl_preprocessor_macros_replace_defaults() {
+    let module = metal_translate::msl::parse_msl_with_macros(
+        UNITY_STYLE,
+        &[("XLT_REMAP_O".to_owned(), "{3, 0, 0, 0, 0, 0, 0, 0}".to_owned())],
     )
-    .unwrap_err();
-    assert_eq!(error.diagnostics[0].message, "unsupported MSL texture type");
+    .unwrap();
+    let fragment = &module.entries[1];
+    assert_eq!(
+        fragment.outputs[0].binding,
+        metal_translate::ir::StageBinding::RenderTarget { index: 3 }
+    );
+}
+
+#[test]
+fn source_msl_compiles_a_compound_literal_and_half_values() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct ApplicationData { float4 pos [[attribute(0)]]; half4 color [[attribute(3)]]; };\n\
+        struct RasterizerData { float4 pos [[position]]; half4 color; };\n\
+        vertex RasterizerData clear_vprog(ApplicationData input [[stage_in]])\n\
+        {\n\
+            return (RasterizerData) { .pos = input.pos, .color = input.color };\n\
+        }\n\
+        fragment half4 clear_fshader(RasterizerData input [[stage_in]])\n\
+        {\n\
+            return input.color;\n\
+        }\0";
+    let target = TargetProfile {
+        shader_float16: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let library = translate_msl(source, &target).unwrap();
+    assert_eq!(library.entries.len(), 2);
+    // An unattributed member is a varying named by the member.
+    assert_eq!(library.entries[0].varyings[0].name, "user(color)");
+    assert_eq!(library.entries[1].varyings[0].name, "user(color)");
+}
+
+#[test]
+fn source_msl_loops_leave_through_one_block() {
+    let source = "kernel void f(device uint* output [[buffer(0)]], uint gid [[thread_position_in_grid]]) {\n\
+        uint total = 0;\n\
+        for (uint i = 0; i < 16; i++) {\n\
+            if (i == gid) { continue; }\n\
+            if (total > 100u) { break; }\n\
+            total += output[i];\n\
+            if (output[i] == 7u) { break; }\n\
+        }\n\
+        output[gid] = total;\n\
+    }";
+    translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
 }
 
 #[test]
@@ -1900,6 +2033,7 @@ fn sample_with_offset(offset: Operand) -> (rspirv::dr::Module, Vec<rspirv::dr::O
                         gradient: None,
                         bias: None,
                         gather: None,
+                        compare: None,
                     },
                 }],
                 terminator: Terminator::Return(None),

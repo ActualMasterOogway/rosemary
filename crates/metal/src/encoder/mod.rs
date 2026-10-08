@@ -2,6 +2,7 @@ mod bind;
 mod blit;
 mod command_buffer;
 mod compute;
+mod parallel;
 mod pass;
 mod queue;
 mod render;
@@ -12,6 +13,7 @@ use bind::*;
 use blit::*;
 use command_buffer::*;
 use compute::*;
+use parallel::*;
 use pass::*;
 use queue::*;
 use render::*;
@@ -175,6 +177,14 @@ pub(crate) struct CommandBuffer {
     uploads: Vec<GpuBuffer>,
     upload_used: u64,
     framebuffers: Vec<vk::Framebuffer>,
+    /// Sub-encoders' secondary command buffers this one executes.
+    secondaries: Vec<gpu::SecondaryContext>,
+    /// Whether this is a parallel render sub-encoder's own command buffer,
+    /// which records into a secondary command buffer and is never committed:
+    /// its parallel encoder adopts everything it holds.
+    secondary: bool,
+    /// Whether that secondary command buffer has been ended.
+    secondary_closed: bool,
     /// `ROSEMARY_PASS_OUT`: attachment readbacks written once the work is done.
     captures: Vec<crate::capture::Capture>,
     scheduled_handlers: Vec<OwnedBlock>,
@@ -200,6 +210,12 @@ pub(crate) struct Encoder {
     fill_mode: u64,
     depth_clip: u64,
     in_render_pass: bool,
+    /// Whether this is a parallel render sub-encoder, which records into a
+    /// secondary command buffer inside a pass its parallel encoder began.
+    sub_encoder: bool,
+    /// The render pass, framebuffer and area of the pass a parallel encoder
+    /// began, which its sub-encoders' command buffers inherit.
+    inheritance: Option<(vk::RenderPass, vk::Framebuffer, vk::Rect2D)>,
     /// Which colour attachments of the pass being recorded are resolved, for
     /// the pipeline variant a draw needs. See [`RenderVariantKey`].
     resolve_mask: u32,
@@ -241,6 +257,13 @@ pub(crate) struct MtlSize {
     pub width: u64,
     pub height: u64,
     pub depth: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct NsRange {
+    pub location: u64,
+    pub length: u64,
 }
 
 #[repr(C)]
@@ -405,7 +428,68 @@ impl Default for RenderPassDescriptor {
     }
 }
 
+fn install_attachment_methods(attachment: &'static objc::class::Class) {
+    methods!(attachment, {
+        "setClearColor:" => set_attachment_clear_color, c"v48@0:8{MTLClearColor=dddd}16";
+        "setClearDepth:" => set_attachment_clear_depth, c"v24@0:8d16";
+        "clearColor" => attachment_clear_color, c"{MTLClearColor=dddd}16@0:8";
+        "clearDepth" => attachment_clear_depth, c"d16@0:8";
+        "dealloc" => attachment_dealloc, c"v16@0:8";
+    });
+    for selector in ["setTexture:", "setResolveTexture:"] {
+        attachment.replace_method(
+            objc::sel::get(selector),
+            set_attachment_object as *const std::ffi::c_void,
+            c"v24@0:8@16",
+        );
+    }
+    for selector in ["texture", "resolveTexture"] {
+        attachment.replace_method(
+            objc::sel::get(selector),
+            attachment_object as *const std::ffi::c_void,
+            c"@16@0:8",
+        );
+    }
+    for selector in [
+        "setLevel:",
+        "setSlice:",
+        "setDepthPlane:",
+        "setLoadAction:",
+        "setStoreAction:",
+        "setClearStencil:",
+        "setResolveLevel:",
+        "setResolveSlice:",
+        "setDepthResolveFilter:",
+        "setStencilResolveFilter:",
+    ] {
+        attachment.replace_method(
+            objc::sel::get(selector),
+            set_attachment_number as *const std::ffi::c_void,
+            c"v24@0:8Q16",
+        );
+    }
+    for selector in [
+        "level",
+        "slice",
+        "depthPlane",
+        "loadAction",
+        "storeAction",
+        "clearStencil",
+        "resolveLevel",
+        "resolveSlice",
+        "depthResolveFilter",
+        "stencilResolveFilter",
+    ] {
+        attachment.replace_method(
+            objc::sel::get(selector),
+            attachment_number as *const std::ffi::c_void,
+            c"Q16@0:8",
+        );
+    }
+}
+
 pub(crate) fn install() {
+    parallel::install();
     object::register::<CommandQueue>(c"RosemaryMTLCommandQueue");
     object::register::<CommandBuffer>(c"RosemaryMTLCommandBuffer");
     object::register::<Encoder>(c"RosemaryMTLCommandEncoder");
@@ -467,6 +551,32 @@ pub(crate) fn install() {
             => copy_buffer_to_texture, c"v120@0:8@16Q24Q32Q40{MTLSize=QQQ}48@72Q80Q88{MTLOrigin=QQQ}96";
         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"
             => copy_texture_to_buffer, c"v120@0:8@16Q24Q32{MTLOrigin=QQQ}40{MTLSize=QQQ}64@88Q96Q104Q112";
+        "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:options:"
+            => copy_buffer_to_texture_options, c"v128@0:8@16Q24Q32Q40{MTLSize=QQQ}48@72Q80Q88{MTLOrigin=QQQ}96Q120";
+        "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:"
+            => copy_texture_to_buffer_options, c"v128@0:8@16Q24Q32{MTLOrigin=QQQ}40{MTLSize=QQQ}64@88Q96Q104Q112Q120";
+        "drawPrimitives:vertexStart:vertexCount:" => draw_primitives_once, c"v40@0:8Q16Q24Q32";
+        "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"
+            => draw_indexed_primitives_once, c"v56@0:8Q16Q24Q32@40Q48";
+        "drawPrimitives:indirectBuffer:indirectBufferOffset:" => draw_primitives_indirect,
+            c"v40@0:8Q16@24Q32";
+        "drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:"
+            => draw_indexed_primitives_indirect, c"v64@0:8Q16Q24@32Q40@48Q56";
+        // Every attachment is stored whatever the pass named (see
+        // `pass::store_op`), so a store action decided late changes nothing.
+        "setColorStoreAction:atIndex:" => crate::no_op, c"v32@0:8Q16Q24";
+        "setDepthStoreAction:" => crate::no_op, c"v24@0:8Q16";
+        "setStencilStoreAction:" => crate::no_op, c"v24@0:8Q16";
+        // One Vulkan queue runs every encoder in order behind a full barrier,
+        // which is everything a fence could ask for.
+        "updateFence:afterStages:" => crate::no_op, c"v32@0:8@16Q24";
+        "waitForFence:beforeStages:" => crate::no_op, c"v32@0:8@16Q24";
+        "memoryBarrierWithScope:" => crate::no_op, c"v24@0:8Q16";
+        "memoryBarrierWithScope:afterStages:beforeStages:" => crate::no_op, c"v40@0:8Q16Q24Q32";
+        "useResource:usage:stages:" => crate::no_op, c"v40@0:8@16Q24Q32";
+        "useHeap:" => crate::no_op, c"v24@0:8@16";
+        "setStencilFrontReferenceValue:backReferenceValue:" => set_stencil_references,
+            c"v24@0:8I16I20";
         "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"
             => copy_texture_to_texture, c"v144@0:8@16Q24Q32{MTLOrigin=QQQ}40{MTLSize=QQQ}64@88Q96Q104{MTLOrigin=QQQ}112";
         "generateMipmapsForTexture:" => generate_mipmaps, c"v24@0:8@16";
@@ -502,41 +612,29 @@ pub(crate) fn install() {
         "setRenderTargetWidth:" => crate::no_op, c"v24@0:8Q16";
         "setRenderTargetHeight:" => crate::no_op, c"v24@0:8Q16";
         "setDefaultRasterSampleCount:" => crate::no_op, c"v24@0:8Q16";
+        "setRenderTargetArrayLength:" => set_render_target_array_length, c"v24@0:8Q16";
     });
-    methods!(attachment, {
-        "setClearColor:" => set_attachment_clear_color, c"v48@0:8{MTLClearColor=dddd}16";
-        "setClearDepth:" => set_attachment_clear_depth, c"v24@0:8d16";
+    methods!(pass, {
+        "setDepthAttachment:" => set_pass_single_attachment, c"v24@0:8@16";
+        "setStencilAttachment:" => set_pass_single_attachment, c"v24@0:8@16";
     });
-    for selector in ["setTexture:", "setResolveTexture:"] {
-        attachment.replace_method(
-            objc::sel::get(selector),
-            set_attachment_object as *const std::ffi::c_void,
-            c"v24@0:8@16",
-        );
-    }
-    for selector in [
-        "setLevel:",
-        "setSlice:",
-        "setDepthPlane:",
-        "setLoadAction:",
-        "setStoreAction:",
-        "setClearStencil:",
-        "setResolveLevel:",
-        "setResolveSlice:",
-        "setDepthResolveFilter:",
-        "setStencilResolveFilter:",
-    ] {
-        attachment.replace_method(
-            objc::sel::get(selector),
-            set_attachment_number as *const std::ffi::c_void,
-            c"v24@0:8Q16",
-        );
+    let _ = attachment;
+    for name in ATTACHMENT_CLASSES {
+        let class = object::register::<AttachmentElement>(name);
+        install_attachment_methods(class);
+        // The vended elements are made with their owner; only a standalone
+        // descriptor a game makes with `+new` is initialized here.
+        if name != c"RosemaryMTLRenderPassAttachmentDescriptor" {
+            methods!(class, { "init" => attachment_init, c"@16@0:8"; });
+        }
     }
 
     methods!(command, {
         "computeCommandEncoder" => new_compute_encoder, c"@16@0:8";
         "blitCommandEncoder" => new_blit_encoder, c"@16@0:8";
         "renderCommandEncoderWithDescriptor:" => new_render_encoder, c"@24@0:8@16";
+        "parallelRenderCommandEncoderWithDescriptor:" => new_parallel_encoder,
+            c"@24@0:8@16";
     });
     let per_stage: [(&str, *const std::ffi::c_void, &std::ffi::CStr); 15] = [
         (
@@ -615,7 +713,54 @@ pub(crate) fn install() {
             c"v32@0:8@16Q24",
         ),
     ];
-    for (selector, implementation, types) in per_stage {
+    let ranged: [(&str, *const std::ffi::c_void, &std::ffi::CStr); 9] = [
+        (
+            "setBuffers:offsets:withRange:",
+            set_buffers::<COMPUTE> as *const std::ffi::c_void,
+            c"v48@0:8r^@16r^Q24{_NSRange=QQ}32",
+        ),
+        (
+            "setVertexBuffers:offsets:withRange:",
+            set_buffers::<VERTEX> as *const std::ffi::c_void,
+            c"v48@0:8r^@16r^Q24{_NSRange=QQ}32",
+        ),
+        (
+            "setFragmentBuffers:offsets:withRange:",
+            set_buffers::<FRAGMENT> as *const std::ffi::c_void,
+            c"v48@0:8r^@16r^Q24{_NSRange=QQ}32",
+        ),
+        (
+            "setTextures:withRange:",
+            set_textures::<COMPUTE> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+        (
+            "setVertexTextures:withRange:",
+            set_textures::<VERTEX> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+        (
+            "setFragmentTextures:withRange:",
+            set_textures::<FRAGMENT> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+        (
+            "setSamplerStates:withRange:",
+            set_samplers::<COMPUTE> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+        (
+            "setVertexSamplerStates:withRange:",
+            set_samplers::<VERTEX> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+        (
+            "setFragmentSamplerStates:withRange:",
+            set_samplers::<FRAGMENT> as *const std::ffi::c_void,
+            c"v40@0:8r^@16{_NSRange=QQ}24",
+        ),
+    ];
+    for (selector, implementation, types) in per_stage.into_iter().chain(ranged) {
         encoder.replace_method(objc::sel::get(selector), implementation, types);
     }
     for selector in [

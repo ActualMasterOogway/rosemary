@@ -1,4 +1,5 @@
 mod buffer;
+mod common;
 mod depth_stencil;
 mod sampler;
 mod texture;
@@ -94,6 +95,18 @@ pub(crate) fn install() {
     let texture = object::register::<Texture>(c"RosemaryMTLTexture");
     methods!(descriptor, {
         "init" => descriptor_init, c"@16@0:8";
+        "resourceOptions" => texture::descriptor_resource_options, c"Q16@0:8";
+        "setResourceOptions:" => texture::set_descriptor_resource_options, c"v24@0:8Q16";
+        "cpuCacheMode" => crate::zero, c"Q16@0:8";
+        "setCpuCacheMode:" => crate::no_op, c"v24@0:8Q16";
+        "hazardTrackingMode" => crate::zero, c"Q16@0:8";
+        "setHazardTrackingMode:" => crate::no_op, c"v24@0:8Q16";
+    });
+    methods!(descriptor.metaclass(), {
+        "texture2DDescriptorWithPixelFormat:width:height:mipmapped:"
+            => texture::texture_2d_descriptor, c"@44@0:8Q16Q24Q32B40";
+        "textureCubeDescriptorWithPixelFormat:size:mipmapped:"
+            => texture::texture_cube_descriptor, c"@36@0:8Q16Q24B32";
     });
     for selector in [
         "setTextureType:",
@@ -136,12 +149,23 @@ pub(crate) fn install() {
             c"Q16@0:8",
         );
     }
+    common::install(buffer);
+    common::install_buffer(buffer);
+    common::install(texture);
+    common::install_texture(texture);
     methods!(texture, {
         "dealloc" => texture_dealloc, c"v16@0:8";
         "replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:"
             => replace_region,
                 c"v104@0:8{MTLRegion={MTLOrigin=QQQ}{MTLSize=QQQ}}16Q64Q72^v80Q88Q96";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
+        "newTextureViewWithPixelFormat:" => new_texture_view, c"@24@0:8Q16";
+        "newTextureViewWithPixelFormat:textureType:levels:slices:" => new_texture_view_range,
+            c"@64@0:8Q16Q24{_NSRange=QQ}32{_NSRange=QQ}48";
+    });
+    methods!(texture, {
+        "parentTexture" => texture_parent, c"@16@0:8";
+        "rootResource" => texture_parent, c"@16@0:8";
     });
 
     let sampler_descriptor = object::register::<SamplerDescriptor>(c"MTLSamplerDescriptor");
@@ -217,22 +241,70 @@ pub(crate) fn install() {
         "attributes" => vertex_attributes, c"@16@0:8";
         "dealloc" => vertex_descriptor_dealloc, c"v16@0:8";
     });
+    methods!(vertex.metaclass(), {
+        "vertexDescriptor" => new_vertex_descriptor, c"@16@0:8";
+    });
+    // A kernel's `[[stage_in]]` is described with the same layouts and
+    // attributes. No translated kernel has one, so the index buffer it names
+    // is never read.
+    let stage_input = object::register::<VertexDescriptor>(c"MTLStageInputOutputDescriptor");
+    methods!(stage_input, {
+        "init" => vertex_descriptor_init, c"@16@0:8";
+        "reset" => vertex_descriptor_init, c"@16@0:8";
+        "layouts" => vertex_layouts, c"@16@0:8";
+        "attributes" => vertex_attributes, c"@16@0:8";
+        "dealloc" => vertex_descriptor_dealloc, c"v16@0:8";
+        "setIndexBufferIndex:" => crate::no_op, c"v24@0:8Q16";
+        "setIndexType:" => crate::no_op, c"v24@0:8Q16";
+    });
+    methods!(stage_input.metaclass(), {
+        "stageInputOutputDescriptor" => new_stage_input_descriptor, c"@16@0:8";
+    });
     methods!(collection, {
         "objectAtIndexedSubscript:" => indexed_element, c"@24@0:8Q16";
+        "setObject:atIndexedSubscript:" => collection_assign, c"v32@0:8@16Q24";
         "dealloc" => collection_dealloc, c"v16@0:8";
     });
-    for selector in [
-        "setStride:",
-        "setStepFunction:",
-        "setStepRate:",
-        "setFormat:",
-        "setOffset:",
-        "setBufferIndex:",
-    ] {
-        element.replace_method(
-            objc::sel::get(selector),
-            set_vertex_element_value as *const std::ffi::c_void,
-            c"v24@0:8Q16",
-        );
+    // A game makes standalone layouts and attributes with `+new` and assigns
+    // them into a descriptor's collections.
+    let layout = object::register::<VertexElement>(c"MTLVertexBufferLayoutDescriptor");
+    let attribute = object::register::<VertexElement>(c"MTLVertexAttributeDescriptor");
+    let stage_layout = object::register::<VertexElement>(c"MTLBufferLayoutDescriptor");
+    let stage_attribute = object::register::<VertexElement>(c"MTLAttributeDescriptor");
+    for class in [layout, stage_layout] {
+        methods!(class, { "init" => vertex_layout_init, c"@16@0:8"; });
+    }
+    for class in [attribute, stage_attribute] {
+        methods!(class, { "init" => vertex_attribute_init, c"@16@0:8"; });
+    }
+    for class in [element, layout, attribute, stage_layout, stage_attribute] {
+        for selector in [
+            "setStride:",
+            "setStepFunction:",
+            "setStepRate:",
+            "setFormat:",
+            "setOffset:",
+            "setBufferIndex:",
+        ] {
+            class.replace_method(
+                objc::sel::get(selector),
+                set_vertex_element_value as *const std::ffi::c_void,
+                c"v24@0:8Q16",
+            );
+        }
+        for selector in [
+            "stride",
+            "stepFunction",
+            "stepRate",
+            "format",
+            "offset",
+            "bufferIndex",
+        ] {
+            class.replace_method(
+                objc::sel::get(selector),
+                vertex_element_value as *const std::ffi::c_void,
+                c"Q16@0:8",
+            );
+        }
     }
 }

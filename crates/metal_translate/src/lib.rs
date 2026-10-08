@@ -12,13 +12,14 @@ use std::fmt;
 pub use air::{AirInput, parse_air};
 pub use cache::{
     CACHE_VERSION, translate_cached, translate_cached_with, translate_msl_cached,
-    translate_msl_cached_with, translate_specialized_cached,
+    translate_msl_cached_with, translate_msl_cached_with_macros, translate_specialized_cached,
 };
 pub use msl::parse_msl;
 pub use passes::{Pass, PassPipeline};
 pub use specialize::{FunctionConstantValues, metal_data_type_size, specialize};
 pub use spirv::{
-    EntryArtifact, FunctionConstantInfo, RequiredFeatures, ResourceBinding, TargetProfile,
+    EntryArtifact, FunctionConstantInfo, RequiredFeatures, ResourceBinding, StageVariable,
+    TargetProfile,
     TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
 };
 
@@ -140,7 +141,18 @@ pub fn translate_msl_with(
     target: &TargetProfile,
     passes: &PassPipeline,
 ) -> Result<TranslatedLibrary, TranslateError> {
-    let mut module = parse_msl(source).map_err(|mut error| {
+    translate_msl_with_macros(source, &[], target, passes)
+}
+
+/// [`translate_msl_with`] with preprocessor macros defined first, as
+/// `MTLCompileOptions.preprocessorMacros` defines them.
+pub fn translate_msl_with_macros(
+    source: &str,
+    macros: &[(String, String)],
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    let mut module = msl::parse_msl_with_macros(source, macros).map_err(|mut error| {
         for diagnostic in &mut error.diagnostics {
             if let Some(line) = diagnostic.line {
                 diagnostic

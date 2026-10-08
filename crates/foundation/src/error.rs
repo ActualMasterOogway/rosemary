@@ -208,6 +208,40 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
+/// The value a guest's user-info dictionary holds under `key`, or nil. An
+/// error this runtime made carries only its description.
+unsafe fn user_info_value(receiver: Id, key: &str) -> Id {
+    // SAFETY: the receiver is an `NSError`.
+    let Some(c) = (unsafe { contents(receiver) }) else {
+        return std::ptr::null_mut();
+    };
+    if c.user_info.is_null() {
+        return std::ptr::null_mut();
+    }
+    let key = crate::string::from_str(key);
+    // SAFETY: a dictionary the error retains, and a string this call made.
+    let value = unsafe {
+        corefoundation::api::CFDictionaryGetValue(
+            c.user_info as corefoundation::base::CFTypeRef,
+            key as corefoundation::base::CFTypeRef,
+        )
+    };
+    objc::arc::release(key);
+    value as Id
+}
+
+unsafe extern "C" fn localized_failure_reason(receiver: Id, _sel: Sel) -> Id {
+    unsafe { user_info_value(receiver, "NSLocalizedFailureReason") }
+}
+
+unsafe extern "C" fn localized_recovery_suggestion(receiver: Id, _sel: Sel) -> Id {
+    unsafe { user_info_value(receiver, "NSLocalizedRecoverySuggestion") }
+}
+
+unsafe extern "C" fn localized_recovery_options(receiver: Id, _sel: Sel) -> Id {
+    unsafe { user_info_value(receiver, "NSLocalizedRecoveryOptions") }
+}
+
 fn autoreleased(text: &str) -> Id {
     let string = crate::string::from_str(text);
     // SAFETY: a string this call just created.
@@ -222,6 +256,9 @@ pub(crate) fn install() {
         "localizedDescription" => localized_description, c"@16@0:8";
         "description" => localized_description, c"@16@0:8";
         "userInfo" => user_info, c"@16@0:8";
+        "localizedFailureReason" => localized_failure_reason, c"@16@0:8";
+        "localizedRecoverySuggestion" => localized_recovery_suggestion, c"@16@0:8";
+        "localizedRecoveryOptions" => localized_recovery_options, c"@16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
         "initWithDomain:code:userInfo:" => init_with_domain, c"@40@0:8@16q24@32";
     });

@@ -60,6 +60,9 @@ pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> I
             uploads: Vec::new(),
             upload_used: 0,
             framebuffers: Vec::new(),
+            secondaries: Vec::new(),
+            secondary: false,
+            secondary_closed: false,
             captures: Vec::new(),
             scheduled_handlers: Vec::new(),
             completed_handlers: Vec::new(),
@@ -94,12 +97,22 @@ pub(super) unsafe extern "C" fn command_buffer_dealloc(receiver: Id, _sel: Sel) 
         for chunk in std::mem::take(&mut command.uploads) {
             gpu.release_upload_chunk(chunk);
         }
+        for secondary in std::mem::take(&mut command.secondaries) {
+            gpu.release_secondary(secondary);
+        }
         // Never submitted, so nothing allocated from the pool is pending.
-        gpu.release_context(CommandContext {
-            pool: command.pool,
-            command_buffer: command.command_buffer,
-            fence: command.fence,
-        });
+        if command.secondary {
+            gpu.release_secondary(gpu::SecondaryContext {
+                pool: command.pool,
+                command_buffer: command.command_buffer,
+            });
+        } else {
+            gpu.release_context(CommandContext {
+                pool: command.pool,
+                command_buffer: command.command_buffer,
+                fence: command.fence,
+            });
+        }
         gpu.release_timestamp_pool(std::mem::replace(
             &mut command.timestamps,
             vk::QueryPool::null(),
@@ -199,6 +212,7 @@ pub(super) unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
         },
         uploads: std::mem::take(&mut command.uploads),
         framebuffers: std::mem::take(&mut command.framebuffers),
+        secondaries: std::mem::take(&mut command.secondaries),
         captures: std::mem::take(&mut command.captures),
         completed_handlers: std::mem::take(&mut command.completed_handlers),
         presents: std::mem::take(&mut command.presents),

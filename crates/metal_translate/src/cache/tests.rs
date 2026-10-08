@@ -65,6 +65,12 @@ fn library() -> TranslatedLibrary {
                     capabilities: vec!["Shader".to_owned(), "VariablePointers".to_owned()],
                     extensions: vec![],
                 },
+                vertex_inputs: vec![StageVariable {
+                    name: "position".to_owned(),
+                    location: 2,
+                    data_type: 6,
+                }],
+                varyings: Vec::new(),
             },
             EntryArtifact {
                 name: String::new(),
@@ -75,6 +81,8 @@ fn library() -> TranslatedLibrary {
                     capabilities: vec![],
                     extensions: vec!["SPV_KHR_variable_pointers".to_owned()],
                 },
+                vertex_inputs: Vec::new(),
+                varyings: Vec::new(),
             },
         ],
     }

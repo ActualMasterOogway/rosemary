@@ -161,7 +161,24 @@ impl Gpu {
         if description.cube {
             flags |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
         }
-        let info = vk::ImageCreateInfo::default()
+        // A texture view of another format needs a mutable-format image.
+        // `PixelFormatView` asks for any compatible format; without it Metal
+        // still allows the sRGB twin, which a format list names so the driver
+        // can keep its compression.
+        let twin = [description.format, srgb_twin(description.format).unwrap_or_default()];
+        let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&twin);
+        let any_format = description.usage & USAGE_PIXEL_FORMAT_VIEW != 0;
+        if any_format || twin[1] != vk::Format::UNDEFINED {
+            flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
+        }
+        // A storage image whose twin is sRGB needs the extended usage flag:
+        // the sRGB format is never a storage format.
+        if usage.contains(vk::ImageUsageFlags::STORAGE)
+            && (any_format || is_srgb(twin[1]) || is_srgb(twin[0]))
+        {
+            flags |= vk::ImageCreateFlags::EXTENDED_USAGE;
+        }
+        let mut info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(description.image_type)
             .format(description.format)
@@ -177,6 +194,9 @@ impl Gpu {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if !any_format && twin[1] != vk::Format::UNDEFINED {
+            info = info.push_next(&mut format_list);
+        }
         // SAFETY: a well-formed create info on this live device.
         let image = unsafe { self.device.create_image(&info, None) }
             .map_err(|error| format!("vkCreateImage failed with {error:?}"))?;
@@ -255,6 +275,9 @@ impl Gpu {
             levels: description.levels.max(1),
             layers: description.layers.max(1),
             samples,
+            base_level: 0,
+            base_layer: 0,
+            usage,
         })
     }
 
@@ -280,6 +303,72 @@ impl Gpu {
             .map_err(|error| format!("vkCreateImageView failed with {error:?}"))
     }
 
+    /// A texture view: `source`'s image seen through another format, view
+    /// type, or range of its levels and layers. The image is still `source`'s,
+    /// and so is its memory; only the view is this image's own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_texture_view(
+        &self,
+        source: &GpuImage,
+        format: vk::Format,
+        view_type: vk::ImageViewType,
+        levels: std::ops::Range<u32>,
+        layers: std::ops::Range<u32>,
+    ) -> Result<GpuImage, String> {
+        let aspect = aspect_of(format);
+        // An sRGB format is never a storage format, so a view of one cannot
+        // carry the storage usage its image may have.
+        let mut usage = source.usage;
+        if is_srgb(format) {
+            usage &= !vk::ImageUsageFlags::STORAGE;
+        }
+        let mut view_usage = vk::ImageViewUsageCreateInfo::default().usage(usage);
+        let info = vk::ImageViewCreateInfo::default()
+            .image(source.image)
+            .view_type(view_type)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: aspect,
+                base_mip_level: levels.start,
+                level_count: levels.len().max(1) as u32,
+                base_array_layer: layers.start,
+                layer_count: layers.len().max(1) as u32,
+            })
+            .push_next(&mut view_usage);
+        // SAFETY: the image belongs to this device and outlives the view,
+        // because the view texture retains the texture that owns it.
+        let view = unsafe { self.device.create_image_view(&info, None) }
+            .map_err(|error| format!("vkCreateImageView failed with {error:?}"))?;
+        Ok(GpuImage {
+            image: source.image,
+            memory: None,
+            view,
+            format,
+            aspect,
+            width: source.width,
+            height: source.height,
+            depth: source.depth,
+            levels: levels.len().max(1) as u32,
+            layers: layers.len().max(1) as u32,
+            samples: source.samples,
+            base_level: levels.start,
+            base_layer: layers.start,
+            usage,
+        })
+    }
+
+    /// Destroy only the view of a texture view; the image is its parent's.
+    pub fn destroy_view(&self, image: GpuImage) {
+        let image = GpuImage {
+            image: vk::Image::null(),
+            memory: None,
+            ..image
+        };
+        if let Some(image) = self.defer_destruction(image) {
+            self.destroy_image_now(image);
+        }
+    }
+
     /// A view of one mip level of one array slice, which is what a framebuffer
     /// attachment must be.
     ///
@@ -299,9 +388,11 @@ impl Gpu {
             .format(image.format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: image.aspect,
-                base_mip_level: level.min(image.levels.saturating_sub(1)),
+                base_mip_level: level
+                    .clamp(image.base_level, image.base_level + image.levels.max(1) - 1),
                 level_count: 1,
-                base_array_layer: slice.min(image.layers.saturating_sub(1)),
+                base_array_layer: slice
+                    .clamp(image.base_layer, image.base_layer + image.layers.max(1) - 1),
                 layer_count: 1,
             });
         // SAFETY: the image belongs to this device and outlives the view.

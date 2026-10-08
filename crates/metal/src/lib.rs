@@ -58,6 +58,9 @@ struct Library {
     entry_modules: Vec<usize>,
     /// The profile of the device which made the library.
     target: Option<&'static metal_translate::TargetProfile>,
+    /// The device which made the library. Devices live as long as the
+    /// process, so it is not retained.
+    device: Id,
 }
 
 struct Function {
@@ -120,6 +123,10 @@ pub(crate) fn live_buffers(delta: i64) -> i64 {
 
 pub(crate) unsafe extern "C" fn no_op(_receiver: Id, _sel: Sel) {}
 
+pub(crate) unsafe extern "C" fn zero(_receiver: Id, _sel: Sel) -> u64 {
+    0
+}
+
 /// The logical device behind an `MTLDevice`, or `None` when Vulkan gave none.
 fn gpu_of(receiver: Id) -> Option<&'static Gpu> {
     // SAFETY: every caller is a method registered on `RosemaryMTLDevice`.
@@ -178,11 +185,23 @@ pub fn bootstrap() {
             "newDefaultLibrary" => new_default_library, c"@16@0:8";
             "newLibraryWithData:error:" => new_library_with_data, c"@32@0:8@16^@24";
             "newLibraryWithSource:options:error:" => new_library_with_source, c"@40@0:8@16@24^@32";
+            "newComputePipelineStateWithDescriptor:options:reflection:error:"
+                => pipeline::new_compute_pipeline_with_descriptor, c"@48@0:8@16Q24^@32^@40";
+            "newComputePipelineStateWithFunction:options:reflection:error:"
+                => pipeline::new_compute_pipeline_with_reflection, c"@48@0:8@16Q24^@32^@40";
             "newComputePipelineStateWithFunction:error:" => new_compute_pipeline,
                 c"@32@0:8@16^@24";
             "newRenderPipelineStateWithDescriptor:error:" => new_render_pipeline,
                 c"@32@0:8@16^@24";
             "currentAllocatedSize" => current_allocated_size, c"Q16@0:8";
+            "newFence" => new_fence, c"@16@0:8";
+        });
+        // Encoders on one device run in order behind full barriers, so a fence
+        // has nothing to carry: it is an object to pass back and nothing more.
+        let fence = object::register::<Id>(c"RosemaryMTLFence");
+        methods!(fence, {
+            "device" => fence_device, c"@16@0:8";
+            "dealloc" => fence_dealloc, c"v16@0:8";
         });
         methods!(library_class, {
             "dealloc" => library_dealloc, c"v16@0:8";
@@ -193,9 +212,25 @@ pub fn bootstrap() {
             "device" => library_device, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
         });
+        let attribute = object::register::<VertexAttributeReflection>(c"RosemaryMTLVertexAttribute");
+        methods!(attribute, {
+            "name" => attribute_name, c"@16@0:8";
+            "attributeIndex" => attribute_index, c"Q16@0:8";
+            "attributeType" => attribute_type, c"Q16@0:8";
+            "isActive" => yes, c"B16@0:8";
+            "isPatchData" => no, c"B16@0:8";
+            "isPatchControlPointData" => no, c"B16@0:8";
+            "dealloc" => attribute_dealloc, c"v16@0:8";
+        });
         methods!(function_class, {
             "dealloc" => function_dealloc, c"v16@0:8";
             "name" => function_name, c"@16@0:8";
+            "functionType" => function_type, c"Q16@0:8";
+            "vertexAttributes" => function_vertex_attributes, c"@16@0:8";
+            "stageInputAttributes" => function_vertex_attributes, c"@16@0:8";
+            "patchType" => zero, c"Q16@0:8";
+            "patchControlPointCount" => zero, c"q16@0:8";
+            "device" => function_device, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
         });
         methods!(constant_values_class, {
@@ -212,8 +247,68 @@ pub fn bootstrap() {
         encoder::install();
         pipeline::install();
         present::install();
+        install_labels();
     });
 }
+
+/// Every Metal object and descriptor answers `-label` and `-setLabel:`. A
+/// label is a debugging aid nothing here displays, so it is not kept.
+fn install_labels() {
+    let names: [&std::ffi::CStr; 23] = [
+        c"RosemaryMTLFence",
+        c"MTLDepthStencilDescriptor",
+        c"MTLRenderPassDescriptor",
+        c"MTLRenderPipelineDescriptor",
+        c"MTLSamplerDescriptor",
+        c"MTLStencilDescriptor",
+        c"MTLTextureDescriptor",
+        c"MTLVertexDescriptor",
+        c"RosemaryMTLBuffer",
+        c"RosemaryMTLColorAttachmentDescriptor",
+        c"RosemaryMTLCommandBuffer",
+        c"RosemaryMTLCommandEncoder",
+        c"RosemaryMTLCommandQueue",
+        c"RosemaryMTLComputePipelineState",
+        c"RosemaryMTLDepthStencilState",
+        c"RosemaryMTLDevice",
+        c"RosemaryMTLFunction",
+        c"RosemaryMTLLibrary",
+        c"RosemaryMTLRenderPassAttachmentDescriptor",
+        c"RosemaryMTLRenderPipelineState",
+        c"RosemaryMTLSamplerState",
+        c"RosemaryMTLTexture",
+        c"RosemaryMTLVertexElement",
+    ];
+    for name in names {
+        let Some(class) = objc::class::lookup(name) else {
+            continue;
+        };
+        methods!(class, {
+            "label" => nil, c"@16@0:8";
+            "setLabel:" => no_op, c"v24@0:8@16";
+        });
+    }
+}
+
+unsafe extern "C" fn new_fence(receiver: Id, _sel: Sel) -> Id {
+    object::make(c"RosemaryMTLFence", objc::arc::retain(receiver))
+}
+
+unsafe extern "C" fn fence_device(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a fence of this crate's.
+    *unsafe { object::body::<Id>(receiver) }
+}
+
+unsafe extern "C" fn fence_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a fence of this crate's; its device was retained when it was made.
+    objc::arc::release(*unsafe { object::body::<Id>(receiver) });
+    objc::arc::finalize(receiver);
+}
+
+pub(crate) unsafe extern "C" fn nil(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
 
 #[cfg(test)]
 mod tests;

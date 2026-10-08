@@ -35,6 +35,11 @@ pub const FILL_BACKWARDS: &str = "backwards";
 pub const FILL_BOTH: &str = "both";
 pub const FILL_REMOVED: &str = "removed";
 
+/// `kCAFilter...`, likewise.
+pub const FILTER_NEAREST: &str = "nearest";
+pub const FILTER_LINEAR: &str = "linear";
+pub const FILTER_TRILINEAR: &str = "trilinear";
+
 /// `kCAGravity...`, likewise.
 pub const GRAVITIES: &[(&str, &str, Gravity)] = &[
     ("_kCAGravityCenter", "center", Gravity::Center),

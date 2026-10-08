@@ -253,3 +253,75 @@ pub(super) unsafe extern "C" fn set_blend_color(
             .cmd_set_blend_constants(command.command_buffer, &[red, green, blue, alpha])
     };
 }
+
+/// `-setBuffers:offsets:withRange:` and its per-stage spellings: one
+/// `-setBuffer:offset:atIndex:` per element of the range.
+pub(super) unsafe extern "C" fn set_buffers<const STAGE: usize>(
+    receiver: Id,
+    sel: Sel,
+    buffers: *const Id,
+    offsets: *const u64,
+    range: NsRange,
+) {
+    if buffers.is_null() || offsets.is_null() {
+        return;
+    }
+    for at in 0..range.length as usize {
+        // SAFETY: the guest passed `range.length` buffers and offsets.
+        let (buffer, offset) = unsafe { (*buffers.add(at), *offsets.add(at)) };
+        unsafe { set_buffer::<STAGE>(receiver, sel, buffer, offset, range.location + at as u64) };
+    }
+}
+
+/// `-setTextures:withRange:` and its per-stage spellings.
+pub(super) unsafe extern "C" fn set_textures<const STAGE: usize>(
+    receiver: Id,
+    sel: Sel,
+    textures: *const Id,
+    range: NsRange,
+) {
+    if textures.is_null() {
+        return;
+    }
+    for at in 0..range.length as usize {
+        // SAFETY: the guest passed `range.length` textures.
+        let texture = unsafe { *textures.add(at) };
+        unsafe { set_texture::<STAGE>(receiver, sel, texture, range.location + at as u64) };
+    }
+}
+
+/// `-setSamplerStates:withRange:` and its per-stage spellings.
+pub(super) unsafe extern "C" fn set_samplers<const STAGE: usize>(
+    receiver: Id,
+    sel: Sel,
+    samplers: *const Id,
+    range: NsRange,
+) {
+    if samplers.is_null() {
+        return;
+    }
+    for at in 0..range.length as usize {
+        // SAFETY: the guest passed `range.length` samplers.
+        let sampler = unsafe { *samplers.add(at) };
+        unsafe { set_sampler::<STAGE>(receiver, sel, sampler, range.location + at as u64) };
+    }
+}
+
+/// `-setStencilFrontReferenceValue:backReferenceValue:`.
+pub(super) unsafe extern "C" fn set_stencil_references(
+    receiver: Id,
+    _sel: Sel,
+    front: u32,
+    back: u32,
+) {
+    // SAFETY: an encoder of this crate's.
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    encoder.stencil_reference = front;
+    let command = encoder.command();
+    // SAFETY: recording into this command buffer.
+    unsafe {
+        let device = &command.gpu.device;
+        device.cmd_set_stencil_reference(command.command_buffer, vk::StencilFaceFlags::FRONT, front);
+        device.cmd_set_stencil_reference(command.command_buffer, vk::StencilFaceFlags::BACK, back);
+    };
+}

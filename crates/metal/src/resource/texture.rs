@@ -5,6 +5,9 @@ pub(crate) struct Texture {
     pub gpu: &'static Gpu,
     pub descriptor: TextureDescriptor,
     pub image: GpuImage,
+    /// The texture a texture view sees into, retained, or null for a texture
+    /// which owns its image.
+    pub parent: Id,
     /// One view per mip level and array slice a render pass has attached,
     /// made on first use. A texture usually has one and a blur pyramid has one
     /// per level, so this is a short list rather than a map.
@@ -37,6 +40,9 @@ impl Texture {
     /// Read from the image rather than the descriptor, so that the figure a
     /// deallocation subtracts is the one its creation added.
     pub fn accounted(&self) -> i64 {
+        if !self.parent.is_null() {
+            return 0;
+        }
         i64::from(gpu::texel_size(self.image.format))
             * i64::from(self.image.width)
             * i64::from(self.image.height)
@@ -127,8 +133,13 @@ pub(super) unsafe extern "C" fn texture_dealloc(receiver: Id, _sel: Sel) {
     }
     let image = std::mem::replace(&mut texture.image, GpuImage::none());
     if !leaking() {
-        texture.gpu.destroy_image(image);
+        if texture.parent.is_null() {
+            texture.gpu.destroy_image(image);
+        } else {
+            texture.gpu.destroy_view(image);
+        }
     }
+    objc::arc::release(std::mem::replace(&mut texture.parent, std::ptr::null_mut()));
     objc::arc::finalize(receiver);
 }
 
@@ -171,6 +182,7 @@ pub(crate) fn new_texture(gpu: &'static Gpu, descriptor: TextureDescriptor) -> I
             gpu,
             descriptor,
             image,
+            parent: std::ptr::null_mut(),
             attachment_views: Vec::new(),
         },
     );
@@ -202,6 +214,7 @@ pub(crate) fn drawable_texture(gpu: &'static Gpu, image: GpuImage, pixel_format:
             gpu,
             descriptor,
             image,
+            parent: std::ptr::null_mut(),
             attachment_views: Vec::new(),
         },
     )
@@ -265,6 +278,71 @@ pub(super) unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a freshly allocated texture descriptor.
     *unsafe { object::body::<TextureDescriptor>(receiver) } = TextureDescriptor::fresh();
     receiver
+}
+
+/// The level count `mipmapped:YES` asks for: the full chain down to 1x1.
+fn full_chain(width: u64, height: u64) -> u64 {
+    u64::from(64 - width.max(height).max(1).leading_zeros())
+}
+
+fn autoreleased_descriptor(descriptor: TextureDescriptor) -> Id {
+    let object = object::make(c"MTLTextureDescriptor", descriptor);
+    // SAFETY: a fresh object this call owns.
+    unsafe { corefoundation::api::CFAutorelease(object as corefoundation::base::CFTypeRef) as Id }
+}
+
+/// `+[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:width:height:mipmapped:]`.
+pub(super) unsafe extern "C" fn texture_2d_descriptor(
+    _class: Id,
+    _sel: Sel,
+    pixel_format: u64,
+    width: u64,
+    height: u64,
+    mipmapped: bool,
+) -> Id {
+    autoreleased_descriptor(TextureDescriptor {
+        pixel_format,
+        width,
+        height,
+        mipmap_level_count: if mipmapped { full_chain(width, height) } else { 1 },
+        ..TextureDescriptor::fresh()
+    })
+}
+
+/// `+[MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:size:mipmapped:]`.
+pub(super) unsafe extern "C" fn texture_cube_descriptor(
+    _class: Id,
+    _sel: Sel,
+    pixel_format: u64,
+    size: u64,
+    mipmapped: bool,
+) -> Id {
+    autoreleased_descriptor(TextureDescriptor {
+        texture_type: MTL_TEXTURE_TYPE_CUBE,
+        pixel_format,
+        width: size,
+        height: size,
+        mipmap_level_count: if mipmapped { full_chain(size, size) } else { 1 },
+        ..TextureDescriptor::fresh()
+    })
+}
+
+/// `-[MTLTextureDescriptor resourceOptions]`: the storage mode is the only
+/// part of `MTLResourceOptions` a descriptor here keeps.
+pub(super) unsafe extern "C" fn descriptor_resource_options(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a texture descriptor of this crate's.
+    unsafe { object::body::<TextureDescriptor>(receiver) }.storage_mode << 4
+}
+
+/// `-[MTLTextureDescriptor setResourceOptions:]`. The CPU cache mode and
+/// hazard tracking bits describe nothing a Vulkan image here has.
+pub(super) unsafe extern "C" fn set_descriptor_resource_options(
+    receiver: Id,
+    _sel: Sel,
+    options: u64,
+) {
+    // SAFETY: a texture descriptor of this crate's.
+    unsafe { object::body::<TextureDescriptor>(receiver) }.storage_mode = (options >> 4) & 0xf;
 }
 
 /// `-[MTLTexture replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:]`.
@@ -401,4 +479,126 @@ fn lcm(a: u64, b: u64) -> u64 {
         x
     };
     a / gcd * b
+}
+
+/// `NSRange`, as the view methods take their level and slice ranges.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct ViewRange {
+    location: u64,
+    length: u64,
+}
+
+/// `-newTextureViewWithPixelFormat:`: every level and slice, another format.
+pub(super) unsafe extern "C" fn new_texture_view(receiver: Id, sel: Sel, pixel_format: u64) -> Id {
+    // SAFETY: a texture of this crate's.
+    let texture = unsafe { object::body::<Texture>(receiver) };
+    let (levels, slices) = (texture.image.levels, texture.image.layers);
+    let texture_type = texture.descriptor.texture_type;
+    unsafe {
+        new_texture_view_range(
+            receiver,
+            sel,
+            pixel_format,
+            texture_type,
+            ViewRange {
+                location: 0,
+                length: u64::from(levels),
+            },
+            ViewRange {
+                location: 0,
+                length: u64::from(slices),
+            },
+        )
+    }
+}
+
+/// `-newTextureViewWithPixelFormat:textureType:levels:slices:`.
+///
+/// The ranges are relative to the receiver, which may itself be a view.
+pub(super) unsafe extern "C" fn new_texture_view_range(
+    receiver: Id,
+    _sel: Sel,
+    pixel_format: u64,
+    texture_type: u64,
+    levels: ViewRange,
+    slices: ViewRange,
+) -> Id {
+    // SAFETY: a texture of this crate's.
+    let texture = unsafe { object::body::<Texture>(receiver) };
+    let format = gpu::pixel_format(pixel_format);
+    if format == vk::Format::UNDEFINED {
+        gpu::trace(format!(
+            "newTextureViewWithPixelFormat: has no Vulkan form for MTLPixelFormat {pixel_format}"
+        ));
+        return std::ptr::null_mut();
+    }
+    let in_range = |range: ViewRange, count: u32| {
+        range.length > 0
+            && range
+                .location
+                .checked_add(range.length)
+                .is_some_and(|end| end <= u64::from(count))
+    };
+    if !in_range(levels, texture.image.levels) || !in_range(slices, texture.image.layers) {
+        gpu::trace(format!(
+            "newTextureViewWithPixelFormat: levels {}+{} and slices {}+{} of a texture with {} \
+             and {}",
+            levels.location,
+            levels.length,
+            slices.location,
+            slices.length,
+            texture.image.levels,
+            texture.image.layers
+        ));
+        return std::ptr::null_mut();
+    }
+    let descriptor = TextureDescriptor {
+        texture_type,
+        pixel_format,
+        mipmap_level_count: levels.length,
+        array_length: match texture_type {
+            MTL_TEXTURE_TYPE_CUBE => 1,
+            6 => (slices.length / 6).max(1),
+            _ => slices.length,
+        },
+        ..texture.descriptor
+    };
+    let (_, view_type, _, _) = descriptor.shape();
+    let base_level = texture.image.base_level + levels.location as u32;
+    let base_layer = texture.image.base_layer + slices.location as u32;
+    let image = match texture.gpu.create_texture_view(
+        &texture.image,
+        format,
+        view_type,
+        base_level..base_level + levels.length as u32,
+        base_layer..base_layer + slices.length as u32,
+    ) {
+        Ok(image) => image,
+        Err(reason) => {
+            gpu::trace(format!("newTextureViewWithPixelFormat: failed: {reason}"));
+            return std::ptr::null_mut();
+        }
+    };
+    // A view of a view sees into the texture that owns the image.
+    let owner = if texture.parent.is_null() {
+        receiver
+    } else {
+        texture.parent
+    };
+    object::make(
+        c"RosemaryMTLTexture",
+        Texture {
+            gpu: texture.gpu,
+            descriptor,
+            image,
+            parent: objc::arc::retain(owner),
+            attachment_views: Vec::new(),
+        },
+    )
+}
+
+pub(super) unsafe extern "C" fn texture_parent(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a texture of this crate's.
+    unsafe { object::body::<Texture>(receiver) }.parent
 }

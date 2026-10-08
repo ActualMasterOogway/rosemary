@@ -1,5 +1,11 @@
 mod compute;
+mod compute_descriptor;
+pub(crate) use compute_descriptor::{
+    new_with_descriptor as new_compute_pipeline_with_descriptor,
+    new_with_function_reflection as new_compute_pipeline_with_reflection,
+};
 mod descriptor;
+mod link;
 mod enums;
 mod render;
 
@@ -212,21 +218,103 @@ impl From<&DepthStencilState> for DepthStencilKey {
     }
 }
 
+/// `MTLCompileOptions`.
+pub(crate) struct CompileOptions {
+    pub macros: Vec<(String, String)>,
+}
+
+unsafe extern "C" fn compile_options_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a freshly allocated options object.
+    unsafe { object::init(receiver, CompileOptions { macros: Vec::new() }) };
+    receiver
+}
+
+unsafe extern "C" fn compile_options_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: an options object `-init` established.
+    unsafe { std::ptr::drop_in_place(object::body::<CompileOptions>(receiver) as *mut CompileOptions) };
+    objc::arc::finalize(receiver);
+}
+
+/// `-setPreprocessorMacros:`: a dictionary of names to strings or numbers,
+/// kept as the text each defines.
+unsafe extern "C" fn set_preprocessor_macros(receiver: Id, _sel: Sel, dictionary: Id) {
+    use corefoundation::api::*;
+    use corefoundation::base::CFTypeRef;
+    let mut macros = Vec::new();
+    if !dictionary.is_null() {
+        // SAFETY: a guest dictionary.
+        let count = unsafe { CFDictionaryGetCount(dictionary as CFTypeRef) }.max(0) as usize;
+        let mut keys: Vec<CFTypeRef> = vec![std::ptr::null(); count];
+        let mut values: Vec<CFTypeRef> = vec![std::ptr::null(); count];
+        // SAFETY: both arrays hold `count` entries.
+        unsafe {
+            CFDictionaryGetKeysAndValues(
+                dictionary as CFTypeRef,
+                keys.as_mut_ptr(),
+                values.as_mut_ptr(),
+            )
+        };
+        for (key, value) in keys.into_iter().zip(values) {
+            // SAFETY: a key of the guest's dictionary.
+            let name = String::from_utf8_lossy(&unsafe { foundation::string::bytes(key as Id) }).into_owned();
+            // SAFETY: a value of the guest's dictionary.
+            let text = if unsafe { CFGetTypeID(value) == CFNumberGetTypeID() } {
+                let mut number = 0f64;
+                // SAFETY: a number, read as a double (kCFNumberDoubleType).
+                unsafe { CFNumberGetValue(value, 13, (&raw mut number).cast()) };
+                if number.fract() == 0.0 && number.abs() < 1e15 {
+                    format!("{}", number as i64)
+                } else {
+                    format!("{number}")
+                }
+            } else {
+                String::from_utf8_lossy(&unsafe { foundation::string::bytes(value as Id) }).into_owned()
+            };
+            macros.push((name, text));
+        }
+    }
+    // Sorted, so one set of macros is one shader cache key whatever order
+    // the dictionary enumerates them in.
+    macros.sort();
+    // SAFETY: an options object `-init` established.
+    unsafe { object::body::<CompileOptions>(receiver) }.macros = macros;
+}
+
 pub(crate) fn install() {
+    compute_descriptor::install();
     let descriptor = object::register::<RenderPipelineDescriptor>(c"MTLRenderPipelineDescriptor");
     let color = object::register::<ColorElement>(c"RosemaryMTLColorAttachmentDescriptor");
-    // `MTLCompileOptions` carries nothing this translator reads: a game sets a
-    // language version and preprocessor macros, and the MSL frontend accepts
-    // one dialect. It exists so `-newLibraryWithSource:options:error:` has
-    // something to be handed.
-    let options = object::register::<()>(c"MTLCompileOptions");
+    // Of `MTLCompileOptions` only the preprocessor macros change what a
+    // library says. The frontend accepts one dialect whatever language
+    // version is asked for, and fast math is the driver's choice.
+    let options = object::register::<CompileOptions>(c"MTLCompileOptions");
     methods!(options, {
-        "init" => identity, c"@16@0:8";
+        "init" => compile_options_init, c"@16@0:8";
+        "dealloc" => compile_options_dealloc, c"v16@0:8";
         "setFastMathEnabled:" => crate::no_op, c"v20@0:8c16";
         "setLanguageVersion:" => crate::no_op, c"v24@0:8Q16";
-        "setPreprocessorMacros:" => crate::no_op, c"v24@0:8@16";
+        "setPreprocessorMacros:" => set_preprocessor_macros, c"v24@0:8@16";
     });
     methods!(descriptor, {
+        // Vulkan takes the topology from each draw, and no function here is
+        // ever a post-tessellation vertex function, so tessellation state has
+        // nothing to configure: a patch function is refused when it is made.
+        "setInputPrimitiveTopology:" => crate::no_op, c"v24@0:8Q16";
+        "setMaxTessellationFactor:" => crate::no_op, c"v24@0:8Q16";
+        "setTessellationControlPointIndexType:" => crate::no_op, c"v24@0:8Q16";
+        "setTessellationFactorFormat:" => crate::no_op, c"v24@0:8Q16";
+        "setTessellationFactorScaleEnabled:" => crate::no_op, c"v20@0:8c16";
+        "setTessellationFactorStepFunction:" => crate::no_op, c"v24@0:8Q16";
+        "setTessellationOutputWindingOrder:" => crate::no_op, c"v24@0:8Q16";
+        "setTessellationPartitionMode:" => crate::no_op, c"v24@0:8Q16";
+        "vertexDescriptor" => descriptor_object, c"@16@0:8";
+        "vertexFunction" => descriptor_object, c"@16@0:8";
+        "fragmentFunction" => descriptor_object, c"@16@0:8";
+        "depthAttachmentPixelFormat" => descriptor_number, c"Q16@0:8";
+        "stencilAttachmentPixelFormat" => descriptor_number, c"Q16@0:8";
+        "sampleCount" => descriptor_number, c"Q16@0:8";
+        "rasterSampleCount" => descriptor_number, c"Q16@0:8";
+        "isAlphaToCoverageEnabled" => descriptor_number, c"Q16@0:8";
         "init" => descriptor_init, c"@16@0:8";
         "colorAttachments" => color_attachments, c"@16@0:8";
         "dealloc" => descriptor_dealloc, c"v16@0:8";
@@ -257,22 +345,46 @@ pub(crate) fn install() {
             c"v24@0:8Q16",
         );
     }
-    for selector in [
-        "setPixelFormat:",
-        "setBlendingEnabled:",
-        "setSourceRGBBlendFactor:",
-        "setDestinationRGBBlendFactor:",
-        "setRgbBlendOperation:",
-        "setSourceAlphaBlendFactor:",
-        "setDestinationAlphaBlendFactor:",
-        "setAlphaBlendOperation:",
-        "setWriteMask:",
-    ] {
-        color.replace_method(
-            objc::sel::get(selector),
-            set_color_value as *const std::ffi::c_void,
-            c"v24@0:8Q16",
-        );
+    let _ = color;
+    for name in descriptor::COLOR_CLASSES {
+        let color = object::register::<ColorElement>(name);
+        if name != c"RosemaryMTLColorAttachmentDescriptor" {
+            methods!(color, { "init" => descriptor::color_init, c"@16@0:8"; });
+        }
+        for selector in [
+            "setPixelFormat:",
+            "setBlendingEnabled:",
+            "setSourceRGBBlendFactor:",
+            "setDestinationRGBBlendFactor:",
+            "setRgbBlendOperation:",
+            "setSourceAlphaBlendFactor:",
+            "setDestinationAlphaBlendFactor:",
+            "setAlphaBlendOperation:",
+            "setWriteMask:",
+        ] {
+            color.replace_method(
+                objc::sel::get(selector),
+                set_color_value as *const std::ffi::c_void,
+                c"v24@0:8Q16",
+            );
+        }
+        for selector in [
+            "pixelFormat",
+            "isBlendingEnabled",
+            "sourceRGBBlendFactor",
+            "destinationRGBBlendFactor",
+            "rgbBlendOperation",
+            "sourceAlphaBlendFactor",
+            "destinationAlphaBlendFactor",
+            "alphaBlendOperation",
+            "writeMask",
+        ] {
+            color.replace_method(
+                objc::sel::get(selector),
+                descriptor::color_value as *const std::ffi::c_void,
+                c"Q16@0:8",
+            );
+        }
     }
 
     let compute =

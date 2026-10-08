@@ -5,6 +5,7 @@ pub(crate) const MTL_PIXEL_FORMAT_RGBA8_UNORM: u64 = 70;
 pub(crate) const MTL_PIXEL_FORMAT_BGRA8_UNORM: u64 = 80;
 
 pub(crate) const MTL_TEXTURE_TYPE_2D: u64 = 2;
+pub(crate) const MTL_TEXTURE_TYPE_CUBE: u64 = 5;
 
 pub(crate) const MTL_STORAGE_MODE_MANAGED: u64 = 1;
 

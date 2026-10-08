@@ -26,6 +26,42 @@ pub fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {
     }
 }
 
+/// The format a texture of `format` may also be viewed as without asking
+/// for `MTLTextureUsagePixelFormatView`: its sRGB or linear twin.
+pub fn srgb_twin(format: vk::Format) -> Option<vk::Format> {
+    use vk::Format as F;
+    let pairs = [
+        (F::R8G8B8A8_UNORM, F::R8G8B8A8_SRGB),
+        (F::B8G8R8A8_UNORM, F::B8G8R8A8_SRGB),
+        (F::BC1_RGBA_UNORM_BLOCK, F::BC1_RGBA_SRGB_BLOCK),
+        (F::BC2_UNORM_BLOCK, F::BC2_SRGB_BLOCK),
+        (F::BC3_UNORM_BLOCK, F::BC3_SRGB_BLOCK),
+        (F::BC7_UNORM_BLOCK, F::BC7_SRGB_BLOCK),
+        (F::R8_UNORM, F::R8_SRGB),
+        (F::R8G8_UNORM, F::R8G8_SRGB),
+    ];
+    pairs.iter().find_map(|&(linear, srgb)| match format {
+        f if f == linear => Some(srgb),
+        f if f == srgb => Some(linear),
+        _ => None,
+    })
+}
+
+pub fn is_srgb(format: vk::Format) -> bool {
+    use vk::Format as F;
+    matches!(
+        format,
+        F::R8G8B8A8_SRGB
+            | F::B8G8R8A8_SRGB
+            | F::BC1_RGBA_SRGB_BLOCK
+            | F::BC2_SRGB_BLOCK
+            | F::BC3_SRGB_BLOCK
+            | F::BC7_SRGB_BLOCK
+            | F::R8_SRGB
+            | F::R8G8_SRGB
+    )
+}
+
 /// `MTLPixelFormat` to `VkFormat`.
 ///
 /// Metal names a texel's components in memory order and Vulkan names them in

@@ -117,6 +117,52 @@ pub(super) unsafe extern "C" fn copy_buffer_to_buffer(
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe extern "C" fn copy_buffer_to_texture(
     receiver: Id,
+    sel: Sel,
+    source: Id,
+    source_offset: u64,
+    bytes_per_row: u64,
+    bytes_per_image: u64,
+    size: MtlSize,
+    destination: Id,
+    slice: u64,
+    level: u64,
+    origin: MtlOrigin,
+) {
+    unsafe {
+        copy_buffer_to_texture_options(
+            receiver,
+            sel,
+            source,
+            source_offset,
+            bytes_per_row,
+            bytes_per_image,
+            size,
+            destination,
+            slice,
+            level,
+            origin,
+            0,
+        )
+    }
+}
+
+/// The aspect of `image` a copy with these `MTLBlitOption`s names: a
+/// combined depth/stencil texture is copied one aspect at a time.
+fn blit_aspect(image: &crate::gpu::GpuImage, options: u64) -> vk::ImageAspectFlags {
+    const DEPTH_FROM_DEPTH_STENCIL: u64 = 1;
+    const STENCIL_FROM_DEPTH_STENCIL: u64 = 2;
+    if options & DEPTH_FROM_DEPTH_STENCIL != 0 {
+        vk::ImageAspectFlags::DEPTH
+    } else if options & STENCIL_FROM_DEPTH_STENCIL != 0 {
+        vk::ImageAspectFlags::STENCIL
+    } else {
+        image.aspect
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn copy_buffer_to_texture_options(
+    receiver: Id,
     _sel: Sel,
     source: Id,
     source_offset: u64,
@@ -127,6 +173,7 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture(
     slice: u64,
     level: u64,
     origin: MtlOrigin,
+    options: u64,
 ) {
     if source.is_null() || destination.is_null() {
         return;
@@ -172,7 +219,7 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture(
         .buffer_row_length(row_texels as u32)
         .buffer_image_height(rows as u32)
         .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: to.image.aspect,
+            aspect_mask: blit_aspect(&to.image, options),
             mip_level: checked.level,
             base_array_layer: checked.slice,
             layer_count: 1,
@@ -204,6 +251,38 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture(
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe extern "C" fn copy_texture_to_buffer(
     receiver: Id,
+    sel: Sel,
+    source: Id,
+    slice: u64,
+    level: u64,
+    origin: MtlOrigin,
+    size: MtlSize,
+    destination: Id,
+    destination_offset: u64,
+    bytes_per_row: u64,
+    bytes_per_image: u64,
+) {
+    unsafe {
+        copy_texture_to_buffer_options(
+            receiver,
+            sel,
+            source,
+            slice,
+            level,
+            origin,
+            size,
+            destination,
+            destination_offset,
+            bytes_per_row,
+            bytes_per_image,
+            0,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn copy_texture_to_buffer_options(
+    receiver: Id,
     _sel: Sel,
     source: Id,
     slice: u64,
@@ -214,6 +293,7 @@ pub(super) unsafe extern "C" fn copy_texture_to_buffer(
     destination_offset: u64,
     bytes_per_row: u64,
     bytes_per_image: u64,
+    options: u64,
 ) {
     if source.is_null() || destination.is_null() {
         return;
@@ -259,7 +339,7 @@ pub(super) unsafe extern "C" fn copy_texture_to_buffer(
         .buffer_row_length(row_texels as u32)
         .buffer_image_height(rows as u32)
         .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: from.image.aspect,
+            aspect_mask: blit_aspect(&from.image, options),
             mip_level: checked.level,
             base_array_layer: checked.slice,
             layer_count: 1,
@@ -399,14 +479,17 @@ pub(super) unsafe extern "C" fn generate_mipmaps(receiver: Id, _sel: Sel, textur
     let vk_command = command.command_buffer;
     let mut width = image.image.width as i32;
     let mut height = image.image.height as i32;
-    for level in 1..image.image.levels {
+    let (base, layer) = (image.image.base_level, image.image.base_layer);
+    width = (width >> base).max(1);
+    height = (height >> base).max(1);
+    for level in base + 1..base + image.image.levels {
         let next_width = (width / 2).max(1);
         let next_height = (height / 2).max(1);
         let blit = vk::ImageBlit::default()
             .src_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: image.image.aspect,
                 mip_level: level - 1,
-                base_array_layer: 0,
+                base_array_layer: layer,
                 layer_count: image.image.layers,
             })
             .src_offsets([
@@ -420,7 +503,7 @@ pub(super) unsafe extern "C" fn generate_mipmaps(receiver: Id, _sel: Sel, textur
             .dst_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: image.image.aspect,
                 mip_level: level,
-                base_array_layer: 0,
+                base_array_layer: layer,
                 layer_count: image.image.layers,
             })
             .dst_offsets([

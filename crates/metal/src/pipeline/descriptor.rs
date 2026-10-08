@@ -10,6 +10,71 @@ use objc::sel::Sel;
 pub(crate) struct ColorElement {
     pub owner: Id,
     pub index: usize,
+    /// The values of an element with no owner: a standalone
+    /// `MTLRenderPipelineColorAttachmentDescriptor`, or one whose descriptor
+    /// has gone.
+    pub local: ColorAttachment,
+}
+
+/// The colour attachment one element names: its descriptor's, or its own.
+fn color_of<'a>(element: Id) -> &'a mut ColorAttachment {
+    // SAFETY: a colour attachment element of this crate's.
+    let element = unsafe { object::body::<ColorElement>(element) };
+    if element.owner.is_null() {
+        return &mut element.local;
+    }
+    // SAFETY: the element holds the descriptor which made it, which orphans
+    // the element before it goes.
+    &mut unsafe { object::body::<RenderPipelineDescriptor>(element.owner) }.colors[element.index]
+}
+
+pub(super) const COLOR_CLASSES: [&std::ffi::CStr; 2] = [
+    c"RosemaryMTLColorAttachmentDescriptor",
+    c"MTLRenderPipelineColorAttachmentDescriptor",
+];
+
+fn assign_color(destination: Id, source: Id) {
+    let is_color = COLOR_CLASSES
+        .iter()
+        .any(|name| object::is_kind(source, name));
+    *color_of(destination) = if is_color {
+        *color_of(source)
+    } else {
+        ColorAttachment::fresh()
+    };
+}
+
+/// `-init` of a standalone colour attachment descriptor.
+pub(super) unsafe extern "C" fn color_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a freshly allocated element.
+    unsafe {
+        object::init(
+            receiver,
+            ColorElement {
+                owner: std::ptr::null_mut(),
+                index: 0,
+                local: ColorAttachment::fresh(),
+            },
+        )
+    };
+    receiver
+}
+
+pub(super) unsafe extern "C" fn color_value(receiver: Id, sel: Sel) -> u64 {
+    let color = color_of(receiver);
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"pixelFormat" => color.pixel_format,
+        b"isBlendingEnabled" => u64::from(color.blending),
+        b"sourceRGBBlendFactor" => color.source_rgb,
+        b"destinationRGBBlendFactor" => color.destination_rgb,
+        b"rgbBlendOperation" => color.rgb_operation,
+        b"sourceAlphaBlendFactor" => color.source_alpha,
+        b"destinationAlphaBlendFactor" => color.destination_alpha,
+        b"alphaBlendOperation" => color.alpha_operation,
+        b"writeMask" => color.write_mask,
+        _ => 0,
+    }
 }
 
 impl crate::resource::Element for ColorElement {
@@ -83,6 +148,31 @@ pub(super) unsafe extern "C" fn set_descriptor_object(receiver: Id, sel: Sel, va
     objc::arc::release(std::mem::replace(slot, objc::arc::retain(value)));
 }
 
+pub(super) unsafe extern "C" fn descriptor_object(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: a render pipeline descriptor of this crate's.
+    let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"vertexFunction" => descriptor.vertex_function,
+        b"fragmentFunction" => descriptor.fragment_function,
+        b"vertexDescriptor" => descriptor.vertex_descriptor,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+pub(super) unsafe extern "C" fn descriptor_number(receiver: Id, sel: Sel) -> u64 {
+    // SAFETY: a render pipeline descriptor of this crate's.
+    let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"depthAttachmentPixelFormat" => descriptor.depth_format,
+        b"stencilAttachmentPixelFormat" => descriptor.stencil_format,
+        b"sampleCount" | b"rasterSampleCount" => descriptor.sample_count,
+        b"isAlphaToCoverageEnabled" => u64::from(descriptor.alpha_to_coverage),
+        _ => 0,
+    }
+}
+
 pub(super) unsafe extern "C" fn set_descriptor_number(receiver: Id, sel: Sel, value: u64) {
     // SAFETY: a render pipeline descriptor of this crate's.
     let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
@@ -109,6 +199,7 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
                 ColorElement {
                     owner: receiver,
                     index,
+                    local: ColorAttachment::fresh(),
                 },
             )
         })
@@ -119,6 +210,7 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
             elements,
             // SAFETY: every element here is an `RosemaryMTLColorAttachmentDescriptor`.
             orphan: |element| unsafe { crate::resource::orphan_element::<ColorElement>(element) },
+            assign: assign_color,
         },
     );
     unsafe { object::body::<RenderPipelineDescriptor>(receiver) }.color_objects = collection;
@@ -126,16 +218,7 @@ pub(super) unsafe extern "C" fn color_attachments(receiver: Id, _sel: Sel) -> Id
 }
 
 pub(super) unsafe extern "C" fn set_color_value(receiver: Id, sel: Sel, value: u64) {
-    // SAFETY: a colour attachment element of this crate's.
-    let element = *unsafe { object::body::<ColorElement>(receiver) };
-    if element.owner.is_null() {
-        // The descriptor which vended this element is gone.
-        return;
-    }
-    // SAFETY: the element holds the descriptor which made it, which orphans
-    // the element before it goes.
-    let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(element.owner) };
-    let color = &mut descriptor.colors[element.index];
+    let color = color_of(receiver);
     // SAFETY: a selector the runtime owns.
     match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
         b"setPixelFormat:" => color.pixel_format = value,

@@ -127,13 +127,13 @@ pub(super) fn retain_library(
             air,
             entry_modules,
             target,
+            device,
         },
     );
     if library.is_null() {
         report_library_error("could not allocate MTL library");
         return std::ptr::null_mut();
     }
-    let _ = device;
     library
 }
 
@@ -141,7 +141,7 @@ pub(super) unsafe extern "C" fn new_library_with_source(
     receiver: Id,
     _sel: Sel,
     source: Id,
-    _options: Id,
+    options: Id,
     error: *mut Id,
 ) -> Id {
     if !error.is_null() {
@@ -171,7 +171,20 @@ pub(super) unsafe extern "C" fn new_library_with_source(
     };
     report_source_library(source);
     dump_source_library(source);
-    let translated = match metal_translate::translate_msl_cached(source, target) {
+    let macros = if object::is_kind(options, c"MTLCompileOptions") {
+        // SAFETY: an options object of this crate's.
+        unsafe { object::body::<crate::pipeline::CompileOptions>(options) }
+            .macros
+            .clone()
+    } else {
+        Vec::new()
+    };
+    let translated = match metal_translate::translate_msl_cached_with_macros(
+        source,
+        &macros,
+        target,
+        metal_translate::PassPipeline::from_env(),
+    ) {
         Ok(translated) => translated,
         Err(translation_error) => return fail_library(error, &translation_error.to_string()),
     };
@@ -324,10 +337,9 @@ pub(super) unsafe extern "C" fn library_function_names(receiver: Id, _sel: Sel) 
     }
 }
 
-pub(super) unsafe extern "C" fn library_device(_receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: the process has one Metal device per adapter and a library is
-    // only made by one of them.
-    unsafe { MTLCreateSystemDefaultDevice() }
+pub(super) unsafe extern "C" fn library_device(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `RosemaryMTLLibrary`.
+    unsafe { object::body::<Library>(receiver) }.device
 }
 
 pub(super) unsafe extern "C" fn function_name(receiver: Id, _sel: Sel) -> Id {
@@ -336,6 +348,90 @@ pub(super) unsafe extern "C" fn function_name(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: the library which vended the function.
     let library = unsafe { object::body::<Library>(function.library) };
     foundation::string::from_str(&library.translated.entries[function.entry].name)
+}
+
+/// `-[MTLFunction functionType]`: `MTLFunctionTypeVertex`, `Fragment` or
+/// `Kernel`.
+pub(super) unsafe extern "C" fn function_type(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: an `RosemaryMTLFunction`.
+    let function = unsafe { object::body::<Function>(receiver) };
+    // SAFETY: the function's library is alive while the function holds it.
+    match unsafe { function.artifact() }.map(|artifact| artifact.stage) {
+        Some(metal_translate::ir::Stage::Vertex) => 1,
+        Some(metal_translate::ir::Stage::Fragment) => 2,
+        _ => 3,
+    }
+}
+
+/// `-[MTLFunction vertexAttributes]`: one `MTLVertexAttribute` per stage
+/// input of a vertex function, from the translation's reflection.
+pub(super) unsafe extern "C" fn function_vertex_attributes(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `RosemaryMTLFunction`.
+    let function = unsafe { object::body::<Function>(receiver) };
+    // SAFETY: the function's library is alive while the function holds it.
+    let inputs = match unsafe { function.artifact() } {
+        Some(artifact) if artifact.stage == metal_translate::ir::Stage::Vertex => {
+            artifact.vertex_inputs.clone()
+        }
+        _ => Vec::new(),
+    };
+    let attributes: Vec<corefoundation::base::CFTypeRef> = inputs
+        .iter()
+        .map(|input| {
+            object::make(
+                c"RosemaryMTLVertexAttribute",
+                VertexAttributeReflection {
+                    name: foundation::string::from_str(&input.name),
+                    index: u64::from(input.location),
+                    data_type: input.data_type,
+                },
+            ) as corefoundation::base::CFTypeRef
+        })
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &attributes,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for attribute in attributes {
+        objc::arc::release(attribute as Id);
+    }
+    objc::arc::autorelease(array as Id)
+}
+
+pub(super) unsafe extern "C" fn function_device(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `RosemaryMTLFunction`.
+    let function = unsafe { object::body::<Function>(receiver) };
+    // SAFETY: the library which vended the function.
+    unsafe { object::body::<Library>(function.library) }.device
+}
+
+/// `MTLVertexAttribute`: one stage input a vertex function reads.
+pub(super) struct VertexAttributeReflection {
+    name: Id,
+    index: u64,
+    data_type: u64,
+}
+
+pub(super) unsafe extern "C" fn attribute_name(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a vertex attribute of this crate's.
+    unsafe { object::body::<VertexAttributeReflection>(receiver) }.name
+}
+
+pub(super) unsafe extern "C" fn attribute_index(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a vertex attribute of this crate's.
+    unsafe { object::body::<VertexAttributeReflection>(receiver) }.index
+}
+
+pub(super) unsafe extern "C" fn attribute_type(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a vertex attribute of this crate's.
+    unsafe { object::body::<VertexAttributeReflection>(receiver) }.data_type
+}
+
+pub(super) unsafe extern "C" fn attribute_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: a vertex attribute of this crate's.
+    objc::arc::release(unsafe { object::body::<VertexAttributeReflection>(receiver) }.name);
+    objc::arc::finalize(receiver);
 }
 
 pub(super) fn fail_library(error: *mut Id, message: &str) -> Id {

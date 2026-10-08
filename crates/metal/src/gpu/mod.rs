@@ -15,7 +15,7 @@ use static_init::dynamic;
 use crate::heap::{Allocation, Heap};
 
 pub(crate) use format::sample_count;
-pub use format::{aspect_of, block_extent, pixel_format, texel_size};
+pub use format::{aspect_of, block_extent, is_srgb, pixel_format, srgb_twin, texel_size};
 pub(crate) use guard::{Guard, GuardedVec};
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
@@ -108,6 +108,8 @@ pub struct Gpu {
     /// fence and descriptor pools every frame is driver work on the thread the
     /// guest records on.
     contexts: Mutex<Vec<CommandContext>>,
+    /// Secondary command buffers, one per parallel render sub-encoder.
+    secondaries: Mutex<Vec<SecondaryContext>>,
     context_budget: ContextBudget,
     descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
     upload_chunks: Mutex<Vec<GpuBuffer>>,
@@ -170,6 +172,13 @@ pub struct CommandContext {
     pub pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
     pub fence: vk::Fence,
+}
+
+/// A secondary command buffer with the pool it was allocated from. It is
+/// executed by a primary one and retires with that primary's submission.
+pub struct SecondaryContext {
+    pub pool: vk::CommandPool,
+    pub command_buffer: vk::CommandBuffer,
 }
 
 struct ContextBudget {
@@ -685,6 +694,7 @@ impl Gpu {
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
             contexts: Mutex::new(Vec::new()),
+            secondaries: Mutex::new(Vec::new()),
             context_budget: ContextBudget::new(),
             descriptor_pools: Mutex::new(Vec::new()),
             upload_chunks: Mutex::new(Vec::new()),
@@ -707,6 +717,7 @@ impl Gpu {
 pub const USAGE_SHADER_READ: u64 = 1;
 pub const USAGE_SHADER_WRITE: u64 = 2;
 pub const USAGE_RENDER_TARGET: u64 = 4;
+pub const USAGE_PIXEL_FORMAT_VIEW: u64 = 0x10;
 
 pub struct GpuBuffer {
     pub buffer: vk::Buffer,
@@ -731,6 +742,15 @@ pub struct GpuImage {
     pub levels: u32,
     pub layers: u32,
     pub samples: vk::SampleCountFlags,
+    /// The first level and layer of the underlying image this one covers:
+    /// zero for an image of its own, the range's start for a texture view.
+    /// `width`, `height` and `depth` stay those of the underlying image's
+    /// level zero, so every extent is computed at the absolute level.
+    pub base_level: u32,
+    pub base_layer: u32,
+    /// What the underlying image was created for, which a view of another
+    /// format may have to narrow.
+    pub usage: vk::ImageUsageFlags,
 }
 
 impl GpuBuffer {
@@ -800,7 +820,8 @@ impl GpuImage {
                 self.layers
             ));
         }
-        let level = level as u32;
+        let level = level as u32 + self.base_level;
+        let slice = slice + u64::from(self.base_layer);
         // The bound is the level rounded up to whole blocks, not the level.
         // A compressed level below one block - the 2x2 and 1x1 tail of any BC
         // mip chain - still occupies a full 4x4 block, and both Metal and
@@ -862,6 +883,9 @@ impl GpuImage {
             levels: 1,
             layers: 1,
             samples: vk::SampleCountFlags::TYPE_1,
+            base_level: 0,
+            base_layer: 0,
+            usage: vk::ImageUsageFlags::empty(),
         }
     }
 }

@@ -117,7 +117,9 @@ impl RenderPipeline {
             )
         })?;
         let vertex_module = gpu.create_shader_module(&vertex.words, &vertex.name)?;
-        let fragment_module = gpu.create_shader_module(&fragment.words, &fragment.name)?;
+        let linked = super::link::link_varyings(&vertex.varyings, &fragment.varyings, &fragment.words);
+        let fragment_words = linked.as_deref().unwrap_or(&fragment.words);
+        let fragment_module = gpu.create_shader_module(fragment_words, &fragment.name)?;
         let layouts = layouts_for(gpu, &[&vertex.resources, &fragment.resources])?;
 
         let mut bindings = Vec::new();

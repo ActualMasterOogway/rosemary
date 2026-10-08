@@ -46,12 +46,114 @@ pub(crate) struct VertexElement {
     pub owner: Id,
     pub index: usize,
     pub layout: bool,
+    /// The values of an element with no owner: a standalone
+    /// `MTLVertexBufferLayoutDescriptor` or `MTLVertexAttributeDescriptor`, or
+    /// one whose descriptor has gone.
+    pub local_layout: VertexLayout,
+    pub local_attribute: VertexAttribute,
+}
+
+impl VertexElement {
+    fn standalone(layout: bool) -> Self {
+        Self {
+            owner: std::ptr::null_mut(),
+            index: 0,
+            layout,
+            local_layout: VertexLayout::default(),
+            local_attribute: VertexAttribute::default(),
+        }
+    }
+}
+
+/// The layout one element names: its descriptor's, or its own.
+fn layout_of<'a>(element: Id) -> &'a mut VertexLayout {
+    // SAFETY: a vertex element of this crate's.
+    let element = unsafe { object::body::<VertexElement>(element) };
+    if element.owner.is_null() {
+        return &mut element.local_layout;
+    }
+    // SAFETY: the element holds the descriptor which made it, which orphans
+    // the element before it goes.
+    &mut unsafe { object::body::<VertexDescriptor>(element.owner) }.layouts[element.index]
+}
+
+fn attribute_of<'a>(element: Id) -> &'a mut VertexAttribute {
+    // SAFETY: a vertex element of this crate's.
+    let element = unsafe { object::body::<VertexElement>(element) };
+    if element.owner.is_null() {
+        return &mut element.local_attribute;
+    }
+    // SAFETY: as for `layout_of`.
+    &mut unsafe { object::body::<VertexDescriptor>(element.owner) }.attributes[element.index]
+}
+
+fn assign_vertex_element(destination: Id, source: Id) {
+    // SAFETY: a vertex element of this crate's.
+    let layout = unsafe { object::body::<VertexElement>(destination) }.layout;
+    let source = [
+        c"RosemaryMTLVertexElement",
+        c"MTLVertexBufferLayoutDescriptor",
+        c"MTLVertexAttributeDescriptor",
+        c"MTLBufferLayoutDescriptor",
+        c"MTLAttributeDescriptor",
+    ]
+    .iter()
+    .any(|name| object::is_kind(source, name))
+    .then_some(source);
+    if layout {
+        *layout_of(destination) = source.map_or_else(VertexLayout::default, |s| *layout_of(s));
+    } else {
+        *attribute_of(destination) =
+            source.map_or_else(VertexAttribute::default, |s| *attribute_of(s));
+    }
+}
+
+pub(super) unsafe extern "C" fn vertex_layout_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a freshly allocated element.
+    unsafe { object::init(receiver, VertexElement::standalone(true)) };
+    receiver
+}
+
+pub(super) unsafe extern "C" fn vertex_attribute_init(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: a freshly allocated element.
+    unsafe { object::init(receiver, VertexElement::standalone(false)) };
+    receiver
+}
+
+pub(super) unsafe extern "C" fn vertex_element_value(receiver: Id, sel: Sel) -> u64 {
+    // SAFETY: a selector the runtime owns.
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"stride" => layout_of(receiver).stride,
+        b"stepFunction" => layout_of(receiver).step_function,
+        b"stepRate" => layout_of(receiver).step_rate,
+        b"format" => attribute_of(receiver).format,
+        b"offset" => attribute_of(receiver).offset,
+        b"bufferIndex" => attribute_of(receiver).buffer_index,
+        _ => 0,
+    }
+}
+
+pub(super) unsafe extern "C" fn collection_assign(
+    receiver: Id,
+    _sel: Sel,
+    object: Id,
+    index: usize,
+) {
+    // SAFETY: an indexed collection of this crate's.
+    let collection = unsafe { object::body::<IndexedCollection>(receiver) };
+    if let Some(element) = collection.elements.get(index) {
+        (collection.assign)(*element, object);
+    }
 }
 
 pub(crate) struct IndexedCollection {
     pub elements: Vec<Id>,
     /// How to tell one of `elements` that its owner is gone. See [`orphan`].
     pub orphan: fn(Id),
+    /// `collection[i] = object`: copy the values of a standalone descriptor,
+    /// or the defaults where it is nil, into element `i`. Metal copies rather
+    /// than keeping the object, so a later change to it changes nothing here.
+    pub assign: fn(Id, Id),
 }
 
 /// A child object which mutates the descriptor that vended it.
@@ -93,6 +195,29 @@ impl Element for VertexElement {
     fn owner(&mut self) -> &mut Id {
         &mut self.owner
     }
+}
+
+/// `+[MTLStageInputOutputDescriptor stageInputOutputDescriptor]`.
+pub(super) unsafe extern "C" fn new_stage_input_descriptor(_class: Id, _sel: Sel) -> Id {
+    autoreleased_vertex_descriptor(c"MTLStageInputOutputDescriptor")
+}
+
+/// `+[MTLVertexDescriptor vertexDescriptor]`.
+pub(super) unsafe extern "C" fn new_vertex_descriptor(_class: Id, _sel: Sel) -> Id {
+    autoreleased_vertex_descriptor(c"MTLVertexDescriptor")
+}
+
+fn autoreleased_vertex_descriptor(class: &std::ffi::CStr) -> Id {
+    let object = object::make(
+        class,
+        VertexDescriptor {
+            layouts: [VertexLayout::default(); VERTEX_SLOTS],
+            attributes: [VertexAttribute::default(); VERTEX_SLOTS],
+            layout_objects: std::ptr::null_mut(),
+            attribute_objects: std::ptr::null_mut(),
+        },
+    );
+    objc::arc::autorelease(object)
 }
 
 pub(super) unsafe extern "C" fn vertex_descriptor_init(receiver: Id, _sel: Sel) -> Id {
@@ -144,7 +269,7 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
                 VertexElement {
                     owner: receiver,
                     index,
-                    layout,
+                    ..VertexElement::standalone(layout)
                 },
             )
         })
@@ -155,6 +280,7 @@ pub(super) fn vertex_collection(receiver: Id, layout: bool) -> Id {
             elements,
             // SAFETY: every element of this collection is an `RosemaryMTLVertexElement`.
             orphan: |element| unsafe { orphan_element::<VertexElement>(element) },
+            assign: assign_vertex_element,
         },
     );
     let descriptor = unsafe { object::body::<VertexDescriptor>(receiver) };
@@ -206,32 +332,14 @@ pub(super) unsafe extern "C" fn vertex_descriptor_dealloc(receiver: Id, _sel: Se
 }
 
 pub(super) unsafe extern "C" fn set_vertex_element_value(receiver: Id, sel: Sel, value: u64) {
-    // SAFETY: a vertex element of this crate's.
-    let element = *unsafe { object::body::<VertexElement>(receiver) };
-    if element.owner.is_null() {
-        // The descriptor which vended this element is gone.
-        return;
-    }
-    // SAFETY: the element holds the descriptor which made it, which orphans
-    // the element before it goes.
-    let descriptor = unsafe { object::body::<VertexDescriptor>(element.owner) };
     // SAFETY: a selector the runtime owns.
-    let name = unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes();
-    if element.layout {
-        let layout = &mut descriptor.layouts[element.index];
-        match name {
-            b"setStride:" => layout.stride = value,
-            b"setStepFunction:" => layout.step_function = value,
-            b"setStepRate:" => layout.step_rate = value,
-            _ => (),
-        }
-    } else {
-        let attribute = &mut descriptor.attributes[element.index];
-        match name {
-            b"setFormat:" => attribute.format = value,
-            b"setOffset:" => attribute.offset = value,
-            b"setBufferIndex:" => attribute.buffer_index = value,
-            _ => (),
-        }
+    match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"setStride:" => layout_of(receiver).stride = value,
+        b"setStepFunction:" => layout_of(receiver).step_function = value,
+        b"setStepRate:" => layout_of(receiver).step_rate = value,
+        b"setFormat:" => attribute_of(receiver).format = value,
+        b"setOffset:" => attribute_of(receiver).offset = value,
+        b"setBufferIndex:" => attribute_of(receiver).buffer_index = value,
+        _ => (),
     }
 }

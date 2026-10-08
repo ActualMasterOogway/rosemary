@@ -472,6 +472,7 @@ pub(super) fn air_texture_intrinsic(
                     gradient: None,
                     bias: None,
                     gather: Some(0),
+                    compare: None,
                 }));
             }
             // A gradient sample carries no level-of-detail flag: the
@@ -491,6 +492,7 @@ pub(super) fn air_texture_intrinsic(
                 gradient,
                 bias,
                 gather: None,
+                compare: None,
             }))
         }
         "read" => {

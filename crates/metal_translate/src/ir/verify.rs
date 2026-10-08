@@ -767,10 +767,22 @@ fn texture_is_well_typed(
             lod,
             gradient,
             bias,
-            ..
+            compare,
+            gather,
         } => {
             let Some(Type::Texture(texture)) = operand_type(function, texture) else {
                 return false;
+            };
+            // A comparison yields one value, only from a depth texture, and
+            // never alongside a gather.
+            let compare_agrees = match compare {
+                None => result == Some(texel_vector(&texture)),
+                Some(reference) => {
+                    texture.depth
+                        && gather.is_none()
+                        && operand_type(function, reference) == Some(Type::Float { bits: 32 })
+                        && result == Some(Type::Float { bits: 32 })
+                }
             };
             // A gradient names the level of detail, so a sample carries one or
             // the other and never both.
@@ -793,7 +805,7 @@ fn texture_is_well_typed(
                 && optional_integer_vector(function, offset.as_ref())
                 && optional_is(function, lod.as_ref(), &Type::Float { bits: 32 })
                 && optional_is(function, bias.as_ref(), &Type::Float { bits: 32 })
-                && result == Some(texel_vector(&texture))
+                && compare_agrees
         }
         InstructionKind::TextureRead {
             texture,

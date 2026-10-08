@@ -14,7 +14,8 @@ use crate::ir::{Access, ResourceKind, Stage};
 use crate::sha256::{self, Sha256};
 use crate::{
     AirInput, EntryArtifact, FunctionConstantInfo, FunctionConstantValues, PassPipeline,
-    RequiredFeatures, ResourceBinding, TargetProfile, TranslateError, TranslatedLibrary,
+    RequiredFeatures, ResourceBinding, StageVariable, TargetProfile, TranslateError,
+    TranslatedLibrary,
 };
 use codec::{decode, encode};
 pub use store::flush;
@@ -135,13 +136,36 @@ pub fn translate_msl_cached_with(
     target: &TargetProfile,
     passes: &PassPipeline,
 ) -> Result<TranslatedLibrary, TranslateError> {
+    translate_msl_cached_with_macros(source, &[], target, passes)
+}
+
+/// [`crate::translate_msl_with_macros`] through the on-disk cache. The
+/// macros are part of the key: they change what the source says.
+pub fn translate_msl_cached_with_macros(
+    source: &str,
+    macros: &[(String, String)],
+    target: &TargetProfile,
+    passes: &PassPipeline,
+) -> Result<TranslatedLibrary, TranslateError> {
+    let mut bytes = Vec::new();
+    for (name, value) in macros {
+        for text in [name, value] {
+            bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+        }
+    }
+    // An empty list keys exactly as a source without macros always has.
+    if !bytes.is_empty() {
+        bytes.extend_from_slice(b"\0macros\0");
+    }
+    bytes.extend_from_slice(source.as_bytes());
     cached(
         Frontend::Msl,
-        source.as_bytes(),
+        &bytes,
         target,
         passes,
         &FunctionConstantValues::new(),
-        || crate::translate_msl_with(source, target, passes),
+        || crate::translate_msl_with_macros(source, macros, target, passes),
     )
 }
 

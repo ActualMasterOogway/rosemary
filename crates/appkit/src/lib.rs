@@ -399,6 +399,9 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_kCAFillModeBackwards", coreanimation::FILL_BACKWARDS),
     ("_kCAFillModeBoth", coreanimation::FILL_BOTH),
     ("_kCAFillModeRemoved", coreanimation::FILL_REMOVED),
+    ("_kCAFilterNearest", coreanimation::FILTER_NEAREST),
+    ("_kCAFilterLinear", coreanimation::FILTER_LINEAR),
+    ("_kCAFilterTrilinear", coreanimation::FILTER_TRILINEAR),
     (
         "_NSWorkspaceLaunchConfigurationArguments",
         workspace::LAUNCH_ARGUMENTS,

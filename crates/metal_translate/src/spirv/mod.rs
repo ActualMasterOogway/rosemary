@@ -216,6 +216,22 @@ pub struct EntryArtifact {
     pub words: Vec<u32>,
     pub resources: Vec<ResourceBinding>,
     pub required: RequiredFeatures,
+    /// A vertex function's attributes, for `-[MTLFunction vertexAttributes]`.
+    pub vertex_inputs: Vec<StageVariable>,
+    /// The user varyings a vertex function writes or a fragment function
+    /// reads, by the `user(NAME)` Metal links them with. Only source
+    /// libraries name them; the runtime renumbers a fragment function's
+    /// locations to its vertex function's by these names.
+    pub varyings: Vec<StageVariable>,
+}
+
+/// One stage interface variable, as reflection reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageVariable {
+    pub name: String,
+    pub location: u32,
+    /// Its `MTLDataType`.
+    pub data_type: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -402,6 +418,7 @@ fn emit_entry(
     let words = module.assemble();
     rspirv::dr::load_words(&words)
         .map_err(|error| emission(format!("emitted SPIR-V could not be parsed: {error}")))?;
+    let (vertex_inputs, varyings) = interface_reflection(entry, function);
     Ok(EntryArtifact {
         name: function.name.clone(),
         stage: entry.stage,
@@ -411,7 +428,69 @@ fn emit_entry(
             capabilities,
             extensions,
         },
+        vertex_inputs,
+        varyings,
     })
+}
+
+/// The attributes a vertex function reads, and the user varyings either
+/// stage names.
+fn interface_reflection(entry: &EntryPoint, function: &Function) -> (Vec<StageVariable>, Vec<StageVariable>) {
+    let mut vertex_inputs = Vec::new();
+    let mut varyings = Vec::new();
+    for input in &entry.inputs {
+        let StageBinding::Location { location, .. } = input.binding else {
+            continue;
+        };
+        let Some(parameter) = function.parameters.get(input.argument as usize) else {
+            continue;
+        };
+        let variable = StageVariable {
+            name: input.name.clone().unwrap_or_default(),
+            location,
+            data_type: metal_data_type(&parameter.ty, input.signed),
+        };
+        match entry.stage {
+            Stage::Vertex => vertex_inputs.push(variable),
+            _ if variable.name.starts_with("user(") => varyings.push(variable),
+            _ => {}
+        }
+    }
+    if entry.stage == Stage::Vertex {
+        for output in &entry.outputs {
+            if let (StageBinding::Location { location, .. }, Some(name)) = (output.binding, &output.name)
+                && name.starts_with("user(")
+            {
+                varyings.push(StageVariable {
+                    name: name.clone(),
+                    location,
+                    data_type: 0,
+                });
+            }
+        }
+    }
+    (vertex_inputs, varyings)
+}
+
+/// The `MTLDataType` of a scalar or vector stage value.
+fn metal_data_type(ty: &Type, signed: bool) -> u64 {
+    let (element, lanes) = match ty {
+        Type::Vector { element, lanes } => (element.as_ref(), u64::from(*lanes)),
+        scalar => (scalar, 1),
+    };
+    let base = match element {
+        Type::Float { bits: 32 } => 3,
+        Type::Float { bits: 16 } => 16,
+        Type::Int { bits: 32, .. } if signed => 29,
+        Type::Int { bits: 32, .. } => 33,
+        Type::Int { bits: 16, .. } if signed => 37,
+        Type::Int { bits: 16, .. } => 41,
+        Type::Int { bits: 8, .. } if signed => 45,
+        Type::Int { bits: 8, .. } => 49,
+        Type::Bool => 53,
+        _ => return 0,
+    };
+    base + lanes - 1
 }
 
 /// The Metal type of one stage output: a member of the returned structure, or

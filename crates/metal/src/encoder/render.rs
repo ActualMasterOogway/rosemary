@@ -130,6 +130,127 @@ pub(super) unsafe fn draw_indexed(
     let Some((device, command)) = encoder.prepare_draw(primitive, base_instance) else {
         return;
     };
+    unsafe { bind_index_buffer(encoder, device, command, index_type, index_buffer, index_offset) };
+    // SAFETY: recording into this command buffer.
+    unsafe {
+        device.cmd_draw_indexed(
+            command,
+            index_count as u32,
+            instance_count.max(1) as u32,
+            0,
+            base_vertex as i32,
+            base_instance as u32,
+        );
+    };
+}
+
+/// `-drawPrimitives:vertexStart:vertexCount:`, one instance.
+pub(super) unsafe extern "C" fn draw_primitives_once(
+    receiver: Id,
+    sel: Sel,
+    primitive: u64,
+    vertex_start: u64,
+    vertex_count: u64,
+) {
+    unsafe { draw_primitives(receiver, sel, primitive, vertex_start, vertex_count, 1) };
+}
+
+/// `-drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:`,
+/// one instance.
+pub(super) unsafe extern "C" fn draw_indexed_primitives_once(
+    receiver: Id,
+    sel: Sel,
+    primitive: u64,
+    index_count: u64,
+    index_type: u64,
+    index_buffer: Id,
+    index_offset: u64,
+) {
+    unsafe {
+        draw_indexed_primitives(
+            receiver,
+            sel,
+            primitive,
+            index_count,
+            index_type,
+            index_buffer,
+            index_offset,
+            1,
+        )
+    };
+}
+
+/// `-drawPrimitives:indirectBuffer:indirectBufferOffset:`.
+///
+/// `MTLDrawPrimitivesIndirectArguments` is `VkDrawIndirectCommand` field for
+/// field, so the guest's buffer is read by the device as it is.
+pub(super) unsafe extern "C" fn draw_primitives_indirect(
+    receiver: Id,
+    _sel: Sel,
+    primitive: u64,
+    indirect: Id,
+    offset: u64,
+) {
+    if indirect.is_null() {
+        return;
+    }
+    // SAFETY: an encoder of this crate's.
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    // FIXME (ACCURACY): the base instance is in device memory, so the check a
+    // stepped vertex layout needs on it is made against zero.
+    let Some((device, command)) = encoder.prepare_draw(primitive, 0) else {
+        return;
+    };
+    // SAFETY: only a buffer of this crate's is ever bound.
+    let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
+    encoder.command().retain(indirect);
+    // SAFETY: recording into this command buffer.
+    unsafe { device.cmd_draw_indirect(command, buffer, offset, 1, 16) };
+}
+
+/// `-drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:`.
+///
+/// `MTLDrawIndexedPrimitivesIndirectArguments` is likewise
+/// `VkDrawIndexedIndirectCommand`.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn draw_indexed_primitives_indirect(
+    receiver: Id,
+    _sel: Sel,
+    primitive: u64,
+    index_type: u64,
+    index_buffer: Id,
+    index_offset: u64,
+    indirect: Id,
+    offset: u64,
+) {
+    if index_buffer.is_null() || indirect.is_null() {
+        return;
+    }
+    // SAFETY: an encoder of this crate's.
+    let encoder = unsafe { object::body::<Encoder>(receiver) };
+    // FIXME (ACCURACY): as for `-drawPrimitives:indirectBuffer:`.
+    let Some((device, command)) = encoder.prepare_draw(primitive, 0) else {
+        return;
+    };
+    unsafe { bind_index_buffer(encoder, device, command, index_type, index_buffer, index_offset) };
+    // SAFETY: only a buffer of this crate's is ever bound.
+    let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
+    encoder.command().retain(indirect);
+    // SAFETY: recording into this command buffer.
+    unsafe { device.cmd_draw_indexed_indirect(command, buffer, offset, 1, 20) };
+}
+
+/// # Safety
+///
+/// `index_buffer` must be an `MTLBuffer` of this crate's.
+unsafe fn bind_index_buffer(
+    encoder: &mut Encoder,
+    device: &ash::Device,
+    command: vk::CommandBuffer,
+    index_type: u64,
+    index_buffer: Id,
+    index_offset: u64,
+) {
     // SAFETY: the caller guarantees the buffer's class.
     let buffer = unsafe { object::body::<Buffer>(index_buffer) };
     encoder.command().retain(index_buffer);
@@ -146,15 +267,4 @@ pub(super) unsafe fn draw_indexed(
         // SAFETY: recording into this command buffer.
         unsafe { device.cmd_bind_index_buffer(command, binding.0, binding.1, binding.2) };
     }
-    // SAFETY: recording into this command buffer.
-    unsafe {
-        device.cmd_draw_indexed(
-            command,
-            index_count as u32,
-            instance_count.max(1) as u32,
-            0,
-            base_vertex as i32,
-            base_instance as u32,
-        );
-    };
 }

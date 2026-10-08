@@ -1,5 +1,10 @@
+mod ast;
 mod blit;
 mod index;
+mod lex;
+mod lower;
+mod parse;
+mod preprocess;
 mod types;
 
 use std::collections::HashMap;
@@ -19,8 +24,41 @@ use types::{
     writable_float_texture,
 };
 
-/// Parse the source-MSL subset currently implemented by the translator.
+/// Parse a Metal source library into the Metal IR.
 pub fn parse_msl(source: &str) -> Result<Module, TranslateError> {
+    parse_msl_with_macros(source, &[])
+}
+
+/// [`parse_msl`] with preprocessor macros defined first, as
+/// `MTLCompileOptions.preprocessorMacros` defines them.
+pub fn parse_msl_with_macros(
+    source: &str,
+    macros: &[(String, String)],
+) -> Result<Module, TranslateError> {
+    // A guest's string may carry its C terminator.
+    let source = source.trim_end_matches('\0');
+    let compiled = (|| {
+        let text = preprocess::preprocess(source, macros)?;
+        let tokens = lex::lex(&text, 1)?;
+        let program = parse::parse(&tokens)?;
+        let module = lower::lower(&program)?;
+        module.verify()?;
+        Ok(module)
+    })();
+    match compiled {
+        Ok(module) => Ok(module),
+        // The narrow kernels the first frontend parsed are still accepted
+        // exactly as before where the general frontend refuses them.
+        Err(error) => parse_legacy(source).map_err(|_| error),
+    }
+}
+
+fn syntax_error(line: usize, message: impl Into<String>) -> TranslateError {
+    TranslateError::one(Diagnostic::new(Phase::AirSyntax, message).at_line(line))
+}
+
+/// The first source frontend: one kernel shape at a time.
+fn parse_legacy(source: &str) -> Result<Module, TranslateError> {
     let source = strip_comments(source);
     let structs = parse_structs(&source)?;
     let kernels: Vec<usize> = source

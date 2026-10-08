@@ -126,6 +126,53 @@ impl Gpu {
         }
     }
 
+    /// A secondary command buffer ready to begin, recycled where one has
+    /// retired. Its pool is its own, so a sub-encoder records on any thread.
+    pub fn acquire_secondary(&self) -> Result<SecondaryContext, String> {
+        if let Some(context) = self.secondaries.lock().expect("secondary contexts").pop() {
+            return Ok(context);
+        }
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_family)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+        // SAFETY: a well-formed create info on this live device.
+        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+            .map_err(|error| format!("vkCreateCommandPool failed with {error:?}"))?;
+        let allocate = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::SECONDARY)
+            .command_buffer_count(1);
+        // SAFETY: the pool was just created by this device.
+        match unsafe { self.device.allocate_command_buffers(&allocate) } {
+            Ok(buffers) => Ok(SecondaryContext {
+                pool,
+                command_buffer: buffers[0],
+            }),
+            Err(error) => {
+                // SAFETY: nothing allocated from the pool is in use.
+                unsafe { self.device.destroy_command_pool(pool, None) };
+                Err(format!("vkAllocateCommandBuffers failed with {error:?}"))
+            }
+        }
+    }
+
+    /// Hand back a secondary command buffer whose primary is not pending.
+    pub fn release_secondary(&self, context: SecondaryContext) {
+        // SAFETY: the caller guarantees nothing from the pool is pending.
+        let reset = unsafe {
+            self.device
+                .reset_command_pool(context.pool, vk::CommandPoolResetFlags::empty())
+        };
+        let mut secondaries = self.secondaries.lock().expect("secondary contexts");
+        if reset.is_ok() && secondaries.len() < RECYCLED {
+            secondaries.push(context);
+            return;
+        }
+        drop(secondaries);
+        // SAFETY: as above.
+        unsafe { self.device.destroy_command_pool(context.pool, None) };
+    }
+
     fn release_context_budget(&self) {
         let mut used = self
             .context_budget

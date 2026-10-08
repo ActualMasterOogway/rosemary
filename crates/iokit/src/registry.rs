@@ -716,9 +716,22 @@ pub unsafe extern "C" fn KextManagerCopyLoadedKextInfo(
     empty_dictionary()
 }
 
+/// `CFDictionaryRef IODisplayCreateInfoDictionary(io_service_t, IOOptionBits)`.
+///
+/// Empty, which is what IOGraphicsLib answers when no display service stands
+/// behind the framebuffer - and `CGDisplayIOServicePort` names none here.
+/// Never null, as on a Mac.
+pub unsafe extern "C" fn IODisplayCreateInfoDictionary(
+    _framebuffer: u32,
+    _options: u32,
+) -> CFTypeRef {
+    empty_dictionary()
+}
+
 exports::exports! {
     functions {
         "KextManagerCopyLoadedKextInfo" => KextManagerCopyLoadedKextInfo,
+        "IODisplayCreateInfoDictionary" => IODisplayCreateInfoDictionary,
         "IOServiceMatching" => IOServiceMatching,
         "IORegistryEntryIDMatching" => IORegistryEntryIDMatching,
         "IOServiceGetMatchingServices" => IOServiceGetMatchingServices,

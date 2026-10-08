@@ -727,6 +727,10 @@ pub enum InstructionKind {
         bias: Option<Operand>,
         /// `gather` selects one component of the four sampled texels.
         gather: Option<u32>,
+        /// Metal's `sample_compare`: the reference a depth texture's texels
+        /// are compared with through the sampler's compare function. The
+        /// result is then one `float`, the filtered comparison.
+        compare: Option<Operand>,
     },
     /// Read one texel by integer coordinate, without a sampler.
     TextureRead {
