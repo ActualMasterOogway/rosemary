@@ -252,10 +252,10 @@ impl Dialog {
     /// Show the pointer while `shown`, if the program has it hidden.
     fn show_cursor(&mut self, shown: bool) {
         // SAFETY: reads a counter.
-        if unsafe { crate::cursor::CGCursorIsVisible() } || self.showed_cursor == shown {
+        if unsafe { crate::cursor::CGCursorIsVisible() } != 0 || self.showed_cursor == shown {
             return;
         }
-        sdl3::video::set_cursor_visible(shown);
+        crate::cursor::force_visible(shown);
         self.showed_cursor = shown;
     }
 

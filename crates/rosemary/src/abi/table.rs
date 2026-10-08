@@ -726,7 +726,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
     // `boolean_t CGCursorIsVisible(void)` - an `int`, not a `CGError`, and the
     // pair to `CGDisplayHideCursor`.
-    sig!("CGCursorIsVisible", BOOL),
+    sig!("CGCursorIsVisible", U32),
     //
     // cocos2d-x decodes every texture the same way: a `CGImageSource` over
     // the file's bytes produces a `CGImage`, a bitmap context is created over

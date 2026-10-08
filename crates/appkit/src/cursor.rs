@@ -173,6 +173,16 @@ fn is_cursor(object: Id) -> bool {
     })
 }
 
+/// A fully transparent cursor of `size` points, at least 1x1 pixel.
+fn transparent_cursor(size: NSSize, hot_spot: NSPoint) -> sdl3::Cursor {
+    let side = |extent: f64| (extent.max(1.0) as u32).min(256);
+    let (width, height) = (side(size.width), side(size.height));
+    let pixels = vec![0u8; (width * height * 4) as usize];
+    let (x, y) = hot_spot_pixels(hot_spot, size, width, height);
+    sdl3::video::create_color_cursor(width as i32, height as i32, &pixels, x, y)
+        .unwrap_or(std::ptr::null_mut())
+}
+
 /// Build the SDL cursor for an image, or null when there are no pixels to
 /// build it from.
 ///
@@ -181,6 +191,11 @@ fn is_cursor(object: Id) -> bool {
 /// image it asked for and far better than an invisible pointer.
 fn cursor_from_image(image: Id, hot_spot: NSPoint) -> sdl3::Cursor {
     let Some(bitmap) = crate::image::bitmap(image) else {
+        // A blank image is an invisible cursor, which is how Unity hides the
+        // pointer. Falling back to the desktop's arrow would show it instead.
+        if crate::image::is_blank(image) {
+            return transparent_cursor(crate::image::declared_size(image), hot_spot);
+        }
         eprintln!(
             "rosemary: appkit: -[NSCursor initWithImage:hotSpot:]: no pixels for this image - \
              the pointer keeps the desktop's cursor"
@@ -416,6 +431,7 @@ pub unsafe fn discard_rects_in_tree(view: Id) {
 /// to whatever the program last `-set`. Called wherever either half can have
 /// changed: a rectangle added or discarded, and every mouse move.
 pub fn apply() {
+    sync_visibility();
     if OVER_CHROME.load(std::sync::atomic::Ordering::Acquire) {
         show(std::ptr::null_mut());
         return;
@@ -848,9 +864,7 @@ pub fn set_over_chrome(over: bool) {
             }
         );
     }
-    if HIDDEN.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        sdl3::video::set_cursor_visible(over);
-    }
+    sync_visibility();
     apply();
 }
 
@@ -927,9 +941,7 @@ fn hide_cursor() {
     if tracing() {
         eprintln!("rosemary: appkit: cursor hidden {count} deep");
     }
-    if count == 1 && !OVER_CHROME.load(std::sync::atomic::Ordering::Acquire) {
-        sdl3::video::set_cursor_visible(false);
-    }
+    sync_visibility();
 }
 
 fn show_cursor() {
@@ -941,10 +953,45 @@ fn show_cursor() {
         // AppKit clamps at zero rather than letting the count go negative, or a
         // stray unhide would take an extra hide to undo.
         HIDDEN.store(0, std::sync::atomic::Ordering::Release);
-        return;
     }
-    if previous == 1 {
-        sdl3::video::set_cursor_visible(true);
+    sync_visibility();
+}
+
+/// `+setHiddenUntilMouseMoves:` is not counted and not undone by `+unhide`: it
+/// hides until the next mouse motion, which [`mouse_moved`] ends.
+static HIDDEN_UNTIL_MOVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the program wants the pointer on screen, chrome aside.
+fn wants_visible() -> bool {
+    HIDDEN.load(std::sync::atomic::Ordering::Acquire) <= 0
+        && !HIDDEN_UNTIL_MOVE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Put SDL's pointer visibility where the program's hide state says.
+///
+/// Idempotent, and run from [`apply`] as well as on every hide: SDL resets its
+/// visibility when video starts, and a hide made before the first window
+/// (Unity's, at startup) would otherwise be lost while the count still says
+/// hidden.
+pub fn sync_visibility() {
+    let over_chrome = OVER_CHROME.load(std::sync::atomic::Ordering::Acquire);
+    let forced = FORCED_VISIBLE.load(std::sync::atomic::Ordering::Acquire);
+    sdl3::video::set_cursor_visible(over_chrome || forced || wants_visible());
+}
+
+/// Set while one of Rosemary's own dialogs is up, which needs a pointer to
+/// press its buttons with whatever the program has hidden.
+static FORCED_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn force_visible(on: bool) {
+    FORCED_VISIBLE.store(on, std::sync::atomic::Ordering::Release);
+    sync_visibility();
+}
+
+/// A mouse motion ends `-setHiddenUntilMouseMoves:`.
+pub fn mouse_moved() {
+    if HIDDEN_UNTIL_MOVE.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        sync_visibility();
     }
 }
 
@@ -975,8 +1022,9 @@ pub unsafe extern "C" fn CGDisplayShowCursor(_display: u32) -> i32 {
 }
 
 #[allow(non_snake_case)]
-pub unsafe extern "C" fn CGCursorIsVisible() -> bool {
-    HIDDEN.load(std::sync::atomic::Ordering::Acquire) == 0
+pub unsafe extern "C" fn CGCursorIsVisible() -> u32 {
+    // `boolean_t` is an `int`.
+    wants_visible() as u32
 }
 
 /// `-setOnMouseEntered:` and `-setOnMouseExited:`, which say that a *tracking
@@ -1028,12 +1076,9 @@ unsafe extern "C" fn class_pop(_class: Id, _sel: Sel) {
     apply();
 }
 
-unsafe extern "C" fn set_hidden_until_mouse_moves(class: Id, sel: Sel, hidden: u8) {
-    match hidden != 0 {
-        // SAFETY: both are `void (Class, SEL)`.
-        true => unsafe { hide(class, sel) },
-        false => unsafe { unhide(class, sel) },
-    }
+unsafe extern "C" fn set_hidden_until_mouse_moves(_class: Id, _sel: Sel, hidden: u8) {
+    HIDDEN_UNTIL_MOVE.store(hidden != 0, std::sync::atomic::Ordering::Release);
+    sync_visibility();
 }
 
 pub(crate) fn install() {
@@ -1094,9 +1139,13 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
+    /// The hide state is process-wide, so the tests that touch it take turns.
+    static HIDE_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The hide count is what makes a program that hides twice stay hidden.
     #[test]
     fn hiding_is_counted() {
+        let _turn = HIDE_STATE.lock().unwrap_or_else(|e| e.into_inner());
         crate::bootstrap();
         let class = objc::class::ptr(objc::class::lookup(c"NSCursor").expect("NSCursor")) as Id;
         HIDDEN.store(0, std::sync::atomic::Ordering::Release);
@@ -1117,11 +1166,31 @@ mod tests {
         // C entry points return `kCGErrorSuccess`.
         assert_eq!(unsafe { CGDisplayHideCursor(0) }, 0);
         assert_eq!(unsafe { CGDisplayHideCursor(0) }, 0);
-        assert!(!unsafe { CGCursorIsVisible() });
+        assert_eq!(unsafe { CGCursorIsVisible() }, 0);
         assert_eq!(unsafe { CGDisplayShowCursor(0) }, 0);
-        assert!(!unsafe { CGCursorIsVisible() });
+        assert_eq!(unsafe { CGCursorIsVisible() }, 0);
         assert_eq!(unsafe { CGDisplayShowCursor(0) }, 0);
-        assert!(unsafe { CGCursorIsVisible() });
+        assert_eq!(unsafe { CGCursorIsVisible() }, 1);
+    }
+
+    /// Hiding until the mouse moves is not counted, and motion ends it.
+    #[test]
+    fn hiding_until_the_mouse_moves_is_not_counted() {
+        let _turn = HIDE_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::bootstrap();
+        HIDDEN.store(0, std::sync::atomic::Ordering::Release);
+        let class = objc::class::ptr(objc::class::lookup(c"NSCursor").expect("NSCursor")) as Id;
+        // SAFETY: `void (Class, SEL, BOOL)`.
+        unsafe {
+            set_hidden_until_mouse_moves(class, objc::sel::get("setHiddenUntilMouseMoves:"), 1)
+        };
+        unsafe {
+            set_hidden_until_mouse_moves(class, objc::sel::get("setHiddenUntilMouseMoves:"), 1)
+        };
+        assert_eq!(unsafe { CGCursorIsVisible() }, 0);
+        mouse_moved();
+        assert_eq!(unsafe { CGCursorIsVisible() }, 1);
+        assert_eq!(HIDDEN.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 
     /// A 2x image's point is in points and its pixels are not, so the two

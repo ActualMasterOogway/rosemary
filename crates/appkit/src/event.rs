@@ -312,6 +312,13 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             post(window, window::DID_CHANGE_BACKING_PROPERTIES);
         }
         Event::WindowMouse { window, entered } => {
+            // A disassociated pointer never leaves: its cursor is frozen where
+            // it was, and SDL's integrated position reaching a window edge is
+            // not the guest's pointer going anywhere. A guest told it left
+            // (Unity does) gives the lock up.
+            if !entered && !crate::screen::mouse_is_associated() {
+                return;
+            }
             if !entered {
                 crate::decor::pointer_left(window);
             }
@@ -433,12 +440,19 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             dy,
             buttons,
         } => {
+            crate::cursor::mouse_moved();
             if take_warp_echo(x, y) {
                 return;
             }
             crate::cgevent::note_mouse_delta(dx, dy);
             crate::screen::hold_at_edge(id, x, y, dx, dy);
-            let on_chrome = crate::decor::pointer_moved(id, x, y);
+            // SDL's position keeps integrating the deltas of a disassociated
+            // pointer, so it wanders over the chrome while the cursor the
+            // program sees sits still. The chrome is for a pointer that moves.
+            let on_chrome = match crate::screen::mouse_is_associated() {
+                true => crate::decor::pointer_moved(id, x, y),
+                false => false,
+            };
             crate::cursor::set_over_chrome(on_chrome);
             if on_chrome {
                 return;
@@ -509,7 +523,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             x,
             y,
         } => {
-            if crate::decor::pointer_button(id, button, down, clicks, x, y) {
+            // The point the guest sees: a disassociated pointer's click lands
+            // where its cursor froze, not where SDL's integrated position is.
+            let (cx, cy) = track_pointer(id, x, y);
+            if crate::decor::pointer_button(id, button, down, clicks, cx, cy) {
                 return;
             }
             let kind = crate::button::event_kind(button, down);

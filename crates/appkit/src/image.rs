@@ -230,6 +230,26 @@ pub fn declared_size(object: Id) -> NSSize {
     }
 }
 
+/// Whether `object` is an image with nothing in it: made by `-initWithSize:`
+/// and never given data, a representation, or anything drawn.
+///
+/// AppKit draws that as nothing, which is how a program makes an invisible
+/// `NSCursor`.
+pub fn is_blank(object: Id) -> bool {
+    if !is_image(object) {
+        return false;
+    }
+    let image = image_of(object);
+    let no_reps = image.reps.is_null()
+        // SAFETY: an array of representations this object made.
+        || unsafe { corefoundation::api::CFArrayGetCount(image.reps as *const c_void) } == 0;
+    image.data.is_null()
+        && no_reps
+        && image.cg_image.is_null()
+        && image.focused_pixels.is_null()
+        && image.handler.is_null()
+}
+
 /// An image's pixels, for a caller outside AppKit that needs them - the
 /// application icon is the one that does.
 pub fn bitmap(object: Id) -> Option<crate::raster::Bitmap> {
