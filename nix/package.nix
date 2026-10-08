@@ -14,6 +14,7 @@
 , libxkbcommon
 , wayland
 , glib-networking
+, steamclient
   # "release" or "debug"; debug keeps the extra checks that catch native-guest bugs.
 , buildType ? "release"
 }:
@@ -68,9 +69,11 @@ rustPlatform.buildRustPackage {
     patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/rosemary
     # WebKitGTK's network stack finds TLS through a GIO module.
     wrapProgram $out/bin/rosemary \
-      --prefix GIO_EXTRA_MODULES : ${glib-networking}/lib/gio/modules
+      --prefix GIO_EXTRA_MODULES : ${glib-networking}/lib/gio/modules \
+      --set-default ROSEMARY_STEAM_CLIENT ${steamclient}/lib/steamclient.dylib
   '' + lib.optionalString stdenv.hostPlatform.isDarwin ''
     wrapProgram $out/bin/rosemary \
+      --set-default ROSEMARY_STEAM_CLIENT ${steamclient}/lib/steamclient.dylib \
       --prefix DYLD_FALLBACK_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
   '';
 

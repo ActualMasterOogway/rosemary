@@ -28,9 +28,13 @@
             cargo = toolchain;
             rustc = toolchain;
           };
+          steamclient = pkgs.callPackage ./nix/steamclient.nix { };
           rosemary = buildType:
-            pkgs.callPackage ./nix/package.nix { inherit rustPlatform buildType; };
+            pkgs.callPackage ./nix/package.nix {
+              inherit rustPlatform buildType steamclient;
+            };
         in {
+          inherit steamclient;
           default = rosemary "release";
           rosemary = rosemary "release";
           rosemary-debug = rosemary "debug";
