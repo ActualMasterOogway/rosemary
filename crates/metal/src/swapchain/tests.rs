@@ -84,6 +84,7 @@ fn a_window_is_presented_to_through_its_swapchain() {
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .expect("a colour image");
 
@@ -192,6 +193,7 @@ fn two_layers_in_a_window_are_composited_into_one_image() {
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .expect("a colour image")
     };
@@ -295,6 +297,7 @@ fn a_transparent_window_is_presented_through_the_corners_pass() {
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .expect("a colour image");
     // Enough frames to reuse every frame slot's descriptor set.
@@ -384,6 +387,7 @@ fn an_opengl_window_is_refused_rather_than_converted() {
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .expect("a colour image");
 
@@ -538,6 +542,7 @@ fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .expect("a colour image");
     assert_eq!(

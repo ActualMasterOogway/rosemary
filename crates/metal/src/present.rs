@@ -216,6 +216,7 @@ fn make_drawable(
             samples: 1,
             usage: gpu::USAGE_RENDER_TARGET | gpu::USAGE_SHADER_READ,
             cube: false,
+            components: vk::ComponentMapping::default(),
         })
         .map_err(|reason| gpu::trace(format!("drawable image creation failed: {reason}")))
         .ok()?;
@@ -840,6 +841,7 @@ pub(crate) fn present_store(
             samples: 1,
             usage: gpu::USAGE_SHADER_READ,
             cube: false,
+            components: vk::ComponentMapping::default(),
         }) {
             Ok(image) => image,
             Err(reason) => {

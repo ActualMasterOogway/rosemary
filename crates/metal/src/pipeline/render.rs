@@ -117,7 +117,8 @@ impl RenderPipeline {
             )
         })?;
         let vertex_module = gpu.create_shader_module(&vertex.words, &vertex.name)?;
-        let linked = super::link::link_varyings(&vertex.varyings, &fragment.varyings, &fragment.words);
+        let linked =
+            super::link::link_varyings(&vertex.varyings, &fragment.varyings, &fragment.words);
         let fragment_words = linked.as_deref().unwrap_or(&fragment.words);
         let fragment_module = gpu.create_shader_module(fragment_words, &fragment.name)?;
         let layouts = layouts_for(gpu, &[&vertex.resources, &fragment.resources])?;
@@ -163,12 +164,7 @@ impl RenderPipeline {
             // Bounded by the check on every attribute above, which is where
             // `vertex_streams` comes from.
             let layout = &layouts_in[*stream as usize];
-            let stride = u32::try_from(layout.stride).map_err(|_| {
-                format!(
-                    "vertex buffer {stream} has stride {}, which Vulkan cannot express",
-                    layout.stride
-                )
-            })?;
+            let stride = binding_stride(*stream, layout)?;
             let (input_rate, divisor) =
                 vertex_input_rate(*stream, layout, gpu.max_vertex_attribute_divisor)?;
             bindings.push(
@@ -410,6 +406,23 @@ impl RenderPipeline {
     }
 }
 
+/// The Vulkan stride of a vertex buffer. Metal ignores the stride of constant
+/// input, which Unity sets anyway; a zero stride makes every vertex read the
+/// first element.
+fn binding_stride(stream: u32, layout: &VertexLayout) -> Result<u32, String> {
+    let stride = if layout.step_function == 0 {
+        0
+    } else {
+        layout.stride
+    };
+    u32::try_from(stride).map_err(|_| {
+        format!(
+            "vertex buffer {stream} has stride {}, which Vulkan cannot express",
+            layout.stride
+        )
+    })
+}
+
 fn vertex_input_rate(
     stream: u32,
     layout: &VertexLayout,
@@ -423,12 +436,8 @@ fn vertex_input_rate(
 > {
     match layout.step_function {
         // Constant input is a per-vertex binding whose zero stride always
-        // addresses the same element.
-        0 if layout.stride == 0 => Ok((vk::VertexInputRate::VERTEX, None)),
-        0 => Err(format!(
-            "vertex buffer {stream} uses MTLVertexStepFunctionConstant with non-zero stride {}",
-            layout.stride
-        )),
+        // addresses the same element; the caller zeroes the stride.
+        0 => Ok((vk::VertexInputRate::VERTEX, None)),
         1 => Ok((vk::VertexInputRate::VERTEX, None)),
         2 if layout.step_rate == 0 => Err(format!(
             "vertex buffer {stream} has a per-instance step rate of zero"
@@ -512,6 +521,19 @@ mod tests {
         };
         let (rate, divisor) = vertex_input_rate(0, &layout, 0).expect("core instance rate");
         assert_eq!(rate, vk::VertexInputRate::INSTANCE);
+        assert!(divisor.is_none());
+    }
+
+    #[test]
+    fn constant_input_ignores_its_declared_stride() {
+        let layout = VertexLayout {
+            stride: 8,
+            step_function: 0,
+            step_rate: 0,
+        };
+        assert_eq!(binding_stride(2, &layout), Ok(0));
+        let (rate, divisor) = vertex_input_rate(2, &layout, 0).expect("constant input");
+        assert_eq!(rate, vk::VertexInputRate::VERTEX);
         assert!(divisor.is_none());
     }
 

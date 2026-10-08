@@ -15,7 +15,10 @@ use static_init::dynamic;
 use crate::heap::{Allocation, Heap};
 
 pub(crate) use format::sample_count;
-pub use format::{aspect_of, block_extent, is_srgb, pixel_format, srgb_twin, texel_size};
+pub use format::{
+    aspect_of, block_extent, is_srgb, pixel_format, pixel_format_components, shader_aspect,
+    srgb_twin, texel_size,
+};
 pub(crate) use guard::{Guard, GuardedVec};
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
@@ -902,6 +905,9 @@ pub struct ImageDescription {
     pub samples: u64,
     pub usage: u64,
     pub cube: bool,
+    /// How a shader sees the components; identity for all but alpha-only
+    /// formats, which Vulkan has no format for.
+    pub components: vk::ComponentMapping,
 }
 
 #[cfg(test)]

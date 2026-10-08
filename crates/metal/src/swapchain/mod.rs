@@ -665,6 +665,7 @@ impl Swapchain {
                     samples: 1,
                     usage: gpu::USAGE_RENDER_TARGET,
                     cube: false,
+                    components: vk::ComponentMapping::default(),
                 },
             };
             let image = self.gpu.create_image(&description)?;

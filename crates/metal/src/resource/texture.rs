@@ -169,6 +169,7 @@ pub(crate) fn new_texture(gpu: &'static Gpu, descriptor: TextureDescriptor) -> I
         samples: descriptor.sample_count,
         usage: descriptor.usage,
         cube,
+        components: gpu::pixel_format_components(descriptor.pixel_format),
     }) {
         Ok(image) => image,
         Err(reason) => {
@@ -304,7 +305,11 @@ pub(super) unsafe extern "C" fn texture_2d_descriptor(
         pixel_format,
         width,
         height,
-        mipmap_level_count: if mipmapped { full_chain(width, height) } else { 1 },
+        mipmap_level_count: if mipmapped {
+            full_chain(width, height)
+        } else {
+            1
+        },
         ..TextureDescriptor::fresh()
     })
 }
@@ -573,6 +578,8 @@ pub(super) unsafe extern "C" fn new_texture_view_range(
         view_type,
         base_level..base_level + levels.length as u32,
         base_layer..base_layer + slices.length as u32,
+        gpu::pixel_format_components(pixel_format),
+        gpu::shader_aspect(pixel_format),
     ) {
         Ok(image) => image,
         Err(reason) => {

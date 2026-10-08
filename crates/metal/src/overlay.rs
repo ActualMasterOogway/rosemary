@@ -473,6 +473,7 @@ pub(crate) fn target_description(width: u32, height: u32) -> ImageDescription {
         samples: 1,
         usage: gpu::USAGE_SHADER_WRITE,
         cube: false,
+        components: vk::ComponentMapping::default(),
     }
 }
 

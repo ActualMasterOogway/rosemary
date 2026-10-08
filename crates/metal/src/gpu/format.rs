@@ -26,6 +26,25 @@ pub fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {
     }
 }
 
+/// The one aspect a shader reads through a view of `MTLPixelFormat` `metal`.
+///
+/// Vulkan forbids a sampled or storage view of both halves of a depth/stencil
+/// image, and Metal reads the depth of a combined texture; the stencil half is
+/// what an `X32_Stencil8` or `X24_Stencil8` view reads.
+pub fn shader_aspect(metal: u64) -> vk::ImageAspectFlags {
+    match metal {
+        261 | 262 => vk::ImageAspectFlags::STENCIL,
+        _ => {
+            let aspect = aspect_of(pixel_format(metal));
+            if aspect.contains(vk::ImageAspectFlags::DEPTH) {
+                vk::ImageAspectFlags::DEPTH
+            } else {
+                aspect
+            }
+        }
+    }
+}
+
 /// The format a texture of `format` may also be viewed as without asking
 /// for `MTLTextureUsagePixelFormatView`: its sRGB or linear twin.
 pub fn srgb_twin(format: vk::Format) -> Option<vk::Format> {
@@ -60,6 +79,23 @@ pub fn is_srgb(format: vk::Format) -> bool {
             | F::R8_SRGB
             | F::R8G8_SRGB
     )
+}
+
+/// The view swizzle that makes `pixel_format(metal)` read as Metal's format.
+///
+/// `A8Unorm` is stored as `R8_UNORM`, and Metal samples it as `(0, 0, 0, a)`:
+/// a text shader reading `.a` from a glyph atlas otherwise sees 1 everywhere.
+pub fn pixel_format_components(metal: u64) -> vk::ComponentMapping {
+    use vk::ComponentSwizzle as S;
+    match metal {
+        1 => vk::ComponentMapping {
+            r: S::ZERO,
+            g: S::ZERO,
+            b: S::ZERO,
+            a: S::R,
+        },
+        _ => vk::ComponentMapping::default(),
+    }
 }
 
 /// `MTLPixelFormat` to `VkFormat`.
@@ -252,6 +288,35 @@ pub fn block_extent(format: vk::Format) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_alpha_only_texture_reads_its_channel_as_alpha() {
+        let a8 = pixel_format_components(1);
+        assert_eq!(pixel_format(1), vk::Format::R8_UNORM);
+        assert_eq!(
+            [a8.r, a8.g, a8.b, a8.a],
+            [
+                vk::ComponentSwizzle::ZERO,
+                vk::ComponentSwizzle::ZERO,
+                vk::ComponentSwizzle::ZERO,
+                vk::ComponentSwizzle::R,
+            ]
+        );
+        let r8 = pixel_format_components(10);
+        assert_eq!(
+            [r8.r, r8.g, r8.b, r8.a],
+            [vk::ComponentSwizzle::IDENTITY; 4]
+        );
+    }
+
+    #[test]
+    fn a_shader_reads_one_aspect_of_a_depth_stencil_texture() {
+        assert_eq!(shader_aspect(260), vk::ImageAspectFlags::DEPTH);
+        assert_eq!(shader_aspect(255), vk::ImageAspectFlags::DEPTH);
+        assert_eq!(shader_aspect(261), vk::ImageAspectFlags::STENCIL);
+        assert_eq!(shader_aspect(253), vk::ImageAspectFlags::STENCIL);
+        assert_eq!(shader_aspect(80), vk::ImageAspectFlags::COLOR);
+    }
 
     #[test]
     fn metal_pixel_formats_map_to_their_vulkan_layout() {

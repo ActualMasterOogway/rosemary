@@ -165,7 +165,10 @@ impl Gpu {
         // `PixelFormatView` asks for any compatible format; without it Metal
         // still allows the sRGB twin, which a format list names so the driver
         // can keep its compression.
-        let twin = [description.format, srgb_twin(description.format).unwrap_or_default()];
+        let twin = [
+            description.format,
+            srgb_twin(description.format).unwrap_or_default(),
+        ];
         let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&twin);
         let any_format = description.usage & USAGE_PIXEL_FORMAT_VIEW != 0;
         if any_format || twin[1] != vk::Format::UNDEFINED {
@@ -223,7 +226,7 @@ impl Gpu {
         let aspect = aspect_of(description.format);
         let levels = description.levels.max(1);
         let layers = description.layers.max(1);
-        let view = self.create_view(*image, description)?;
+        let view = self.create_view(*image, description, usage)?;
         let view = Guard::new(view, |view| {
             // SAFETY: a view of this device's which nothing has used.
             unsafe { self.device.destroy_image_view(view, None) };
@@ -285,14 +288,16 @@ impl Gpu {
         &self,
         image: vk::Image,
         description: &ImageDescription,
+        usage: vk::ImageUsageFlags,
     ) -> Result<vk::ImageView, String> {
         let view_type = description.view_type;
         let info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(view_type)
             .format(description.format)
+            .components(view_components(description.components, usage))
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: aspect_of(description.format),
+                aspect_mask: single_aspect(aspect_of(description.format)),
                 base_mip_level: 0,
                 level_count: description.levels.max(1),
                 base_array_layer: 0,
@@ -314,6 +319,8 @@ impl Gpu {
         view_type: vk::ImageViewType,
         levels: std::ops::Range<u32>,
         layers: std::ops::Range<u32>,
+        components: vk::ComponentMapping,
+        view_aspect: vk::ImageAspectFlags,
     ) -> Result<GpuImage, String> {
         let aspect = aspect_of(format);
         // An sRGB format is never a storage format, so a view of one cannot
@@ -327,8 +334,9 @@ impl Gpu {
             .image(source.image)
             .view_type(view_type)
             .format(format)
+            .components(view_components(components, usage))
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: aspect,
+                aspect_mask: view_aspect,
                 base_mip_level: levels.start,
                 level_count: levels.len().max(1) as u32,
                 base_array_layer: layers.start,
@@ -710,4 +718,31 @@ fn reference2(reference: &vk::AttachmentReference) -> vk::AttachmentReference2<'
     vk::AttachmentReference2::default()
         .attachment(reference.attachment)
         .layout(reference.layout)
+}
+
+/// A storage or attachment view must not swizzle, so an image used that way
+/// keeps the identity and a shader writing it sees the stored channel.
+fn view_components(
+    components: vk::ComponentMapping,
+    usage: vk::ImageUsageFlags,
+) -> vk::ComponentMapping {
+    let identity = vk::ComponentMapping::default();
+    let swizzled = [components.r, components.g, components.b, components.a]
+        .iter()
+        .any(|swizzle| *swizzle != vk::ComponentSwizzle::IDENTITY);
+    if swizzled && usage.contains(vk::ImageUsageFlags::STORAGE) {
+        super::trace_once("an alpha-only texture is also a storage image, so it is not swizzled");
+        return identity;
+    }
+    components
+}
+
+/// The aspect of a texture's own view, which is what a shader reads: depth
+/// alone of a depth/stencil image, because a sampled view may name only one.
+fn single_aspect(aspect: vk::ImageAspectFlags) -> vk::ImageAspectFlags {
+    if aspect.contains(vk::ImageAspectFlags::DEPTH) {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        aspect
+    }
 }
