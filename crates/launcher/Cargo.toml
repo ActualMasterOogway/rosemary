@@ -1,0 +1,12 @@
+[package]
+name = "launcher"
+description = "A launcher for Rosemary in bundled packages such as AppImage and the Steam compatibilitytools.d archive."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# No dependencies, and built for a musl target when packaged: it has to run on
+# hosts whose libc is too old (or not glibc at all) for the bundled binary.
+[[bin]]
+name = "rosemary-launcher"
+path = "src/main.rs"

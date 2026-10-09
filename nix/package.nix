@@ -1,6 +1,6 @@
 { lib
 , stdenv
-, rustPlatform
+, craneLib
 , pkg-config
 , makeBinaryWrapper
 , patchelf
@@ -31,10 +31,12 @@ let
       libxkbcommon
       wayland
     ];
-in
-rustPlatform.buildRustPackage {
-  pname = "rosemary" + lib.optionalString (buildType == "debug") "-debug";
-  version = (lib.importTOML ../Cargo.toml).workspace.package.version;
+
+  # What the crates link or pkg-config against while building. Kept apart from
+  # runtimeLibs so that a different SDL3 or OpenAL (nix/bundle.nix wants them
+  # built to dlopen their backends) does not rebuild every dependency.
+  buildLibs = [ curl zlib ]
+    ++ lib.optionals stdenv.hostPlatform.isLinux [ libxkbcommon wayland ];
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -45,25 +47,55 @@ rustPlatform.buildRustPackage {
     ];
   };
 
-  cargoLock = {
-    lockFile = ../Cargo.lock;
-    # Git dependencies are pinned by rev in Cargo.lock; fetching them with
-    # builtins.fetchGit avoids a hash to bump on every microlift update.
-    allowBuiltinFetchGit = true;
+  # Crane packages every crate of a git dependency to vendor it, and the
+  # Cranelift fork has several whose manifests name a README that is not in the
+  # repository. An empty one is enough for `cargo package`.
+  cargoVendorDir = craneLib.vendorCargoDeps {
+    inherit src;
+    overrideVendorGitCheckout = packages: drv:
+      if lib.any (p: lib.hasPrefix "git+https://github.com/microlift/wasmtime" (p.source or "")) packages
+      then drv.overrideAttrs (_: {
+        postPatch = ''
+          find . -name Cargo.toml | while read -r manifest; do
+            dir=$(dirname "$manifest")
+            readme=$(sed -n 's/^readme *= *"\(.*\)".*/\1/p' "$manifest" | head -1)
+            if [ -n "$readme" ] && [ ! -e "$dir/$readme" ]; then touch "$dir/$readme"; fi
+          done
+        '';
+      })
+      else drv;
   };
 
-  inherit buildType;
-  cargoBuildFlags = [ "--package" "rosemary" "--bin" "rosemary" ];
+  common = {
+    inherit src cargoVendorDir;
+    pname = "rosemary" + lib.optionalString (buildType == "debug") "-debug";
+    version = (lib.importTOML ../Cargo.toml).workspace.package.version;
+    strictDeps = true;
 
-  # The suite needs x86_64 Mach-O fixtures, a GPU and a display.
-  doCheck = false;
+    # Crane vendors Cargo.lock's git dependencies (Microlift and its Cranelift
+    # fork) itself, so there is no hash to bump on every update.
+    cargoExtraArgs = "--locked --package rosemary --bin rosemary";
+    CARGO_PROFILE = if buildType == "debug" then "dev" else "release";
 
-  # Keep debug info for gdb/lldb and guest symbolication in a debug build.
-  dontStrip = buildType == "debug";
+    nativeBuildInputs = [ pkg-config ];
+    buildInputs = buildLibs;
 
-  nativeBuildInputs = [ pkg-config makeBinaryWrapper ]
+    # The suite needs x86_64 Mach-O fixtures, a GPU and a display.
+    doCheck = false;
+    # Keep debug info for gdb/lldb and guest symbolication in a debug build.
+    dontStrip = buildType == "debug";
+  };
+
+  # Third-party crates only: built from a stub of the workspace, so editing
+  # Rosemary's own sources never recompiles them.
+  cargoArtifacts = craneLib.buildDepsOnly common;
+in
+craneLib.buildPackage (common // {
+  inherit cargoArtifacts;
+
+  nativeBuildInputs = common.nativeBuildInputs
+    ++ [ makeBinaryWrapper ]
     ++ lib.optional stdenv.hostPlatform.isLinux patchelf;
-  buildInputs = runtimeLibs;
 
   postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
     patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/rosemary
@@ -77,10 +109,13 @@ rustPlatform.buildRustPackage {
       --prefix DYLD_FALLBACK_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
   '';
 
+  # The portable packages (nix/bundle.nix) vendor exactly these.
+  passthru = { inherit runtimeLibs; };
+
   meta = {
     description = "Run macOS applications across architectures and operating systems";
     license = with lib.licenses; [ mit asl20 ];
     mainProgram = "rosemary";
     platforms = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
   };
-}
+})

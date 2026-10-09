@@ -231,7 +231,7 @@ pub(crate) fn is_mach_o(path: &CStr) -> bool {
 
 /// This runtime's own executable, which is what a Mach-O spawn is re-pointed at.
 fn runtime_path() -> Option<CString> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = crate::exe::current().ok()?;
     CString::new(exe.into_os_string().into_encoded_bytes()).ok()
 }
 

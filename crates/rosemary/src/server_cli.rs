@@ -30,7 +30,7 @@ fn directory() -> PathBuf {
 /// for it here costs nothing and leaves no zombie behind in a guest that
 /// never reaps children it did not make.
 fn launch(directory: &Path) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = darwin::exe::current()?;
     let status = std::process::Command::new(exe)
         .arg("server")
         .arg("--directory")
@@ -93,7 +93,7 @@ fn init_for(directory: &Path) -> Option<server::daemon::Init> {
         return None;
     }
     Some(server::daemon::Init {
-        program: std::env::current_exe().ok()?,
+        program: darwin::exe::current().ok()?,
         args: vec!["run".into(), LAUNCHD.into()],
         current_dir: prefix::ns::host_path("/"),
         console: Some(prefix.console()),

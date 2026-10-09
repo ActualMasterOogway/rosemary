@@ -3,13 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, ... }:
+  outputs = { self, nixpkgs, rust-overlay, crane, ... }:
     let
       systems =
         [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
@@ -24,25 +25,70 @@
           pkgs = pkgsFor system;
           # nixpkgs' rustc can trail the 1.99 this tree needs.
           toolchain = pkgs.rust-bin.stable.latest.minimal;
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
+          craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
           steamclient = pkgs.callPackage ./nix/steamclient.nix { };
           rosemary = buildType:
             pkgs.callPackage ./nix/package.nix {
-              inherit rustPlatform buildType steamclient;
+              inherit craneLib buildType steamclient;
             };
+          release = rosemary "release";
+
+          # Relocatable packages for non-Nix hosts, built from the same
+          # derivation: fhs, then bundle (libraries and glibc vendored in),
+          # then each distribution format on top of the bundle.
+          #
+          # nixpkgs links SDL3 and OpenAL against X11, ALSA, PulseAudio,
+          # PipeWire and the rest, so neither loads on a host missing any one
+          # of them. Upstream opens those at run time instead, and so does the
+          # portable build.
+          portableRosemary = pkgs.callPackage ./nix/package.nix {
+            inherit craneLib steamclient;
+            buildType = "release";
+            sdl3 = pkgs.sdl3.overrideAttrs (old: {
+              cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DSDL_DEPS_SHARED:BOOL=TRUE" ];
+              # Its suite wants to open an audio device and a display, which
+              # the sandbox has none of once backends are loaded at run time.
+              doCheck = false;
+            });
+            openal = pkgs.openal.overrideAttrs (old: {
+              cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DALSOFT_DLOPEN:BOOL=TRUE" ];
+            });
+          };
+          portable = rec {
+            launcher = pkgs.callPackage ./nix/launcher.nix { };
+            fhs = pkgs.callPackage ./nix/fhs.nix {
+              rosemary = portableRosemary;
+              inherit launcher steamclient;
+            };
+            bundle = pkgs.callPackage ./nix/bundle.nix {
+              rosemary = portableRosemary;
+              inherit fhs;
+              nixpkgsInfo = {
+                inherit (nixpkgs) lastModified;
+                rev = nixpkgs.rev or null;
+                narHash = nixpkgs.narHash or null;
+              };
+            };
+            appimage = pkgs.callPackage ./nix/appimage.nix {
+              rosemary = portableRosemary;
+              inherit bundle;
+            };
+          };
         in {
           inherit steamclient;
           # Steam compatibility tool; see tools/steam-compat and
           # homeManagerModules.default (programs.rosemary.steam.enable).
           steam-compat = pkgs.callPackage ./nix/steam-compat.nix {
-            rosemary = rosemary "release";
+            rosemary = release;
           };
-          default = rosemary "release";
-          rosemary = rosemary "release";
+          default = release;
+          rosemary = release;
           rosemary-debug = rosemary "debug";
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          rosemary-launcher = portable.launcher;
+          rosemary-fhs = portable.fhs;
+          rosemary-bundle = portable.bundle;
+          rosemary-appimage = portable.appimage;
         });
 
       # Builds the Steam tool around any rosemary package.

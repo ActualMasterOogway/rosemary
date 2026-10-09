@@ -109,7 +109,7 @@ fn me() -> Option<Process> {
         // Not started as a guest - a test, or a tool. Its host name is the
         // only one it has.
         None => {
-            let exe = std::env::current_exe().unwrap_or_default();
+            let exe = crate::exe::current().unwrap_or_default();
             (
                 exe.to_string_lossy().into_owned(),
                 std::env::args_os()
