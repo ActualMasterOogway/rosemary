@@ -69,6 +69,10 @@
                 narHash = nixpkgs.narHash or null;
               };
             };
+            steamTool = pkgs.callPackage ./nix/steam-tool.nix {
+              rosemary = portableRosemary;
+              inherit bundle;
+            };
             appimage = pkgs.callPackage ./nix/appimage.nix {
               rosemary = portableRosemary;
               inherit bundle;
@@ -89,6 +93,8 @@
           rosemary-fhs = portable.fhs;
           rosemary-bundle = portable.bundle;
           rosemary-appimage = portable.appimage;
+          rosemary-steam-tool = portable.steamTool;
+          rosemary-steam-tool-archive = portable.steamTool.archive;
         });
 
       # Builds the Steam tool around any rosemary package.

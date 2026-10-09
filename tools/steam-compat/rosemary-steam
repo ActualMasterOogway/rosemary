@@ -18,7 +18,13 @@ fi
 here=${0%/*}
 # Steam's runtime may not have the user's PATH, so install.sh records paths.
 [ -f "$here/rosemary-steam.env" ] && . "$here/rosemary-steam.env"
-rosemary=${ROSEMARY_BIN:-rosemary}
+rosemary=${ROSEMARY_BIN:-}
+# A packaged tool carries its own rosemary (and the libraries it needs) beside
+# this script; otherwise whatever is on PATH.
+if [ -z "$rosemary" ] && [ -x "$here/bin/rosemary" ]; then
+    rosemary=$here/bin/rosemary
+fi
+rosemary=${rosemary:-rosemary}
 
 [ $# -ge 1 ] || { echo "usage: $0 <verb> <exe> [args...]" >&2; exit 2; }
 verb=$1
