@@ -82,7 +82,7 @@ impl TextureDescriptor {
     }
 
     /// The Vulkan image shape a Metal texture type asks for.
-    fn shape(&self) -> (vk::ImageType, vk::ImageViewType, u32, bool) {
+    pub(super) fn shape(&self) -> (vk::ImageType, vk::ImageViewType, u32, bool) {
         match self.texture_type {
             0 => (vk::ImageType::TYPE_1D, vk::ImageViewType::TYPE_1D, 1, false),
             1 => (
@@ -124,6 +124,7 @@ pub(super) unsafe extern "C" fn texture_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: a texture of this crate's.
     let texture = unsafe { object::body::<Texture>(receiver) };
     crate::account(-texture.accounted());
+    heap::leave(receiver);
     for (_, view) in std::mem::take(&mut texture.attachment_views) {
         // SAFETY: the last reference is gone, so nothing can attach it again,
         // and a command buffer which did holds a reference until it completes.

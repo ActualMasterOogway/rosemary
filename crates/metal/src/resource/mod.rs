@@ -1,6 +1,7 @@
 mod buffer;
 mod common;
 mod depth_stencil;
+mod heap;
 mod sampler;
 mod texture;
 mod vertex;
@@ -23,6 +24,8 @@ pub(crate) use buffer::leaking;
 
 pub(crate) use buffer::new_buffer;
 pub(crate) use depth_stencil::{DepthStencilState, StencilState, new_depth_stencil_state};
+pub(crate) use heap::new_heap;
+pub(crate) use heap::{heap_buffer_size_and_align, heap_texture_size_and_align};
 pub(crate) use sampler::{SamplerDescriptor, SamplerState, compare_op, new_sampler};
 pub(crate) use texture::{Texture, TextureDescriptor, drawable_texture, new_texture};
 pub(crate) use vertex::{
@@ -149,6 +152,7 @@ pub(crate) fn install() {
             c"Q16@0:8",
         );
     }
+    heap::install();
     common::install(buffer);
     common::install_buffer(buffer);
     common::install(texture);

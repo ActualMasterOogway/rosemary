@@ -521,6 +521,8 @@ pub(crate) fn install() {
         "presentDrawable:" => present_drawable, c"v24@0:8@16";
         "presentDrawable:atTime:" => present_drawable_at_time, c"v32@0:8@16d24";
         "setLabel:" => crate::no_op, c"v24@0:8@16";
+        "pushDebugGroup:" => crate::no_op, c"v24@0:8@16";
+        "popDebugGroup" => crate::no_op, c"v16@0:8";
     });
 
     let encoder = objc::class::lookup(c"RosemaryMTLCommandEncoder").expect("just registered");
@@ -584,6 +586,12 @@ pub(crate) fn install() {
         "generateMipmapsForTexture:" => generate_mipmaps, c"v24@0:8@16";
         "synchronizeResource:" => crate::no_op, c"v24@0:8@16";
         "synchronizeTexture:slice:level:" => crate::no_op, c"v40@0:8@16Q24Q32";
+        // Layout hints for a GPU's compressed texture storage; Vulkan picks
+        // its own layouts, so there is nothing to change.
+        "optimizeContentsForGPUAccess:" => crate::no_op, c"v24@0:8@16";
+        "optimizeContentsForGPUAccess:slice:level:" => crate::no_op, c"v40@0:8@16Q24Q32";
+        "optimizeContentsForCPUAccess:" => crate::no_op, c"v24@0:8@16";
+        "optimizeContentsForCPUAccess:slice:level:" => crate::no_op, c"v40@0:8@16Q24Q32";
         "updateFence:" => crate::no_op, c"v24@0:8@16";
         "waitForFence:" => crate::no_op, c"v24@0:8@16";
         "pushDebugGroup:" => crate::no_op, c"v24@0:8@16";

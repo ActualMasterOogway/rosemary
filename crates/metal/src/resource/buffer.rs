@@ -99,6 +99,7 @@ pub(super) unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
         );
     }
     crate::account(-(buffer.inner.length as i64));
+    heap::leave(receiver);
     let inner = std::mem::replace(&mut buffer.inner, GpuBuffer::none());
     if !leaking() {
         buffer.gpu.destroy_buffer(inner);

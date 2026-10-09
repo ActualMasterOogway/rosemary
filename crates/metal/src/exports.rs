@@ -88,6 +88,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "MTLTextureDescriptor",
         "MTLVertexDescriptor",
         "MTLSamplerDescriptor",
+        "MTLHeapDescriptor",
         "MTLDepthStencilDescriptor",
         "MTLStencilDescriptor",
         "MTLRenderPipelineDescriptor",

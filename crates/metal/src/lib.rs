@@ -196,6 +196,11 @@ pub fn bootstrap() {
                 c"@32@0:8@16^@24";
             "currentAllocatedSize" => current_allocated_size, c"Q16@0:8";
             "newFence" => new_fence, c"@16@0:8";
+            "newHeapWithDescriptor:" => new_heap, c"@24@0:8@16";
+            "heapBufferSizeAndAlignWithLength:options:" => resource::heap_buffer_size_and_align,
+                c"{MTLSizeAndAlign=QQ}32@0:8Q16Q24";
+            "heapTextureSizeAndAlignWithDescriptor:" => resource::heap_texture_size_and_align,
+                c"{MTLSizeAndAlign=QQ}24@0:8@16";
         });
         // Encoders on one device run in order behind full barriers, so a fence
         // has nothing to carry: it is an object to pass back and nothing more.
@@ -256,8 +261,10 @@ pub fn bootstrap() {
 /// Every Metal object and descriptor answers `-label` and `-setLabel:`. A
 /// label is a debugging aid nothing here displays, so it is not kept.
 fn install_labels() {
-    let names: [&std::ffi::CStr; 23] = [
+    let names: [&std::ffi::CStr; 25] = [
         c"RosemaryMTLFence",
+        c"MTLHeapDescriptor",
+        c"RosemaryMTLHeap",
         c"MTLDepthStencilDescriptor",
         c"MTLRenderPassDescriptor",
         c"MTLRenderPipelineDescriptor",

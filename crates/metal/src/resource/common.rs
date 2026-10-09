@@ -43,15 +43,14 @@ unsafe extern "C" fn yes(_receiver: Id, _sel: Sel) -> bool {
     true
 }
 
-/// Methods every resource class answers alike. No resource here is made from
-/// a heap, so none has one and none can be aliased.
+/// Methods every resource class answers alike.
 pub(super) fn install(class: &'static objc::class::Class) {
     methods!(class, {
         "setPurgeableState:" => set_purgeable_state, c"Q24@0:8Q16";
-        "heap" => crate::nil, c"@16@0:8";
+        "heap" => heap::resource_heap, c"@16@0:8";
         "heapOffset" => crate::zero, c"Q16@0:8";
-        "isAliasable" => no, c"B16@0:8";
-        "makeAliasable" => crate::no_op, c"v16@0:8";
+        "isAliasable" => heap::resource_is_aliasable, c"B16@0:8";
+        "makeAliasable" => heap::resource_make_aliasable, c"v16@0:8";
         "cpuCacheMode" => crate::zero, c"Q16@0:8";
         "hazardTrackingMode" => crate::zero, c"Q16@0:8";
     });

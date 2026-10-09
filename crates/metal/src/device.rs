@@ -83,6 +83,13 @@ pub(super) unsafe extern "C" fn new_sampler_state(receiver: Id, _sel: Sel, descr
     resource::new_sampler(gpu, &descriptor)
 }
 
+pub(super) unsafe extern "C" fn new_heap(receiver: Id, _sel: Sel, descriptor: Id) -> Id {
+    let Some(gpu) = gpu_of(receiver) else {
+        return std::ptr::null_mut();
+    };
+    resource::new_heap(gpu, receiver, descriptor)
+}
+
 pub(super) unsafe extern "C" fn new_depth_stencil_state(
     _receiver: Id,
     _sel: Sel,

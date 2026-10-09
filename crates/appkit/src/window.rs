@@ -2262,6 +2262,8 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
         "frameRectForContentRect:styleMask:" => frame_rect_for_content_style,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
+        // Windows never merge into tabs here, which is what turning it off asks.
+        "setAllowsAutomaticWindowTabbing:" => ignored_flag, c"v20@0:8c16";
     });
     methods!(class, {
         "appearance" => appearance, c"@16@0:8";

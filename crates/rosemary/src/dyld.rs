@@ -1158,9 +1158,12 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
 /// handle [`crate::frameworks`] registers for `dlopen("/usr/lib/libSystem.B.dylib")`,
 /// which must agree with it.
 pub fn system_symbol(name: &str) -> Option<u64> {
+    // `name` is a C identifier, and `darwin::symbol` takes the Mach-O spelling:
+    // handed `_availability_version_check` bare, it strips the identifier's own
+    // underscore and finds nothing, which turns every `@available` false.
     crate::shims::runtime::host_substitute(name)
         .or_else(|| crate::shims::openat::host_substitute(name))
-        .or_else(|| darwin::symbol(name))
+        .or_else(|| darwin::symbol(&format!("_{name}")))
 }
 
 fn selected_native_symbol(found: u64, name: &str) -> u64 {
@@ -2154,6 +2157,18 @@ mod tests {
         let expected = remember_native_symbol(expected, name, None);
         assert_eq!(lookup(RTLD_NEXT, name), Some(expected));
         assert_eq!(lookup(global_handle(), name), Some(expected));
+    }
+
+    /// compiler-rt's `@available` asks `dlsym(RTLD_DEFAULT,
+    /// "_availability_version_check")`, a C name with its own underscore; Unity
+    /// gates its shadow comparison sampler on the answer.
+    #[test]
+    fn a_global_search_finds_an_underscored_libsystem_name() {
+        const RTLD_DEFAULT: u64 = -2i64 as u64;
+        let name = "_availability_version_check";
+        let expected = darwin::symbol(&format!("_{name}")).expect("darwin defines it");
+        assert_eq!(system_symbol(name), Some(expected));
+        assert!(lookup(RTLD_DEFAULT, name).is_some());
     }
 
     #[test]
