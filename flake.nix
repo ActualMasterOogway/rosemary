@@ -9,7 +9,7 @@
     };
   };
 
-  outputs = { nixpkgs, rust-overlay, ... }:
+  outputs = { self, nixpkgs, rust-overlay, ... }:
     let
       systems =
         [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
@@ -35,10 +35,23 @@
             };
         in {
           inherit steamclient;
+          # Steam compatibility tool; see tools/steam-compat and
+          # homeManagerModules.default (programs.rosemary.steam.enable).
+          steam-compat = pkgs.callPackage ./nix/steam-compat.nix {
+            rosemary = rosemary "release";
+          };
           default = rosemary "release";
           rosemary = rosemary "release";
           rosemary-debug = rosemary "debug";
         });
+
+      # Builds the Steam tool around any rosemary package.
+      lib = forAllSystems (system: {
+        steamCompat = rosemary:
+          (pkgsFor system).callPackage ./nix/steam-compat.nix { inherit rosemary; };
+      });
+
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
 
       devShells = forAllSystems (system:
         let
