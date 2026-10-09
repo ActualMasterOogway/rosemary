@@ -642,42 +642,71 @@ unsafe extern "C" fn resume(receiver: Id, _sel: Sel) {
                 std::fs::write(host, bytes).map_err(|e| e.to_string())?;
                 Ok(path)
             });
-            let error = match result {
-                Ok(path) => {
-                    let url = corefoundation::url::new_file_url(&path, false) as Id;
-                    // SAFETY: the delegate implements this optional method, and
-                    // the task retains it until the callback returns.
-                    unsafe {
-                        let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
-                            std::mem::transmute(objc::msg::entry());
-                        f(
-                            delegate as Id,
-                            objc::sel::get("URLSession:downloadTask:didFinishDownloadingToURL:"),
-                            session as Id,
-                            task_id as Id,
-                            url,
-                        );
-                        corefoundation::api::CFRelease(url as CFTypeRef);
-                    }
-                    std::ptr::null_mut()
+            if completion != 0 {
+                // The handler form: no delegate callbacks. Apple removes the
+                // file once the handler returns, so the handler must move it.
+                let response = unsafe { contents::<Task>(task_id as Id, task_class()) }
+                    .map_or(0, |t| t.response.load(std::sync::atomic::Ordering::Acquire));
+                let (url, error) = match &result {
+                    Ok(path) => (
+                        objc::arc::autorelease(corefoundation::url::new_file_url(path, false) as Id),
+                        std::ptr::null_mut(),
+                    ),
+                    Err(message) => (
+                        std::ptr::null_mut(),
+                        crate::error::make(
+                            crate::error::NSURL_ERROR_DOMAIN,
+                            crate::error::NSURL_ERROR_UNKNOWN,
+                            message,
+                        ),
+                    ),
+                };
+                // SAFETY: the block was retained when the task was made, and
+                // takes (NSURL *, NSURLResponse *, NSError *) like the data one.
+                unsafe { call_completion(completion as Id, url, response as Id, error) };
+                if let Ok(path) = &result {
+                    let _ = std::fs::remove_file(prefix::ns::host_path(path));
                 }
-                Err(message) => crate::error::make(
-                    crate::error::NSURL_ERROR_DOMAIN,
-                    crate::error::NSURL_ERROR_UNKNOWN,
-                    &message,
-                ),
-            };
-            // SAFETY: the delegate and session are retained by this task.
-            unsafe {
-                let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
-                    std::mem::transmute(objc::msg::entry());
-                f(
-                    delegate as Id,
-                    objc::sel::get("URLSession:task:didCompleteWithError:"),
-                    session as Id,
-                    task_id as Id,
-                    error,
-                );
+            } else {
+                let error = match result {
+                    Ok(path) => {
+                        let url = corefoundation::url::new_file_url(&path, false) as Id;
+                        // SAFETY: the delegate implements this optional method, and
+                        // the task retains it until the callback returns.
+                        unsafe {
+                            let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
+                                std::mem::transmute(objc::msg::entry());
+                            f(
+                                delegate as Id,
+                                objc::sel::get(
+                                    "URLSession:downloadTask:didFinishDownloadingToURL:",
+                                ),
+                                session as Id,
+                                task_id as Id,
+                                url,
+                            );
+                            corefoundation::api::CFRelease(url as CFTypeRef);
+                        }
+                        std::ptr::null_mut()
+                    }
+                    Err(message) => crate::error::make(
+                        crate::error::NSURL_ERROR_DOMAIN,
+                        crate::error::NSURL_ERROR_UNKNOWN,
+                        &message,
+                    ),
+                };
+                // SAFETY: the delegate and session are retained by this task.
+                unsafe {
+                    let f: unsafe extern "C" fn(Id, Sel, Id, Id, Id) =
+                        std::mem::transmute(objc::msg::entry());
+                    f(
+                        delegate as Id,
+                        objc::sel::get("URLSession:task:didCompleteWithError:"),
+                        session as Id,
+                        task_id as Id,
+                        error,
+                    );
+                }
             }
         } else {
             let (data, response, error) = objects(perform(&request));
@@ -833,6 +862,19 @@ fn autoreleased_task(request: Request, completion: Id) -> Id {
 }
 
 unsafe extern "C" fn download_task_with_request(receiver: Id, _sel: Sel, request: Id) -> Id {
+    download_task(receiver, request, std::ptr::null_mut())
+}
+
+unsafe extern "C" fn download_task_with_request_handler(
+    receiver: Id,
+    _sel: Sel,
+    request: Id,
+    completion: Id,
+) -> Id {
+    download_task(receiver, request, completion)
+}
+
+fn download_task(receiver: Id, request: Id, completion: Id) -> Id {
     // SAFETY: a request and a session this module made.
     let Some(request) = (unsafe { request_of(request) }) else {
         return std::ptr::null_mut();
@@ -844,7 +886,7 @@ unsafe extern "C" fn download_task_with_request(receiver: Id, _sel: Sel, request
         download_task_class(),
         Task {
             request: request.clone(),
-            completion: 0,
+            completion: objc::block::copy(completion) as usize,
             delegate: objc::arc::retain(session.delegate as Id) as usize,
             session: objc::arc::retain(receiver) as usize,
             download: true,
@@ -988,6 +1030,8 @@ pub(crate) fn install() {
         "dataTaskWithRequest:completionHandler:" => data_task_with_request, c"@32@0:8@16@?24";
         "dataTaskWithURL:completionHandler:" => data_task_with_url, c"@32@0:8@16@?24";
         "downloadTaskWithRequest:" => download_task_with_request, c"@24@0:8@16";
+        "downloadTaskWithRequest:completionHandler:"
+            => download_task_with_request_handler, c"@32@0:8@16@?24";
         "invalidateAndCancel" => invalidate_session, c"v16@0:8";
         "finishTasksAndInvalidate" => invalidate_session, c"v16@0:8";
     });
