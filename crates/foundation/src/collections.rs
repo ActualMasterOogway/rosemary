@@ -524,13 +524,11 @@ unsafe extern "C" fn sorted_array_using_comparator(receiver: Id, _sel: Sel, bloc
     let call: unsafe extern "C" fn(Id, Id, Id) -> isize = unsafe { std::mem::transmute(invoke) };
     // Sorted out of place: the block may read the array it is sorting.
     let mut values = array.values.clone();
-    values.sort_by(
-        |a, b| match unsafe { call(block, *a as Id, *b as Id) } {
-            ..0 => std::cmp::Ordering::Less,
-            0 => std::cmp::Ordering::Equal,
-            _ => std::cmp::Ordering::Greater,
-        },
-    );
+    values.sort_by(|a, b| match unsafe { call(block, *a as Id, *b as Id) } {
+        ..0 => std::cmp::Ordering::Less,
+        0 => std::cmp::Ordering::Equal,
+        _ => std::cmp::Ordering::Greater,
+    });
     // SAFETY: a fresh array follows the convenience-constructor rule.
     unsafe {
         api::CFAutorelease(collections::new_array(

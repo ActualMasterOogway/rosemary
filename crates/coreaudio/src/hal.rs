@@ -662,7 +662,10 @@ pub unsafe extern "C" fn AudioObjectIsPropertySettable(
 /// accepting a new one would be agreeing to something the device is not doing.
 fn is_settable(object: ObjectId, selector: u32) -> bool {
     device(object).is_some()
-        && matches!(selector, selector::BUFFER_FRAME_SIZE | selector::BUFFER_SIZE)
+        && matches!(
+            selector,
+            selector::BUFFER_FRAME_SIZE | selector::BUFFER_SIZE
+        )
 }
 
 /// `OSStatus AudioObjectSetPropertyData(...)`
@@ -703,9 +706,10 @@ pub unsafe extern "C" fn AudioObjectSetPropertyData(
         selector::BUFFER_SIZE => value / device.frame_bytes() as u32,
         _ => value,
     };
-    device
-        .buffer_frames
-        .store(frames.clamp(MINIMUM_FRAMES, MAXIMUM_FRAMES), Ordering::Relaxed);
+    device.buffer_frames.store(
+        frames.clamp(MINIMUM_FRAMES, MAXIMUM_FRAMES),
+        Ordering::Relaxed,
+    );
     SUCCESS
 }
 
@@ -836,7 +840,10 @@ fn registered(object: ObjectId, id: *mut c_void) -> Result<Arc<Mutex<Proc>>, i32
         return Err(BAD_OBJECT);
     }
     let registration = proc_for(id).ok_or(crate::status::INVALID_PARAMETER)?;
-    let device = registration.lock().unwrap_or_else(|e| e.into_inner()).device;
+    let device = registration
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .device;
     match device.id == object {
         true => Ok(registration),
         false => Err(crate::status::INVALID_PARAMETER),
@@ -1225,8 +1232,8 @@ mod tests {
     /// agrees with it.
     #[test]
     fn the_default_input_device_is_listed_when_present() {
-        let default = ask(SYSTEM_OBJECT, selector::DEFAULT_INPUT_DEVICE, scope::GLOBAL)
-            .expect("answered");
+        let default =
+            ask(SYSTEM_OBJECT, selector::DEFAULT_INPUT_DEVICE, scope::GLOBAL).expect("answered");
         let devices = ask(SYSTEM_OBJECT, selector::DEVICES, scope::GLOBAL).expect("answered");
         match input() {
             Some(_) => {
@@ -1275,7 +1282,10 @@ mod tests {
         };
         assert_eq!(status, SUCCESS);
         assert_ne!(unsafe { AudioDeviceStop(INPUT_DEVICE, id) }, SUCCESS);
-        assert_eq!(unsafe { AudioDeviceDestroyIOProcID(OUTPUT_DEVICE, id) }, SUCCESS);
+        assert_eq!(
+            unsafe { AudioDeviceDestroyIOProcID(OUTPUT_DEVICE, id) },
+            SUCCESS
+        );
     }
 
     /// The buffer size is the one property a program may set, in frames or in

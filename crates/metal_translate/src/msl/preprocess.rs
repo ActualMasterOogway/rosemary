@@ -29,7 +29,10 @@ const PREDEFINED: &[(&str, &str)] = &[
 
 /// Run the preprocessor over `source`, with `macros` defined first, as
 /// `MTLCompileOptions.preprocessorMacros` defines them.
-pub(super) fn preprocess(source: &str, macros: &[(String, String)]) -> Result<String, TranslateError> {
+pub(super) fn preprocess(
+    source: &str,
+    macros: &[(String, String)],
+) -> Result<String, TranslateError> {
     let mut table: HashMap<String, Macro> = HashMap::new();
     for (name, body) in PREDEFINED {
         table.insert(
@@ -212,7 +215,11 @@ fn split_word(text: &str) -> (&str, &str) {
     (&text[..end], &text[end..])
 }
 
-fn define(rest: &str, table: &mut HashMap<String, Macro>, line: usize) -> Result<(), TranslateError> {
+fn define(
+    rest: &str,
+    table: &mut HashMap<String, Macro>,
+    line: usize,
+) -> Result<(), TranslateError> {
     let (name, after) = split_word(rest);
     if name.is_empty() {
         return Err(syntax_error(line, "#define has no name"));
@@ -266,7 +273,9 @@ fn expand(
         if c.is_ascii_digit() {
             // A number's suffix is not an identifier: `1u` stays whole.
             let start = at;
-            while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'.' || bytes[at] == b'_') {
+            while at < bytes.len()
+                && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'.' || bytes[at] == b'_')
+            {
                 // An exponent's sign belongs to the number.
                 if (bytes[at] == b'e' || bytes[at] == b'E')
                     && matches!(bytes.get(at + 1), Some(b'+' | b'-'))
@@ -308,9 +317,13 @@ fn expand(
                     continue;
                 }
                 let open = at + skipped;
-                let (arguments, end) = macro_arguments(text, open)
-                    .ok_or_else(|| syntax_error(line, format!("unterminated arguments to {name}")))?;
-                let arguments = if parameters.is_empty() && arguments.len() == 1 && arguments[0].trim().is_empty() {
+                let (arguments, end) = macro_arguments(text, open).ok_or_else(|| {
+                    syntax_error(line, format!("unterminated arguments to {name}"))
+                })?;
+                let arguments = if parameters.is_empty()
+                    && arguments.len() == 1
+                    && arguments[0].trim().is_empty()
+                {
                     Vec::new()
                 } else {
                     arguments
@@ -393,7 +406,11 @@ fn substitute(body: &str, parameters: &[String], arguments: &[String]) -> String
 }
 
 /// Evaluate a `#if` condition.
-fn evaluate(text: &str, table: &HashMap<String, Macro>, line: usize) -> Result<i64, TranslateError> {
+fn evaluate(
+    text: &str,
+    table: &HashMap<String, Macro>,
+    line: usize,
+) -> Result<i64, TranslateError> {
     // `defined` is answered before expansion, as it must be.
     let mut resolved = String::new();
     let mut rest = text;
@@ -421,7 +438,11 @@ fn evaluate(text: &str, table: &HashMap<String, Macro>, line: usize) -> Result<i
             let (name, remainder) = split_word(trimmed);
             (name, remainder)
         };
-        resolved.push_str(if table.contains_key(name) { " 1 " } else { " 0 " });
+        resolved.push_str(if table.contains_key(name) {
+            " 1 "
+        } else {
+            " 0 "
+        });
         rest = remainder;
     }
     resolved.push_str(rest);

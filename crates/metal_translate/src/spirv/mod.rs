@@ -435,7 +435,10 @@ fn emit_entry(
 
 /// The attributes a vertex function reads, and the user varyings either
 /// stage names.
-fn interface_reflection(entry: &EntryPoint, function: &Function) -> (Vec<StageVariable>, Vec<StageVariable>) {
+fn interface_reflection(
+    entry: &EntryPoint,
+    function: &Function,
+) -> (Vec<StageVariable>, Vec<StageVariable>) {
     let mut vertex_inputs = Vec::new();
     let mut varyings = Vec::new();
     for input in &entry.inputs {
@@ -458,7 +461,8 @@ fn interface_reflection(entry: &EntryPoint, function: &Function) -> (Vec<StageVa
     }
     if entry.stage == Stage::Vertex {
         for output in &entry.outputs {
-            if let (StageBinding::Location { location, .. }, Some(name)) = (output.binding, &output.name)
+            if let (StageBinding::Location { location, .. }, Some(name)) =
+                (output.binding, &output.name)
                 && name.starts_with("user(")
             {
                 varyings.push(StageVariable {

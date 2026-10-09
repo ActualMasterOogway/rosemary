@@ -19,8 +19,7 @@ pub use passes::{Pass, PassPipeline};
 pub use specialize::{FunctionConstantValues, metal_data_type_size, specialize};
 pub use spirv::{
     EntryArtifact, FunctionConstantInfo, RequiredFeatures, ResourceBinding, StageVariable,
-    TargetProfile,
-    TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
+    TargetProfile, TranslatedLibrary, WORKGROUP_SIZE_SPEC_IDS, emit_spirv,
 };
 
 /// The phase which reported a translation diagnostic.

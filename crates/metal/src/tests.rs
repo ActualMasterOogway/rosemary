@@ -433,15 +433,15 @@ fn a_private_buffer_is_filled_written_and_copied_by_the_device() {
         let mut error = std::ptr::null_mut();
         let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
         assert!(!pipeline.is_null());
-        let private = new_buffer_with_bytes(
-            device,
-            std::ptr::null(),
-            words.as_ptr().cast(),
-            16,
-            PRIVATE,
-        );
+        let private =
+            new_buffer_with_bytes(device, std::ptr::null(), words.as_ptr().cast(), 16, PRIVATE);
         assert!(!private.is_null());
-        assert!(object::body::<resource::Buffer>(private).inner.contents.is_null());
+        assert!(
+            object::body::<resource::Buffer>(private)
+                .inner
+                .contents
+                .is_null()
+        );
         assert_eq!(send_number_result(private, "storageMode"), 2);
         let shared = new_buffer(device, std::ptr::null(), 16, 0);
         let queue = new_command_queue(device, std::ptr::null());

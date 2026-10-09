@@ -8,9 +8,15 @@ pub(super) enum Kind {
     Ident(String),
     /// An integer literal. `unsigned` is its type after C++'s rules: a `u`
     /// suffix, or a hexadecimal literal too large for `int`.
-    Int { value: u64, unsigned: bool },
+    Int {
+        value: u64,
+        unsigned: bool,
+    },
     /// A floating literal. `half` for an `h` suffix.
-    Float { value: f64, half: bool },
+    Float {
+        value: f64,
+        half: bool,
+    },
     Punct(&'static str),
 }
 
@@ -66,7 +72,10 @@ pub(super) fn lex(text: &str, first_line: usize) -> Result<Vec<Token>, Translate
         else {
             return Err(syntax_error(
                 line,
-                format!("unexpected character {:?}", text[at..].chars().next().unwrap_or('?')),
+                format!(
+                    "unexpected character {:?}",
+                    text[at..].chars().next().unwrap_or('?')
+                ),
             ));
         };
         tokens.push(Token {
@@ -138,17 +147,27 @@ fn number(text: &str, start: usize, line: usize) -> Result<(Kind, usize), Transl
     // An octal literal is a leading zero followed by digits; Metal source
     // spells none, and reading one as decimal would be silently wrong.
     if digits.len() > 1 && digits.starts_with('0') {
-        return Err(syntax_error(line, format!("octal literal {digits} is not supported")));
+        return Err(syntax_error(
+            line,
+            format!("octal literal {digits} is not supported"),
+        ));
     }
     let value = digits
         .parse::<u64>()
         .map_err(|_| syntax_error(line, format!("malformed literal {digits}")))?;
     let (unsigned, end) = integer_suffix(text, at);
-    let limit = if unsigned { u64::from(u32::MAX) } else { i32::MAX as u64 };
+    let limit = if unsigned {
+        u64::from(u32::MAX)
+    } else {
+        i32::MAX as u64
+    };
     if value > limit {
         // C++ makes such a literal a `long`, which this frontend does not
         // model.
-        return Err(syntax_error(line, format!("literal {digits} does not fit 32 bits")));
+        return Err(syntax_error(
+            line,
+            format!("literal {digits} does not fit 32 bits"),
+        ));
     }
     Ok((Kind::Int { value, unsigned }, end))
 }

@@ -29,7 +29,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total = 0;
     let mut paths = std::fs::read_dir(directory)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|extension| extension == "metal"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "metal")
+        })
         .collect::<Vec<_>>();
     paths.sort();
     for path in paths {
@@ -39,7 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let (Ok(library), Some(output)) = (&translated, &output) {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             for entry in &library.entries {
-                let bytes = entry.words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+                let bytes = entry
+                    .words
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect::<Vec<_>>();
                 std::fs::write(output.join(format!("{stem}-{}.spv", entry.name)), bytes)?;
             }
         }
