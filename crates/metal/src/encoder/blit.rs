@@ -102,14 +102,14 @@ pub(super) unsafe extern "C" fn copy_buffer_to_buffer(
         .dst_offset(destination_offset)
         .size(size);
     // SAFETY: recording into this command buffer.
-    unsafe {
+    encoder.record_named("blit copyBuffer", || unsafe {
         command.gpu.device.cmd_copy_buffer(
             command.command_buffer,
             from.inner.buffer,
             to.inner.buffer,
             &[region],
-        )
-    };
+        );
+    });
     command.retain(source);
     command.retain(destination);
 }
@@ -235,15 +235,15 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture_options(
             depth: checked.size[2],
         });
     // SAFETY: recording into this command buffer; the image is in GENERAL.
-    unsafe {
+    encoder.record_named("blit copyBufferToTexture", || unsafe {
         command.gpu.device.cmd_copy_buffer_to_image(
             command.command_buffer,
             from.inner.buffer,
             to.image.image,
             vk::ImageLayout::GENERAL,
             &[region],
-        )
-    };
+        );
+    });
     command.retain(source);
     command.retain(destination);
 }
@@ -355,15 +355,15 @@ pub(super) unsafe extern "C" fn copy_texture_to_buffer_options(
             depth: checked.size[2],
         });
     // SAFETY: recording into this command buffer; the image is in GENERAL.
-    unsafe {
+    encoder.record_named("blit copyTextureToBuffer", || unsafe {
         command.gpu.device.cmd_copy_image_to_buffer(
             command.command_buffer,
             from.image.image,
             vk::ImageLayout::GENERAL,
             to.inner.buffer,
             &[region],
-        )
-    };
+        );
+    });
     command.retain(source);
     command.retain(destination);
 }
@@ -450,7 +450,7 @@ pub(super) unsafe extern "C" fn copy_texture_to_texture(
             depth: source_checked.size[2].min(destination_checked.size[2]),
         });
     // SAFETY: recording into this command buffer; both images are in GENERAL.
-    unsafe {
+    encoder.record_named("blit copyTexture", || unsafe {
         command.gpu.device.cmd_copy_image(
             command.command_buffer,
             from.image.image,
@@ -458,8 +458,8 @@ pub(super) unsafe extern "C" fn copy_texture_to_texture(
             to.image.image,
             vk::ImageLayout::GENERAL,
             &[region],
-        )
-    };
+        );
+    });
     command.retain(source);
     command.retain(destination);
 }
@@ -515,7 +515,7 @@ pub(super) unsafe extern "C" fn generate_mipmaps(receiver: Id, _sel: Sel, textur
                 },
             ]);
         // SAFETY: recording into this command buffer; the image is in GENERAL.
-        unsafe {
+        encoder.record_named("blit generateMipmaps", || unsafe {
             device.cmd_blit_image(
                 vk_command,
                 image.image.image,
@@ -524,8 +524,8 @@ pub(super) unsafe extern "C" fn generate_mipmaps(receiver: Id, _sel: Sel, textur
                 vk::ImageLayout::GENERAL,
                 &[blit],
                 vk::Filter::LINEAR,
-            )
-        };
+            );
+        });
         encoder.barrier();
         width = next_width;
         height = next_height;

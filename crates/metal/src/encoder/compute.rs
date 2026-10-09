@@ -64,10 +64,17 @@ pub(super) unsafe extern "C" fn dispatch_threadgroups(
     stats::count(Counter::Dispatches);
     let command = encoder.command();
     // SAFETY: recording into this command buffer.
-    unsafe {
+    let label = state.profile_label.as_ref().map(|label| {
+        format!(
+            "{label} [{}x{}x{} groups of {}x{}x{}]",
+            counts[0], counts[1], counts[2], size[0], size[1], size[2]
+        )
+        .into()
+    });
+    encoder.record_as(label, || unsafe {
         command
             .gpu
             .device
             .cmd_dispatch(command.command_buffer, counts[0], counts[1], counts[2])
-    };
+    });
 }

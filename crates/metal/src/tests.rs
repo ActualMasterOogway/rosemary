@@ -412,6 +412,82 @@ fn rebinding_between_dispatches_reaches_each_buffer() {
     }
 }
 
+/// A private buffer lives where the host cannot map it, so its `-contents`
+/// is null; the bytes it was made with, the device's writes and a blit out of
+/// it must still all arrive, and a reused range must read back as zeros.
+#[test]
+fn a_private_buffer_is_filled_written_and_copied_by_the_device() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const PRIVATE: u64 = 2 << 4;
+    let library = source_library(device, TEST_KERNEL);
+    let words: [u32; 4] = [1, 2, 3, 4];
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null());
+        let private = new_buffer_with_bytes(
+            device,
+            std::ptr::null(),
+            words.as_ptr().cast(),
+            16,
+            PRIVATE,
+        );
+        assert!(!private.is_null());
+        assert!(object::body::<resource::Buffer>(private).inner.contents.is_null());
+        assert_eq!(send_number_result(private, "storageMode"), 2);
+        let shared = new_buffer(device, std::ptr::null(), 16, 0);
+        let queue = new_command_queue(device, std::ptr::null());
+
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        set_buffer_at(encoder, private, 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        let blit = send(command, "blitCommandEncoder");
+        copy_buffer(blit, private, shared, 16);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        let contents = object::body::<resource::Buffer>(shared).inner.contents as *const u32;
+        assert_eq!(std::slice::from_raw_parts(contents, 4), [42, 2, 3, 4]);
+
+        // The range the first buffer held is handed to the next one.
+        objc::arc::release(private);
+        let reused = new_buffer(device, std::ptr::null(), 16, PRIVATE);
+        let command = send(queue, "commandBuffer");
+        let blit = send(command, "blitCommandEncoder");
+        copy_buffer(blit, reused, shared, 16);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        assert_eq!(std::slice::from_raw_parts(contents, 4), [0, 0, 0, 0]);
+    }
+}
+
+/// # Safety
+///
+/// `blit` must be a blit encoder of this crate's, and both buffers its own.
+unsafe fn copy_buffer(blit: Id, from: Id, to: Id, size: u64) {
+    let sel = objc::sel::get("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(blit) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    // SAFETY: the registered signature.
+    let call: unsafe extern "C" fn(Id, Sel, Id, u64, Id, u64, u64) =
+        unsafe { std::mem::transmute(method.implementation()) };
+    unsafe { call(blit, sel, from, 0, to, 0, size) };
+}
+
 /// `MTLSamplerAddressModeMirrorClampToEdge` is the one Metal wrap mode Vulkan
 /// makes conditional on a feature.
 #[test]

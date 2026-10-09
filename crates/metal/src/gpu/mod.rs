@@ -100,6 +100,9 @@ pub struct Gpu {
     /// The blocks Metal buffers are cut out of, made on first use because the
     /// memory type depends on what a buffer's requirements admit.
     buffers: OnceLock<Heap>,
+    /// The blocks `MTLStorageModePrivate` buffers are cut out of: device
+    /// memory, never mapped.
+    private_buffers: OnceLock<Heap>,
     /// Two-timestamp query pools, one per command buffer in flight, kept for
     /// reuse by command-buffer timing and the optional statistics.
     timestamp_pools: Mutex<Vec<vk::QueryPool>>,
@@ -693,6 +696,7 @@ impl Gpu {
             render_passes: Mutex::new(HashMap::new()),
             immediate: Mutex::new(None),
             buffers: OnceLock::new(),
+            private_buffers: OnceLock::new(),
             timestamp_pools: Mutex::new(Vec::new()),
             timestamp_period: properties.limits.timestamp_period,
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
@@ -727,6 +731,8 @@ pub struct GpuBuffer {
     pub allocation: Allocation,
     pub contents: *mut u8,
     pub length: u64,
+    /// Cut from the private heap: device memory the host cannot map.
+    pub private: bool,
 }
 
 // SAFETY: `contents` is a permanent mapping of device memory, valid on every
@@ -765,6 +771,7 @@ impl GpuBuffer {
             allocation: Allocation::none(),
             contents: std::ptr::null_mut(),
             length: 0,
+            private: false,
         }
     }
 }

@@ -193,6 +193,8 @@ pub(crate) struct CommandBuffer {
     presents: Vec<OwnedObjcRef>,
     completion: Arc<CommandCompletion>,
     recording: bool,
+    /// `ROSEMARY_METAL_PROFILE`: shared with its parallel sub-encoders.
+    profile: Option<Arc<crate::profile::Profile>>,
 }
 
 pub(crate) struct Encoder {

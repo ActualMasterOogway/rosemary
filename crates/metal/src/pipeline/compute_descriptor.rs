@@ -27,8 +27,14 @@ unsafe extern "C" fn init(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: a descriptor `-init` established.
     let descriptor = unsafe { object::body::<ComputeDescriptor>(receiver) };
-    objc::arc::release(std::mem::replace(&mut descriptor.function, std::ptr::null_mut()));
-    objc::arc::release(std::mem::replace(&mut descriptor.stage_input, std::ptr::null_mut()));
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.function,
+        std::ptr::null_mut(),
+    ));
+    objc::arc::release(std::mem::replace(
+        &mut descriptor.stage_input,
+        std::ptr::null_mut(),
+    ));
     objc::arc::finalize(receiver);
 }
 

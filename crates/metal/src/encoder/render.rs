@@ -14,15 +14,15 @@ pub(super) unsafe extern "C" fn draw_primitives(
         return;
     };
     // SAFETY: recording into this command buffer.
-    unsafe {
+    encoder.record(|| unsafe {
         device.cmd_draw(
             command,
             vertex_count as u32,
             instance_count.max(1) as u32,
             vertex_start as u32,
             0,
-        )
-    };
+        );
+    });
 }
 
 pub(super) unsafe extern "C" fn draw_primitives_base(
@@ -40,15 +40,15 @@ pub(super) unsafe extern "C" fn draw_primitives_base(
         return;
     };
     // SAFETY: recording into this command buffer.
-    unsafe {
+    encoder.record(|| unsafe {
         device.cmd_draw(
             command,
             vertex_count as u32,
             instance_count.max(1) as u32,
             vertex_start as u32,
             base_instance as u32,
-        )
-    };
+        );
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -130,9 +130,18 @@ pub(super) unsafe fn draw_indexed(
     let Some((device, command)) = encoder.prepare_draw(primitive, base_instance) else {
         return;
     };
-    unsafe { bind_index_buffer(encoder, device, command, index_type, index_buffer, index_offset) };
-    // SAFETY: recording into this command buffer.
     unsafe {
+        bind_index_buffer(
+            encoder,
+            device,
+            command,
+            index_type,
+            index_buffer,
+            index_offset,
+        )
+    };
+    // SAFETY: recording into this command buffer.
+    encoder.record(|| unsafe {
         device.cmd_draw_indexed(
             command,
             index_count as u32,
@@ -141,7 +150,7 @@ pub(super) unsafe fn draw_indexed(
             base_vertex as i32,
             base_instance as u32,
         );
-    };
+    });
 }
 
 /// `-drawPrimitives:vertexStart:vertexCount:`, one instance.
@@ -205,7 +214,7 @@ pub(super) unsafe extern "C" fn draw_primitives_indirect(
     let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
     encoder.command().retain(indirect);
     // SAFETY: recording into this command buffer.
-    unsafe { device.cmd_draw_indirect(command, buffer, offset, 1, 16) };
+    encoder.record(|| unsafe { device.cmd_draw_indirect(command, buffer, offset, 1, 16) });
 }
 
 /// `-drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:`.
@@ -232,12 +241,21 @@ pub(super) unsafe extern "C" fn draw_indexed_primitives_indirect(
     let Some((device, command)) = encoder.prepare_draw(primitive, 0) else {
         return;
     };
-    unsafe { bind_index_buffer(encoder, device, command, index_type, index_buffer, index_offset) };
+    unsafe {
+        bind_index_buffer(
+            encoder,
+            device,
+            command,
+            index_type,
+            index_buffer,
+            index_offset,
+        )
+    };
     // SAFETY: only a buffer of this crate's is ever bound.
     let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
     encoder.command().retain(indirect);
     // SAFETY: recording into this command buffer.
-    unsafe { device.cmd_draw_indexed_indirect(command, buffer, offset, 1, 20) };
+    encoder.record(|| unsafe { device.cmd_draw_indexed_indirect(command, buffer, offset, 1, 20) });
 }
 
 /// # Safety

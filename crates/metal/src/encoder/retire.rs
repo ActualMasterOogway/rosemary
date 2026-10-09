@@ -133,6 +133,7 @@ pub(crate) struct Submission {
     /// Host time when Vulkan accepted this submission, used if this queue has
     /// no device timestamps or reading them fails.
     pub(super) scheduled_time: f64,
+    pub(super) profile: Option<Arc<crate::profile::Profile>>,
 }
 
 impl Submission {
@@ -191,6 +192,9 @@ impl Submission {
             gpu_times = Some((self.scheduled_time.min(end), end));
         }
         self.gpu.release_timestamp_pool(self.timestamps);
+        if let Some(profile) = self.profile.take() {
+            profile.finish(self.gpu, result.is_ok());
+        }
         // Only a command buffer which never reached the queue still holds
         // drawables here; its frames are never shown.
         for drawable in self.presents.drain(..) {

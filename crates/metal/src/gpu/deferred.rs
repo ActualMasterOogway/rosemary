@@ -31,6 +31,9 @@ pub struct Batch {
     /// run is kept until it has.
     images: HashSet<vk::Image>,
     doomed: Vec<GpuImage>,
+    /// Likewise the private buffers it names, and those destroyed since.
+    buffers_named: HashSet<vk::Buffer>,
+    doomed_buffers: Vec<GpuBuffer>,
 }
 
 #[derive(Default)]
@@ -48,6 +51,11 @@ impl Batch {
     /// Note that the recording names `image`.
     pub fn touch(&mut self, image: vk::Image) {
         self.images.insert(image);
+    }
+
+    /// Note that the recording names `buffer`.
+    pub fn touch_buffer(&mut self, buffer: vk::Buffer) {
+        self.buffers_named.insert(buffer);
     }
 
     /// Copy `bytes` somewhere the device can read them until the batch has
@@ -149,6 +157,8 @@ impl Gpu {
             buffers: Vec::new(),
             images: HashSet::new(),
             doomed: Vec::new(),
+            buffers_named: HashSet::new(),
+            doomed_buffers: Vec::new(),
         })
     }
 
@@ -231,6 +241,7 @@ impl Gpu {
             chunks,
             buffers,
             doomed,
+            doomed_buffers,
             ..
         } = batch;
         self.recycle_context(context);
@@ -242,6 +253,9 @@ impl Gpu {
         }
         for image in doomed {
             self.destroy_image_now(image);
+        }
+        for buffer in doomed_buffers {
+            self.destroy_buffer_now(buffer);
         }
     }
 
@@ -275,6 +289,34 @@ impl Gpu {
                 None
             }
             None => Some(image),
+        }
+    }
+
+    /// As [`Gpu::defer_destruction`], for a private buffer.
+    pub(super) fn defer_buffer_destruction(&self, buffer: GpuBuffer) -> Option<GpuBuffer> {
+        self.retire_deferred();
+        {
+            let mut pending = self.deferred.pending.lock().expect("deferred transfers");
+            if let Some(batch) = pending
+                .as_mut()
+                .filter(|batch| batch.buffers_named.contains(&buffer.buffer))
+            {
+                batch.doomed_buffers.push(buffer);
+                drop(pending);
+                self.flush_deferred_now();
+                return None;
+            }
+        }
+        let mut in_flight = self.deferred.in_flight.lock().expect("deferred transfers");
+        match in_flight
+            .iter_mut()
+            .find(|batch| batch.buffers_named.contains(&buffer.buffer))
+        {
+            Some(batch) => {
+                batch.doomed_buffers.push(buffer);
+                None
+            }
+            None => Some(buffer),
         }
     }
 }

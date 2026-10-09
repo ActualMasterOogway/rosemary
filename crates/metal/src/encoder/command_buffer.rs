@@ -42,6 +42,7 @@ pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> I
             );
         }
     }
+    let profile = crate::profile::Profile::begin(gpu, command_buffer);
     stats::count(Counter::CommandBuffers);
     // `-commandBuffer` owns nothing it hands back: Metal vends an autoreleased
     // command buffer, and a guest which keeps one retains it itself.
@@ -69,6 +70,7 @@ pub(super) unsafe extern "C" fn new_command_buffer(receiver: Id, _sel: Sel) -> I
             presents: Vec::new(),
             completion: Arc::new(CommandCompletion::new()),
             recording: true,
+            profile,
         },
     ))
 }
@@ -220,6 +222,7 @@ pub(super) unsafe extern "C" fn commit(receiver: Id, _sel: Sel) {
         serial: 0,
         completion: Arc::clone(&command.completion),
         scheduled_time: 0.0,
+        profile: command.profile.take(),
     });
     // SAFETY: recording began when the command buffer was made.
     if let Err(error) = unsafe { gpu.device.end_command_buffer(command.command_buffer) } {

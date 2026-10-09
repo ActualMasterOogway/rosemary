@@ -321,7 +321,11 @@ pub(super) unsafe extern "C" fn set_stencil_references(
     // SAFETY: recording into this command buffer.
     unsafe {
         let device = &command.gpu.device;
-        device.cmd_set_stencil_reference(command.command_buffer, vk::StencilFaceFlags::FRONT, front);
+        device.cmd_set_stencil_reference(
+            command.command_buffer,
+            vk::StencilFaceFlags::FRONT,
+            front,
+        );
         device.cmd_set_stencil_reference(command.command_buffer, vk::StencilFaceFlags::BACK, back);
     };
 }

@@ -109,7 +109,11 @@ mod tests {
         for (id, location) in [(10, 0), (11, 1), (12, 0)] {
             words.extend([4 << 16 | OP_DECORATE, id, DECORATION_LOCATION, location]);
         }
-        for (id, class) in [(10, STORAGE_CLASS_INPUT), (11, STORAGE_CLASS_INPUT), (12, 3)] {
+        for (id, class) in [
+            (10, STORAGE_CLASS_INPUT),
+            (11, STORAGE_CLASS_INPUT),
+            (12, 3),
+        ] {
             words.extend([4 << 16 | OP_VARIABLE, 99, id, class]);
         }
         words

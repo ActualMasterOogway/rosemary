@@ -29,7 +29,10 @@ pub(super) unsafe extern "C" fn texture_allocated_size(receiver: Id, _sel: Sel) 
 
 pub(super) unsafe extern "C" fn texture_resource_options(receiver: Id, _sel: Sel) -> u64 {
     // SAFETY: a texture of this crate's.
-    unsafe { object::body::<Texture>(receiver) }.descriptor.storage_mode << 4
+    unsafe { object::body::<Texture>(receiver) }
+        .descriptor
+        .storage_mode
+        << 4
 }
 
 unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> bool {

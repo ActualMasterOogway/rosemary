@@ -13,6 +13,7 @@ mod object;
 mod overlay;
 mod pipeline;
 mod present;
+mod profile;
 mod resource;
 pub mod stats;
 mod submission;
@@ -212,7 +213,8 @@ pub fn bootstrap() {
             "device" => library_device, c"@16@0:8";
             "setLabel:" => no_op, c"v24@0:8@16";
         });
-        let attribute = object::register::<VertexAttributeReflection>(c"RosemaryMTLVertexAttribute");
+        let attribute =
+            object::register::<VertexAttributeReflection>(c"RosemaryMTLVertexAttribute");
         methods!(attribute, {
             "name" => attribute_name, c"@16@0:8";
             "attributeIndex" => attribute_index, c"Q16@0:8";
@@ -308,7 +310,6 @@ unsafe extern "C" fn fence_dealloc(receiver: Id, _sel: Sel) {
 pub(crate) unsafe extern "C" fn nil(_receiver: Id, _sel: Sel) -> Id {
     std::ptr::null_mut()
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -41,10 +41,25 @@ impl Gpu {
     /// through `-contents` crosses the bus. `MTLStorageModeShared` on a Mac
     /// with a discrete GPU is system memory too.
     pub fn create_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
-        self.create_buffer_with(length, true)
+        self.create_buffer_with(length, true, false)
     }
 
-    fn create_buffer_with(&self, length: u64, zeroed: bool) -> Result<GpuBuffer, String> {
+    /// An `MTLStorageModePrivate` buffer, in device memory.
+    ///
+    /// Only the device reads and writes it, and only the device should hold
+    /// it: a compute pass over host memory crosses the bus for every access,
+    /// which made an FFT over a few megabytes take forty milliseconds a
+    /// dispatch. Its `-contents` is null, as Metal's is.
+    pub fn create_private_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
+        self.create_buffer_with(length, true, true)
+    }
+
+    fn create_buffer_with(
+        &self,
+        length: u64,
+        zeroed: bool,
+        private: bool,
+    ) -> Result<GpuBuffer, String> {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::UNIFORM_BUFFER
             | vk::BufferUsageFlags::VERTEX_BUFFER
@@ -67,7 +82,10 @@ impl Gpu {
         });
         // SAFETY: the buffer was just created by this device.
         let requirements = unsafe { self.device.get_buffer_memory_requirements(*buffer) };
-        let heap = self.buffer_heap(requirements.memory_type_bits)?;
+        let heap = match private {
+            true => self.private_buffer_heap(requirements.memory_type_bits)?,
+            false => self.buffer_heap(requirements.memory_type_bits)?,
+        };
         let allocation = heap.allocate(&self.device, requirements.size, requirements.alignment)?;
         let allocation = Guard::new(allocation, |allocation| {
             heap.free(&self.device, allocation);
@@ -84,33 +102,101 @@ impl Gpu {
         // handed over is already zero, and during a streaming burst - which is
         // where this matters, because it is gigabytes a second - almost all of
         // it is, so only a reused range is written over.
-        if zeroed && !allocation.pristine {
-            // SAFETY: the mapping covers this whole range.
-            crate::stats::timed(crate::stats::Counter::BufferZeroMicros, || unsafe {
-                std::ptr::write_bytes(allocation.contents, 0, length as usize)
-            });
-        }
-        Ok(GpuBuffer {
+        let gpu_buffer = GpuBuffer {
             buffer,
             allocation,
             contents: allocation.contents,
             length,
+            private,
+        };
+        if zeroed && !allocation.pristine {
+            if allocation.contents.is_null() {
+                // Unmapped, so the device zeroes it ahead of any work which
+                // could read it.
+                let filled = self.defer(|gpu, batch| {
+                    batch.touch_buffer(buffer);
+                    // SAFETY: the batch is recording, and the buffer lives
+                    // until it has run: see `destroy_buffer`.
+                    unsafe {
+                        gpu.device.cmd_fill_buffer(
+                            batch.command_buffer(),
+                            buffer,
+                            0,
+                            vk::WHOLE_SIZE,
+                            0,
+                        )
+                    };
+                    Ok(())
+                });
+                if let Err(reason) = filled {
+                    self.destroy_buffer(gpu_buffer);
+                    return Err(reason);
+                }
+            } else {
+                // SAFETY: the mapping covers this whole range.
+                crate::stats::timed(crate::stats::Counter::BufferZeroMicros, || unsafe {
+                    std::ptr::write_bytes(allocation.contents, 0, length as usize)
+                });
+            }
+        }
+        Ok(gpu_buffer)
+    }
+
+    /// Copy `bytes` into the start of a buffer the host cannot map, ahead of
+    /// whatever is submitted next.
+    pub fn upload_to_private(&self, buffer: &GpuBuffer, bytes: &[u8]) -> Result<(), String> {
+        let length = (bytes.len() as u64).min(buffer.length);
+        if length == 0 {
+            return Ok(());
+        }
+        let target = buffer.buffer;
+        self.defer(|gpu, batch| {
+            let (staging, offset) = batch.stage(gpu, &bytes[..length as usize], 4)?;
+            batch.touch_buffer(target);
+            let region = vk::BufferCopy::default()
+                .src_offset(offset)
+                .dst_offset(0)
+                .size(length);
+            // SAFETY: the batch is recording; both buffers outlive it.
+            unsafe {
+                gpu.device
+                    .cmd_copy_buffer(batch.command_buffer(), staging, target, &[region])
+            };
+            Ok(())
         })
     }
 
     /// A host-visible buffer whose bytes the caller overwrites in full before
     /// the device reads them, so a reused range is not zeroed first.
     pub fn create_staging_buffer(&self, length: u64) -> Result<GpuBuffer, String> {
-        self.create_buffer_with(length, false)
+        self.create_buffer_with(length, false, false)
     }
 
     /// Destroy a buffer this device made and return its range to the heap.
     ///
     /// The caller must have waited for every submission which referred to it.
+    ///
+    /// A private buffer a deferred transfer still names is kept until the
+    /// device has run that transfer.
     pub fn destroy_buffer(&self, buffer: GpuBuffer) {
+        let buffer = match buffer.private {
+            true => match self.defer_buffer_destruction(buffer) {
+                Some(buffer) => buffer,
+                None => return,
+            },
+            false => buffer,
+        };
+        self.destroy_buffer_now(buffer);
+    }
+
+    pub(super) fn destroy_buffer_now(&self, buffer: GpuBuffer) {
         // SAFETY: the caller guarantees the buffer is idle.
         unsafe { self.device.destroy_buffer(buffer.buffer, None) };
-        if let Ok(heap) = self.buffer_heap(u32::MAX) {
+        let heap = match buffer.private {
+            true => self.private_buffers.get(),
+            false => self.buffers.get(),
+        };
+        if let Some(heap) = heap {
             heap.free(&self.device, buffer.allocation);
         }
     }
@@ -129,7 +215,30 @@ impl Gpu {
             .memory_type(bits, host | vk::MemoryPropertyFlags::HOST_CACHED)
             .or_else(|| self.memory_type(bits, host))
             .ok_or("no Vulkan memory type is host visible and coherent")?;
-        Ok(self.buffers.get_or_init(|| Heap::new(index)))
+        Ok(self.buffers.get_or_init(|| Heap::new(index, true)))
+    }
+
+    /// The heap private buffers are cut from: device-local memory, preferring
+    /// a type the host cannot see, which on a discrete adapter is video
+    /// memory rather than the small mappable window into it. Where there is
+    /// none - a device with no device-local type admitting buffers - private
+    /// buffers share the ordinary heap's memory type, unmapped.
+    fn private_buffer_heap(&self, bits: u32) -> Result<&Heap, String> {
+        if let Some(heap) = self.private_buffers.get() {
+            return Ok(heap);
+        }
+        let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let index = (0..self.memory.memory_type_count)
+            .find(|index| {
+                let flags = self.memory.memory_types[*index as usize].property_flags;
+                bits & (1 << index) != 0
+                    && flags.contains(local)
+                    && !flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+            })
+            .or_else(|| self.memory_type(bits, local))
+            .or_else(|| self.memory_type(bits, vk::MemoryPropertyFlags::empty()))
+            .ok_or("no Vulkan memory type admits a private buffer")?;
+        Ok(self.private_buffers.get_or_init(|| Heap::new(index, false)))
     }
 
     pub fn create_image(&self, description: &ImageDescription) -> Result<GpuImage, String> {

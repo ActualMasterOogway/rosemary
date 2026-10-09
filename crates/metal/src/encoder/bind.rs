@@ -177,6 +177,53 @@ impl Encoder {
         unsafe { object::body::<CommandBuffer>(self.command_buffer) }
     }
 
+    /// Record one draw or dispatch, timed under `ROSEMARY_METAL_PROFILE`.
+    pub(super) fn record(&self, body: impl FnOnce()) {
+        let command = self.command();
+        let Some(profile) = &command.profile else {
+            return body();
+        };
+        let label = match self.kind {
+            // SAFETY: only pipeline states of this crate's are ever bound.
+            Kind::Render => unsafe { object::body::<RenderPipeline>(self.render_pipeline) }
+                .profile_label
+                .as_ref(),
+            Kind::Compute => unsafe { object::body::<ComputePipeline>(self.compute_pipeline) }
+                .profile_label
+                .as_ref(),
+            Kind::Blit => None,
+        };
+        match label {
+            Some(label) => profile.span(&command.gpu.device, command.command_buffer, label, body),
+            None => body(),
+        }
+    }
+
+    /// Record work timed under a fixed name rather than the bound pipeline's.
+    pub(super) fn record_named(&self, name: &'static str, body: impl FnOnce()) {
+        let command = self.command();
+        match &command.profile {
+            Some(profile) => profile.span(
+                &command.gpu.device,
+                command.command_buffer,
+                &crate::profile::named(name),
+                body,
+            ),
+            None => body(),
+        }
+    }
+
+    /// Record work timed under an explicit label, or untimed without one.
+    pub(super) fn record_as(&self, label: Option<std::sync::Arc<str>>, body: impl FnOnce()) {
+        let command = self.command();
+        match (&command.profile, label) {
+            (Some(profile), Some(label)) => {
+                profile.span(&command.gpu.device, command.command_buffer, &label, body)
+            }
+            _ => body(),
+        }
+    }
+
     /// Write the descriptor sets one pipeline's resources need and bind them.
     ///
     /// `false` only where no descriptor set could be allocated at all, which

@@ -5,8 +5,8 @@ pub(crate) use compute_descriptor::{
     new_with_function_reflection as new_compute_pipeline_with_reflection,
 };
 mod descriptor;
-mod link;
 mod enums;
+mod link;
 mod render;
 
 use std::collections::HashMap;
@@ -231,7 +231,9 @@ unsafe extern "C" fn compile_options_init(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn compile_options_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: an options object `-init` established.
-    unsafe { std::ptr::drop_in_place(object::body::<CompileOptions>(receiver) as *mut CompileOptions) };
+    unsafe {
+        std::ptr::drop_in_place(object::body::<CompileOptions>(receiver) as *mut CompileOptions)
+    };
     objc::arc::finalize(receiver);
 }
 
@@ -256,7 +258,8 @@ unsafe extern "C" fn set_preprocessor_macros(receiver: Id, _sel: Sel, dictionary
         };
         for (key, value) in keys.into_iter().zip(values) {
             // SAFETY: a key of the guest's dictionary.
-            let name = String::from_utf8_lossy(&unsafe { foundation::string::bytes(key as Id) }).into_owned();
+            let name = String::from_utf8_lossy(&unsafe { foundation::string::bytes(key as Id) })
+                .into_owned();
             // SAFETY: a value of the guest's dictionary.
             let text = if unsafe { CFGetTypeID(value) == CFNumberGetTypeID() } {
                 let mut number = 0f64;
@@ -268,7 +271,8 @@ unsafe extern "C" fn set_preprocessor_macros(receiver: Id, _sel: Sel, dictionary
                     format!("{number}")
                 }
             } else {
-                String::from_utf8_lossy(&unsafe { foundation::string::bytes(value as Id) }).into_owned()
+                String::from_utf8_lossy(&unsafe { foundation::string::bytes(value as Id) })
+                    .into_owned()
             };
             macros.push((name, text));
         }

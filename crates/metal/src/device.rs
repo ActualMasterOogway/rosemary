@@ -41,11 +41,19 @@ pub(super) unsafe extern "C" fn new_buffer_with_bytes(
     };
     let buffer = resource::new_buffer(gpu, length, options);
     if !buffer.is_null() && !bytes.is_null() {
-        // SAFETY: a buffer this call just made, mapped over `length` bytes,
-        // and `length` readable bytes the guest promised.
-        unsafe {
-            let contents = object::body::<resource::Buffer>(buffer).inner.contents;
-            std::ptr::copy_nonoverlapping(bytes, contents, length);
+        // SAFETY: a buffer this call just made.
+        let inner = unsafe { &object::body::<resource::Buffer>(buffer).inner };
+        if inner.contents.is_null() {
+            // A private buffer: the device copies the bytes in.
+            // SAFETY: `length` readable bytes the guest promised.
+            let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+            if let Err(reason) = gpu.upload_to_private(inner, bytes) {
+                gpu::trace(format!("newBufferWithBytes: upload failed: {reason}"));
+            }
+        } else {
+            // SAFETY: the buffer is mapped over `length` bytes, and `length`
+            // readable bytes the guest promised.
+            unsafe { std::ptr::copy_nonoverlapping(bytes, inner.contents, length) };
         }
     }
     buffer

@@ -73,9 +73,13 @@ pub(super) unsafe extern "C" fn new_sub_encoder(receiver: Id, _sel: Sel) -> Id {
         )
         .inheritance_info(&inheritance);
     // SAFETY: the command buffer is fresh or was reset with its pool.
-    if let Err(error) = unsafe { gpu.device.begin_command_buffer(context.command_buffer, &begin) }
-    {
-        gpu::trace(format!("vkBeginCommandBuffer (secondary) failed with {error:?}"));
+    if let Err(error) = unsafe {
+        gpu.device
+            .begin_command_buffer(context.command_buffer, &begin)
+    } {
+        gpu::trace(format!(
+            "vkBeginCommandBuffer (secondary) failed with {error:?}"
+        ));
         gpu.release_secondary(context);
         return std::ptr::null_mut();
     }
@@ -104,6 +108,7 @@ pub(super) unsafe extern "C" fn new_sub_encoder(receiver: Id, _sel: Sel) -> Id {
             presents: Vec::new(),
             completion: Arc::new(CommandCompletion::new()),
             recording: true,
+            profile: parent.profile.clone(),
         },
     );
     let encoder = new_encoder(child, Kind::Render);
@@ -127,8 +132,15 @@ pub(super) fn close_secondary(command: &mut CommandBuffer) {
         return;
     }
     // SAFETY: recording began when the sub-encoder was made.
-    if let Err(error) = unsafe { command.gpu.device.end_command_buffer(command.command_buffer) } {
-        gpu::trace(format!("vkEndCommandBuffer (secondary) failed with {error:?}"));
+    if let Err(error) = unsafe {
+        command
+            .gpu
+            .device
+            .end_command_buffer(command.command_buffer)
+    } {
+        gpu::trace(format!(
+            "vkEndCommandBuffer (secondary) failed with {error:?}"
+        ));
     }
     command.secondary_closed = true;
 }
@@ -152,7 +164,9 @@ pub(super) unsafe extern "C" fn end_parallel_encoding(receiver: Id, sel: Sel) {
         if command.recording {
             command.recording = false;
             executed.push(command.command_buffer);
-            parent.descriptor_pools.append(&mut command.descriptor_pools);
+            parent
+                .descriptor_pools
+                .append(&mut command.descriptor_pools);
             parent.uploads.append(&mut command.uploads);
             command.retained_set.clear();
             parent.retained.append(&mut command.retained);
@@ -192,8 +206,7 @@ pub(super) unsafe extern "C" fn parallel_dealloc(receiver: Id, sel: Sel) {
 }
 
 pub(super) fn install() {
-    let parallel =
-        object::register::<ParallelEncoder>(c"RosemaryMTLParallelRenderCommandEncoder");
+    let parallel = object::register::<ParallelEncoder>(c"RosemaryMTLParallelRenderCommandEncoder");
     methods!(parallel, {
         "renderCommandEncoder" => new_sub_encoder, c"@16@0:8";
         "endEncoding" => end_parallel_encoding, c"v16@0:8";

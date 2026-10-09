@@ -66,13 +66,17 @@ struct State {
 /// One memory type's blocks.
 pub struct Heap {
     memory_type: u32,
+    /// Whether blocks are mapped. A private heap's are not: its memory type
+    /// need not be host visible, and nothing on the host touches it.
+    mapped: bool,
     state: Mutex<State>,
 }
 
 impl Heap {
-    pub fn new(memory_type: u32) -> Self {
+    pub fn new(memory_type: u32, mapped: bool) -> Self {
         Self {
             memory_type,
+            mapped,
             state: Mutex::new(State::default()),
         }
     }
@@ -142,10 +146,7 @@ impl Heap {
             let _ = size;
             // SAFETY: nothing else was cut from this block, and the caller
             // guarantees the buffer bound into it is destroyed and idle.
-            unsafe {
-                device.unmap_memory(memory);
-                device.free_memory(memory, None);
-            }
+            unsafe { self.release_memory(device, memory) };
             return;
         }
         state.blocks[index].release(allocation.offset, allocation.size);
@@ -163,8 +164,19 @@ impl Heap {
         drop(state);
         // SAFETY: the block is entirely free, so no live buffer is bound into
         // it, and every buffer that was is destroyed and idle.
+        unsafe { self.release_memory(device, memory) };
+    }
+
+    /// # Safety
+    ///
+    /// No live buffer may be bound into `memory`.
+    unsafe fn release_memory(&self, device: &Device, memory: vk::DeviceMemory) {
+        // SAFETY: the caller guarantees the memory is idle; it is mapped
+        // exactly when the heap maps its blocks.
         unsafe {
-            device.unmap_memory(memory);
+            if self.mapped {
+                device.unmap_memory(memory);
+            }
             device.free_memory(memory, None);
         }
     }
@@ -176,6 +188,15 @@ impl Heap {
         // SAFETY: a well-formed allocation on this live device.
         let memory = unsafe { device.allocate_memory(&info, None) }
             .map_err(|error| format!("vkAllocateMemory of {size} bytes failed with {error:?}"))?;
+        if !self.mapped {
+            return Ok(Block {
+                memory,
+                contents: std::ptr::null_mut(),
+                size,
+                free: vec![(0, size)],
+                reached: 0,
+            });
+        }
         // SAFETY: host-visible memory nothing else has mapped.
         let contents =
             unsafe { device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }
@@ -237,8 +258,11 @@ impl State {
                 block.reached = block.reached.max(aligned + size);
                 return Some(Allocation {
                     memory: block.memory,
-                    // SAFETY: `aligned` is inside a mapping of `block.size`.
-                    contents: unsafe { block.contents.add(aligned as usize) },
+                    contents: match block.contents.is_null() {
+                        true => std::ptr::null_mut(),
+                        // SAFETY: `aligned` is inside a mapping of `block.size`.
+                        false => unsafe { block.contents.add(aligned as usize) },
+                    },
                     block: Some(index),
                     offset: aligned,
                     size,

@@ -193,6 +193,16 @@ pub(super) unsafe extern "C" fn new_library_with_source(
     if library.is_null() {
         return fail_library(error, "could not allocate MTL source library");
     }
+    if crate::profile::enabled() {
+        let hash = fnv1a64(source.as_bytes());
+        // SAFETY: the library just made.
+        for entry in &unsafe { object::body::<Library>(library) }
+            .translated
+            .entries
+        {
+            crate::profile::label_entry(entry, format!("msl-{hash:016x}:{}", entry.name));
+        }
+    }
     library
 }
 
