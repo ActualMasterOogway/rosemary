@@ -1,0 +1,204 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # No Nix, no dependencies: the launcher's own tests, before anything slow.
+  launcher:
+    name: launcher tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          rustc --edition 2024 --test crates/launcher/src/main.rs -o launcher-tests
+          ./launcher-tests
+
+  build:
+    name: package (${{ matrix.arch }})
+    needs: launcher
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # aarch64 builds from the same flake but has not been run yet:
+          # - arch: aarch64
+          #   runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      # The store, WebKitGTK's closure included, needs more than a stock
+      # runner leaves free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ github.token }}
+            # A result symlink only pins an output's runtime closure. These two
+            # keep the build closure -- the Cargo dependency artifacts above
+            # all -- alive behind it, so trimming the store below cannot drop
+            # what the next run wants to restore.
+            keep-outputs = true
+            keep-derivations = true
+
+      # Carry /nix/store between runs. Rosemary's third-party crates build in
+      # their own derivation (crane's cargoArtifacts), which depends on
+      # Cargo.lock, the toolchain and the link-time libraries and nothing
+      # else. The key is therefore those inputs, not the sources: a change to
+      # Rosemary's own crates restores the store, recompiles only the
+      # workspace, and saves nothing. Pull requests restore main's cache but
+      # do not write one.
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'nix/**', 'flake.nix') }}
+          restore-prefixes-first-match: nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-
+          save: ${{ github.event_name == 'push' }}
+          # Actions' cache is 10 GB for the whole repository. This collects
+          # what went stale when a pin moved, without touching anything a
+          # later run can still use; raise it if a full build outgrows it.
+          gc-max-store-size-linux: 8G
+          purge: true
+          purge-prefixes: nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.arch }}-
+          purge-created: 0
+          purge-primary-key: never
+
+      # -o, not --no-link: the symlinks are the roots the trim above reads.
+      - name: Build the Steam tool
+        run: nix build --print-build-logs -o result-steam .#rosemary-steam-tool-archive
+
+      - name: Build the AppImage
+        run: nix build --print-build-logs -o result-appimage .#rosemary-appimage
+
+      # Neither is a compile, and either differing means the download is not
+      # reproducible: sorted entries and fixed times in the archive, and
+      # SOURCE_DATE_EPOCH in the squashfs.
+      - name: Check determinism
+        run: |
+          nix build --print-build-logs --rebuild .#rosemary-steam-tool-archive
+          nix build --print-build-logs --rebuild .#rosemary-appimage
+
+      # A stock Ubuntu runner has a glibc older than the bundle's, so this
+      # also exercises the bundled glibc on a machine with no Nix store
+      # reachable by the tool's own libraries.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home" ROSEMARY_PREFIX_SETUP=none ROSEMARY_LAUNCHER_TRACE=1
+          mkdir -p "$HOME" smoke
+          tar -xzf result-steam/*.tar.gz -C smoke
+          out=$(smoke/Rosemary/bin/rosemary run /nonexistent 2>&1 || true)
+          echo "$out"
+          grep -q "bundled glibc" <<<"$out"
+          grep -q "No such file" <<<"$out"
+          out=$(APPIMAGE_EXTRACT_AND_RUN=1 ./result-appimage run /nonexistent 2>&1 || true)
+          echo "$out"
+          grep -q "No such file" <<<"$out"
+          smoke/Rosemary/rosemary-steam getnativepath /some/path | grep -qx /some/path
+
+      - name: Collect
+        id: collect
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          name="Rosemary-${version}-${{ matrix.arch }}"
+          mkdir dist
+          cp result-steam/*.tar.gz result-steam/*.tar.zst dist/
+          cp result-appimage "dist/${name}.AppImage"
+          cp smoke/Rosemary/share/doc/rosemary/SOURCES.yaml "dist/${name}.SOURCES.yaml"
+          chmod u+w dist/*
+          (cd dist && sha256sum -- * | tee SHA256SUMS.${{ matrix.arch }})
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      # Provenance for every push, so an Actions download can be traced to its
+      # run as well as a release can. Pull requests get no OIDC token.
+      - name: Attest
+        id: attest
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.tar.zst
+            dist/*.AppImage
+
+      - name: Keep the attestation beside what it attests
+        if: github.event_name == 'push'
+        run: cp '${{ steps.attest.outputs.bundle-path }}' 'dist/${{ steps.collect.outputs.name }}.intoto.jsonl'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect.outputs.name }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # A tag that disagrees with the version in the archives' names would
+      # publish files that claim to be a different release.
+      - name: Tag matches version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          test "${GITHUB_REF#refs/tags/}" = "v${version}" || {
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match workspace version ${version}"
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combine checksums
+        run: |
+          cd dist
+          cat SHA256SUMS.* | sort -k2 > SHA256SUMS
+          rm SHA256SUMS.*
+          sha256sum --check SHA256SUMS
+
+      - name: Attest
+        id: attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/SHA256SUMS
+
+      - run: cp '${{ steps.attest.outputs.bundle-path }}' dist/release.intoto.jsonl
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
