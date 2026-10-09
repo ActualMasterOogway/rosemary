@@ -71,10 +71,21 @@ pub fn fresh_address() -> Address {
 /// `ss -x`; the random address is what actually keeps them apart.
 #[cfg(target_os = "linux")]
 fn sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    named(address, "")
+}
+
+/// The listener a port's send rights hold a claim on, beside the port itself.
+#[cfg(target_os = "linux")]
+fn senders_sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    named(address, ".senders")
+}
+
+#[cfg(target_os = "linux")]
+fn named(address: Address, suffix: &str) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let uid = unsafe { libc::getuid() };
-    let name = format!("rosemary.mach.{uid}.{address:016x}");
+    let name = format!("rosemary.mach.{uid}.{address:016x}{suffix}");
     // The leading NUL is the abstract namespace; the name is what follows it and
     // is *not* NUL-terminated, so the length has to be exact.
     let bytes = name.as_bytes();
@@ -92,11 +103,25 @@ fn socket_path(address: Address) -> std::path::PathBuf {
 }
 
 #[cfg(not(target_os = "linux"))]
+fn senders_path(address: Address) -> std::path::PathBuf {
+    server::location::runtime_directory().join(format!("mach/{address:016x}.senders"))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    at_path(socket_path(address))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn senders_sockaddr(address: Address) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    at_path(senders_path(address))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn at_path(path: std::path::PathBuf) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     use std::os::unix::ffi::OsStrExt;
     let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let path = socket_path(address);
     let bytes = path.as_os_str().as_bytes();
     if bytes.len() >= addr.sun_path.len() {
         return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
@@ -128,9 +153,20 @@ pub fn is_bound(address: Address) -> bool {
     rc == 0
 }
 
+/// A receive right taken apart to be sent to another process.
+pub struct Moved {
+    pub fd: c_int,
+    pub senders: c_int,
+    pub claims: Vec<c_int>,
+    pub complete: bool,
+}
+
 /// The end of a port that messages arrive at: a receive right.
 pub struct Receiver {
     fd: c_int,
+    /// The listener send rights to this port hold a claim on, or `-1` when it
+    /// could not be made - in which case no-senders is never reported.
+    senders: c_int,
     address: Address,
     /// A message that was too large for the buffer a caller offered.
     ///
@@ -146,8 +182,23 @@ impl Drop for Receiver {
         // SAFETY: this type's own descriptor, not shared with any other value:
         // a `Receiver` is only ever reached through an `Arc`.
         unsafe { libc::close(self.fd) };
+        if self.senders >= 0 {
+            // Before the close, so the registry never polls a reused number.
+            for claim in super::senders::untrack(self.address)
+                .map(|taken| taken.claims)
+                .unwrap_or_default()
+            {
+                // SAFETY: a claim the registry accepted and handed back.
+                unsafe { libc::close(claim) };
+            }
+            // SAFETY: as above, this type's own listener.
+            unsafe { libc::close(self.senders) };
+        }
         #[cfg(not(target_os = "linux"))]
-        let _ = std::fs::remove_file(socket_path(self.address));
+        {
+            let _ = std::fs::remove_file(socket_path(self.address));
+            let _ = std::fs::remove_file(senders_path(self.address));
+        }
     }
 }
 
@@ -167,8 +218,13 @@ impl Receiver {
             // length is computed from the name written into it.
             let rc = unsafe { libc::bind(fd, (&raw const addr).cast(), len) };
             if rc == 0 {
+                let senders = listen_for_senders(address);
+                if senders >= 0 {
+                    super::senders::track(address, senders, true, Vec::new());
+                }
                 return Ok(Receiver {
                     fd,
+                    senders,
                     address,
                     held: Mutex::new(None),
                 });
@@ -187,12 +243,33 @@ impl Receiver {
     /// same socket the sender had bound, so this end answers on the same
     /// address.
     ///
+    /// `senders` is the listener that travelled with it, or `-1`, and `claims`
+    /// the claims its old owner had accepted - the senders it already has.
+    /// `complete` is false when some of those could not be carried.
+    ///
     /// # Safety
     ///
-    /// `fd` is an owned descriptor for the socket bound to `address`.
-    pub unsafe fn adopt(fd: c_int, address: Address) -> Self {
+    /// `fd` is an owned descriptor for the socket bound to `address`, and
+    /// `senders` and `claims` are owned descriptors for its listener (or `-1`)
+    /// and the claims on it.
+    pub unsafe fn adopt(
+        fd: c_int,
+        senders: c_int,
+        claims: Vec<c_int>,
+        complete: bool,
+        address: Address,
+    ) -> Self {
+        if senders >= 0 {
+            super::senders::track(address, senders, complete, claims);
+        } else {
+            for claim in claims {
+                // SAFETY: descriptors handed over to this call.
+                unsafe { libc::close(claim) };
+            }
+        }
         Receiver {
             fd,
+            senders,
             address,
             held: Mutex::new(None),
         }
@@ -206,14 +283,24 @@ impl Receiver {
         self.fd
     }
 
-    /// Give up the descriptor, so it can be sent to another process.
+    /// Give up the descriptors - the port, its listener (`-1` if it has none)
+    /// and the claims accepted on it - so they can be sent to another process.
     ///
     /// The `Receiver` must be dropped without closing after this, which is why
     /// it consumes the value.
-    pub fn into_fd(self) -> c_int {
-        let fd = self.fd;
+    pub fn into_parts(self) -> Moved {
+        let taken = match self.senders >= 0 {
+            true => super::senders::untrack(self.address),
+            false => None,
+        };
+        let moved = Moved {
+            fd: self.fd,
+            senders: self.senders,
+            complete: taken.as_ref().is_some_and(|t| t.complete),
+            claims: taken.map(|t| t.claims).unwrap_or_default(),
+        };
         core::mem::forget(self);
-        fd
+        moved
     }
 
     /// A message held back because the last caller's buffer was too small.
@@ -248,6 +335,66 @@ impl Receiver {
         }
         receive_from(self.fd)
     }
+}
+
+/// Bind and listen on the sender-tracking socket for `address`, or `-1`.
+fn listen_for_senders(address: Address) -> c_int {
+    let Ok((addr, len)) = senders_sockaddr(address) else {
+        return -1;
+    };
+    let Ok(fd) = stream_socket() else { return -1 };
+    // SAFETY: a socket opened above, and an address whose length is computed
+    // from the name written into it.
+    let bound = unsafe { libc::bind(fd, (&raw const addr).cast(), len) } == 0
+        && unsafe { libc::listen(fd, 1024) } == 0;
+    if !bound {
+        // SAFETY: the descriptor opened above, which nothing else holds.
+        unsafe { libc::close(fd) };
+        return -1;
+    }
+    fd
+}
+
+/// Take a claim on the port at `address`: it counts as a sender for as long as
+/// the descriptor stays open, in this process or - once sent - another.
+///
+/// `None` when the port is gone or does not track senders, which is also when
+/// there is nothing for the claim to keep alive.
+pub fn claim(address: Address) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let (addr, len) = senders_sockaddr(address).ok()?;
+    let fd = stream_socket().ok()?;
+    // SAFETY: a socket opened above. Non-blocking, so that a full backlog is a
+    // refusal here rather than a wait on a port that is not accepting.
+    let rc = unsafe { libc::connect(fd, (&raw const addr).cast(), len) };
+    if rc < 0 {
+        // SAFETY: the descriptor opened above, which nothing else holds.
+        unsafe { libc::close(fd) };
+        return None;
+    }
+    // SAFETY: an open descriptor this call owns.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// A non-blocking, close-on-exec stream socket.
+fn stream_socket() -> std::io::Result<c_int> {
+    #[cfg(not(target_os = "macos"))]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+    #[cfg(target_os = "macos")]
+    let kind = libc::SOCK_STREAM;
+    // SAFETY: a plain socket call with constant arguments.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: the descriptor opened above.
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    Ok(fd)
 }
 
 /// A socket suitable for a port: datagrams, close-on-exec.
@@ -339,9 +486,14 @@ pub fn poll_any(fds: &[c_int], timeout_ms: i32) -> Option<usize> {
 /// keeps the receive path from allocating on a length the sender chose.
 pub const MAX_RIGHTS: usize = 16;
 
+/// The most descriptors one message can carry, just under the kernel's limit of
+/// 253 for one `SCM_RIGHTS`. A receive right is the port, its listener and the
+/// claims on it; a send right is one claim.
+pub const MAX_FDS: usize = 252;
+
 fn control_len() -> usize {
     // SAFETY: `CMSG_SPACE` is arithmetic on its argument.
-    unsafe { libc::CMSG_SPACE((MAX_RIGHTS * core::mem::size_of::<c_int>()) as u32) as usize }
+    unsafe { libc::CMSG_SPACE((MAX_FDS * core::mem::size_of::<c_int>()) as u32) as usize }
 }
 
 /// Send `bytes` to `destination`, moving `fds` with it.
@@ -360,7 +512,7 @@ pub fn send(destination: Address, bytes: &[u8], fds: &[c_int]) -> std::io::Resul
     let Some(sender) = *SENDER.get_or_init(|| socket().ok()) else {
         return Err(std::io::Error::other("no Mach sending socket"));
     };
-    if fds.len() > MAX_RIGHTS {
+    if fds.len() > MAX_FDS {
         return Err(std::io::Error::from_raw_os_error(libc::EMSGSIZE));
     }
 
@@ -520,16 +672,20 @@ mod tests {
         let moved = Receiver::bind().expect("the right being moved");
         let address = moved.address();
 
-        let fd = moved.into_fd();
+        let moved = moved.into_parts();
+        let (fd, senders) = (moved.fd, moved.senders);
         send(mailbox.address(), b"carrying a right", &[fd]).expect("send");
-        // SAFETY: the sender's own copy, no longer used - the kernel holds the
+        // SAFETY: the sender's own copies, no longer used - the kernel holds the
         // in-flight reference until the receive below.
-        unsafe { libc::close(fd) };
+        unsafe {
+            libc::close(fd);
+            libc::close(senders);
+        }
 
         let mut message = mailbox.receive(1000).expect("receive").expect("a message");
         let carried = message.take_fd(0).expect("a right came with it");
         // SAFETY: the descriptor just received, bound to `address`.
-        let adopted = unsafe { Receiver::adopt(carried, address) };
+        let adopted = unsafe { Receiver::adopt(carried, -1, Vec::new(), true, address) };
         assert_eq!(adopted.address(), address);
 
         send(address, b"to the new holder", &[]).expect("send to the moved right");

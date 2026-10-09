@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::os::fd::FromRawFd;
 
 use super::kern::*;
 use super::space::{self, MACH_PORT_DEAD, MACH_PORT_NULL, Name};
@@ -78,7 +79,15 @@ struct Reference {
     /// The disposition the *receiver* sees, which is always a `MOVE_`: a right
     /// that has arrived has already been transferred.
     disposition: u8,
+    /// The descriptor that travelled with this right: a receive right's port,
+    /// or a send right's claim on the port. `-1` for none.
     fd_index: i16,
+    /// For a receive right, what follows its port in the descriptors: whether its
+    /// listener does, how many claims on it do, and whether those are all of
+    /// them.
+    listener: bool,
+    claims: u16,
+    complete: bool,
     address: u64,
 }
 
@@ -87,6 +96,9 @@ impl Reference {
         kind: refkind::NONE,
         disposition: 0,
         fd_index: -1,
+        listener: false,
+        claims: 0,
+        complete: false,
         address: 0,
     };
 
@@ -94,16 +106,23 @@ impl Reference {
         out.push(self.kind);
         out.push(self.disposition);
         out.extend_from_slice(&self.fd_index.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        let extra = u32::from(self.claims)
+            | u32::from(self.listener) << 16
+            | u32::from(self.complete) << 17;
+        out.extend_from_slice(&extra.to_le_bytes());
         out.extend_from_slice(&self.address.to_le_bytes());
     }
 
     fn decode(bytes: &[u8]) -> Option<Reference> {
         let bytes: &[u8; REFERENCE] = bytes.get(..REFERENCE)?.try_into().ok()?;
+        let extra = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
         Some(Reference {
             kind: bytes[0],
             disposition: bytes[1],
             fd_index: i16::from_le_bytes([bytes[2], bytes[3]]),
+            listener: extra & 1 << 16 != 0,
+            claims: (extra & 0xffff) as u16,
+            complete: extra & 1 << 17 != 0,
             address: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
         })
     }
@@ -114,12 +133,34 @@ impl Reference {
         match self.kind {
             refkind::SEND => match self.disposition as u32 {
                 MOVE_SEND_ONCE => space::insert_send_once(self.address),
-                _ => space::insert_send(self.address),
+                _ => {
+                    let claim = usize::try_from(self.fd_index)
+                        .ok()
+                        .and_then(|index| message.take_fd(index))
+                        // SAFETY: a descriptor that arrived over `SCM_RIGHTS`,
+                        // now owned by this process.
+                        .map(|fd| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                    space::insert_send_with(self.address, claim)
+                }
             },
             refkind::RECEIVE => match message.take_fd(self.fd_index.max(0) as usize) {
-                // SAFETY: a descriptor that arrived over `SCM_RIGHTS` for the
-                // socket bound to `address`, now owned by this process.
-                Some(fd) => space::insert_receive(unsafe { Receiver::adopt(fd, self.address) }),
+                Some(fd) => {
+                    let base = self.fd_index.max(0) as usize;
+                    let senders = match self.listener {
+                        true => message.take_fd(base + 1).unwrap_or(-1),
+                        false => -1,
+                    };
+                    let claims: Vec<_> = (0..self.claims as usize)
+                        .filter_map(|i| message.take_fd(base + 2 + i))
+                        .collect();
+                    let complete = self.complete && claims.len() == self.claims as usize;
+                    // SAFETY: descriptors that arrived over `SCM_RIGHTS` for
+                    // the socket bound to `address`, its listener and the
+                    // claims on it, now owned by this process.
+                    space::insert_receive(unsafe {
+                        Receiver::adopt(fd, senders, claims, complete, self.address)
+                    })
+                }
                 // The sender said a right was coming and none did. The name it
                 // would have had is dead rather than null, so a caller that
                 // sends to it is told the port is gone.
@@ -140,8 +181,9 @@ enum Pending {
     Copied,
     /// A name to release once the message is away.
     Moved(Name),
-    /// A receive right already out of the space, with the descriptor to send.
-    Receive { fd: std::ffi::c_int, address: u64 },
+    /// A receive right already out of the space, with the descriptors to send:
+    /// the port, and its listener or `-1`.
+    Receive { moved: wire::Moved, address: u64 },
 }
 
 impl Pending {
@@ -149,10 +191,18 @@ impl Pending {
     fn restore(self) {
         match self {
             Pending::Copied | Pending::Moved(_) => {}
-            Pending::Receive { fd, address } => {
-                // SAFETY: the descriptor taken out of the space above, never
+            Pending::Receive { moved, address } => {
+                // SAFETY: the descriptors taken out of the space above, never
                 // handed to anything else.
-                space::insert_receive(unsafe { Receiver::adopt(fd, address) });
+                space::insert_receive(unsafe {
+                    Receiver::adopt(
+                        moved.fd,
+                        moved.senders,
+                        moved.claims,
+                        moved.complete,
+                        address,
+                    )
+                });
             }
         }
     }
@@ -164,11 +214,19 @@ impl Pending {
             Pending::Moved(name) => {
                 super::space::mach_port_deallocate(space::TASK_SELF, name);
             }
-            Pending::Receive { fd, .. } => {
+            Pending::Receive { moved, .. } => {
                 // The kernel holds the in-flight reference until the receiver
-                // takes it, so this end is done with the descriptor.
-                // SAFETY: this process's own copy, already sent.
-                unsafe { libc::close(fd) };
+                // takes it, so this end is done with the descriptors.
+                // SAFETY: this process's own copies, already sent.
+                unsafe {
+                    libc::close(moved.fd);
+                    if moved.senders >= 0 {
+                        libc::close(moved.senders);
+                    }
+                    for claim in moved.claims {
+                        libc::close(claim);
+                    }
+                }
             }
         }
     }
@@ -192,15 +250,18 @@ fn export(name: Name, disposition: u32) -> Result<(Reference, Option<Pending>), 
         MOVE_RECEIVE => {
             let port = space::move_receive(name)?;
             let address = port.address();
-            let fd = port.into_fd();
+            let moved = port.into_parts();
             Ok((
                 Reference {
                     kind: refkind::RECEIVE,
                     disposition: MOVE_RECEIVE as u8,
                     fd_index: -1,
+                    listener: moved.senders >= 0,
+                    claims: 0,
+                    complete: moved.complete,
                     address,
                 },
-                Some(Pending::Receive { fd, address }),
+                Some(Pending::Receive { moved, address }),
             ))
         }
         MAKE_SEND | COPY_SEND | MOVE_SEND => {
@@ -214,6 +275,9 @@ fn export(name: Name, disposition: u32) -> Result<(Reference, Option<Pending>), 
                     kind: refkind::SEND,
                     disposition: MOVE_SEND as u8,
                     fd_index: -1,
+                    listener: false,
+                    claims: 0,
+                    complete: false,
                     address,
                 },
                 Some(held),
@@ -230,12 +294,102 @@ fn export(name: Name, disposition: u32) -> Result<(Reference, Option<Pending>), 
                     kind: refkind::SEND,
                     disposition: MOVE_SEND_ONCE as u8,
                     fd_index: -1,
+                    listener: false,
+                    claims: 0,
+                    complete: false,
                     address,
                 },
                 Some(held),
             ))
         }
         _ => Err(MACH_SEND_INVALID_TYPE),
+    }
+}
+
+/// The datagram for a message: the envelope, its references, then the payload.
+fn encode(
+    bits: u32,
+    id: i32,
+    reply: &Reference,
+    descriptors: &[Reference],
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut wire_bytes =
+        Vec::with_capacity(envelope::FIXED + descriptors.len() * REFERENCE + payload.len());
+    wire_bytes.extend_from_slice(&envelope::MAGIC.to_le_bytes());
+    wire_bytes.extend_from_slice(&envelope::VERSION.to_le_bytes());
+    wire_bytes.extend_from_slice(&bits.to_le_bytes());
+    wire_bytes.extend_from_slice(&id.to_le_bytes());
+    wire_bytes.extend_from_slice(&(descriptors.len() as u32).to_le_bytes());
+    wire_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    reply.encode(&mut wire_bytes);
+    for reference in descriptors {
+        reference.encode(&mut wire_bytes);
+    }
+    wire_bytes.extend_from_slice(payload);
+    wire_bytes
+}
+
+/// Queue a `MACH_NOTIFY_NO_SENDERS` message on the port at `destination`.
+///
+/// What a kernel would write on a port's behalf: a `mach_no_senders_notification_t`
+/// - header, `NDR_record_t`, and the make-send count - arriving as a message with
+/// no reply port, which is how a MIG notify server tells it from a request.
+pub fn deliver_no_senders(destination: wire::Address, count: u32) {
+    /// `NDR_record`: little-endian integers, ASCII characters, IEEE floats.
+    const NDR: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
+    let mut payload = Vec::with_capacity(NDR.len() + 4);
+    payload.extend_from_slice(&NDR);
+    payload.extend_from_slice(&count.to_le_bytes());
+    let bytes = encode(
+        MOVE_SEND_ONCE,
+        space::NOTIFY_NO_SENDERS,
+        &Reference::NONE,
+        &[],
+        &payload,
+    );
+    // A destination that is gone has nothing left to tell.
+    let _ = wire::send(destination, &bytes, &[]);
+}
+
+/// Put the descriptors a right travels with beside `fds`, and say where they are.
+///
+/// A send right carries a fresh claim on its port rather than the sender's own,
+/// so the right counts as a sender while the message is in flight and after the
+/// sender has let go of its copy. `claims` keeps this process's end open until
+/// the send has finished.
+fn attach(
+    reference: &mut Reference,
+    held: Option<&Pending>,
+    fds: &mut Vec<std::ffi::c_int>,
+    claims: &mut Vec<std::os::fd::OwnedFd>,
+) {
+    use std::os::fd::AsRawFd;
+    match reference.kind {
+        refkind::RECEIVE => {
+            if let Some(Pending::Receive { moved, .. }) = held {
+                reference.fd_index = fds.len() as i16;
+                fds.push(moved.fd);
+                if moved.senders >= 0 {
+                    fds.push(moved.senders);
+                }
+                // As many of the port's claims as fit; the rest are closed once
+                // the send is done, and the port is then no longer complete.
+                let room = wire::MAX_FDS.saturating_sub(fds.len());
+                let carried = moved.claims.len().min(room);
+                fds.extend(&moved.claims[..carried]);
+                reference.claims = carried as u16;
+                reference.complete = moved.complete && carried == moved.claims.len();
+            }
+        }
+        refkind::SEND if reference.disposition as u32 != MOVE_SEND_ONCE => {
+            if let Some(claim) = wire::claim(reference.address) {
+                reference.fd_index = fds.len() as i16;
+                fds.push(claim.as_raw_fd());
+                claims.push(claim);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -287,8 +441,11 @@ unsafe fn send(msg: *const u8, send_size: u32) -> i32 {
     // The reply port. Its disposition is the *local* field of `msgh_bits`, which
     // is the one a MIG routine sets to `MAKE_SEND_ONCE` so the server can answer.
     let local_disposition = (bits >> BITS_LOCAL_SHIFT) & BITS_PORTS_MASK;
+    let mut fds = Vec::new();
+    let mut claims = Vec::new();
     let reply = match export(local_name, local_disposition) {
-        Ok((reference, held)) => {
+        Ok((mut reference, held)) => {
+            attach(&mut reference, held.as_ref(), &mut fds, &mut claims);
             pending.extend(held);
             reference
         }
@@ -297,7 +454,6 @@ unsafe fn send(msg: *const u8, send_size: u32) -> i32 {
 
     let complex = bits & BITS_COMPLEX != 0;
     let mut descriptors = Vec::new();
-    let mut fds = Vec::new();
     let mut payload_at = HEADER;
 
     if complex {
@@ -322,12 +478,7 @@ unsafe fn send(msg: *const u8, send_size: u32) -> i32 {
             let disposition = bytes[at + DESCRIPTOR_DISPOSITION_AT] as u32;
             match export(name, disposition) {
                 Ok((mut reference, held)) => {
-                    if reference.kind == refkind::RECEIVE {
-                        reference.fd_index = fds.len() as i16;
-                        if let Some(Pending::Receive { fd, .. }) = held.as_ref() {
-                            fds.push(*fd);
-                        }
-                    }
+                    attach(&mut reference, held.as_ref(), &mut fds, &mut claims);
                     pending.extend(held);
                     descriptors.push(reference);
                 }
@@ -336,20 +487,7 @@ unsafe fn send(msg: *const u8, send_size: u32) -> i32 {
         }
     }
 
-    let payload = &bytes[payload_at..];
-    let mut wire_bytes =
-        Vec::with_capacity(envelope::FIXED + descriptors.len() * REFERENCE + payload.len());
-    wire_bytes.extend_from_slice(&envelope::MAGIC.to_le_bytes());
-    wire_bytes.extend_from_slice(&envelope::VERSION.to_le_bytes());
-    wire_bytes.extend_from_slice(&bits.to_le_bytes());
-    wire_bytes.extend_from_slice(&id.to_le_bytes());
-    wire_bytes.extend_from_slice(&(descriptors.len() as u32).to_le_bytes());
-    wire_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    reply.encode(&mut wire_bytes);
-    for reference in &descriptors {
-        reference.encode(&mut wire_bytes);
-    }
-    wire_bytes.extend_from_slice(payload);
+    let wire_bytes = encode(bits, id, &reply, &descriptors, &bytes[payload_at..]);
 
     match wire::send(destination, &wire_bytes, &fds) {
         Ok(()) => {
@@ -1199,5 +1337,226 @@ mod tests {
         let other = std::thread::spawn(|| mig_get_reply_port()).join().unwrap();
         assert_ne!(other, second, "a reply port belongs to one thread");
         mig_dealloc_reply_port(second);
+    }
+
+    /// Receive one message from `port` into a fresh buffer, or `None` on timeout.
+    fn take(port: Name, timeout_ms: u32) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; 256];
+        // SAFETY: 256 writable bytes.
+        let rc = unsafe {
+            mach_msg(
+                buf.as_mut_ptr().cast(),
+                RCV_MSG | RCV_TIMEOUT,
+                0,
+                buf.len() as u32,
+                port,
+                timeout_ms,
+                MACH_PORT_NULL,
+            )
+        };
+        (rc == MACH_MSG_SUCCESS).then_some(buf)
+    }
+
+    fn request_no_senders(port: Name, notify: Name) {
+        // SAFETY: a null `previous` is allowed.
+        let rc = unsafe {
+            space::mach_port_request_notification(
+                space::TASK_SELF,
+                port,
+                space::NOTIFY_NO_SENDERS,
+                0,
+                notify,
+                MAKE_SEND_ONCE,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, KERN_SUCCESS);
+    }
+
+    #[test]
+    fn the_last_send_right_going_away_is_reported_to_the_notify_port() {
+        let port = allocate_receive();
+        let notify = allocate_receive();
+        let first = space::insert_send(space::address_of(port).unwrap());
+        let second = space::insert_send(space::address_of(port).unwrap());
+        assert_eq!(first, second, "one name for one port");
+        request_no_senders(port, notify);
+
+        assert!(take(notify, 200).is_none(), "a sender is still held");
+        space::mach_port_deallocate(space::TASK_SELF, first);
+        assert!(take(notify, 200).is_none(), "one of two references remains");
+        space::mach_port_deallocate(space::TASK_SELF, first);
+
+        let told = take(notify, 2000).expect("a no-senders notification");
+        assert_eq!(word(&told, 20) as i32, 0o106, "MACH_NOTIFY_NO_SENDERS");
+        assert_eq!(
+            word(&told, 4) as usize,
+            HEADER + 8 + 4,
+            "a notification's size"
+        );
+        assert_eq!(word(&told, 12), notify, "it arrived on the notify port");
+        assert_eq!(word(&told, 8), MACH_PORT_NULL, "and has nobody to reply to");
+        assert_eq!(word(&told, HEADER + 8), 1, "one right was ever made");
+
+        space::destroy(port);
+        space::destroy(notify);
+    }
+
+    /// A right inside a queued message is a sender, which is what keeps a port
+    /// that was just handed to a client from being declared abandoned before the
+    /// client has looked at the message.
+    #[test]
+    fn a_send_right_in_flight_still_counts_as_a_sender() {
+        let port = allocate_receive();
+        let notify = allocate_receive();
+        let mailbox = allocate_receive();
+        let held = space::insert_send(space::address_of(port).unwrap());
+        request_no_senders(port, notify);
+
+        let mut descriptor = Vec::new();
+        descriptor.extend_from_slice(&1u32.to_le_bytes());
+        descriptor.extend_from_slice(&held.to_le_bytes());
+        descriptor.extend_from_slice(&0u32.to_le_bytes());
+        descriptor.extend_from_slice(&[0, 0, MOVE_SEND as u8, DESCRIPTOR_PORT]);
+        let mut sent = message(BITS_COMPLEX, mailbox, MACH_PORT_NULL, 9, &descriptor);
+        // SAFETY: a whole message of the size in its header.
+        let rc = unsafe {
+            mach_msg(
+                sent.as_mut_ptr().cast(),
+                SEND_MSG,
+                sent.len() as u32,
+                0,
+                MACH_PORT_NULL,
+                0,
+                MACH_PORT_NULL,
+            )
+        };
+        assert_eq!(rc, MACH_MSG_SUCCESS);
+        assert!(
+            space::address_of(held).is_none(),
+            "the sender gave its right away"
+        );
+        assert!(
+            take(notify, 300).is_none(),
+            "the right is in the mailbox, not gone"
+        );
+
+        let arrived = take(mailbox, 1000).expect("the message");
+        let received = word(&arrived, HEADER + BODY);
+        assert_eq!(
+            space::address_of(received),
+            space::address_of(port),
+            "it names the same port"
+        );
+        assert!(take(notify, 300).is_none(), "now the receiver holds it");
+
+        space::mach_port_deallocate(space::TASK_SELF, received);
+        assert!(take(notify, 2000).is_some(), "and now nobody does");
+
+        space::destroy(port);
+        space::destroy(notify);
+        space::destroy(mailbox);
+    }
+
+    /// The case this exists for: the holder of the right is another process, and
+    /// it exiting is the only thing that releases it.
+    #[test]
+    fn a_holder_process_that_exits_is_reported_as_no_senders() {
+        let port = allocate_receive();
+        let notify = allocate_receive();
+        let address = space::address_of(port).unwrap();
+        request_no_senders(port, notify);
+
+        let claim = wire::claim(address).expect("a claim");
+        // SAFETY: the child calls only async-signal-safe functions and never
+        // returns into the test harness.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                libc::usleep(300_000);
+                libc::_exit(0);
+            }
+        }
+        assert!(child > 0, "fork");
+        // The child's copy is the only one left.
+        drop(claim);
+        assert!(take(notify, 100).is_none(), "the child still holds it");
+        let mut status = 0;
+        // SAFETY: the child just forked, and a live local for the status.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(take(notify, 2000).is_some(), "the holder is gone");
+
+        space::destroy(port);
+        space::destroy(notify);
+    }
+
+    /// How a crash reporter hands over its exception port: the client creates it,
+    /// keeps a send right, and moves the receive right to its handler - which
+    /// then asks to be told when the client's right is gone.
+    #[test]
+    fn a_moved_receive_right_keeps_the_senders_it_already_had() {
+        let port = allocate_receive();
+        let notify = allocate_receive();
+        let mailbox = allocate_receive();
+        let address = space::address_of(port).unwrap();
+        let held = space::insert_send(address);
+
+        let mut descriptor = Vec::new();
+        descriptor.extend_from_slice(&1u32.to_le_bytes());
+        descriptor.extend_from_slice(&port.to_le_bytes());
+        descriptor.extend_from_slice(&0u32.to_le_bytes());
+        descriptor.extend_from_slice(&[0, 0, MOVE_RECEIVE as u8, DESCRIPTOR_PORT]);
+        let mut sent = message(BITS_COMPLEX, mailbox, MACH_PORT_NULL, 11, &descriptor);
+        // SAFETY: a whole message of the size in its header.
+        let rc = unsafe {
+            mach_msg(
+                sent.as_mut_ptr().cast(),
+                SEND_MSG,
+                sent.len() as u32,
+                0,
+                MACH_PORT_NULL,
+                0,
+                MACH_PORT_NULL,
+            )
+        };
+        assert_eq!(rc, MACH_MSG_SUCCESS);
+        let arrived = take(mailbox, 1000).expect("the message");
+        let moved = word(&arrived, HEADER + BODY);
+        assert!(space::receiver(moved).is_some(), "a receive right again");
+
+        request_no_senders(moved, notify);
+        assert!(
+            take(notify, 300).is_none(),
+            "the sender's right is still held"
+        );
+        space::mach_port_deallocate(space::TASK_SELF, held);
+        assert!(take(notify, 2000).is_some(), "and then it is not");
+
+        space::destroy(moved);
+        space::destroy(notify);
+        space::destroy(mailbox);
+    }
+
+    /// A crash reporter registers its handler's port and lets go of its own
+    /// right at once, because the kernel keeps one.
+    #[test]
+    fn a_registered_exception_port_is_a_sender_until_it_is_replaced() {
+        const MASK: u32 = 1 << 9;
+        let port = allocate_receive();
+        let notify = allocate_receive();
+        let held = space::insert_send(space::address_of(port).unwrap());
+        super::super::task::task_set_exception_ports(space::TASK_SELF, MASK, held, 1, 0);
+        request_no_senders(port, notify);
+
+        space::mach_port_deallocate(space::TASK_SELF, held);
+        assert!(
+            take(notify, 300).is_none(),
+            "the registration holds the port"
+        );
+        super::super::task::task_set_exception_ports(space::TASK_SELF, MASK, MACH_PORT_NULL, 0, 0);
+        assert!(take(notify, 2000).is_some(), "until it is cleared");
+
+        space::destroy(port);
+        space::destroy(notify);
     }
 }

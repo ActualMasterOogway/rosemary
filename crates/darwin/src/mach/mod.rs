@@ -5,6 +5,7 @@ pub mod clock;
 pub mod info;
 pub mod kern;
 pub mod msg;
+pub mod senders;
 pub mod space;
 pub mod sync;
 pub mod task;

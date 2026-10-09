@@ -79,6 +79,12 @@ struct Registration {
     port: Name,
     behavior: i32,
     flavor: i32,
+    /// The send right the kernel takes for itself when a port is registered, and
+    /// keeps after the caller deallocates its own - which a crash reporter does
+    /// straight away. Without it the handler's port would look abandoned the
+    /// moment it was installed. Closed when the registration is replaced, and
+    /// by the host when this process exits.
+    _held: Option<std::os::fd::OwnedFd>,
 }
 
 fn registrations() -> &'static std::sync::Mutex<Vec<Registration>> {
@@ -92,11 +98,13 @@ fn record(symbol: &str, mask: u32, port: Name, behavior: i32, flavor: i32) {
     let mut held = registrations().lock().unwrap_or_else(|e| e.into_inner());
     held.retain(|existing| existing.mask & mask != existing.mask);
     if port != MACH_PORT_NULL {
+        let claim = super::space::address_of(port).and_then(super::wire::claim);
         held.push(Registration {
             mask,
             port,
             behavior,
             flavor,
+            _held: claim,
         });
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::sync::{Arc, RwLock};
 
 use super::kern::*;
@@ -53,7 +54,16 @@ pub enum Right {
     Receive(Arc<Receiver>),
     /// A send right: the address of somebody else's receive right, and the user
     /// reference count Mach makes the caller balance.
-    Send { address: Address, refs: u32 },
+    ///
+    /// `claim` is what makes this right count as a sender: an open connection to
+    /// the port's listener, closed when the name is, or when this process exits.
+    /// `None` when the port could not be reached, which reports no senders
+    /// changes for it.
+    Send {
+        address: Address,
+        refs: u32,
+        claim: Option<OwnedFd>,
+    },
     /// A send-once right, which is destroyed by the message that uses it.
     SendOnce { address: Address },
     /// A port set, which has no queue of its own - only members.
@@ -214,21 +224,40 @@ pub fn move_receive(name: Name) -> Result<Receiver, i32> {
 /// compares them - a crash reporter deciding whether it already knows this
 /// sender - would otherwise see two ports where there is one.
 pub fn insert_send(address: Address) -> Name {
+    insert_send_with(address, None)
+}
+
+/// [`insert_send`] for a right that arrived with its claim, which is the one
+/// that was made when it was sent and so kept the port's count up while the
+/// message was in flight.
+pub fn insert_send_with(address: Address, carried: Option<OwnedFd>) -> Name {
     with(|space| {
         for (name, right) in space.names.iter_mut() {
             if let Right::Send {
                 address: existing,
                 refs,
+                claim,
             } = right
                 && *existing == address
             {
                 *refs = refs.saturating_add(1);
+                if claim.is_none() {
+                    *claim = carried;
+                }
                 return *name;
             }
         }
+        let claim = carried.or_else(|| super::wire::claim(address));
         let name = space.next;
         space.next = space.next.wrapping_add(4);
-        space.names.insert(name, Right::Send { address, refs: 1 });
+        space.names.insert(
+            name,
+            Right::Send {
+                address,
+                refs: 1,
+                claim,
+            },
+        );
         name
     })
 }
@@ -536,9 +565,11 @@ pub extern "C" fn mach_port_insert_right(
             return KERN_RIGHT_EXISTS;
         }
         let inserted = match disposition {
-            super::msg::MAKE_SEND | super::msg::COPY_SEND | super::msg::MOVE_SEND => {
-                Right::Send { address, refs: 1 }
-            }
+            super::msg::MAKE_SEND | super::msg::COPY_SEND | super::msg::MOVE_SEND => Right::Send {
+                address,
+                refs: 1,
+                claim: super::wire::claim(address),
+            },
             super::msg::MAKE_SEND_ONCE | super::msg::MOVE_SEND_ONCE => Right::SendOnce { address },
             _ => return KERN_INVALID_VALUE,
         };
@@ -686,16 +717,21 @@ pub extern "C" fn mach_port_set_attributes(
     }
 }
 
+/// `MACH_NOTIFY_NO_SENDERS`, from `<mach/notify.h>`: `MACH_NOTIFY_FIRST + 6`.
+pub const NOTIFY_NO_SENDERS: i32 = 0o106;
+
 /// `kern_return_t mach_port_request_notification(ipc_space_t, mach_port_name_t,
 /// mach_msg_id_t, mach_port_mscount_t, mach_port_name_t notify,
 /// mach_msg_type_name_t, mach_port_name_t *previous)`
 ///
-/// Recorded and never delivered. There is no kernel here watching a port to
-/// notice that its last send right went away, and inventing the notification
-/// would be worse than withholding it: a dead-name notification tells a client
-/// its server has died, so a spurious one makes a working server look dead. The
-/// withheld direction says "still alive", which is the failure a caller can
-/// survive.
+/// `MACH_NOTIFY_NO_SENDERS` is delivered - see [`super::senders`] - because a
+/// process that is the only thing keeping a helper alive is what the helper
+/// watches for: a crash handler that is never told its client has exited stays
+/// behind forever. Every other notification is recorded and never delivered.
+/// Inventing one would be worse than withholding it: a dead-name notification
+/// tells a client its server has died, so a spurious one makes a working server
+/// look dead, where the withheld direction says "still alive", which is the
+/// failure a caller can survive.
 ///
 /// # Safety
 ///
@@ -703,41 +739,58 @@ pub extern "C" fn mach_port_set_attributes(
 pub unsafe extern "C" fn mach_port_request_notification(
     task: Name,
     name: Name,
-    _id: i32,
-    _sync: u32,
+    id: i32,
+    sync: u32,
     notify: Name,
-    _disposition: u32,
+    disposition: u32,
     previous: *mut Name,
 ) -> i32 {
     if task != TASK_SELF {
         return KERN_INVALID_TASK;
     }
-    {
-        let guard = space().read().unwrap_or_else(|e| e.into_inner());
-        if !guard.names.contains_key(&name) {
-            return KERN_INVALID_NAME;
-        }
+    let held = with_right(name, |right| matches!(right, Right::Receive(_)));
+    let Some(is_receive) = held else {
+        return KERN_INVALID_NAME;
+    };
+    if id == NOTIFY_NO_SENDERS && !is_receive {
+        return KERN_INVALID_RIGHT;
     }
-    // The send-once right the caller handed over is consumed by the request,
-    // whether or not the notification ever fires.
-    if notify != MACH_PORT_NULL {
+    let port = receiver(name);
+    // Where the notification goes. A `MAKE_` disposition names the receive right
+    // it is made from and leaves it alone; a `MOVE_` one hands over a send-once
+    // right, which the request consumes whether or not it ever fires.
+    let destination = (notify != MACH_PORT_NULL)
+        .then(|| address_of(notify))
+        .flatten();
+    if notify != MACH_PORT_NULL
+        && matches!(
+            disposition,
+            super::msg::MOVE_SEND_ONCE | super::msg::MOVE_SEND
+        )
+    {
         with(|space| release(space, notify));
     }
     if !previous.is_null() {
         // SAFETY: the caller's `mach_port_name_t`.
         unsafe { previous.write(MACH_PORT_NULL) };
     }
-    announce_undelivered_notifications();
+    if id == NOTIFY_NO_SENDERS
+        && let Some(port) = port
+        && super::senders::request(port.address(), destination, sync)
+    {
+        return KERN_SUCCESS;
+    }
+    announce_undelivered_notifications(id);
     KERN_SUCCESS
 }
 
-fn announce_undelivered_notifications() {
+fn announce_undelivered_notifications(id: i32) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "rosemary: mach_port_request_notification accepted but never delivered - nothing here \
-             watches a port's reference counts, so a caller waiting for a dead-name notification \
-             waits forever rather than being told a live port died"
+            "rosemary: mach_port_request_notification {id:#o} accepted but never delivered - \
+             nothing here watches this kind of port event, so a caller waiting for it waits \
+             forever rather than being told a live port died"
         );
     }
 }
