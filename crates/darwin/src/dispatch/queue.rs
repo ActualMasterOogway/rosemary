@@ -376,9 +376,13 @@ fn run_one(handle: u64) {
             }
         }
     };
+    // A worker thread has no pool of its own, and Apple drains one around each
+    // work item; without it whatever the work autoreleases leaks.
+    let pool = objc::arc::pool_push();
     // SAFETY: guest work whose pointers are thunks. No lock is held: the work is
     // guest code and may submit to this queue or block on another.
     run_tracked(handle, || unsafe { item.run() });
+    objc::arc::pool_pop(pool);
     let more = {
         let mut state = q.state.lock().unwrap_or_else(|e| e.into_inner());
         if !q.concurrent {

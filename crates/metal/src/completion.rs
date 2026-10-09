@@ -79,6 +79,9 @@ unsafe fn run(entry: Pending) {
         // allocator identity out of. The dispatch pool does the same thing for
         // the same reason.
         let _darwin = darwin::tls::DarwinThread::enter();
+        // Metal runs handlers on a dispatch queue, which drains a pool around
+        // each one; without it whatever the handler autoreleases leaks.
+        let pool = objc::arc::pool_push();
         // A block's invoke pointer is its third word.
         // SAFETY: `block` was copied by `objc_retainBlock` and is still live.
         let invoke = unsafe { *((block as *const u8).add(16) as *const usize) };
@@ -88,6 +91,7 @@ unsafe fn run(entry: Pending) {
             // SAFETY: the guest's handler, given the buffer it was registered on.
             unsafe { call(block, command_buffer) };
         }
+        objc::arc::pool_pop(pool);
     }
     // The reference this entry owned, now spent.
     objc::block::release(block);
