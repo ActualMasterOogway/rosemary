@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use super::*;
 
 /// `ROSEMARY_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
@@ -41,6 +43,9 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
         }
     };
     crate::account(length as i64);
+    if !private {
+        crate::add_shared_buffer_bytes(length as u64);
+    }
     crate::stats::count(crate::stats::Counter::BuffersCreated);
     crate::stats::add(crate::stats::Counter::BufferBytes, length as u64);
     object::make(
@@ -99,6 +104,9 @@ pub(super) unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
         );
     }
     crate::account(-(buffer.inner.length as i64));
+    if !buffer.inner.private {
+        crate::sub_shared_buffer_bytes(buffer.inner.length);
+    }
     heap::leave(receiver);
     let inner = std::mem::replace(&mut buffer.inner, GpuBuffer::none());
     if !leaking() {

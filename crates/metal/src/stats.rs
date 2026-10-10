@@ -136,7 +136,31 @@ pub fn tick() {
         .collect::<Vec<_>>()
         .join(" ");
     eprintln!("rosemary: Metal: stats {line}");
+    report_memory();
     report_shader_cache();
+}
+
+/// Live buffer memory, as totals: a leak shows as one of these climbing.
+fn report_memory() {
+    let Ok(adapters) = crate::vulkan::adapters() else {
+        return;
+    };
+    // A guest that enumerates devices may open several; name the ones in use.
+    let heaps = adapters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, adapter)| {
+            Some(format!(
+                "gpu{index} {}",
+                adapter.opened_gpu()?.heap_report()?
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "rosemary: Metal: memory shared_buffers={}MiB {heaps}",
+        crate::SHARED_BUFFER_BYTES.load(Ordering::Relaxed) >> 20,
+    );
 }
 
 /// The on-disk shader cache, as totals rather than as a rate.

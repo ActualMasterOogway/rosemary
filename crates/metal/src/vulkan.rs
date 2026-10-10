@@ -25,6 +25,11 @@ struct AdapterRank {
 }
 
 impl Adapter {
+    /// The logical device if something has already opened it.
+    pub fn opened_gpu(&self) -> Option<&Gpu> {
+        self.gpu.get()?.as_ref().ok()
+    }
+
     pub fn gpu(&self) -> Result<&Gpu, &str> {
         match self.gpu.get_or_init(|| {
             let state = STATE.get().expect("adapters were enumerated first");

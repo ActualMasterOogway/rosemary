@@ -201,6 +201,27 @@ impl Gpu {
         }
     }
 
+    /// What the buffer heaps hold, for `ROSEMARY_METAL_STATS`: blocks, their
+    /// size and the free part of it, or `None` while both are empty. Held
+    /// minus free is what live buffers occupy, so a heap that grows while
+    /// little of it is free is a guest holding buffers, and one that grows
+    /// while much is free is fragmentation.
+    pub fn heap_report(&self) -> Option<String> {
+        let shared = self.buffers.get().map_or((0, 0, 0), Heap::usage);
+        let private = self.private_buffers.get().map_or((0, 0, 0), Heap::usage);
+        if shared.0 + private.0 == 0 {
+            return None;
+        }
+        let usage = |(blocks, bytes, free): (usize, u64, u64)| {
+            format!("{blocks}/{}MiB/{}MiB", bytes >> 20, free >> 20)
+        };
+        Some(format!(
+            "shared_heap(blocks/held/free)={} private_heap={}",
+            usage(shared),
+            usage(private),
+        ))
+    }
+
     /// The heap every Metal buffer is cut from.
     ///
     /// One heap, not one per requirement mask: every buffer this crate makes is

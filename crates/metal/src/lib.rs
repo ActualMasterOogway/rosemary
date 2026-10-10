@@ -97,6 +97,20 @@ struct ConstantValues {
 }
 
 static ALLOCATED_SIZE: AtomicU64 = AtomicU64::new(0);
+/// Bytes of live shared and managed `MTLBuffer`s, for `ROSEMARY_METAL_STATS`.
+static SHARED_BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn add_shared_buffer_bytes(amount: u64) {
+    if stats::enabled() {
+        SHARED_BUFFER_BYTES.fetch_add(amount, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn sub_shared_buffer_bytes(amount: u64) {
+    if stats::enabled() {
+        SHARED_BUFFER_BYTES.fetch_sub(amount, Ordering::Relaxed);
+    }
+}
 
 /// Diagnostics [`report_library_error`] has already printed.
 ///

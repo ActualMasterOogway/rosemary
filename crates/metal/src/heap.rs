@@ -167,6 +167,21 @@ impl Heap {
         unsafe { self.release_memory(device, memory) };
     }
 
+    /// Blocks held, their bytes, and how many of those bytes are free.
+    pub fn usage(&self) -> (usize, u64, u64) {
+        let state = self.state.lock().expect("buffer heap");
+        let live = state.blocks.iter().filter(|block| block.size > 0);
+        let free = live
+            .clone()
+            .map(|block| block.free.iter().map(|(_, size)| size).sum::<u64>())
+            .sum();
+        (
+            live.clone().count(),
+            live.map(|block| block.size).sum(),
+            free,
+        )
+    }
+
     /// # Safety
     ///
     /// No live buffer may be bound into `memory`.
