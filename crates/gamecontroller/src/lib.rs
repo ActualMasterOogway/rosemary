@@ -8,6 +8,8 @@ use objc::sel::Sel;
 
 pub const DID_CONNECT: &str = "GCControllerDidConnectNotification";
 pub const DID_DISCONNECT: &str = "GCControllerDidDisconnectNotification";
+pub const MOUSE_DID_CONNECT: &str = "GCMouseDidConnectNotification";
+pub const MOUSE_DID_DISCONNECT: &str = "GCMouseDidDisconnectNotification";
 
 #[repr(C)]
 struct Controller {
@@ -1212,6 +1214,8 @@ pub fn symbol(name: &str) -> Option<u64> {
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_GCControllerDidConnectNotification", DID_CONNECT),
     ("_GCControllerDidDisconnectNotification", DID_DISCONNECT),
+    ("_GCMouseDidConnectNotification", MOUSE_DID_CONNECT),
+    ("_GCMouseDidDisconnectNotification", MOUSE_DID_DISCONNECT),
     ("_GCInputButtonA", "Button A"),
     ("_GCInputButtonB", "Button B"),
     ("_GCInputButtonX", "Button X"),
