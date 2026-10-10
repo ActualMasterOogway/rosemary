@@ -125,7 +125,7 @@ fn the_guest_stack_is_readable_guest_memory() {
     let vm = vm_for(&path);
     let (_, argv, _, _) = vm.main_args();
 
-    let view: GuestView = vm.view();
+    let view: GuestView = vm.view().clone();
     assert!(view.contains(argv), "argv is on the guest stack");
 
     let mut word = [0u8; 8];
@@ -144,7 +144,7 @@ fn an_address_in_nothing_mapped_is_refused_rather_than_dereferenced() {
         skip!("cannot build x86_64 fixtures")
     };
     let vm = vm_for(&path);
-    let view = vm.view();
+    let view = vm.view().clone();
 
     let mut byte = [0u8; 1];
     assert!(view.read(0, &mut byte).is_err(), "null is not readable");

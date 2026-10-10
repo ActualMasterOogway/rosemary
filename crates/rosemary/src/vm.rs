@@ -371,9 +371,9 @@ impl GuestView {
     /// Write `data` at `va` without taking a `&mut` view.
     ///
     /// The same store [`GuestMemory::write`] makes - nothing in a write mutates the
-    /// view, and `PageCache` is atomics - reachable from a shared borrow. What that
-    /// buys is the two `Arc` clones [`Vm::view`] costs, on a path that runs once per
-    /// indirect call and on every guest thread at once.
+    /// view, and `PageCache` is atomics - reachable from a shared borrow, so the
+    /// per-call paths never clone the view's two `Arc`s, a line every guest thread
+    /// shares.
     pub fn store(&self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
         let dst = self
             .resolve(va, data.len())
@@ -406,6 +406,18 @@ impl GuestMemory for GuestView {
 
     // Writability is the guest's business: a store to a page it made read-only
     // faults exactly as it would have on x86.
+    fn write(&mut self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
+        GuestView::store(self, va, data)
+    }
+}
+
+// Nothing in a write mutates the view, so a borrow serves wherever a
+// `&mut dyn GuestMemory` is wanted without cloning one.
+impl GuestMemory for &GuestView {
+    fn read(&self, va: u64, out: &mut [u8]) -> Result<(), machish::Error> {
+        GuestView::read(self, va, out)
+    }
+
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), machish::Error> {
         GuestView::store(self, va, data)
     }
@@ -655,9 +667,11 @@ impl Vm {
         }
     }
 
-    /// Guest memory, as a value a shim can hold.
-    pub fn view(&self) -> GuestView {
-        self.view.clone()
+    /// Guest memory, borrowed. A shim that needs to hold it clones it; everything on
+    /// a per-call path borrows, because a clone is two atomic increments on a line
+    /// every guest thread shares.
+    pub fn view(&self) -> &GuestView {
+        &self.view
     }
 
     /// How many regions have been translated so far.
@@ -746,13 +760,13 @@ impl Vm {
         let padded = (stack.len() as u64).next_multiple_of(16);
         let args_at = top - padded;
         if !stack.is_empty() {
-            self.view()
-                .write(args_at, stack)
+            self.view
+                .store(args_at, stack)
                 .map_err(|source| VmError::Stack { source })?;
         }
         let rsp = args_at - 8;
-        self.view()
-            .write(rsp, &crate::retstub::address().to_le_bytes())
+        self.view
+            .store(rsp, &crate::retstub::address().to_le_bytes())
             .map_err(|source| VmError::Stack { source })?;
         self.enter(state, entry, ctx, rsp)
     }
@@ -916,7 +930,7 @@ impl Vm {
                             continue;
                         }
                         let mut ret = [0u8; 8];
-                        self.view()
+                        self.view
                             .read(ctx.rsp, &mut ret)
                             .map_err(|source| VmError::Stack { source })?;
                         ctx.rsp = ctx.rsp.wrapping_add(8);
@@ -1143,13 +1157,16 @@ impl Vm {
         site: &crate::program::ImportSite,
         ctx: &mut RegisterContext,
     ) -> Result<(), VmError> {
+        // Every question below is a string lookup or a region search whose answer
+        // never changes for a site, so it is asked once and kept on the site.
+        let plan = site.plan(|va| self.program.is_guest_address(va));
         // An import that resolved into another **guest** image, which happens
         // as soon as one exists.
-        if site.resolved != 0 && self.program.is_guest_address(site.resolved) {
+        if plan.resolves_to_guest {
             return self.transfer_to_guest(site.resolved, ctx);
         }
-        let mut mem = self.view();
-        crate::abi::call_import_with(&site.symbol, site.tag, site.resolved, ctx, &mut mem, self)?;
+        let mut mem = &self.view;
+        crate::abi::call_planned(plan.call, &site.symbol, site.resolved, ctx, &mut mem, self)?;
         Ok(())
     }
 
@@ -1171,8 +1188,8 @@ impl Vm {
         };
         if !state.entered_by_jump() {
             let rsp = ctx.rsp.wrapping_sub(8);
-            self.view()
-                .write(rsp, &ctx.rip.to_le_bytes())
+            self.view
+                .store(rsp, &ctx.rip.to_le_bytes())
                 .map_err(|source| VmError::Stack { source })?;
             ctx.rsp = rsp;
         }
@@ -1213,9 +1230,6 @@ impl Vm {
             // answered by a range compare instead of a search.
             unsafe { std::ptr::write_unaligned(rsp as usize as *mut u64, resume.to_le()) };
         } else {
-            // `store`, not `view()`: a clone of the view is two atomic increments on
-            // a line every guest thread shares, for a borrow this needs for one
-            // store.
             self.view
                 .store(rsp, &resume.to_le_bytes())
                 .map_err(|source| VmError::Stack { source })?;
@@ -1596,7 +1610,7 @@ impl crate::objc::Realizer for Vm {
     }
 
     fn memory(&self) -> Box<dyn crate::abi::GuestMemory + '_> {
-        Box::new(self.view())
+        Box::new(&self.view)
     }
 
     fn is_guest_address(&self, va: u64) -> bool {

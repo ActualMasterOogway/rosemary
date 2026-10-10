@@ -205,7 +205,7 @@ unsafe extern "C" fn interpret(ctx: *mut RegisterContext, instructions: u64) {
     // this runtime, and one worth reporting rather than aborting on.
     let at = ctx.rip;
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::interp::run(ctx, &vm.view(), instructions)
+        crate::interp::run(ctx, vm.view(), instructions)
     }));
     match done {
         Ok(Ok(())) => {}

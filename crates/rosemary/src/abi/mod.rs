@@ -230,45 +230,97 @@ pub fn call_import_with(
     mem: &mut dyn GuestMemory,
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
-    // `ROSEMARY_TRACE_CALL` reports this call, if it names its symbol.
-    if !crate::trace::watching(symbol) {
-        return call_import_inner(symbol, tag, host, ctx, mem, callbacks);
-    }
-    crate::trace::entering(symbol, ctx);
-    let result = call_import_inner(symbol, tag, host, ctx, mem, callbacks);
-    crate::trace::leaving(symbol, ctx, &result);
-    result
+    call_planned(plan(symbol, tag, host), symbol, host, ctx, mem, callbacks)
 }
 
-/// [`call_import_with`], without the trace around it.
-fn call_import_inner(
+/// What a call to one import comes to.
+///
+/// Every question in it is asked of the symbol's *name* - a shim match, a table
+/// hash, the trace list - and none of the answers change once start-up is over,
+/// so a caller that services the same site repeatedly asks once and keeps this.
+/// See `ImportSite::plan`.
+#[derive(Clone, Copy)]
+pub struct Plan {
+    route: Route,
+    /// `ROSEMARY_TRACE_CALL` names this symbol.
+    traced: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Route {
+    Unsatisfied,
+    Shim(crate::shims::Resolved),
+    Call(&'static FunctionAbi),
+    /// Described, but variadic and with no shim to read its arguments.
+    Variadic,
+    Refused(&'static str),
+    Unknown,
+}
+
+/// Work out how a call to `symbol`, resolved to `host`, is serviced.
+pub fn plan(symbol: &str, tag: u64, host: u64) -> Plan {
+    let route = if host == 0 {
+        Route::Unsatisfied
+    } else if let Some(shim) = crate::shims::resolve(symbol) {
+        // Shims first, unconditionally: a shim exists precisely because passing the
+        // call through would be wrong, so it must win over any table entry.
+        Route::Shim(shim)
+    } else {
+        match table::lookup(tag, symbol) {
+            Lookup::Known(abi) if abi.variadic => Route::Variadic,
+            Lookup::Known(abi) => Route::Call(abi),
+            Lookup::Refused(reason) => Route::Refused(reason),
+            Lookup::Unknown => Route::Unknown,
+        }
+    };
+    Plan {
+        route,
+        traced: crate::trace::watching(symbol),
+    }
+}
+
+/// Service one call to `symbol` as `plan`, which [`plan`] made for the same
+/// `symbol` and `host`.
+pub fn call_planned(
+    plan: Plan,
     symbol: &str,
-    tag: u64,
     host: u64,
     ctx: &mut RegisterContext,
     mem: &mut dyn GuestMemory,
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
-    if host == 0 {
-        return Err(AbiError::Unsatisfied {
-            symbol: symbol.to_string(),
-        });
+    if !plan.traced {
+        return call_route(plan.route, symbol, host, ctx, mem, callbacks);
     }
-    // Shims first, unconditionally: a shim exists precisely because passing the
-    // call through would be wrong, so it must win over any table entry.
-    if let Some(result) = crate::shims::dispatch(symbol, ctx, mem, callbacks) {
-        return result;
-    }
-    match table::lookup(tag, symbol) {
-        Lookup::Known(abi) if abi.variadic => Err(AbiError::NoShim {
+    crate::trace::entering(symbol, ctx);
+    let result = call_route(plan.route, symbol, host, ctx, mem, callbacks);
+    crate::trace::leaving(symbol, ctx, &result);
+    result
+}
+
+/// [`call_planned`], without the trace around it.
+fn call_route(
+    route: Route,
+    symbol: &str,
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    match route {
+        Route::Shim(shim) => shim.call(symbol, ctx, mem, callbacks),
+        Route::Call(abi) => marshal::call_with(symbol, abi, host, ctx, mem, callbacks),
+        Route::Unsatisfied => Err(AbiError::Unsatisfied {
             symbol: symbol.to_string(),
         }),
-        Lookup::Known(abi) => marshal::call_with(symbol, abi, host, ctx, mem, callbacks),
-        Lookup::Refused(reason) => Err(AbiError::Refused {
+        Route::Variadic => Err(AbiError::NoShim {
+            symbol: symbol.to_string(),
+        }),
+        Route::Refused(reason) => Err(AbiError::Refused {
             symbol: symbol.to_string(),
             reason,
         }),
-        Lookup::Unknown => Err(AbiError::NoSignature {
+        Route::Unknown => Err(AbiError::NoSignature {
             symbol: symbol.to_string(),
         }),
     }

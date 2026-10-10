@@ -914,7 +914,7 @@ impl Convert for Classes<'_> {
             // A block passed as a plain `id` (`objc_retain`, `objc_storeStrong`,
             // an `@` argument) gets copied by the runtime just as one passed to
             // `objc_retainBlock` does, and the copy runs its helpers.
-            true if crate::shims::block::is_block(raw, &self.vm.view()) => {
+            true if crate::shims::block::is_block(raw, self.vm.view()) => {
                 let mut view = self.vm.view();
                 crate::shims::block::substitute_block(symbol, raw, &mut view, self.vm)?;
                 Ok(raw)

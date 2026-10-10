@@ -337,6 +337,7 @@ mod tests {
             resolved,
             tag: 0,
             is_stub: false,
+            plan: Default::default(),
         }
     }
 

@@ -906,6 +906,7 @@ fn collect_imports(
             resolved: b.resolved,
             tag: b.tag,
             is_stub: false,
+            plan: Default::default(),
         };
         imports.insert(b.slot_va, site.clone());
         if let Some(stub) = b.stub_va {
@@ -926,6 +927,7 @@ fn collect_imports(
                 resolved: 0,
                 tag: 0,
                 is_stub: false,
+                plan: Default::default(),
             };
             imports.insert(m.slot_va, site.clone());
             if let Some(stub) = m.stub_va {
@@ -1261,6 +1263,7 @@ fn remember_native_symbol(addr: u64, name: &str, library: Option<String>) -> u64
             resolved: addr,
             tag: 0,
             is_stub: false,
+            plan: Default::default(),
         }))
     });
     if map.len() != before {

@@ -130,6 +130,39 @@ pub fn dispatch(
     mem: &mut dyn GuestMemory,
     callbacks: &dyn crate::abi::Callbacks,
 ) -> Option<Result<()>> {
+    resolve(symbol).map(|shim| shim.call(symbol, ctx, mem, callbacks))
+}
+
+/// A shim of either shape, as [`resolve`] finds it.
+#[derive(Clone, Copy)]
+pub enum Resolved {
+    Plain(Shim),
+    WithCallbacks(CallbackShim),
+}
+
+impl Resolved {
+    /// Run the shim for a call to `symbol`, the Mach-O name it was resolved from.
+    pub fn call(
+        self,
+        symbol: &str,
+        ctx: &mut RegisterContext,
+        mem: &mut dyn GuestMemory,
+        callbacks: &dyn crate::abi::Callbacks,
+    ) -> Result<()> {
+        let name = symbol.strip_prefix('_').unwrap_or(symbol);
+        match self {
+            Resolved::Plain(f) => f(name, ctx, mem),
+            Resolved::WithCallbacks(f) => f(name, ctx, mem, callbacks),
+        }
+    }
+}
+
+/// The shim for `symbol`, if there is one.
+///
+/// A function of the name alone - and of start-up choices such as the frameworks
+/// backend, which are fixed before the first guest call - so a caller may keep
+/// the answer for as long as it keeps the name.
+pub fn resolve(symbol: &str) -> Option<Resolved> {
     let name = symbol.strip_prefix('_').unwrap_or(symbol);
     let f = match name {
         "printf" => printf::printf,
@@ -183,7 +216,7 @@ pub fn dispatch(
                 // .or_else(|| crate::unwind::shim_for(name))
                 .or_else(|| platform_shim_for(name))
             {
-                return Some(f(name, ctx, mem));
+                return Some(Resolved::Plain(f));
             }
             // And the families that need one thing more than the rest.
             return crate::signal::shim_for(name)
@@ -193,10 +226,10 @@ pub fn dispatch(
                 .or_else(|| zlib::shim_for(name))
                 .or_else(|| curl::shim_for(name))
                 .or_else(|| callback_shim_for(name))
-                .map(|f| f(name, ctx, mem, callbacks));
+                .map(Resolved::WithCallbacks);
         }
     };
-    Some(f(name, ctx, mem))
+    Some(Resolved::Plain(f))
 }
 
 /// Whether [`dispatch`] would handle `symbol`.

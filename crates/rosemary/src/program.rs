@@ -120,7 +120,11 @@ pub struct Program<M: Regions = BufferSpace> {
     pub functions: Vec<std::ops::Range<u64>>,
     /// Every address a call site might name, mapped to the host address behind
     /// it: both `slot_va` and `stub_va` for each binding.
-    pub imports: BTreeMap<u64, ImportSite>,
+    ///
+    /// Hashed rather than ordered because [`Program::import_at`] asks it on every
+    /// serviced import, and the tree walk showed up on a Roblox profile. The
+    /// consumers that need address order sort for themselves.
+    pub imports: AddrMap<ImportSite>,
     /// How to leave each function of the root image, from `__unwind_info`.
     pub unwind: machish::image::UnwindInfo,
     /// The same sites, keyed by the address they *resolved to*.
@@ -200,6 +204,54 @@ pub struct ImportSite {
     pub tag: u64,
     /// Whether this address is the `__stubs` entry rather than the pointer slot.
     pub is_stub: bool,
+    /// How a call through this site is serviced, once it has been.
+    pub(crate) plan: PlanCell,
+}
+
+impl ImportSite {
+    /// How a call through this site is serviced, worked out on the first call
+    /// and kept: none of the fields it is derived from change after linking,
+    /// and every question it answers is a string lookup or a region search.
+    ///
+    /// `is_guest` decides whether `resolved` is guest code.
+    pub(crate) fn plan(&self, is_guest: impl FnOnce(u64) -> bool) -> SitePlan {
+        *self.plan.0.get_or_init(|| SitePlan {
+            resolves_to_guest: self.resolved != 0 && is_guest(self.resolved),
+            call: crate::abi::plan(&self.symbol, self.tag, self.resolved),
+        })
+    }
+}
+
+/// What [`ImportSite::plan`] decided.
+#[derive(Clone, Copy)]
+pub(crate) struct SitePlan {
+    /// The import resolved into another guest image, so servicing it is a
+    /// transfer of control rather than a host call.
+    pub resolves_to_guest: bool,
+    pub call: crate::abi::Plan,
+}
+
+/// [`ImportSite::plan`]'s memo. A cache rather than part of the site, so two
+/// sites compare equal whether or not either has been called.
+#[derive(Clone, Default)]
+pub(crate) struct PlanCell(std::sync::OnceLock<SitePlan>);
+
+impl PartialEq for PlanCell {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PlanCell {}
+
+impl fmt::Debug for PlanCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "planned"
+        } else {
+            "unplanned"
+        })
+    }
 }
 
 /// Turns [`announce_unbound_imports`] from a warning into a refusal to load.
@@ -771,7 +823,7 @@ impl<M: Regions> Program<M> {
 
         let unwind = machish::image::UnwindInfo::parse(&obj, slide)?;
 
-        let mut imports = BTreeMap::new();
+        let mut imports: AddrMap<ImportSite> = AddrMap::default();
         for b in report.bindings() {
             let site = ImportSite {
                 symbol: b.symbol.clone(),
@@ -779,6 +831,7 @@ impl<M: Regions> Program<M> {
                 resolved: b.resolved,
                 tag: b.tag,
                 is_stub: false,
+                plan: Default::default(),
             };
             imports.insert(b.slot_va, site.clone());
             if let Some(stub) = b.stub_va {
@@ -802,6 +855,7 @@ impl<M: Regions> Program<M> {
                     resolved: 0,
                     tag: 0,
                     is_stub: false,
+                    plan: Default::default(),
                 };
                 imports.insert(m.slot_va, site.clone());
                 if let Some(stub) = m.stub_va {
@@ -1038,12 +1092,15 @@ impl<M: Regions> Program<M> {
     pub fn install_trampolines(&mut self) -> usize {
         // Collected first, because deciding needs `&self` (for
         // `is_guest_address`) and writing needs `&mut self.memory`.
-        let eligible: Vec<(u64, ImportSite)> = self
+        let mut eligible: Vec<(u64, ImportSite)> = self
             .imports
             .iter()
             .filter(|(_, site)| !site.is_stub && !self.is_guest_address(site.resolved))
             .map(|(&va, site)| (va, site.clone()))
             .collect();
+        // In address order, so trampoline slots are handed out the same way on
+        // every run.
+        eligible.sort_unstable_by_key(|(va, _)| *va);
         crate::trampoline::install(
             eligible.iter().map(|(va, site)| (*va, site)),
             // Already filtered above, where the borrow was available.
@@ -1097,10 +1154,12 @@ impl<M: Regions> Program<M> {
 
     /// What an imported symbol resolved to, by name.
     pub fn resolved_symbol(&self, symbol: &str) -> Option<u64> {
+        // The lowest-addressed match, as the ordered map this used to be gave.
         self.imports
-            .values()
-            .find(|s| !s.is_stub && s.symbol == symbol && s.resolved != 0)
-            .map(|s| s.resolved)
+            .iter()
+            .filter(|(_, s)| !s.is_stub && s.symbol == symbol && s.resolved != 0)
+            .min_by_key(|&(&va, _)| va)
+            .map(|(_, s)| s.resolved)
     }
 
     /// The import that *resolved to* `host`, if any.
@@ -1116,7 +1175,9 @@ impl<M: Regions> Program<M> {
 
     /// Every import address, in ascending order.
     pub fn import_addresses(&self) -> impl Iterator<Item = u64> + '_ {
-        self.imports.keys().copied()
+        let mut addresses: Vec<u64> = self.imports.keys().copied().collect();
+        addresses.sort_unstable();
+        addresses.into_iter()
     }
 }
 

@@ -416,7 +416,7 @@ fn selector_reference_slots_are_uniqued_in_place() {
     // After: each slot holds exactly what `sel_registerName` returns for the
     // name that used to be there.
     use rosemary::abi::GuestMemory;
-    let view = vm.view();
+    let view = vm.view().clone();
     for &slot in &image.selector_refs {
         let mut buf = [0u8; 8];
         view.read(slot, &mut buf).expect("the slot is guest memory");
