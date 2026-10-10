@@ -5,13 +5,10 @@
 Pass an app bundle or a Mach-O executable to `run`:
 
 ```sh
-rosemary run /some/app.app
-rosemary run --emulated "/some/My App.app" [args...]
-rosemary run /some/app.app/Contents/MacOS/App [args...]
+rosemary /some/app.app
+rosemary --emulated "/some/My App.app" [args...]
+rosemary /some/app.app/Contents/MacOS/App [args...]
 ```
-
-A bundle directory can also be launched directly: `rosemary /some/app.app [args...]`.
-Use `run` to select a backend or pass runtime options.
 
 For a bundle, Rosemary reads `Contents/Info.plist` (XML or binary) and runs
 the executable named by `CFBundleExecutable` in `Contents/MacOS`. An empty
@@ -21,14 +18,14 @@ bundle resource lookup apply. Invalid bundles report an error.
 
 ## The process server
 
-Off macOS, every guest is a host process of its own and none can see the
-others by itself. A per-prefix **process server** keeps the table that `top`,
-`ps` and `task_for_pid` read. It starts on demand and exits when idle; it can
+On non-macOS, every guest is a host process of its own and none can see the
+others by itself. A per-prefix **process server** tracks resources that `top`,
+`ps` and `task_for_pid` read. It starts on demand and exits when idle. It can
 also be run or stopped by hand:
 
 ```sh
 rosemary server --foreground   # run this prefix's server in the terminal
-rosemary server --stop         # ask this prefix's server to exit once idle
+rosemary server --stop         # ask this prefix's server to exit
 ```
 
 ## Environment variables
@@ -38,29 +35,31 @@ rosemary server --stop         # ask this prefix's server to exit once idle
 | --- | ------- | ----------- |
 | `ROSEMARY_OBJC` | `native` (macOS), `builtin` (other) | Set the Objective-C runtime implementation to use. On Linux, there is only `builtin`. On macOS, `native` uses the real Objective-C, and `builtin` uses the compatibility implementation which can only talk to cross platform reimplementations. `native` yields better compatibility and performance, so use it if you can. It is only recommended you use `builtin` if you are differentially testing, or working upon the compatibility layer from a real macOS system. Make sure that if you're on macOS you also set `ROSEMARY_BUNDLED=1`. |
 | `ROSEMARY_BUNDLED` | `0` | (macOS only) - determines if Rosemary should re-execute from a virtual repackage of the application. Makes the real Objective-C runtime recognize plist registrations, unnecessary with `builtin` (and possibly problematic). |
-| `ROSEMARY_LIBC` | `native` (macOS), `builtin` (other) | Select the libc shim implementation for guest imports. Guest-aware default modules remain active in both modes, including `sysctl`. `builtin` additionally enables shared `atomics`, `clock`, `glob`, `pthread`, `regex`, `resolv`, `stackprobe`, `stat`, and `string` modules on macOS and other hosts, subject to architecture support. Nonportable modules are enabled only on non-macOS hosts. This setting is independent of `ROSEMARY_OBJC`. `native` is available only on macOS. |
+| `ROSEMARY_LIBC` | `native` (macOS), `builtin` (other) | Select the libc shim implementation for guest imports. Guest-aware default modules remain active in both modes. |
 | `ROSEMARY_DEAD_FLAGS` | `0` | Enable Microlift's dead flag elimination pass. Improves performance in some applications, but not by a wide enough margin. **May have semantic accuracy bugs, use with extreme caution**. |
 | `ROSEMARY_CALL_RETURN` | `0` | Enable Microlift native call return support. Can improve performance in some applications - disabled by default as measurements were inconclusive and it is additional, complex code surface. |
 | `ROSEMARY_STRICT_IMPORTS` | `0` | Refuse to run a program that has unbound imports, rather than announcing them on stderr and running anyway. Unbound imports are always announced; this only decides whether they are fatal. |
 | `ROSEMARY_UNBOUND_DETAIL` | `40` | How many unbound imports are named one by one before the rest are only counted. Set to `all` for the whole list. A large application has hundreds, so the default keeps the interesting output - what comes *after* the list - on screen; raise it when a fault at address zero has to be matched against a symbol. |
 | `ROSEMARY_NO_FOREIGN` | `0` | (macOS only - unsafe) Assume that we have reimplemented every framework this app asks of us, disabling foreign Objective-C support in the reimplementations for a slight performance boost. Assumed to be always on with non-macOS systems, since there are no native Objective C frameworks to conflict with. |
-| `ROSEMARY_STEAM` | `1` | Bridge a guest's Steamworks calls to the host's own Steam client, and publish the Mach service `libsteam_api` asks where Steam is. Set to `0` to turn both off, so that a guest asking for Steam is told there is none. Has no effect unless a generated `steamclient.dylib` exists - see `docs/steam.md`. |
+| `ROSEMARY_STEAM` | `1` | Bridge a guest's Steamworks calls to the host's own Steam client, and publish the Mach service `libsteam_api` asks where Steam is. Set to `0` to turn both off, so that a guest asking for Steam is told there is none. Has no effect unless a generated `steamclient.dylib` exists. |
 | `ROSEMARY_STEAM_CLIENT` | (found) | The generated guest-facing `steamclient.dylib`. Looked for beside the `rosemary` binary, and then in `tools/steamclient/generated/` above it, which is where a checkout leaves it. |
 | `ROSEMARY_STEAM_HOST_CLIENT` | (found) | The host's own `steamclient.so`. Looked for under `$STEAM_COMPAT_CLIENT_INSTALL_PATH`, `~/.steam/sdk64`, `~/.steam/root`, `~/.steam/steam` and `~/.local/share/Steam`. |
 | `ROSEMARY_STEAM_TRACE` | unset | Report every bridged Steamworks call on stderr: the dispatch id, the host interface, and the vtable slot it landed on. |
 | `ROSEMARY_SWAP_INTERVAL` | `none` | Force a specific swap interval on OpenGL applications. Allows enabling immediate (0), VSync (1), and -1 (Adaptive VSync), along with other V-blank values, allowing unlocked framerate on apps that use VSync. |
-| `ROSEMARY_PREFIX` | the default prefix (`off` on macOS) | The prefix a guest runs in: a directory holding a Darwin filesystem, whose `root/` subdirectory is the guest's `/`. Unset, `rosemary run` uses `$XDG_DATA_HOME/rosemary/prefixes/default` (or `$HOME/.local/share/rosemary/prefixes/default`), creating it on first use. Set it to another path to keep a guest's files separate, or to `off` to leave guest paths alone entirely. See `docs/prefixes.md`. |
+| `ROSEMARY_PREFIX` | the default prefix (`off` on macOS) | The prefix a guest runs in: a directory holding a Darwin filesystem, whose `root/` subdirectory is the guest's `/`. Unset, `rosemary run` uses `$XDG_DATA_HOME/rosemary/prefixes/default` (or `$HOME/.local/share/rosemary/prefixes/default`), creating it on first use. Set it to another path to keep a guest's files separate, or to `off` to leave guest paths alone entirely. |
 | `ROSEMARY_PREFIX_HOME` | `prefix` | Where the guest's home directory is. `prefix` keeps it inside the prefix, so a prefix is one directory to copy, archive or delete. `host` mounts the guest's `/Users/<name>` onto the real `$HOME` instead, for a user who would rather keep one set of documents than two. |
 | `ROSEMARY_PREFIX_SETUP` | `ask` | What to do when a prefix needs its Darwin base and it is not cached. `ask` asks - a dialog under `rosemary run` when there is a display, then the terminal - and declines when there is nobody to ask. `download` fetches it without asking. `fail` never downloads. The base is verified against hashes compiled into Rosemary whichever route it takes. |
 | `ROSEMARY_ROOTFS_CACHE` | `$XDG_CACHE_HOME/rosemary/rootfs` | Where verified Darwin bases are cached, shared by every prefix. Falls back to `$HOME/.cache/rosemary/rootfs`. |
-| `ROSEMARY_GUEST_PATH` | unset | (internal) Set by a prefixed guest's `exec` of another Mach-O to carry the guest's `PATH` to the child runtime, which gives it to the child guest instead of the default Darwin `PATH`. Never visible to a guest; see `docs/prefixes.md`. |
+| `ROSEMARY_GUEST_PATH`, `ROSEMARY_GUEST_HOME`, `ROSEMARY_GUEST_SHELL` | unset | (internal) Set by a prefixed guest's `exec` of another Mach-O to carry the guest's own `PATH`, `HOME` and `SHELL` to the child runtime, which gives them to the child guest instead of the defaults. Never visible to a guest. |
 | `ROSEMARY_TRACE_PREFIX` | unset | Report every guest-to-host path translation on stderr, as the pair of spellings. The namespace sits underneath every file call a guest makes, so this is the first thing to reach for when a program behaves differently inside a prefix. |
 | `ROSEMARY_SERVER` | `on` | Whether guests join their prefix's process server, which is how one guest sees another: `top`, `ps`, `task_for_pid`, `proc_listpids`. The first guest starts the server as `rosemary server` and it exits a few seconds after the last guest. Set to `off` to keep every guest to itself, as if it were the only process on the system. |
 | `ROSEMARY_SERVER_LINGER` | `5` | Seconds a process server stays up with no guest connected, so a shell running one short guest after another keeps one server rather than starting a new one each time. Fractions are accepted; `0` exits as soon as the last guest leaves. |
-| `ROSEMARY_DECORATIONS` | `client` | Who draws a titled window's titlebar. `client` draws a Mac-style titlebar (window buttons, title, and the application's menus) in the window itself, and keeps SDL from loading libdecor, whose GTK 3 plugin cannot share a process with the GTK 4 that WebKit loads. `server` leaves the titlebar to the host's window manager. Applies to the `builtin` AppKit on every host, including macOS with `ROSEMARY_OBJC=builtin`. See `docs/decorations.md`. |
+| `ROSEMARY_DECORATIONS` | `client` | Who draws a titled window's titlebar. `client` draws a Mac-style titlebar (window buttons, title, and the application's menus) in the window itself, and keeps SDL from loading libdecor, whose GTK 3 plugin cannot share a process with the GTK 4 that WebKit loads. `server` leaves the titlebar to the host's window manager. Applies to the `builtin` AppKit on every host, including macOS with `ROSEMARY_OBJC=builtin`. |
 | `ROSEMARY_MENU` | `titlebar` (`client`), `strip` (`server`) | Where the application's main menu is shown. `titlebar` puts it in the titlebar after the window buttons; `strip` puts it in a row of its own under the titlebar, which is the only placement under `server` decorations; `none` shows no menus. Key equivalents work whichever is chosen. |
 | `ROSEMARY_MENU_CTRL` | `1` | Let Control stand in for Command in menu key equivalents, so Ctrl+S reaches an item whose equivalent is Command-S. Only when nothing took the key as Control first. Set to `0` to leave Control to the program. |
 | `ROSEMARY_CONFINE_POINTER` | unset | Keep the pointer inside the focused window's content, off the titlebar Rosemary draws; pushed against the edge it holds still and keeps reporting deltas. A workaround, not Mac behavior: some ports (Feral's, e.g. Life Is Strange) confine the cursor with a Win32 `ClipCursor` emulation that clamps only once and counts on warping the pointer back when it strays, which cannot reach a pointer that has left the window on Wayland. Their drag interactions stop short without it. |
+| `ROSEMARY_GLIBC` | `auto` | (packaged builds) Which glibc the launcher runs Rosemary on: `host`, `bundled`, or `auto`, which uses the host's when it defines every symbol version the bundle's libraries need and the bundled one otherwise. |
+| `ROSEMARY_EXE` | (set by the launcher) | The path that starts another copy of Rosemary. Under the bundled glibc the kernel reports the bundled dynamic loader as this process's executable, so the runtime re-launches itself (`rosemary server`, a guest spawning a Mach-O) through this instead. |
 
 ## Prefixes
 
