@@ -15,6 +15,7 @@ use machish::extensions::objc::{ObjcCategory, ObjcClass, ObjcImage, ObjcMethod, 
 use machish::report::LinkReport;
 
 use crate::abi::GuestMemory;
+use crate::program::AddrMap;
 use crate::vm::VmError;
 
 /// What realizing a guest's Objective-C metadata needs from the backend running it.
@@ -112,12 +113,15 @@ pub struct Stats {
 #[derive(Clone, Debug)]
 pub struct ObjcRuntime {
     /// Guest `objc_class` VA -> the host `Class` standing for it.
-    to_host: HashMap<u64, u64>,
+    ///
+    /// Address-hashed, like the other two: these are asked for pointers crossing
+    /// on every message, where SipHash showed up on a profile by itself.
+    to_host: AddrMap<u64>,
     /// The reverse, so a `Class` coming *back* from the host runtime can be handed to
     /// the guest as the address the guest already has.
-    to_guest: HashMap<u64, u64>,
+    to_guest: AddrMap<u64>,
     /// Guest `protocol_t` VA -> host `Protocol *`.
-    protocols: HashMap<u64, u64>,
+    protocols: AddrMap<u64>,
     /// The half-open bounds of `to_host`'s keys, and of `to_guest`'s.
     ///
     /// Every pointer crossing the seam asks one of these maps, and almost every
@@ -125,6 +129,9 @@ pub struct ObjcRuntime {
     /// answer that without hashing.
     guest_bounds: (u64, u64),
     host_bounds: (u64, u64),
+    /// The same, over `protocols`' keys. A message's `@` argument that is not a
+    /// class is asked of the protocols next, and is almost never one either.
+    protocol_bounds: (u64, u64),
     stats: Stats,
     refusals: Vec<Refusal>,
 }
@@ -132,12 +139,13 @@ pub struct ObjcRuntime {
 impl Default for ObjcRuntime {
     fn default() -> Self {
         Self {
-            to_host: HashMap::new(),
-            to_guest: HashMap::new(),
-            protocols: HashMap::new(),
+            to_host: AddrMap::default(),
+            to_guest: AddrMap::default(),
+            protocols: AddrMap::default(),
             // Empty, so every range test fails.
             guest_bounds: (u64::MAX, 0),
             host_bounds: (u64::MAX, 0),
+            protocol_bounds: (u64::MAX, 0),
             stats: Stats::default(),
             refusals: Vec::new(),
         }
@@ -206,7 +214,17 @@ impl ObjcRuntime {
     /// The host `Protocol *` for a guest `protocol_t` address, leaving anything that is
     /// not one of this pass's protocols alone.
     pub fn host_protocol_or(&self, va: u64) -> u64 {
+        if va < self.protocol_bounds.0 || va >= self.protocol_bounds.1 {
+            return va;
+        }
         self.protocols.get(&va).copied().unwrap_or(va)
+    }
+
+    /// Record that `host` is the `Protocol *` for the guest's at `guest_va`.
+    fn link_protocol(&mut self, guest_va: u64, host: u64) {
+        self.protocols.insert(guest_va, host);
+        self.protocol_bounds.0 = self.protocol_bounds.0.min(guest_va);
+        self.protocol_bounds.1 = self.protocol_bounds.1.max(guest_va + 1);
     }
 
     pub fn stats(&self) -> &Stats {
@@ -678,7 +696,7 @@ fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
     // SAFETY: `name` is NUL-terminated and outlives the call.
     let existing = unsafe { host::objc_getProtocol(name.as_ptr()) };
     if !existing.is_null() {
-        rt.protocols.insert(p.va, existing as u64);
+        rt.link_protocol(p.va, existing as u64);
         return;
     }
     let proto = unsafe { host::objc_allocateProtocol(name.as_ptr()) };
@@ -713,7 +731,7 @@ fn register_protocol(rt: &mut ObjcRuntime, p: &ObjcProtocol) {
 
     // SAFETY: `proto` came from `objc_allocateProtocol` and is registered once.
     unsafe { host::objc_registerProtocol(proto) };
-    rt.protocols.insert(p.va, proto as u64);
+    rt.link_protocol(p.va, proto as u64);
     rt.stats.protocols += 1;
 }
 

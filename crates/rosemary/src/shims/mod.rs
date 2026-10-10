@@ -138,6 +138,9 @@ pub fn dispatch(
 pub enum Resolved {
     Plain(Shim),
     WithCallbacks(CallbackShim),
+    /// The Objective-C runtime's, resolved past the name so a message send does
+    /// not search its tables again.
+    Objc(crate::objc::dispatch::Entry),
 }
 
 impl Resolved {
@@ -153,6 +156,7 @@ impl Resolved {
         match self {
             Resolved::Plain(f) => f(name, ctx, mem),
             Resolved::WithCallbacks(f) => f(name, ctx, mem, callbacks),
+            Resolved::Objc(entry) => entry.call(name, ctx, mem),
         }
     }
 }
@@ -213,9 +217,16 @@ pub fn resolve(symbol: &str) -> Option<Resolved> {
                 .or_else(|| sysvsem::shim_for(name))
                 .or_else(|| vmmap::shim_for(name))
                 .or_else(|| crate::jmpbuf::shim_for(name))
-                // .or_else(|| crate::unwind::shim_for(name))
-                .or_else(|| platform_shim_for(name))
+            // .or_else(|| crate::unwind::shim_for(name))
             {
+                return Some(Resolved::Plain(f));
+            }
+            // First of the platform shims, kept as an entry rather than the
+            // `serve` that `platform_shim_for` would give.
+            if let Some(entry) = crate::objc::dispatch::resolve(name) {
+                return Some(Resolved::Objc(entry));
+            }
+            if let Some(f) = platform_shim_for(name) {
                 return Some(Resolved::Plain(f));
             }
             // And the families that need one thing more than the rest.

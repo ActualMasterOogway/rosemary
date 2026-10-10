@@ -559,14 +559,7 @@ fn set_arg_reg(ctx: &mut RegisterContext, i: usize, v: u64) {
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<crate::jmpbuf::Shim> {
-    if exception_shim(name).is_some()
-        || MESSAGES.iter().any(|(n, _)| *n == name)
-        || REFUSED.iter().any(|(n, _)| *n == name)
-        || RUNTIME.binary_search_by_key(&name, |r| r.name).is_ok()
-    {
-        return Some(serve);
-    }
-    None
+    resolve(name).map(|_| serve as crate::jmpbuf::Shim)
 }
 
 /// Symbols this runtime answers for, resolved to the host's own implementations.
@@ -678,27 +671,68 @@ pub(super) fn host_symbol(name: &str) -> Option<u64> {
 
 /// Service one call into the Objective-C runtime.
 fn serve(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    match resolve(symbol) {
+        Some(entry) => entry.call(symbol, ctx, mem),
+        None => {
+            current_vm(symbol)?;
+            Err(AbiError::NoSignature {
+                symbol: symbol.to_string(),
+            })
+        }
+    }
+}
+
+/// Which of this module's tables `name` is in, found once by [`resolve`] so that a
+/// caller servicing the same import again does not search them by name again.
+#[derive(Clone, Copy)]
+pub struct Entry(Kind);
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Exception(crate::jmpbuf::Shim),
+    Send(Send),
+    Runtime(usize),
+    Refused(&'static str),
+}
+
+/// The entry for `name` (underscore already stripped), if it is one of this
+/// module's. A function of the name and of the runtime backend, which is fixed
+/// before the first guest call.
+pub fn resolve(name: &str) -> Option<Entry> {
     // Before [`REFUSED`], which still lists these: the refusal is what a program
     // the shim cannot serve gets, and the shim decides which that is.
-    if let Some(f) = exception_shim(symbol) {
-        return f(symbol, ctx, mem);
+    let kind = if let Some(f) = exception_shim(name) {
+        Kind::Exception(f)
+    } else if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == name) {
+        Kind::Send(*message)
+    } else if let Ok(i) = RUNTIME.binary_search_by_key(&name, |r| r.name) {
+        Kind::Runtime(i)
+    } else if let Some((_, reason)) = REFUSED.iter().find(|(n, _)| *n == name) {
+        Kind::Refused(reason)
+    } else {
+        return None;
+    };
+    Some(Entry(kind))
+}
+
+impl Entry {
+    /// Service one call to `symbol`, the name this entry was resolved from.
+    pub fn call(
+        self,
+        symbol: &str,
+        ctx: &mut RegisterContext,
+        mem: &mut dyn GuestMemory,
+    ) -> Result<()> {
+        match self.0 {
+            Kind::Exception(f) => f(symbol, ctx, mem),
+            Kind::Send(message) => send(symbol, message, current_vm(symbol)?, ctx, mem),
+            Kind::Runtime(i) => call_runtime(symbol, i, current_vm(symbol)?, ctx, mem),
+            Kind::Refused(reason) => Err(AbiError::Refused {
+                symbol: symbol.to_string(),
+                reason,
+            }),
+        }
     }
-    if let Some((_, message)) = MESSAGES.iter().find(|(n, _)| *n == symbol) {
-        return send(symbol, *message, current_vm(symbol)?, ctx, mem);
-    }
-    if let Ok(i) = RUNTIME.binary_search_by_key(&symbol, |r| r.name) {
-        return call_runtime(symbol, i, current_vm(symbol)?, ctx, mem);
-    }
-    if let Some((_, reason)) = REFUSED.iter().find(|(n, _)| *n == symbol) {
-        return Err(AbiError::Refused {
-            symbol: symbol.to_string(),
-            reason,
-        });
-    }
-    current_vm(symbol)?;
-    Err(AbiError::NoSignature {
-        symbol: symbol.to_string(),
-    })
 }
 
 /// The two libobjc exception entry points that are more than an alias for their
@@ -839,13 +873,29 @@ fn call_runtime(
         object_return: false,
         protocols: entry.protocols,
     };
-    let Some(leaves) = entry.struct_return else {
+    let Some((shapes, layout)) = struct_return_shapes(i) else {
         return marshal::call_types(symbol, entry.types, host, ctx, mem, &convert);
     };
-    // The general marshaller, for the one return a `&[ArgType]` cannot spell.
-    let mut shapes = vec![Shape::Struct(packed(leaves))];
-    shapes.extend(entry.types.iter().skip(1).copied().map(Shape::Scalar));
-    marshal::call_shapes(symbol, &shapes, host, ctx, mem, &convert)
+    marshal::call_laid_out(symbol, shapes, layout, host, ctx, mem, &convert)
+}
+
+/// The general marshaller's description of every [`RUNTIME`] entry with a
+/// struct return - the one return a `&[ArgType]` cannot spell - built once.
+fn struct_return_shapes(i: usize) -> Option<&'static (Vec<Shape>, marshal::Layout)> {
+    #[dynamic]
+    static SHAPES: Vec<Option<(Vec<Shape>, marshal::Layout)>> = {
+        RUNTIME
+            .iter()
+            .map(|entry| {
+                let leaves = entry.struct_return?;
+                let mut shapes = vec![Shape::Struct(packed(leaves))];
+                shapes.extend(entry.types.iter().skip(1).copied().map(Shape::Scalar));
+                let layout = marshal::Layout::of(&shapes);
+                Some((shapes, layout))
+            })
+            .collect()
+    };
+    SHAPES[i].as_ref()
 }
 
 /// A C struct laid out from its members, each at its own alignment.
@@ -1031,7 +1081,7 @@ fn send(
         );
     }
 
-    let (imp, signature, variadic, stret) = match &plan.to {
+    let (imp, signature, layout, variadic, stret) = match &plan.to {
         // Guest -> guest: the trampoline's whole job is the jump, and the
         // guest's registers are already the callee's. A `super` send arrived
         // with the `objc_super` structure in `rdi`, and the method is called
@@ -1043,9 +1093,10 @@ fn send(
         Target::Host {
             imp,
             signature,
+            layout,
             variadic,
             stret,
-        } => (*imp, signature, *variadic, *stret),
+        } => (*imp, signature, layout, *variadic, *stret),
     };
 
     // Guest -> host, with the arguments the method's own encoding does not
@@ -1095,8 +1146,8 @@ fn send(
         protocols: &[],
     };
     // Named by the *message* when it fails.
-    let result =
-        marshal::call_shapes(symbol, &signature.shapes, imp, ctx, mem, &convert).map_err(|e| {
+    let result = marshal::call_laid_out(symbol, &signature.shapes, layout, imp, ctx, mem, &convert)
+        .map_err(|e| {
             // `object_getClass` and `class_getName` are runtime calls rather
             // than messages, which matters here.
             let class = class_of(host_receiver);
@@ -1148,6 +1199,8 @@ enum Target {
     Host {
         imp: u64,
         signature: Signature,
+        /// Where the guest leaves each of `signature`'s arguments.
+        layout: marshal::Layout,
         variadic: Variadic,
         /// Whether the method's own encoding returns MEMORY-class, i.e. `_stret`.
         stret: bool,
@@ -1165,10 +1218,13 @@ enum Variadic {
 }
 
 /// The resolutions made so far, keyed by `(class, selector)`.
-fn plans() -> &'static std::sync::RwLock<std::collections::HashMap<(u64, u64), &'static Plan>> {
-    static PLANS: std::sync::OnceLock<
-        std::sync::RwLock<std::collections::HashMap<(u64, u64), &'static Plan>>,
-    > = std::sync::OnceLock::new();
+///
+/// Address-hashed: this is read on every send, and SipHash over the two words was
+/// as much as the rest of the read.
+type Plans = std::collections::HashMap<(u64, u64), &'static Plan, crate::program::AddrHash>;
+
+fn plans() -> &'static std::sync::RwLock<Plans> {
+    static PLANS: std::sync::OnceLock<std::sync::RwLock<Plans>> = std::sync::OnceLock::new();
     PLANS.get_or_init(Default::default)
 }
 
@@ -1215,6 +1271,7 @@ fn plan_for(symbol: &str, vm: &Vm, class: host::Class, sel: u64) -> Result<&'sta
                     (true, None) => Variadic::Format,
                     (false, _) => Variadic::No,
                 },
+                layout: marshal::Layout::of(&signature.shapes),
                 signature,
             }
         }

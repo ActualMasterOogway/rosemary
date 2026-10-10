@@ -840,6 +840,25 @@ fn leaf_bits(buf: &[u8], offset: usize, width: usize) -> u64 {
     u64::from_le_bytes(word)
 }
 
+/// Where the guest leaves every argument of one signature, which depends on the
+/// signature alone.
+///
+/// Worked out per call by [`call_shapes`]; a caller that calls through the same
+/// signature repeatedly - an Objective-C message - keeps one beside the shapes
+/// and hands it to [`call_laid_out`] instead.
+#[derive(Clone, Debug)]
+pub struct Layout {
+    places: Vec<Place>,
+    sret: Option<Where>,
+}
+
+impl Layout {
+    pub fn of(shapes: &[Shape]) -> Self {
+        let (places, sret) = place_shapes(shapes);
+        Layout { places, sret }
+    }
+}
+
 /// Call `host` with a signature that may contain aggregates.
 pub fn call_shapes(
     symbol: &str,
@@ -849,17 +868,30 @@ pub fn call_shapes(
     mem: &mut dyn GuestMemory,
     convert: &dyn Convert,
 ) -> Result<()> {
+    call_laid_out(symbol, shapes, &Layout::of(shapes), host, ctx, mem, convert)
+}
+
+/// [`call_shapes`], with `layout` already worked out - by [`Layout::of`], from
+/// these same `shapes`.
+pub fn call_laid_out(
+    symbol: &str,
+    shapes: &[Shape],
+    layout: &Layout,
+    host: u64,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    convert: &dyn Convert,
+) -> Result<()> {
+    static VOID: Shape = Shape::Scalar(ArgType::None);
     let unmarshallable = |reason: &'static str| AbiError::Unmarshallable {
         symbol: symbol.to_string(),
         reason,
     };
-    let ret = shapes
-        .first()
-        .cloned()
-        .unwrap_or(Shape::Scalar(ArgType::None));
+    // Borrowed, not cloned: an aggregate return owns its leaves.
+    let ret = shapes.first().unwrap_or(&VOID);
     // Classified before anything is read, so an unsupported return costs a
     // diagnostic rather than a half-made call.
-    let ret_host = match &ret {
+    let ret_host = match ret {
         Shape::Scalar(_) => None,
         Shape::Struct(agg) => {
             if agg.size > MAX_INDIRECT {
@@ -871,14 +903,15 @@ pub fn call_shapes(
         }
     };
 
-    let (places, sret) = place_shapes(shapes);
+    let Layout { places, sret } = layout;
+    let sret = *sret;
 
     let Gathered {
         ints,
         fps,
         overflow,
         copies,
-    } = gather_args(symbol, shapes, &places, sret.is_some(), ctx, &*mem, convert)?;
+    } = gather_args(symbol, shapes, places, sret.is_some(), ctx, &*mem, convert)?;
 
     // Only the integer-returning prototypes were given tails, so a narrow
     // overflow is refused for anything else - an aggregate return included,
@@ -891,11 +924,11 @@ pub fn call_shapes(
     })?;
 
     // Everything that can fail has failed by here.
-    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, &ret, tail);
+    let (out, scalar_ret) = call_returning(host, &ints, &fps, ret_host, ret, tail);
     // Said rather than left to scope: `ints` holds addresses into these, and the
     // callee has finished reading through them only now.
     drop(copies);
-    write_return(ctx, mem, symbol, &ret, sret, &out, scalar_ret, convert)
+    write_return(ctx, mem, symbol, ret, sret, &out, scalar_ret, convert)
 }
 
 /// The prototype's arguments, ready to be handed to whichever variant is called.
