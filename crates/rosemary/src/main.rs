@@ -7,6 +7,7 @@ use rosemary::{
     startup,
 };
 
+use clap::{Args, Parser, Subcommand};
 use microlift::arch::x86_64::X86_64;
 use microlift::core::lift_to_function;
 
@@ -180,131 +181,221 @@ fn imply_builtin_runtime() {
     }
 }
 
+/// How a guest is run; shared by `rosemary run` and the bare form.
+#[derive(Args, Debug, Default)]
+struct RunOptions {
+    /// Turn every import into a VM exit instead of binding known ones directly
+    #[arg(long)]
+    slow: bool,
+    /// Run the host-architecture slice directly, never through the lifter
+    #[arg(long, conflicts_with = "emulated")]
+    native: bool,
+    /// Recompile the x86-64 slice through Microlift even when a native slice exists
+    #[arg(long)]
+    emulated: bool,
+    /// Enable the built-in Objective-C runtime's fail-fast checks (needs ROSEMARY_OBJC=builtin)
+    #[arg(long)]
+    objc_debug: bool,
+}
+
+/// `rosemary [OPTIONS] <PATH> [ARGS]...`, the form without a subcommand.
+#[derive(Args, Debug)]
+struct Target {
+    /// Mach-O executable or .app bundle
+    path: Option<OsString>,
+    /// Arguments for the guest, or flags for the analysis. Put `--` before any
+    /// guest argument that is spelled like one of this tool's flags.
+    #[arg(allow_hyphen_values = true)]
+    args: Vec<OsString>,
+    #[command(flatten)]
+    run: RunOptions,
+    /// Report what loading the program finds instead of running it: images,
+    /// imports, ABI coverage, Objective-C metadata and one lifted region
+    #[arg(long)]
+    analyze: bool,
+    /// With the analysis, also check every direct call target (implies --analyze)
+    #[arg(long)]
+    audit: bool,
+    /// With the analysis, print the lifted IR (implies --analyze)
+    #[arg(long)]
+    ir: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "rosemary",
+    version,
+    about = "Run macOS applications across architectures and operating systems",
+    args_conflicts_with_subcommands = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[command(flatten)]
+    target: Target,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run a Mach-O executable or .app bundle
+    Run {
+        #[command(flatten)]
+        options: RunOptions,
+        /// The program, then its arguments, which are passed through untouched
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        program: Vec<OsString>,
+    },
+    /// Manage prefixes: create, info, verify, repair, reset-system, update, cache
+    #[command(disable_help_flag = true)]
+    Prefix {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Run or stop this prefix's process server
+    #[command(disable_help_flag = true)]
+    Server {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+}
+
 fn main() -> ExitCode {
-    // `args_os`, not `args`: a process argument is a byte string, and
+    // Parsed from `args_os`: a process argument is a byte string, and
     // `std::env::args` *panics* on one that is not UTF-8. Some apps spawn
     // with annotations copied out of `sysctl`, so the argument
     // that aborted this runtime before it had loaded anything was the guest's
     // own and perfectly legal.
-    let mut args = std::env::args_os().skip(1);
-    let Some(first) = args.next() else {
-        eprintln!(
-            "usage: rosemary run [--native|--emulated] [--objc-debug] <mach-o or .app path> [args...]"
-        );
-        eprintln!(
-            "       rosemary prefix <create|info|verify|repair|reset-system|update|cache> ..."
-        );
-        eprintln!("       rosemary server [--directory DIR] [--foreground] [--stop]");
-        eprintln!("       rosemary <mach-o path> [--audit] [--ir]");
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Prefix { args }) => prefix_cli::command(args.into_iter()),
+        Some(Command::Server { args }) => server_cli::command(args.into_iter()),
+        Some(Command::Run {
+            options,
+            mut program,
+        }) => {
+            let path = program.remove(0);
+            launch(path, &options, program)
+        }
+        None => {
+            let t = cli.target;
+            let Some(path) = t.path else {
+                // `arg_required_else_help` shows help for no arguments at all;
+                // this is options with no program.
+                eprintln!("rosemary: no program given; see `rosemary --help`");
+                return ExitCode::FAILURE;
+            };
+            match t.analyze || t.audit || t.ir {
+                true => analyze(path, t.ir, t.audit),
+                false => launch(path, &t.run, t.args),
+            }
+        }
+    }
+}
+
+/// Load `path` as a program and execute it.
+fn launch(path: OsString, options: &RunOptions, args: Vec<OsString>) -> ExitCode {
+    // Before anything can ask which prefix this is, including the paths
+    // published below.
+    prefix_cli::settle_prefix();
+    #[cfg(target_os = "macos")]
+    imply_builtin_runtime();
+    // `--slow` turns every import into a VM exit; `--native`/`--emulated`
+    // force a backend the file's own slices would not have chosen.
+    let policy = match options.slow {
+        true => ImportPolicy::AlwaysSlow,
+        false => ImportPolicy::FastWhenKnown,
+    };
+    let engine = match (options.native, options.emulated) {
+        (true, _) => Some(Engine::Native),
+        (_, true) => Some(Engine::Emulated),
+        _ => None,
+    };
+    let objc_debug = options.objc_debug;
+    // Before anything can ask which prefix this is, including the paths
+    // published below.
+    prefix_cli::settle_prefix();
+    #[cfg(target_os = "macos")]
+    imply_builtin_runtime();
+    // The guest's *arguments* are bytes; its own path is not. Refused by
+    // name rather than converted, because every later use of it - the
+    // bundle layout, `_NSGetExecutablePath`, the fault reports - is text.
+    let Some(path) = path.to_str().map(str::to_owned) else {
+        eprintln!("rosemary: the program's path is not valid UTF-8");
         return ExitCode::FAILURE;
     };
-    if first == "prefix" {
-        return prefix_cli::command(args);
-    }
-    if first == "server" {
-        return server_cli::command(args);
-    }
-    let implicit_bundle = first != "run" && std::path::Path::new(&first).is_dir();
-    if first == "run" || implicit_bundle {
-        // Before anything can ask which prefix this is, including the paths
-        // published below.
-        prefix_cli::settle_prefix();
-        #[cfg(target_os = "macos")]
-        imply_builtin_runtime();
-        // `--slow` turns every import into a VM exit; `--native`/`--emulated`
-        // force a backend the file's own slices would not have chosen.
-        let mut policy = ImportPolicy::FastWhenKnown;
-        let mut engine = None;
-        let mut objc_debug = false;
-        let mut path = implicit_bundle.then(|| first.clone());
-        while path.is_none() {
-            let Some(arg) = args.next() else { break };
-            match arg.to_str().unwrap_or_default() {
-                "--slow" if path.is_none() => policy = ImportPolicy::AlwaysSlow,
-                "--native" if path.is_none() => engine = Some(Engine::Native),
-                "--emulated" if path.is_none() => engine = Some(Engine::Emulated),
-                "--objc-debug" if path.is_none() => objc_debug = true,
-                _ => {
-                    path = Some(arg);
-                    break;
-                }
-            }
-        }
-        let Some(path) = path else {
+    if objc_debug {
+        if std::env::var("ROSEMARY_OBJC").as_deref() == Ok("native") {
             eprintln!(
-                "usage: rosemary run [--slow] [--native|--emulated] [--objc-debug] \
-                 <mach-o or .app path> [args...]"
+                "rosemary: --objc-debug requires the built-in Objective-C runtime; \
+                 set ROSEMARY_OBJC=builtin"
             );
             return ExitCode::FAILURE;
-        };
-        // The guest's *arguments* are bytes; its own path is not. Refused by
-        // name rather than converted, because every later use of it - the
-        // bundle layout, `_NSGetExecutablePath`, the fault reports - is text.
-        let Some(path) = path.to_str().map(str::to_owned) else {
-            eprintln!("rosemary: the program's path is not valid UTF-8");
-            return ExitCode::FAILURE;
-        };
-        if objc_debug {
-            if std::env::var("ROSEMARY_OBJC").as_deref() == Ok("native") {
-                eprintln!(
-                    "rosemary: --objc-debug requires the built-in Objective-C runtime; \
-                     set ROSEMARY_OBJC=builtin"
-                );
-                return ExitCode::FAILURE;
-            }
-            if rosemary::objc::host::backend() != rosemary::objc::host::Backend::Builtin {
-                eprintln!(
-                    "rosemary: --objc-debug requires the built-in Objective-C runtime; \
-                     set ROSEMARY_OBJC=builtin"
-                );
-                return ExitCode::FAILURE;
-            }
-            objc::debug::enable();
         }
-        // Before anything can ask: both say which program the guest is, and a
-        // guest that finds its own resources through either must get the same
-        // answer.
-        // The argument may be a host path or one the guest spells; everything
-        // below opens files, so it is resolved to this host's spelling first.
-        let path = program_path(&path);
-        let executable = match rosemary::bundle::executable(std::path::Path::new(&path)) {
-            Ok(executable) => executable,
+        if rosemary::objc::host::backend() != rosemary::objc::host::Backend::Builtin {
+            eprintln!(
+                "rosemary: --objc-debug requires the built-in Objective-C runtime; \
+                 set ROSEMARY_OBJC=builtin"
+            );
+            return ExitCode::FAILURE;
+        }
+        objc::debug::enable();
+    }
+    // Before anything can ask: both say which program the guest is, and a
+    // guest that finds its own resources through either must get the same
+    // answer.
+    // The argument may be a host path or one the guest spells; everything
+    // below opens files, so it is resolved to this host's spelling first.
+    let path = program_path(&path);
+    let executable = match rosemary::bundle::executable(std::path::Path::new(&path)) {
+        Ok(executable) => executable,
+        Err(e) => {
+            eprintln!("rosemary: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(path) = executable.to_str() else {
+        eprintln!("rosemary: the bundle executable's path is not valid UTF-8");
+        return ExitCode::FAILURE;
+    };
+    rosemary::shims::runtime::set_executable_path(std::path::Path::new(path));
+    rosemary::frameworks::set_main_bundle(std::path::Path::new(path));
+    // The same path as the guest spells it, for `argv[0]`.
+    let guest = guest_spelling(path);
+    // A Mac's `~/Library` subtree, which this host has not got and a guest
+    // does not create for itself.
+    #[cfg(not(target_os = "macos"))]
+    foundation::paths::ensure_standard_directories();
+    #[cfg(target_os = "macos")]
+    if !rosemary::frameworks::using_builtin()
+        && let Some(mirror) = rosemary::bundle::remirror(std::path::Path::new(path))
+    {
+        eprintln!("rosemary: re-executing from {}", mirror.display());
+        let e = rosemary::bundle::reexec(&mirror);
+        // Only reached if `execv` failed, in which case running anyway is
+        // strictly better than not running.
+        eprintln!("rosemary: could not re-execute from the bundle mirror: {e}");
+    }
+    run(path, &guest, args, policy, engine)
+}
+
+/// Load `path` without running it and report what was found.
+fn analyze(path: OsString, show_ir: bool, audit_calls: bool) -> ExitCode {
+    let Some(path) = path.to_str().map(str::to_owned) else {
+        eprintln!("rosemary: the program's path is not valid UTF-8");
+        return ExitCode::FAILURE;
+    };
+    // A bundle is analysed through the executable it would run.
+    let path = match std::path::Path::new(&path).is_dir() {
+        true => match rosemary::bundle::executable(std::path::Path::new(&path)) {
+            Ok(executable) => executable.to_string_lossy().into_owned(),
             Err(e) => {
                 eprintln!("rosemary: {path}: {e}");
                 return ExitCode::FAILURE;
             }
-        };
-        let Some(path) = executable.to_str() else {
-            eprintln!("rosemary: the bundle executable's path is not valid UTF-8");
-            return ExitCode::FAILURE;
-        };
-        rosemary::shims::runtime::set_executable_path(std::path::Path::new(path));
-        rosemary::frameworks::set_main_bundle(std::path::Path::new(path));
-        // The same path as the guest spells it, for `argv[0]`.
-        let guest = guest_spelling(path);
-        // A Mac's `~/Library` subtree, which this host has not got and a guest
-        // does not create for itself.
-        #[cfg(not(target_os = "macos"))]
-        foundation::paths::ensure_standard_directories();
-        #[cfg(target_os = "macos")]
-        if !rosemary::frameworks::using_builtin()
-            && let Some(mirror) = rosemary::bundle::remirror(std::path::Path::new(path))
-        {
-            eprintln!("rosemary: re-executing from {}", mirror.display());
-            let e = rosemary::bundle::reexec(&mirror);
-            // Only reached if `execv` failed, in which case running anyway is
-            // strictly better than not running.
-            eprintln!("rosemary: could not re-execute from the bundle mirror: {e}");
-        }
-        return run(path, &guest, args.collect(), policy, engine);
-    }
-    let Some(path) = first.to_str().map(str::to_owned) else {
-        eprintln!("rosemary: the program's path is not valid UTF-8");
-        return ExitCode::FAILURE;
+        },
+        false => path,
     };
-    let rest: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
-    let show_ir = rest.iter().any(|a| a == "--ir");
-    let run_audit = rest.iter().any(|a| a == "--audit");
 
     let program = match Program::load(&path, &[]) {
         Ok(p) => p,
@@ -434,7 +525,7 @@ fn main() -> ExitCode {
         None => println!("  no entry point (a dylib or bundle)"),
     }
 
-    if !run_audit {
+    if !audit_calls {
         return ExitCode::SUCCESS;
     }
 
