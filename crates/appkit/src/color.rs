@@ -236,16 +236,6 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
         .map(|_| unsafe { named(std::ptr::null_mut(), objc::sel::get(name)) })
 }
 
-/// `+controlAlternatingRowBackgroundColors`, an `NSArray` of **two** colours.
-///
-/// Not in [`NAMED`] because it is not a colour: a table view alternates its row
-/// background between the two, so the answer is the pair and a caller indexes it
-/// with the row number. The members are the even and odd row backgrounds, which
-/// match `+controlBackgroundColor` and `+alternatingContentBackgroundColor` - a
-/// caller that uses one table and the other constant has to get the same shade.
-///
-/// Kept rather than autoreleased, for [`singleton`]'s reason: this is a named
-/// constant a caller may put straight into a `static`.
 unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
     static COLORS: std::sync::Mutex<[usize; 2]> = std::sync::Mutex::new([0; 2]);
     let dark = crate::appearance::is_dark() as usize;
@@ -266,6 +256,19 @@ unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
     );
     *kept = array as usize;
     array as Id
+}
+
+/// `-highlightWithLevel:`
+unsafe extern "C" fn highlight_with_level(receiver: Id, _sel: Sel, level: CGFloat) -> Id {
+    // SAFETY: a colour of this crate's.
+    let (r, g, b, a) = unsafe { components(receiver) };
+    let t = if level.is_nan() {
+        0.0
+    } else {
+        level.clamp(0.0, 1.0)
+    };
+    let mix = |c: f64| c + (1.0 - c) * t;
+    make(mix(r), mix(g), mix(b), a)
 }
 
 unsafe extern "C" fn color_with_rgba(
@@ -514,6 +517,7 @@ pub(crate) fn install() {
     }
     class_methods!(class, {
         "controlAlternatingRowBackgroundColors" => alternating_row_colors, c"@16@0:8";
+        "alternatingContentBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
         "colorWithDeviceRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
         "colorWithSRGBRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
@@ -523,6 +527,7 @@ pub(crate) fn install() {
         "colorWithWhite:alpha:" => color_with_white, c"@32@0:8d16d24";
     });
     methods!(class, {
+        "highlightWithLevel:" => highlight_with_level, c"@24@0:8d16";
         "setFill" => set_fill, c"v16@0:8";
         "setStroke" => set_stroke, c"v16@0:8";
         "set" => set_both, c"v16@0:8";
@@ -586,6 +591,54 @@ mod tests {
         // SAFETY: still live, because nothing autoreleased it.
         assert_eq!(unsafe { components(first) }, before);
         assert_eq!(before, (0.0, 0.0, 0.0, 1.0));
+    }
+
+    /// `+alternatingContentBackgroundColors` is the same kept pair as the older
+    /// `+controlAlternatingRowBackgroundColors`, so a caller using either gets
+    /// matching row shades.
+    #[test]
+    fn alternating_content_colours_match_the_row_colours() {
+        crate::bootstrap();
+        let class = objc::class::ptr(objc::class::lookup(c"NSColor").expect("NSColor")) as Id;
+        // SAFETY: both are `id (Class, SEL)` messages to a class this crate
+        // installed.
+        let (old, new) = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            (
+                f(
+                    class,
+                    objc::sel::get("controlAlternatingRowBackgroundColors"),
+                ),
+                f(class, objc::sel::get("alternatingContentBackgroundColors")),
+            )
+        };
+        assert!(!new.is_null());
+        assert_eq!(old, new);
+    }
+
+    /// A highlight moves each component toward white by the level and keeps alpha.
+    #[test]
+    fn highlight_with_level_blends_toward_white() {
+        crate::bootstrap();
+        let color = make(0.2, 0.4, 0.0, 0.5);
+        // SAFETY: `-highlightWithLevel:` is `id (id, SEL, double)`.
+        let f: unsafe extern "C" fn(Id, Sel, f64) -> Id =
+            unsafe { std::mem::transmute(objc::msg::entry()) };
+        let sel = objc::sel::get("highlightWithLevel:");
+        // SAFETY: colours this crate just made.
+        let (r, g, b, a) = unsafe { components(f(color, sel, 0.5)) };
+        assert!((r - 0.6).abs() < 1e-9 && (g - 0.7).abs() < 1e-9 && (b - 0.5).abs() < 1e-9);
+        assert_eq!(a, 0.5);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { components(f(color, sel, 7.0)) },
+            (1.0, 1.0, 1.0, 0.5)
+        );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { components(f(color, sel, 0.0)) },
+            (0.2, 0.4, 0.0, 0.5)
+        );
     }
 
     /// And something that is not a colour reads as opaque black rather than as
