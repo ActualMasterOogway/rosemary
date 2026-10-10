@@ -683,27 +683,31 @@ static MAIN: Mutex<Option<Arc<RunLoop>>> = Mutex::new(None);
 
 /// This thread's run loop, made if it has none.
 ///
-/// The first caller's becomes the main one, which is right because the first
-/// caller is the thread the program started on.
+/// The main thread's is the one [`main`] answers, whoever asked for it first.
+/// "First caller" is not the main thread: Unity's joystick thread asks for its
+/// own loop before the main thread does, and main-loop timers then fired there.
 pub fn current() -> Arc<RunLoop> {
     CURRENT.with(|cell| {
-        let loop_ = cell.get_or_init(|| {
-            let loop_ = Arc::new(RunLoop::new());
-            note(Arc::as_ptr(&loop_));
-            loop_
-        });
-        let mut main = MAIN.lock().unwrap_or_else(|e| e.into_inner());
-        if main.is_none() {
-            *main = Some(Arc::clone(loop_));
-        }
-        Arc::clone(loop_)
+        Arc::clone(cell.get_or_init(|| {
+            // SAFETY: no arguments; answers from thread ids.
+            match unsafe { darwin::pthread::main_np() } != 0 {
+                true => main(),
+                false => fresh(),
+            }
+        }))
     })
 }
 
-/// The main thread's run loop, or this thread's if nothing has claimed it.
+/// The main thread's run loop, made if nothing has asked for it yet.
 pub fn main() -> Arc<RunLoop> {
-    let existing = MAIN.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    existing.unwrap_or_else(current)
+    let mut main = MAIN.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(main.get_or_insert_with(fresh))
+}
+
+fn fresh() -> Arc<RunLoop> {
+    let loop_ = Arc::new(RunLoop::new());
+    note(Arc::as_ptr(&loop_));
+    loop_
 }
 
 #[cfg(test)]
@@ -731,6 +735,18 @@ mod tests {
                 timer as TimerCallback,
             )
         }};
+    }
+
+    /// Unity's joystick thread asks for its own loop before the main thread
+    /// asks for anything, and main-loop timers then fired on it.
+    #[test]
+    fn another_threads_loop_is_never_the_main_one() {
+        // Neither the harness's thread nor a spawned one is the main thread.
+        let theirs = std::thread::spawn(current).join().unwrap();
+        let main = main();
+        assert!(!Arc::ptr_eq(&main, &theirs));
+        assert!(!Arc::ptr_eq(&main, &current()));
+        assert!(Arc::ptr_eq(&main, &super::main()));
     }
 
     #[test]

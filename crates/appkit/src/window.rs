@@ -2362,6 +2362,8 @@ pub(crate) fn install() {
         "setHasShadow:" => ignored_flag, c"v20@0:8c16";
         // No shadow is drawn, so there is none to recompute.
         "invalidateShadow" => ignored, c"v16@0:8";
+        // A no-op on every macOS since 10.10; Unity 5 still sends it.
+        "useOptimizedDrawing:" => ignored_flag, c"v20@0:8c16";
         "setDocumentEdited:" => ignored_flag, c"v20@0:8c16";
         "setWorksWhenModal:" => ignored_flag, c"v20@0:8c16";
         "setResizeIncrements:" => ignored_size, c"v32@0:8{CGSize=dd}16";

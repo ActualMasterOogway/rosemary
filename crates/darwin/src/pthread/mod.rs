@@ -441,8 +441,14 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
 /// # Safety
 ///
 /// `thread` is a `pthread_t` this process issued.
-#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
+    if let Some(stack) = moved_main_stack(thread) {
+        return stack.end;
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: a handle this process issued.
+    return unsafe { libc::pthread_get_stackaddr_np(thread_of(thread)) } as u64;
+    #[cfg(not(target_os = "macos"))]
     match unsafe { stack_of(thread) } {
         Some((low, size)) => low.wrapping_add(size as u64),
         None => 0,
@@ -454,9 +460,38 @@ pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
 /// # Safety
 ///
 /// As [`get_stackaddr_np`].
-#[cfg(not(target_os = "macos"))]
 pub unsafe extern "C" fn get_stacksize_np(thread: u64) -> u64 {
+    if let Some(stack) = moved_main_stack(thread) {
+        return stack.end - stack.start;
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: a handle this process issued.
+    return unsafe { libc::pthread_get_stacksize_np(thread_of(thread)) } as u64;
+    #[cfg(not(target_os = "macos"))]
     unsafe { stack_of(thread) }.map_or(0, |(_, size)| size as u64)
+}
+
+/// The main thread's `pthread_t` and the stack the runtime moved it onto.
+static MAIN_STACK: std::sync::OnceLock<(u64, core::ops::Range<u64>)> = std::sync::OnceLock::new();
+
+/// Record that the calling thread - the process's main one - is about to run on
+/// `stack` instead of the stack the host started it on.
+///
+/// An `LC_UNIXTHREAD` program is entered on a stack the runtime laid its
+/// arguments out on, and the host's attributes still describe the old one. A
+/// conservative collector (Mono's Boehm) scans from its stack pointer up to
+/// what `pthread_get_stackaddr_np` says is the top, so the old answer walks it
+/// off the end of the new stack.
+pub fn set_main_stack(stack: core::ops::Range<u64>) {
+    // SAFETY: always safe to call.
+    let me = thread_bits(unsafe { libc::pthread_self() });
+    let _ = MAIN_STACK.set((me, stack));
+}
+
+/// The moved stack, when `thread` is the main thread and it was moved.
+fn moved_main_stack(thread: u64) -> Option<core::ops::Range<u64>> {
+    let (main, stack) = MAIN_STACK.get()?;
+    (thread_bits(thread_of(thread)) == *main).then(|| stack.clone())
 }
 
 /// The `(lowest address, size)` of `thread`'s stack, out of the host's
@@ -1099,14 +1134,8 @@ exports::exports! {
         "pthread_create" => create,
         "pthread_detach" => detach,
         "pthread_kill" => kill,
-        #[cfg(not(target_os = "macos"))]
         "pthread_get_stackaddr_np" => get_stackaddr_np,
-        #[cfg(target_os = "macos")]
-        "pthread_get_stackaddr_np" => libc::pthread_get_stackaddr_np,
-        #[cfg(not(target_os = "macos"))]
         "pthread_get_stacksize_np" => get_stacksize_np,
-        #[cfg(target_os = "macos")]
-        "pthread_get_stacksize_np" => libc::pthread_get_stacksize_np,
         "pthread_setname_np" => setname_np,
         "pthread_getname_np" => getname_np,
         "pthread_main_np" => main_np,

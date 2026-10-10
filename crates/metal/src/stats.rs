@@ -32,6 +32,7 @@ counters!(
     FenceWakeToRetiredMicros = "fence_wake_to_retired_micros",
     DrawableVended = "drawable_vended",
     DrawablePressure = "drawable_pressure",
+    DrawableReclaimed = "drawable_reclaimed",
     InFlightContexts = "in_flight_contexts_peak",
     ContextPressure = "context_pressure",
     InFlightTransientPeakBytes = "in_flight_transient_peak_bytes",

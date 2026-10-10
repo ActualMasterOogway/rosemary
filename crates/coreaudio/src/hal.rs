@@ -779,6 +779,150 @@ pub unsafe extern "C" fn AudioObjectRemovePropertyListener(
     }
 }
 
+fn hardware_address(selector: u32) -> Address {
+    Address {
+        selector,
+        scope: scope::GLOBAL,
+        element: 0,
+    }
+}
+
+fn device_address(channel: u32, is_input: u8, selector: u32) -> Address {
+    Address {
+        selector,
+        scope: match is_input {
+            0 => scope::OUTPUT,
+            _ => scope::INPUT,
+        },
+        element: channel,
+    }
+}
+
+/// The legacy `GetPropertyInfo` shape: a size and a writable flag, either null.
+unsafe fn property_info(
+    object: ObjectId,
+    address: &Address,
+    size: *mut u32,
+    writable: *mut u8,
+) -> i32 {
+    let mut answer = 0u32;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(object, address, 0, std::ptr::null(), &mut answer)
+    };
+    if status != SUCCESS {
+        return status;
+    }
+    if !size.is_null() {
+        unsafe { *size = answer };
+    }
+    if !writable.is_null() {
+        unsafe { *writable = u8::from(is_settable(object, address.selector)) };
+    }
+    SUCCESS
+}
+
+/// `OSStatus AudioHardwareGetPropertyInfo(AudioHardwarePropertyID, UInt32 *,
+/// Boolean *)`
+///
+/// # Safety
+///
+/// `size` and `writable` must each be null or writable.
+pub unsafe extern "C" fn AudioHardwareGetPropertyInfo(
+    selector: u32,
+    size: *mut u32,
+    writable: *mut u8,
+) -> i32 {
+    unsafe { property_info(SYSTEM_OBJECT, &hardware_address(selector), size, writable) }
+}
+
+/// `OSStatus AudioHardwareGetProperty(AudioHardwarePropertyID, UInt32 *, void *)`
+///
+/// # Safety
+///
+/// As [`AudioObjectGetPropertyData`].
+pub unsafe extern "C" fn AudioHardwareGetProperty(
+    selector: u32,
+    size: *mut u32,
+    data: *mut c_void,
+) -> i32 {
+    let address = hardware_address(selector);
+    unsafe { AudioObjectGetPropertyData(SYSTEM_OBJECT, &address, 0, std::ptr::null(), size, data) }
+}
+
+/// `OSStatus AudioHardwareAddPropertyListener(AudioHardwarePropertyID,
+/// AudioHardwarePropertyListenerProc, void *)`
+///
+/// Accepted and not recorded: no listener is ever called (see [`Listener`]),
+/// and this proc's signature is not the one [`LISTENERS`] holds.
+pub unsafe extern "C" fn AudioHardwareAddPropertyListener(
+    _selector: u32,
+    listener: *const c_void,
+    _client_data: *mut c_void,
+) -> i32 {
+    match listener.is_null() {
+        true => crate::status::PARAM_ERROR,
+        false => SUCCESS,
+    }
+}
+
+/// `OSStatus AudioDeviceGetPropertyInfo(AudioDeviceID, UInt32 inChannel,
+/// Boolean isInput, AudioDevicePropertyID, UInt32 *, Boolean *)`
+///
+/// # Safety
+///
+/// As [`AudioHardwareGetPropertyInfo`].
+pub unsafe extern "C" fn AudioDeviceGetPropertyInfo(
+    object: ObjectId,
+    channel: u32,
+    is_input: u8,
+    selector: u32,
+    size: *mut u32,
+    writable: *mut u8,
+) -> i32 {
+    let address = device_address(channel, is_input, selector);
+    unsafe { property_info(object, &address, size, writable) }
+}
+
+/// `OSStatus AudioDeviceGetProperty(AudioDeviceID, UInt32, Boolean,
+/// AudioDevicePropertyID, UInt32 *, void *)`
+///
+/// # Safety
+///
+/// As [`AudioObjectGetPropertyData`].
+pub unsafe extern "C" fn AudioDeviceGetProperty(
+    object: ObjectId,
+    channel: u32,
+    is_input: u8,
+    selector: u32,
+    size: *mut u32,
+    data: *mut c_void,
+) -> i32 {
+    let address = device_address(channel, is_input, selector);
+    unsafe { AudioObjectGetPropertyData(object, &address, 0, std::ptr::null(), size, data) }
+}
+
+/// `OSStatus AudioDeviceSetProperty(AudioDeviceID, const AudioTimeStamp *,
+/// UInt32, Boolean, AudioDevicePropertyID, UInt32, const void *)`
+///
+/// The time stamp asks for the change to land at a given sample time; every
+/// change here is immediate, which is what a null one means.
+///
+/// # Safety
+///
+/// As [`AudioObjectSetPropertyData`].
+pub unsafe extern "C" fn AudioDeviceSetProperty(
+    object: ObjectId,
+    _when: *const c_void,
+    channel: u32,
+    is_input: u8,
+    selector: u32,
+    size: u32,
+    data: *const c_void,
+) -> i32 {
+    let address = device_address(channel, is_input, selector);
+    unsafe { AudioObjectSetPropertyData(object, &address, 0, std::ptr::null(), size, data) }
+}
+
 /// `OSStatus AudioHardwareUnload(void)`
 ///
 /// Nothing is loaded that a program can unload: the device belongs to SDL and
@@ -1117,6 +1261,50 @@ mod tests {
         .expect("a default output device");
         assert_eq!(id, as_bytes(&OUTPUT_DEVICE));
         assert!(ask(OUTPUT_DEVICE, selector::NOMINAL_SAMPLE_RATE, scope::GLOBAL).is_some());
+    }
+
+    /// FMOD in Unity 5 asks through the pre-10.5 spellings, and an unbound one
+    /// is its first call jumping to address zero.
+    #[test]
+    fn the_legacy_spellings_reach_the_same_properties() {
+        let mut device: ObjectId = 0;
+        let mut size = size_of::<ObjectId>() as u32;
+        // SAFETY: a writable size and a buffer of that size.
+        let status = unsafe {
+            AudioHardwareGetProperty(
+                selector::DEFAULT_OUTPUT_DEVICE,
+                &mut size,
+                (&raw mut device).cast(),
+            )
+        };
+        assert_eq!(status, SUCCESS);
+        assert_eq!(device, OUTPUT_DEVICE);
+
+        let (mut size, mut writable) = (0u32, 0u8);
+        // SAFETY: two writable locals.
+        let status = unsafe {
+            AudioDeviceGetPropertyInfo(
+                OUTPUT_DEVICE,
+                0,
+                0,
+                selector::BUFFER_FRAME_SIZE,
+                &mut size,
+                &mut writable,
+            )
+        };
+        assert_eq!(status, SUCCESS);
+        assert_eq!(size as usize, size_of::<u32>());
+        assert_eq!(writable, 1);
+        for name in [
+            "AudioHardwareGetPropertyInfo",
+            "AudioHardwareGetProperty",
+            "AudioHardwareAddPropertyListener",
+            "AudioDeviceGetPropertyInfo",
+            "AudioDeviceGetProperty",
+            "AudioDeviceSetProperty",
+        ] {
+            assert!(crate::names().contains(&name), "{name} must be published");
+        }
     }
 
     /// An unknown property is refused *and* reports a size of zero, so a caller

@@ -259,6 +259,21 @@ fn present_impl(
     presented
 }
 
+/// Hand back every drawable whose copy into a swapchain image has finished.
+///
+/// A frame slot otherwise keeps its source until the slot comes round again,
+/// several presentations later. Core Animation has a drawable back once it is
+/// on screen, and a guest that holds one drawable of three - Unity keeps the
+/// one it fetched on resize - runs its ring dry waiting for a presentation
+/// that needs a drawable to happen. Must not be called with the drawable
+/// cache locked: finishing a source takes that lock.
+pub(crate) fn retire_copied() {
+    let mut guard = SWAPCHAINS.lock().expect("window swapchains");
+    for swapchain in guard.iter_mut().flat_map(|all| all.values_mut()) {
+        swapchain.retire_copied();
+    }
+}
+
 fn finish_source(source: Option<usize>) {
     if let Some(source) = source {
         crate::present::presentation_complete(source);
@@ -597,6 +612,20 @@ impl Swapchain {
             corners.forget_output();
         }
         Ok(())
+    }
+
+    /// Finish the source of every submitted frame whose fence has signalled.
+    fn retire_copied(&mut self) {
+        for frame in &mut self.frames {
+            if frame.source.is_none() || !frame.submitted {
+                continue;
+            }
+            // SAFETY: a fence of this device's, attached to this frame's
+            // last submission.
+            if unsafe { self.gpu.device.get_fence_status(frame.done) }.unwrap_or(false) {
+                finish_source(frame.source.take());
+            }
+        }
     }
 
     /// Wait for every frame in flight and rebuild at `extent`.

@@ -351,6 +351,7 @@ impl Execution for Native {
             // return, so this guard deliberately lives until `exit` ends the
             // process.
             let _darwin = darwin::tls::DarwinThread::enter();
+            darwin::pthread::set_main_stack(self.stack.range());
             // SAFETY: the loader mapped `entry` from a host-architecture image,
             // and `GuestStack` owns the aligned, writable frame at `sp`.
             unsafe { enter_unix_thread(entry, sp) }

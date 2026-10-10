@@ -1275,6 +1275,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `OSStatus FSGetCatalogInfo(const FSRef *, FSCatalogInfoBitmap,
     // FSCatalogInfo *, HFSUniStr255 *, FSSpec *, FSRef *)`.
     sig!("FSGetCatalogInfo", I32, P, U32, P, P, P, P),
+    sig!("FSCreateFileUnicode", I32, P, U64, P, U32, P, P, P),
     sig!("FSCompareFSRefs", I32, P, P),
     sig!("FSExchangeObjects", I32, P, P),
     sig!("FSIsAliasFile", I32, P, P, P),
@@ -1285,6 +1286,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("FSPathMoveObjectToTrashSync", I32, P, P, U32),
     sig!("FSFileOperationCreate", P, P),
     sig!("FSFileOperationScheduleWithRunLoop", V, P, P, P),
+    sig!("CSCopyMachineName", P),
     sig!("GetCurrentProcess", I32, P),
     sig!("GetFrontProcess", I32, P),
     sig!("GetProcessBundleLocation", I32, P, P),
@@ -3362,6 +3364,24 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioDeviceStart", I32, U32, P),
     sig!("AudioDeviceStop", I32, U32, P),
     sig!("AudioHardwareUnload", I32),
+    // The pre-10.5 HAL spellings. The listener is never called, so it is not a
+    // callback argument.
+    sig!("AudioHardwareGetPropertyInfo", I32, U32, P, P),
+    sig!("AudioHardwareGetProperty", I32, U32, P, P),
+    sig!("AudioHardwareAddPropertyListener", I32, U32, P, P),
+    sig!("AudioDeviceGetPropertyInfo", I32, U32, U32, BOOL, U32, P, P),
+    sig!("AudioDeviceGetProperty", I32, U32, U32, BOOL, U32, P, P),
+    sig!(
+        "AudioDeviceSetProperty",
+        I32,
+        U32,
+        P,
+        U32,
+        BOOL,
+        U32,
+        U32,
+        P
+    ),
     sig!("AudioObjectHasProperty", BOOL, U32, P),
     sig!("AudioObjectIsPropertySettable", I32, U32, P, P),
     sig!("AudioObjectSetPropertyData", I32, U32, P, U32, P, U32, P),

@@ -548,6 +548,7 @@ dependencies = [
  "darwin",
  "exports",
  "foundation",
+ "libc",
  "prefix",
 ]
 

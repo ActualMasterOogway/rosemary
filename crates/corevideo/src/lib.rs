@@ -190,6 +190,44 @@ pub unsafe extern "C" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(
     })
 }
 
+/// `CVTime`: sixteen bytes, so both ABIs return it in two integer registers.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Time {
+    pub time_value: i64,
+    pub time_scale: i32,
+    pub flags: i32,
+}
+
+/// `kCVTimeIsIndefinite`, for a handle that names no link.
+const TIME_IS_INDEFINITE: i32 = 1;
+
+/// The scale the nominal period is reported in, nanoseconds.
+const NOMINAL_SCALE: i32 = 1_000_000_000;
+
+/// `CVTime CVDisplayLinkGetNominalOutputVideoRefreshPeriod(CVDisplayLinkRef)`
+///
+/// Unity 5 derives its frame rate cap from this; zero reads as "invalid".
+pub unsafe extern "C" fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(
+    handle: *mut c_void,
+) -> Time {
+    match link_for(handle) {
+        Some(link) => {
+            let period = link.lock().unwrap_or_else(|e| e.into_inner()).period;
+            Time {
+                time_value: (period * f64::from(NOMINAL_SCALE)).round() as i64,
+                time_scale: NOMINAL_SCALE,
+                flags: 0,
+            }
+        }
+        None => Time {
+            time_value: 0,
+            time_scale: 0,
+            flags: TIME_IS_INDEFINITE,
+        },
+    }
+}
+
 /// `CVDisplayLinkStart`: start the thread that calls the guest back.
 pub unsafe extern "C" fn CVDisplayLinkStart(handle: *mut c_void) -> i32 {
     let Some(link) = link_for(handle) else {
@@ -314,6 +352,7 @@ exports::exports! {
         "CVDisplayLinkSetCurrentCGDisplay" => CVDisplayLinkSetCurrentCGDisplay,
         "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext" => CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext,
         "CVDisplayLinkGetActualOutputVideoRefreshPeriod" => CVDisplayLinkGetActualOutputVideoRefreshPeriod,
+        "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => CVDisplayLinkGetNominalOutputVideoRefreshPeriod,
         "CVDisplayLinkStart" => CVDisplayLinkStart,
         "CVDisplayLinkStop" => CVDisplayLinkStop,
         "CVDisplayLinkRetain" => CVDisplayLinkRetain,
@@ -400,6 +439,27 @@ mod tests {
             settled,
             "the thread kept firing"
         );
+    }
+
+    /// Unity 5 caps its frame rate from the nominal period, and reads zero as
+    /// an invalid rate.
+    #[test]
+    fn the_nominal_period_is_the_actual_one_as_a_time() {
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: a writable slot, then the handle it was given.
+        unsafe {
+            assert_eq!(CVDisplayLinkCreateWithCGDisplay(0, &mut handle), SUCCESS);
+            let actual = CVDisplayLinkGetActualOutputVideoRefreshPeriod(handle);
+            let nominal = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(handle);
+            assert!(nominal.time_value > 0 && nominal.time_scale > 0);
+            let seconds = nominal.time_value as f64 / f64::from(nominal.time_scale);
+            assert!((seconds - actual).abs() < 1e-6);
+            CVDisplayLinkRelease(handle);
+            assert_eq!(
+                CVDisplayLinkGetNominalOutputVideoRefreshPeriod(0x1 as *mut c_void).flags,
+                TIME_IS_INDEFINITE
+            );
+        }
     }
 
     /// A handle nothing made is refused rather than dereferenced.

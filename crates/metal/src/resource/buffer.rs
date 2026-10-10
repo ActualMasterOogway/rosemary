@@ -1,14 +1,7 @@
-use std::sync::atomic::Ordering;
-
 use super::*;
 
-/// `ROSEMARY_TRACE_BUFFERS=1`: every `MTLBuffer` made and destroyed, with its
+/// Every `MTLBuffer` made and destroyed, with its
 /// length, its `MTLResourceOptions` and how many are live.
-///
-/// The aggregate counters say a run is allocating gigabytes a second; only the
-/// sizes say what it is allocating, and a game which asks for one size five
-/// hundred times over is a different problem from one which asks for five
-/// hundred sizes once each.
 #[inline(always)]
 pub(super) fn tracing_buffers() -> bool {
     #[dynamic]

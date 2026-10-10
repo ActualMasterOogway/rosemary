@@ -13,6 +13,10 @@ const PARAM_ERR: OSStatus = -50;
 const FNF_ERR: OSStatus = -43;
 /// `dirNFErr`: the directory is not there, and could not be made.
 const DIR_NF_ERR: OSStatus = -120;
+/// `dupFNErr`: something by that name is already there.
+const DUP_FN_ERR: OSStatus = -48;
+/// `ioErr`: the host refused for a reason the File Manager has no word for.
+const IO_ERR: OSStatus = -36;
 /// `errFSRefsDifferent`: the two references name different objects.
 const REFS_DIFFERENT: OSStatus = -1420;
 
@@ -365,8 +369,62 @@ pub unsafe extern "C" fn FSResolveAliasFile(
     NO_ERR
 }
 
+/// `OSErr FSCreateFileUnicode(const FSRef *parentRef, UniCharCount nameLength,
+/// const UniChar *name, FSCatalogInfoBitmap whichInfo, const FSCatalogInfo
+/// *catalogInfo, FSRef *newRef, FSSpecPtr newSpec)`
+///
+/// Creates an empty file; fails if one exists. The catalog info a caller asks
+/// to set (Finder info, dates, permissions) is not applied - Unity passes none.
+/// `newSpec` is left alone: an `FSSpec` has no 64-bit meaning.
+///
+/// # Safety
+///
+/// `parent` is a whole `FSRef`, `name` holds `length` UTF-16 units, and
+/// `new_ref` is null or storage for a whole `FSRef`. `new_ref` may be `parent`.
+pub unsafe extern "C" fn FSCreateFileUnicode(
+    parent: *const c_void,
+    length: u64,
+    name: *const u16,
+    _which_info: u32,
+    _catalog_info: *const c_void,
+    new_ref: *mut c_void,
+    _new_spec: *mut c_void,
+) -> OSStatus {
+    if name.is_null() || length == 0 {
+        return PARAM_ERR;
+    }
+    let Some(directory) = (unsafe { load(parent) }) else {
+        return PARAM_ERR;
+    };
+    // SAFETY: the caller states `name` holds `length` units.
+    let units = unsafe { std::slice::from_raw_parts(name, length as usize) };
+    let Ok(name) = String::from_utf16(units) else {
+        return PARAM_ERR;
+    };
+    if name.contains('/') {
+        return PARAM_ERR;
+    }
+    let path = directory.join(name);
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    match created {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return DUP_FN_ERR,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DIR_NF_ERR,
+        Err(_) => return IO_ERR,
+    }
+    if !new_ref.is_null() {
+        // SAFETY: the caller states it is a whole `FSRef`.
+        unsafe { store(new_ref, path) };
+    }
+    NO_ERR
+}
+
 exports::exports! {
     functions {
+        "FSCreateFileUnicode" => FSCreateFileUnicode,
         "FSFindFolder" => FSFindFolder,
         "FSPathMakeRef" => FSPathMakeRef,
         "FSRefMakePath" => FSRefMakePath,
@@ -422,6 +480,43 @@ mod tests {
         }
         let end = out.iter().position(|b| *b == 0).unwrap();
         assert_eq!(&out[..end], dir.to_str().unwrap().as_bytes());
+    }
+
+    /// Unity creates its preferences file this way; a second creation is
+    /// `dupFNErr`, not a truncation.
+    #[test]
+    fn a_created_file_exists_and_cannot_be_created_twice() {
+        let dir = std::env::temp_dir().join(format!("rosemary-fscreate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut parent = [0_u8; FS_REF_BYTES];
+        // SAFETY: storage for a whole reference.
+        unsafe { store(parent.as_mut_ptr().cast(), dir.clone()) };
+        let name: Vec<u16> = "made.plist".encode_utf16().collect();
+        let create = |out: *mut c_void| {
+            // SAFETY: a reference made above, a name of the length given, and
+            // null or storage for a whole reference.
+            unsafe {
+                FSCreateFileUnicode(
+                    parent.as_ptr().cast(),
+                    name.len() as u64,
+                    name.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    out,
+                    std::ptr::null_mut(),
+                )
+            }
+        };
+        let mut made = [0_u8; FS_REF_BYTES];
+        assert_eq!(create(made.as_mut_ptr().cast()), NO_ERR);
+        assert!(dir.join("made.plist").is_file());
+        // SAFETY: the reference just filled in.
+        assert_eq!(
+            unsafe { load(made.as_ptr().cast()) },
+            Some(dir.join("made.plist"))
+        );
+        assert_eq!(create(std::ptr::null_mut()), DUP_FN_ERR);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Storage the guest merely zeroed is not a reference, and is refused

@@ -195,8 +195,24 @@ fn described(status: OSStatus) -> *const c_char {
     })
 }
 
+/// `CFStringRef CSCopyMachineName(void)` - the computer's name, owned by the
+/// caller. The host name is the nearest thing a non-Mac host has.
+pub unsafe extern "C" fn CSCopyMachineName() -> *mut c_void {
+    let mut buffer = [0u8; 256];
+    // SAFETY: a buffer described by its own length, less one so the result stays
+    // NUL-terminated.
+    let name = match unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len() - 1) } {
+        0 => CStr::from_bytes_until_nul(&buffer)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    foundation::string::from_str(&name).cast()
+}
+
 exports::exports! {
     functions {
+        "CSCopyMachineName" => CSCopyMachineName,
         "GetCurrentProcess" => GetCurrentProcess,
         "GetFrontProcess" => GetFrontProcess,
         "SameProcess" => SameProcess,

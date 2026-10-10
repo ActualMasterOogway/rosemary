@@ -129,6 +129,8 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         ));
         return std::ptr::null_mut();
     }
+    // Before the cache is locked, which finishing a copied source needs.
+    crate::swapchain::retire_copied();
     let mut cache = CACHE.0.lock().expect("drawable cache");
     retire_stale(&mut cache);
     for entry in cache
@@ -172,12 +174,17 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         }
     };
 
+    let matches = |entry: &Cached| {
+        !entry.stale
+            && entry.layer == receiver as usize
+            && (entry.width, entry.height, entry.pixel_format) == (width, height, pixel_format)
+    };
+    debug_assert!(matches(&cache[at]));
     loop {
-        let Some(entry) = cache.get_mut(at).filter(|entry| {
-            !entry.stale
-                && entry.layer == receiver as usize
-                && (entry.width, entry.height, entry.pixel_format) == (width, height, pixel_format)
-        }) else {
+        reclaim_dropped(&mut cache);
+        // Looked up again each time round: the lock is given up below, and
+        // the ring may have been retired meanwhile.
+        let Some(entry) = cache.iter_mut().find(|entry| matches(entry)) else {
             return std::ptr::null_mut();
         };
         if let Some(slot) = entry
@@ -191,7 +198,39 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
             return objc::arc::autorelease(objc::arc::retain(slot.drawable as Id));
         }
         crate::stats::count(crate::stats::Counter::DrawablePressure);
-        cache = CACHE.1.wait(cache).expect("drawable cache");
+        // A presented drawable whose copy is done comes back through the
+        // swapchain, which locks the cache to return it.
+        drop(cache);
+        crate::swapchain::retire_copied();
+        cache = CACHE.0.lock().expect("drawable cache");
+        // Timed, because neither a finished copy nor a guest dropping a
+        // drawable it never presented signals the condition variable.
+        cache = CACHE
+            .1
+            .wait_timeout(cache, RECLAIM_POLL)
+            .expect("drawable cache")
+            .0;
+    }
+}
+
+/// How often a `nextDrawable` waiting on a full ring looks for a drawable the
+/// guest has let go of.
+const RECLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Return to its ring every vended drawable the guest no longer holds.
+///
+/// Core Animation takes back a drawable released without being presented, and
+/// Unity relies on it: its main thread fetches drawables for frames it then
+/// abandons. Holding those as vended starves the ring, and the frame that
+/// would retire the last presented one can never get a drawable to draw into.
+/// The cache's own reference is the one left when nobody else holds it; an
+/// autoreleased one still counts as held until its pool drains.
+fn reclaim_dropped(cache: &mut [Cached]) {
+    for slot in cache.iter_mut().flat_map(|entry| entry.slots.iter_mut()) {
+        if slot.state == SlotState::Vended && objc::arc::retain_count(slot.drawable as Id) <= 1 {
+            slot.state = SlotState::Available;
+            crate::stats::count(crate::stats::Counter::DrawableReclaimed);
+        }
     }
 }
 
@@ -252,6 +291,7 @@ fn release_slots(slots: &mut Vec<CachedSlot>) {
 }
 
 fn retire_stale(cache: &mut Vec<Cached>) {
+    reclaim_dropped(cache);
     let mut index = 0;
     while index < cache.len() {
         if cache[index].stale
