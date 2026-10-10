@@ -599,25 +599,139 @@ pub unsafe extern "C" fn objc_autoreleasePoolPop(token: *mut c_void) {
     crate::arc::pool_pop(token);
 }
 
-/// The return-value optimisations, none of which this runtime elides.
+/// The return-value handoff: a callee that ends in `objc_autoreleaseReturnValue`
+/// and a caller that begins with `objc_retainAutoreleasedReturnValue` skip the
+/// autorelease and the retain between them.
 ///
-/// Eliding them needs the caller and the callee to agree through a marker
-/// instruction after the call site, which is a bargain between two compilations
-/// this runtime is not part of. Doing the plain thing is always correct.
-pub unsafe extern "C" fn objc_autoreleaseReturnValue(object: Id) -> Id {
-    crate::arc::autorelease(object)
+/// Not an optimisation a guest can do without. Code that returns objects on a
+/// thread with no autorelease pool - Unity's render thread does, every frame -
+/// is correct on a Mac only because the handoff keeps those objects out of the
+/// pool; without it they pile up in a pool that is never drained.
+///
+/// The callee recognises a caller that will claim the object from the
+/// instruction at its return address, as Apple's runtime does, and leaves the
+/// object for it in a thread-local slot. The slot names the object, so a claim
+/// of anything else takes the ordinary path.
+mod handoff {
+    use std::cell::Cell;
+
+    use crate::object::Id;
+
+    thread_local! {
+        static PENDING: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Whether the caller returned to at `ra` claims the object at once.
+    ///
+    /// # Safety
+    ///
+    /// `ra` must be a return address: code that is mapped and readable.
+    unsafe fn caller_claims(ra: usize) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: every address read is code the caller is about to run, or a
+        // pointer slot that code reads.
+        unsafe {
+            let read32 = |at: usize| (at as *const i32).read_unaligned() as isize;
+            let code = ra as *const u8;
+            // mov rdi, rax
+            if std::slice::from_raw_parts(code, 3) != [0x48, 0x89, 0xc7] {
+                return false;
+            }
+            let slot = match *code.add(3) {
+                // call stub; the stub is `jmp [rip + slot]`.
+                0xe8 => {
+                    let stub = (ra + 8).wrapping_add_signed(read32(ra + 4));
+                    if (stub as *const [u8; 2]).read_unaligned() != [0xff, 0x25] {
+                        return false;
+                    }
+                    (stub + 6).wrapping_add_signed(read32(stub + 2))
+                }
+                // call [rip + slot]
+                0xff if *code.add(4) == 0x15 => (ra + 9).wrapping_add_signed(read32(ra + 5)),
+                _ => return false,
+            };
+            let target = (slot as *const usize).read_unaligned();
+            target == super::objc_retainAutoreleasedReturnValue as *const () as usize
+                || target == super::objc_unsafeClaimAutoreleasedReturnValue as *const () as usize
+        }
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: the instruction the caller returns to.
+        unsafe {
+            // mov x29, x29: the marker a claiming caller puts after its call.
+            (ra as *const u32).read_unaligned() == 0xaa1d03fd
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let _ = ra;
+            false
+        }
+    }
+
+    /// Hand `object`, which carries a reference the caller is owed, to a
+    /// claiming caller, or autorelease it.
+    pub(super) unsafe extern "C" fn give(object: Id, ra: usize) -> Id {
+        // SAFETY: `ra` came from the trampoline, which read the return address.
+        if !object.is_null() && unsafe { caller_claims(ra) } {
+            let stale = PENDING.replace(object as usize);
+            if stale != 0 {
+                // A handoff nobody claimed; its reference was owed to a pool.
+                crate::arc::autorelease(stale as Id);
+            }
+            return object;
+        }
+        crate::arc::autorelease(object)
+    }
+
+    /// Whether `object` was handed off on this thread, taking it if so.
+    pub(super) fn claim(object: Id) -> bool {
+        if object.is_null() || PENDING.get() != object as usize {
+            return false;
+        }
+        PENDING.set(0);
+        true
+    }
+
+    pub(super) unsafe extern "C" fn retain_and_give(object: Id, ra: usize) -> Id {
+        unsafe { give(crate::arc::retain(object), ra) }
+    }
 }
 
-pub unsafe extern "C" fn objc_retainAutoreleaseReturnValue(object: Id) -> Id {
-    crate::arc::autorelease(crate::arc::retain(object))
+/// Enters `$target(object, return address)`.
+macro_rules! with_return_address {
+    ($name:ident, $target:path) => {
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        pub unsafe extern "C" fn $name(object: Id) -> Id {
+            core::arch::naked_asm!("mov rsi, [rsp]", "jmp {target}", target = sym $target)
+        }
+        #[cfg(target_arch = "aarch64")]
+        #[unsafe(naked)]
+        pub unsafe extern "C" fn $name(object: Id) -> Id {
+            core::arch::naked_asm!("mov x1, x30", "b {target}", target = sym $target)
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        pub unsafe extern "C" fn $name(object: Id) -> Id {
+            unsafe { $target(object, 0) }
+        }
+    };
 }
+
+with_return_address!(objc_autoreleaseReturnValue, handoff::give);
+with_return_address!(objc_retainAutoreleaseReturnValue, handoff::retain_and_give);
 
 pub unsafe extern "C" fn objc_retainAutoreleasedReturnValue(object: Id) -> Id {
+    if handoff::claim(object) {
+        return object;
+    }
     crate::arc::retain(object)
 }
 
 pub unsafe extern "C" fn objc_unsafeClaimAutoreleasedReturnValue(object: Id) -> Id {
     crate::debug::validate(object, "objc_unsafeClaimAutoreleasedReturnValue");
+    if handoff::claim(object) {
+        // The handoff carried a reference this caller does not keep.
+        crate::arc::release(object);
+    }
     object
 }
 
@@ -710,4 +824,96 @@ pub unsafe extern "C" fn objc_setAssociatedObject(
 
 pub unsafe extern "C" fn objc_getAssociatedObject(object: Id, key: *const c_void) -> Id {
     crate::arc::associated(object, key)
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    /// A caller's code after its call: `mov rdi, rax`, then a call through
+    /// `slot` (`call [rip + slot]`), or through a stub (`call stub`, where the
+    /// stub is `jmp [rip + slot]`). Answers the code and its return address.
+    fn caller(through_stub: bool, claimer: usize) -> (Box<[u8; 64]>, usize) {
+        let mut code = Box::new([0xccu8; 64]);
+        let base = code.as_ptr() as usize;
+        let slot = 48;
+        code[slot..slot + 8].copy_from_slice(&claimer.to_le_bytes());
+        code[..3].copy_from_slice(&[0x48, 0x89, 0xc7]);
+        let rel = |from: usize, to: usize| ((to as isize - from as isize) as i32).to_le_bytes();
+        if through_stub {
+            let stub = 32;
+            code[3] = 0xe8;
+            code[4..8].copy_from_slice(&rel(base + 8, base + stub));
+            code[stub..stub + 2].copy_from_slice(&[0xff, 0x25]);
+            code[stub + 2..stub + 6].copy_from_slice(&rel(base + stub + 6, base + slot));
+        } else {
+            code[3..5].copy_from_slice(&[0xff, 0x15]);
+            code[5..9].copy_from_slice(&rel(base + 9, base + slot));
+        }
+        (code, base)
+    }
+
+    fn object() -> Id {
+        crate::bootstrap();
+        let class = crate::class::lookup(c"NSObject").expect("NSObject");
+        crate::object::create_instance(class, 0)
+    }
+
+    /// The count `object` is left with once a pool around `body` drains.
+    fn after_pool(object: Id, body: impl FnOnce()) -> usize {
+        let pool = crate::arc::pool_push();
+        body();
+        crate::arc::pool_pop(pool);
+        crate::arc::retain_count(object)
+    }
+
+    #[test]
+    fn a_claimed_return_value_never_reaches_the_pool() {
+        let claimer = objc_retainAutoreleasedReturnValue as *const () as usize;
+        for through_stub in [false, true] {
+            let (_code, ra) = caller(through_stub, claimer);
+            let object = object();
+            // The callee's +1 is handed over and the claim keeps it, with
+            // nothing left in the pool to release it again.
+            let count = after_pool(object, || unsafe {
+                let returned = handoff::give(object, ra);
+                assert_eq!(objc_retainAutoreleasedReturnValue(returned), object);
+                assert_eq!(crate::arc::retain_count(object), 1, "{through_stub}");
+            });
+            assert_eq!(count, 1, "through_stub={through_stub}");
+            crate::arc::release(object);
+        }
+    }
+
+    #[test]
+    fn an_unsafe_claim_gives_the_handed_reference_back() {
+        let claimer = objc_unsafeClaimAutoreleasedReturnValue as *const () as usize;
+        let (_code, ra) = caller(false, claimer);
+        let object = object();
+        crate::arc::retain(object);
+        let count = after_pool(object, || unsafe {
+            let returned = handoff::give(object, ra);
+            objc_unsafeClaimAutoreleasedReturnValue(returned);
+            assert_eq!(crate::arc::retain_count(object), 1);
+        });
+        assert_eq!(count, 1);
+        crate::arc::release(object);
+    }
+
+    #[test]
+    fn a_caller_that_does_not_claim_gets_an_autoreleased_value() {
+        let (_code, ra) = caller(false, objc_retain as *const () as usize);
+        let object = object();
+        crate::arc::retain(object);
+        // Autoreleased, so the pool takes the extra reference back.
+        let count = after_pool(object, || unsafe {
+            handoff::give(object, ra);
+        });
+        assert_eq!(count, 1);
+        // A later claim of the same object is an ordinary retain.
+        unsafe { objc_retainAutoreleasedReturnValue(object) };
+        assert_eq!(crate::arc::retain_count(object), 2);
+        crate::arc::release(object);
+        crate::arc::release(object);
+    }
 }
