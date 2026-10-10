@@ -2782,8 +2782,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("pathconf", I64, P, I32),
     sig!("pclose", I32, P),
     sig!("perror", V, P),
-    // `int poll(struct pollfd *, nfds_t, int)`.
     sig!("pipe", I32, P),
+    // Standardized in POSIX.1-2024, added in macOS 27.
+    // Thanks for finally adding this, Apple :)
+    sig!("pipe2", I32, P, I32),
+    // `int poll(struct pollfd *, nfds_t, int)`.
     sig!("poll", I32, P, U32, I32),
     sig!("popen", P, P, P),
     sig!("posix_madvise", I32, P, U64, I32),
