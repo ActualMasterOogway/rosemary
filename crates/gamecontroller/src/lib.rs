@@ -621,6 +621,15 @@ unsafe extern "C" fn supported_localities(_receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(set) as Id }
 }
 
+/// There is no CoreHaptics engine to hand out, and `supportedLocalities` is
+/// empty, so every locality is unsupported and the documented answer is nil.
+unsafe extern "C" fn create_engine_with_locality(_receiver: Id, _sel: Sel, locality: Id) -> Id {
+    trace_controller(format_args!(
+        "createEngineWithLocality: {locality:p} unsupported"
+    ));
+    std::ptr::null_mut()
+}
+
 unsafe extern "C" fn set_paused_handler(receiver: Id, _sel: Sel, block: Id) {
     // SAFETY: a controller.
     replace_block(
@@ -1173,6 +1182,11 @@ pub fn bootstrap() {
             supported_localities as *const c_void,
             c"@16@0:8",
         );
+        haptics.replace_method(
+            objc::sel::get("createEngineWithLocality:"),
+            create_engine_with_locality as *const c_void,
+            c"@24@0:8@16",
+        );
     });
 }
 
@@ -1209,8 +1223,15 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         ));
     }
     out.extend(corefoundation::base::string_globals(STRING_GLOBALS));
+    out.push((
+        "_GCHapticDurationInfinite".to_string(),
+        &HAPTIC_DURATION_INFINITE as *const f32 as usize as u64,
+    ));
     out
 }
+
+/// A `const float`, so the import slot holds this storage's address, not a string.
+static HAPTIC_DURATION_INFINITE: f32 = f32::INFINITY;
 
 /// Resolve a GameController data symbol, accepting Mach-O's leading underscore
 /// or the bare spelling used by `dlsym`.
@@ -1249,6 +1270,14 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_GCInputXboxPaddleTwo", "Paddle 2"),
     ("_GCInputXboxPaddleThree", "Paddle 3"),
     ("_GCInputXboxPaddleFour", "Paddle 4"),
+    ("_GCHapticsLocalityDefault", "Default"),
+    ("_GCHapticsLocalityAll", "All"),
+    ("_GCHapticsLocalityHandles", "Handles"),
+    ("_GCHapticsLocalityLeftHandle", "LeftHandle"),
+    ("_GCHapticsLocalityRightHandle", "RightHandle"),
+    ("_GCHapticsLocalityTriggers", "Triggers"),
+    ("_GCHapticsLocalityLeftTrigger", "LeftTrigger"),
+    ("_GCHapticsLocalityRightTrigger", "RightTrigger"),
 ];
 
 #[cfg(test)]
@@ -1279,6 +1308,12 @@ mod tests {
         for selector in ["motion", "light", "haptics", "battery"] {
             assert!(controller.method(objc::sel::get(selector)).is_some());
         }
+        let haptics = objc::class::lookup(c"GCDeviceHaptics").expect("GCDeviceHaptics");
+        assert!(
+            haptics
+                .method(objc::sel::get("createEngineWithLocality:"))
+                .is_some()
+        );
         assert!(
             button_class()
                 .method(objc::sel::get("setValueChangedHandler:"))
