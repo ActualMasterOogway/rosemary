@@ -100,11 +100,10 @@ sudo pkg install curl sdl3 mesa-libs
 cargo build --release --bin rosemary
 ```
 
-FreeBSD support is newer than the Linux port and is not yet at parity: the build
-and the test suite run, but everything that reads `/proc` - `libproc`, Mach
-task-info, the region map behind a fault report, and the Mach port
-transport, which uses Linux's abstract socket namespace, still need a FreeBSD
-path. Expect a guest that needs those to fail.
+FreeBSD support is newer than the Linux port, and might not be at parity.
+In particular, some code paths are not updated to use our `starnix` abstraction,
+and may result in inconsistencies. Bug reports are welcome, they are generally
+a sign of unportable code.
 
 Development from a macOS host can also use the configured Debian container:
 
