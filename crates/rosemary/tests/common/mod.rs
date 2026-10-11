@@ -944,6 +944,12 @@ int main(void) {
         printf("outer %s\n", [[e name] UTF8String]);
     }
 
+    @try {
+        @throw [NSException exceptionWithName:@"I" reason:@"i" userInfo:nil];
+    } @catch (id e) {
+        printf("id %s\n", [[e name] UTF8String]);
+    }
+
     printf("done\n");
     return 0;
 }

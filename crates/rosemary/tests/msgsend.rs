@@ -273,7 +273,7 @@ fn objective_c_exceptions_throw_and_catch_as_they_do_natively() {
         skip!("cannot build x86_64 Objective-C++ fixtures")
     };
 
-    let expected = "caught E r\nfinally\nsubclass N\nouter O\ndone\n";
+    let expected = "caught E r\nfinally\nsubclass N\nouter O\nid I\ndone\n";
     if let Some((status, stdout)) = common::run_native(&path) {
         assert_eq!(status, Some(0), "the fixture does not run on Apple's");
         assert_eq!(stdout, expected, "the fixture does not do this on Apple's");

@@ -36,26 +36,21 @@ static RECORDS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
 static NO_BASES: AtomicU64 = AtomicU64::new(0);
 static ONE_BASE: AtomicU64 = AtomicU64::new(0);
 
-/// The `type_info` for `class`, making it and its superclasses' if needed.
-///
-/// `None` before [`bind`] has found the vtables, and for a class this runtime
-/// does not have: a record whose base chain stops short would answer "not a
-/// subclass" for a class that is one, which is a wrong catch rather than a
-/// missing one.
-pub fn record_for(class: &'static objc::class::Class) -> Option<u64> {
-    let name = class.name_str().to_string();
-    if let Some((_, addr)) = RECORDS
+/// The record `@catch (id)` names, `_OBJC_EHTYPE_id`.
+const ID_NAME: &str = "id";
+
+/// An interned record by name.
+fn interned(name: &str) -> Option<u64> {
+    RECORDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .find(|(n, _)| *n == name)
-    {
-        return Some(*addr);
-    }
-    let base = match class.superclass() {
-        Some(parent) => record_for(parent)?,
-        None => 0,
-    };
+        .find(|(n, _)| n == name)
+        .map(|(_, addr)| *addr)
+}
+
+/// Make and intern a record, or `None` before the vtables are known.
+fn make(name: &str, base: u64) -> Option<u64> {
     let vptr = match base {
         0 => NO_BASES.load(Ordering::Acquire),
         _ => ONE_BASE.load(Ordering::Acquire),
@@ -63,7 +58,7 @@ pub fn record_for(class: &'static objc::class::Class) -> Option<u64> {
     if vptr == 0 {
         return None;
     }
-    let text = CString::new(name.as_str()).ok()?;
+    let text = CString::new(name).ok()?;
     let record = Box::leak(Box::new(TypeInfo {
         vptr,
         name: Box::leak(text.into_boxed_c_str()).as_ptr(),
@@ -73,8 +68,36 @@ pub fn record_for(class: &'static objc::class::Class) -> Option<u64> {
     RECORDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push((name, addr));
+        .push((name.to_string(), addr));
     Some(addr)
+}
+
+/// The `type_info` for `id`.
+///
+/// libobjc's personality routine special-cases this record to match any
+/// Objective-C object. Here it is instead the base of every root class's
+/// record, so libc++abi's ordinary base-chain walk reaches it from any thrown
+/// object and `@catch (id)` needs no personality of its own.
+pub fn id_record() -> Option<u64> {
+    interned(ID_NAME).or_else(|| make(ID_NAME, 0))
+}
+
+/// The `type_info` for `class`, making it and its superclasses' if needed.
+///
+/// `None` before [`bind`] has found the vtables, and for a class this runtime
+/// does not have: a record whose base chain stops short would answer "not a
+/// subclass" for a class that is one, which is a wrong catch rather than a
+/// missing one.
+pub fn record_for(class: &'static objc::class::Class) -> Option<u64> {
+    let name = class.name_str().to_string();
+    if let Some(addr) = interned(&name) {
+        return Some(addr);
+    }
+    let base = match class.superclass() {
+        Some(parent) => record_for(parent)?,
+        None => id_record()?,
+    };
+    make(&name, base)
 }
 
 /// Rewrite the `type_info` records the *guest* laid out for its own classes.
@@ -113,7 +136,11 @@ pub fn repair_image_records(mem: &mut dyn crate::abi::GuestMemory, report: &Link
             let Some(class) = class_named_in(mem, record) else {
                 continue;
             };
-            let Some(base) = class.superclass().and_then(record_for) else {
+            let base = match class.superclass() {
+                Some(parent) => record_for(parent),
+                None => id_record(),
+            };
+            let Some(base) = base else {
                 continue;
             };
             let _ = mem.write(record, &one_base.to_le_bytes());
@@ -147,7 +174,7 @@ fn class_named_in(
     objc::class::lookup(&CString::new(name).ok()?)
 }
 
-/// Point every `_OBJC_EHTYPE_$_` binding at a record, and
+/// Point every `_OBJC_EHTYPE_$_` and `_OBJC_EHTYPE_id` binding at a record, and
 /// `___objc_personality_v0` at the vendored `__gxx_personality_v0`.
 ///
 /// Runs after [`crate::cxxlib::bind_cxxabi_to_the_runtime`], because the
@@ -206,14 +233,17 @@ pub fn bind<M: machish::memory::Regions>(
     for image in &mut report.images {
         let mut satisfied = Vec::new();
         for (i, missing) in image.missing.iter().enumerate() {
-            let Some(class) = missing.symbol.strip_prefix("_OBJC_EHTYPE_$_") else {
+            let record = if missing.symbol == "_OBJC_EHTYPE_id" {
+                id_record()
+            } else if let Some(class) = missing.symbol.strip_prefix("_OBJC_EHTYPE_$_") {
+                std::ffi::CString::new(class)
+                    .ok()
+                    .and_then(|n| objc::class::lookup(&n))
+                    .and_then(record_for)
+            } else {
                 continue;
             };
-            let Some(record) = std::ffi::CString::new(class)
-                .ok()
-                .and_then(|n| objc::class::lookup(&n))
-                .and_then(record_for)
-            else {
+            let Some(record) = record else {
                 continue;
             };
             memory.write(missing.slot_va, &record.to_le_bytes())?;
@@ -298,10 +328,14 @@ mod tests {
                 std::ffi::CStr::from_ptr(record.name).to_str(),
                 Ok("NSString")
             );
-            // The root uses the vtable with no base word, and everything else
-            // the one with it.
-            assert_eq!((*(record.base as *const TypeInfo)).base, 0);
-            assert_eq!((*(record.base as *const TypeInfo)).vptr, 0x1000);
+            // The root class hangs off `id`, which uses the vtable with no
+            // base word; everything else uses the one with it.
+            let root = &*(record.base as *const TypeInfo);
+            assert_eq!(root.vptr, 0x2000);
+            assert_eq!(Some(root.base), id_record());
+            let id = &*(root.base as *const TypeInfo);
+            assert_eq!(id.base, 0);
+            assert_eq!(id.vptr, 0x1000);
             assert_eq!(record.vptr, 0x2000);
         }
     }
