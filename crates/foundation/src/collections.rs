@@ -2098,6 +2098,22 @@ unsafe extern "C" fn set_any_object(receiver: Id, _sel: Sel) -> Id {
         .map_or(std::ptr::null_mut(), |value| value as Id)
 }
 
+unsafe extern "C" fn set_enumerate(
+    receiver: Id,
+    _sel: Sel,
+    state: *mut FastEnumerationState,
+    _buffer: *mut Id,
+    _len: usize,
+) -> usize {
+    // SAFETY: a set.
+    let Some(set) = (unsafe { collections::set(receiver as CFTypeRef) }) else {
+        return 0;
+    };
+    // SAFETY: the guest's own state structure, and storage that outlives the
+    // loop.
+    unsafe { enumerate(state, &mut set.values) }
+}
+
 pub(crate) fn install() {
     let set = objc::class::lookup(c"NSSet").expect("CoreFoundation registered NSSet");
     class_methods!(set, {
@@ -2109,6 +2125,7 @@ pub(crate) fn install() {
         "count" => set_count, c"Q16@0:8";
         "containsObject:" => set_contains_object, c"B24@0:8@16";
         "anyObject" => set_any_object, c"@16@0:8";
+        "countByEnumeratingWithState:objects:count:" => set_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     let mutable_set = objc::class::lookup(c"NSMutableSet").expect("NSMutableSet");
     methods!(mutable_set, {
