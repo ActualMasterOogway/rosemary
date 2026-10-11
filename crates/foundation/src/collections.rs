@@ -1294,6 +1294,23 @@ unsafe extern "C" fn remove_object_for_key(receiver: Id, _sel: Sel, key: Id) {
     }
 }
 
+unsafe extern "C" fn dictionary_remove_all_objects(receiver: Id, _sel: Sel) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "removeAllObjects");
+    }
+    // Taken first: a release can run a guest `dealloc` that reads this
+    // dictionary again.
+    let (keys, values) = (d.keys, d.values);
+    for (key, value) in std::mem::take(&mut d.entries) {
+        keys.release(key);
+        values.release(value);
+    }
+}
+
 /// `-allKeys`, which is an `NSArray` of the keys in insertion order.
 unsafe extern "C" fn all_keys(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a dictionary.
@@ -2210,6 +2227,7 @@ pub(crate) fn install() {
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "setObject:forKeyedSubscript:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
+        "removeAllObjects" => dictionary_remove_all_objects, c"v16@0:8";
         "setValue:forKey:" => dictionary_set_value_for_key, c"v32@0:8@16@24";
     });
     class_methods!(mutable_dictionary, {
