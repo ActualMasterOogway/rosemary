@@ -29,7 +29,6 @@ pub mod exec;
 pub mod fault;
 pub mod heapcheck;
 pub mod host;
-pub mod hostheap;
 pub mod interp;
 pub mod interpose;
 pub mod jit;

@@ -4,20 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use machish::memory::Regions;
 use machish::report::LinkReport;
 
-/// Set to skip every interposition, leaving each image bound to the host's own.
-///
-/// A debugging lever, and the one worth reaching for first when a program
-/// corrupts its heap. The interposition a guest declares is nearly always an
-/// allocator replacing `malloc`/`free`, and a replacement allocator is silent
-/// about a double free where glibc's own aborts with a sentence naming it - so
-/// turning the replacement off does not fix the bug, it moves the report from
-/// "a corrupted free list, thousands of allocations later" to "free(): invalid
-/// pointer, here".
-///
-/// Not safe in general: an image that interposes for a reason other than
-/// allocation gets its replacement dropped.
-pub const NO_INTERPOSE_ENV: &str = "ROSEMARY_NO_INTERPOSE";
-
 /// Set to print every binding an interposition moves.
 ///
 /// The question it answers is "did the replacement allocator reach *this*
@@ -29,8 +15,7 @@ pub const TRACE_ENV: &str = "ROSEMARY_TRACE_INTERPOSE";
 /// Set to leave this tree's frameworks on the host's allocator, rather than the
 /// guest's.
 ///
-/// Narrower than [`NO_INTERPOSE_ENV`] and useful for the opposite reason: the
-/// guest keeps its own allocator throughout, and the only thing that changes is
+/// The guest keeps its own allocator throughout, and the only thing that changes is
 /// whether `objc::allocator` and `darwin::heap` call into it. So a heap
 /// corruption that survives this is not one of *these* crossings, and one that
 /// does not is.
@@ -44,19 +29,8 @@ fn tracing() -> bool {
     std::env::var_os(TRACE_ENV).is_some()
 }
 
-fn disabled() -> bool {
-    std::env::var_os(NO_INTERPOSE_ENV).is_some_and(|v| v != "0")
-}
-
 /// Apply every interposition the link's images declare.
 pub fn apply<M: Regions>(report: &mut LinkReport, memory: &mut M) -> Result<usize, machish::Error> {
-    if disabled() {
-        eprintln!(
-            "rosemary: interpose: every interposition skipped ({NO_INTERPOSE_ENV} is set) - the \
-             program is using the host's allocator throughout"
-        );
-        return Ok(0);
-    }
     // Gathered before the loop because the loop mutates `report.images`, and
     // because an image may interpose a function another image also interposes -
     // in which case dyld applies both, in load order, and so does this.
@@ -153,9 +127,6 @@ pub fn apply_to_loaded<M: Regions>(
     report: &mut LinkReport,
     memory: &mut M,
 ) -> Result<usize, machish::Error> {
-    if disabled() {
-        return Ok(0);
-    }
     let requests = remember(report, false);
     if requests.is_empty() {
         return Ok(0);

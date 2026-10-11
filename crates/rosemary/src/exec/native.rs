@@ -230,10 +230,6 @@ impl Native {
             path: path.to_string(),
             reason: e.to_string(),
         })?;
-        crate::hostheap::apply(&mut report, &mut memory).map_err(|e| VmError::Load {
-            path: path.to_string(),
-            reason: e.to_string(),
-        })?;
         crate::heapcheck::install(&mut report, &mut memory).map_err(|e| VmError::Load {
             path: path.to_string(),
             reason: e.to_string(),
