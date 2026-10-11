@@ -470,6 +470,10 @@ fn start_worker(state: &Arc<Queue>) {
     }
     let state = Arc::clone(state);
     std::thread::spawn(move || {
+        // A worker runs guest operations, which read `errno`, thread-locals and
+        // their allocator's thread identity off the thread pointer - and a new
+        // thread's is its parent's until it enters. The dispatch pool does the same.
+        let _darwin = darwin::tls::DarwinThread::enter();
         loop {
             let operation = {
                 let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());

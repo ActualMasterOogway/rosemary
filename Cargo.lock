@@ -521,6 +521,7 @@ name = "coreaudio"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "darwin",
  "exports",
  "libc",
  "sdl3",
@@ -557,6 +558,7 @@ name = "corevideo"
 version = "0.1.0"
 dependencies = [
  "corefoundation",
+ "darwin",
  "exports",
  "objc",
  "sdl3",

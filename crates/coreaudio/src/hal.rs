@@ -1126,6 +1126,8 @@ unsafe extern "C" fn drive(
     if registration.stream.is_null() {
         return;
     }
+    // On SDL's thread, as in `render::feed`.
+    let _darwin = darwin::tls::DarwinThread::enter();
     let device = registration.device;
     let frame_bytes = device.frame_bytes();
     let per_call = device.buffer_frames() as usize;
@@ -1184,6 +1186,8 @@ unsafe extern "C" fn capture(
     };
     // Held across the guest's call, as in `drive`.
     let mut registration = registration.lock().unwrap_or_else(|e| e.into_inner());
+    // On SDL's thread, as in `drive`.
+    let _darwin = darwin::tls::DarwinThread::enter();
     if registration.stream.is_null() {
         return;
     }

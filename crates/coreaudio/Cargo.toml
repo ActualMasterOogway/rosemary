@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 exports.workspace = true
 corefoundation.workspace = true
+darwin.workspace = true
 libc.workspace = true
 sdl3.workspace = true
 static_init.workspace = true

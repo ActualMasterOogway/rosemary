@@ -54,6 +54,18 @@ pub fn tsd_base() -> u64 {
     // SAFETY: as above; `base` is a leaked allocation this thread now owns, and
     // `release` frees it when the thread ends.
     unsafe { libc::pthread_setspecific(key, base as usize as *const core::ffi::c_void) };
+    // A new thread starts with its parent's thread pointer - `clone` copies it -
+    // so a host thread that runs Darwin code without entering reads the parent's
+    // `pthread_self`, thread-locals and allocator identity. Installed here so that
+    // the first Darwin call on such a thread ends the sharing. Host code never
+    // reads this register.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        target_arch = "x86_64"
+    ))]
+    if INSTALLED.with(|at| at.get()) == 0 {
+        set_thread_pointer(base);
+    }
     base
 }
 

@@ -127,6 +127,10 @@ pub unsafe extern "C" fn feed(
         feed_silence(stream, additional as usize);
         return;
     }
+    // SDL's audio thread inherited the thread pointer of whichever thread opened
+    // the device, and the render callback is guest code that reads its allocator's
+    // thread identity and its thread-locals off it.
+    let _darwin = darwin::tls::DarwinThread::enter();
 
     let frame_bytes = match format.non_interleaved() {
         true => format.bytes_per_frame() * format.channels_per_frame as usize,

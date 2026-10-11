@@ -251,6 +251,9 @@ pub unsafe extern "C" fn CVDisplayLinkStart(handle: *mut c_void) -> i32 {
     std::thread::Builder::new()
         .name("CVDisplayLink".to_string())
         .spawn(move || {
+            // The callback is guest code, which reads its thread identity off the
+            // thread pointer - its parent's on a new thread until it enters.
+            let _darwin = darwin::tls::DarwinThread::enter();
             let mut next = std::time::Instant::now() + period;
             while running.load(Ordering::Acquire) {
                 let now = std::time::Instant::now();
