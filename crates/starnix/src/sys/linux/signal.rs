@@ -64,16 +64,32 @@ mod machine {
         libc::REG_R15,
     ];
 
+    // The kernel's `struct sigcontext` head; musl hides `fpregs` in
+    // `__private`.
+    #[repr(C)]
+    struct Mcontext {
+        gregs: [libc::greg_t; 23],
+        fpregs: *mut [u8; 512],
+    }
+
+    // Past the registers is the kernel's `_fpx_sw_bytes`, which says whether
+    // an `XSAVE` header follows at 512. Its `XSTATE_BV` must claim x87 and
+    // SSE, or `XRSTOR` resets them rather than load what was written.
+    pub(super) const SW_BYTES: usize = 464;
+    const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+
     pub unsafe fn context(raw: *const c_void) -> Option<Context> {
         // SAFETY: the caller's live `ucontext_t`.
         let uc = unsafe { &*raw.cast::<libc::ucontext_t>() };
         let reg = |i: c_int| uc.uc_mcontext.gregs[i as usize] as u64;
         // cs, gs, fs, ss, a 16-bit selector each.
         let segments = reg(libc::REG_CSGSFS);
-        let fxsave = match uc.uc_mcontext.fpregs.is_null() {
+        // SAFETY: `Mcontext` is a prefix of `mcontext_t`.
+        let fpregs = unsafe { (*(&raw const uc.uc_mcontext).cast::<Mcontext>()).fpregs };
+        let fxsave = match fpregs.is_null() {
             true => None,
             // SAFETY: the kernel's `FXSAVE` image, 512 bytes.
-            false => Some(unsafe { uc.uc_mcontext.fpregs.cast::<[u8; 512]>().read_unaligned() }),
+            false => Some(unsafe { fpregs.read_unaligned() }),
         };
         Some(Context {
             machine: Machine {
@@ -102,16 +118,19 @@ mod machine {
         }
         uc.uc_mcontext.gregs[libc::REG_RIP as usize] = machine.rip as i64;
         uc.uc_mcontext.gregs[libc::REG_EFL as usize] = machine.rflags as i64;
+        // SAFETY: as in `context`.
+        let fpregs = unsafe { (*(&raw const uc.uc_mcontext).cast::<Mcontext>()).fpregs };
         if let Some(fxsave) = machine.fxsave
-            && !uc.uc_mcontext.fpregs.is_null()
+            && !fpregs.is_null()
         {
-            // SAFETY: as in `context`.
+            let frame = fpregs.cast::<u8>();
+            // SAFETY: as in `context`; with the magic, the header follows.
             unsafe {
-                uc.uc_mcontext
-                    .fpregs
-                    .cast::<[u8; 512]>()
-                    .write_unaligned(fxsave)
-            };
+                core::ptr::copy_nonoverlapping(fxsave.as_ptr(), frame, SW_BYTES);
+                if frame.add(SW_BYTES).cast::<u32>().read_unaligned() == FP_XSTATE_MAGIC1 {
+                    *frame.add(512) |= 0b11;
+                }
+            }
         }
         uc.uc_sigmask = context.mask;
     }
@@ -260,5 +279,63 @@ pub fn send_to_thread(tid: i32, signo: c_int) -> std::io::Result<()> {
     match rc {
         0 => Ok(()),
         _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::machine::SW_BYTES;
+    use super::*;
+
+    const LOW: [u8; 16] = [0x5a; 16];
+
+    /// Writes `LOW` into `xmm15`'s image, with the software-reserved tail
+    /// zeroed as a guest's `x86_FLOAT_STATE64` leaves it.
+    extern "C" fn handler(_: c_int, _: *mut libc::siginfo_t, raw: *mut c_void) {
+        // SAFETY: the kernel's context for this handler.
+        let mut context = unsafe { context(raw) }.expect("a context");
+        let image = context.machine.fxsave.as_mut().expect("an FXSAVE image");
+        image[400..416].copy_from_slice(&LOW);
+        image[SW_BYTES..].fill(0);
+        // SAFETY: as above, before the handler returns.
+        unsafe { set_context(raw, &context) };
+    }
+
+    #[test]
+    fn a_written_xmm_register_is_restored_and_its_ymm_half_kept() {
+        if !std::arch::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let signo = libc::SIGRTMAX();
+        // SAFETY: a handler of this module's own, for a signal nothing else uses.
+        unsafe {
+            let mut action: libc::sigaction = core::mem::zeroed();
+            action.sa_sigaction = handler as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO;
+            assert_eq!(libc::sigaction(signo, &action, core::ptr::null_mut()), 0);
+        }
+        let before = [0xa5u8; 32];
+        let mut after = [0u8; 32];
+        // SAFETY: `ymm15` is loaded, the signal taken and `ymm15` stored in one
+        // block, so nothing between can move it; both buffers are 32 bytes.
+        unsafe {
+            core::arch::asm!(
+                "vmovdqu ymm15, [{before}]",
+                "syscall",
+                "vmovdqu [{after}], ymm15",
+                "vzeroupper",
+                before = in(reg) before.as_ptr(),
+                after = in(reg) after.as_mut_ptr(),
+                inlateout("rax") libc::SYS_tgkill => _,
+                in("rdi") libc::getpid(),
+                in("rsi") libc::gettid(),
+                in("rdx") signo,
+                out("rcx") _,
+                out("r11") _,
+                out("xmm15") _,
+            );
+        }
+        assert_eq!(after[..16], LOW, "the handler's xmm15 was not restored");
+        assert_eq!(after[16..], before[16..], "the ymm15 upper half was lost");
     }
 }
