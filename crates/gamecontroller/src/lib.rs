@@ -641,6 +641,12 @@ unsafe extern "C" fn input_pressed(receiver: Id, sel: Sel) -> u8 {
     (unsafe { input_value(receiver, sel) } > 0.0) as u8
 }
 
+/// Nothing here is claimed by the system (Home, screenshot, etc.), so no
+/// button is ever bound to a system gesture and the app always receives it.
+unsafe extern "C" fn input_bound_to_system_gesture(_receiver: Id, _sel: Sel) -> bool {
+    false
+}
+
 unsafe extern "C" fn input_is_analog(receiver: Id, _sel: Sel) -> bool {
     // Axes and triggers have a continuous value. SDL's standardized digital
     // buttons do not, even though GCControllerButtonInput inherits the axis API.
@@ -1112,6 +1118,11 @@ pub fn bootstrap() {
         button.replace_method(
             objc::sel::get("isPressed"),
             input_pressed as *const c_void,
+            c"B16@0:8",
+        );
+        button.replace_method(
+            objc::sel::get("isBoundToSystemGesture"),
+            input_bound_to_system_gesture as *const c_void,
             c"B16@0:8",
         );
         for name in ["xAxis", "yAxis", "up", "down", "left", "right"] {
