@@ -71,9 +71,8 @@ pub fn tsd_base() -> u64 {
 
 #[cfg(not(target_os = "macos"))]
 fn synthetic_key() -> libc::pthread_key_t {
-    use std::sync::OnceLock;
-    static KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
-    *KEY.get_or_init(|| {
+    use std::sync::LazyLock;
+    static KEY: LazyLock<libc::pthread_key_t> = LazyLock::new(|| {
         let mut key: libc::pthread_key_t = 0;
         // SAFETY: a live local; `release` is an `extern "C"` function of this module.
         let rc = unsafe { libc::pthread_key_create(&mut key, Some(release)) };
@@ -82,7 +81,8 @@ fn synthetic_key() -> libc::pthread_key_t {
             "a guest thread cannot run without thread-specific data"
         );
         key
-    })
+    });
+    *KEY
 }
 
 #[cfg(not(target_os = "macos"))]
