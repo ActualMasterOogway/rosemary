@@ -155,11 +155,31 @@ exports::exports! {
         // zero so those binaries bind, and nothing reads the slot.
         "__objc_empty_vtable",
     }
+    constants {
+        // Every class the compiler emits points its cache slot here. Guest
+        // classes are re-registered rather than dispatched through, so nothing
+        // fills it, but it has to be a real empty cache in case anything reads it.
+        "_objc_empty_cache" => &raw const EMPTY_CACHE as usize as u64,
+    }
     // libclosure, which is this runtime's for the reason `block` gives.
     groups {
         block,
     }
 }
+
+/// `struct objc_cache` as `<objc/runtime.h>` lays it out, with nothing in it.
+#[repr(C)]
+struct ObjcCache {
+    mask: u32,
+    occupied: u32,
+    buckets: [usize; 1],
+}
+
+static EMPTY_CACHE: ObjcCache = ObjcCache {
+    mask: 0,
+    occupied: 0,
+    buckets: [0],
+};
 
 /// The classes this crate owns, as opposed to a framework's.
 ///

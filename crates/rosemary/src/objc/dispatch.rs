@@ -624,8 +624,7 @@ fn unintercepted() -> u64 {
     stub as *const () as usize as u64
 }
 
-/// Symbols in the `_objc_` family that are **data**, not entry points.
-const DATA: &[&str] = &["objc_ehtype_vtable"];
+const DATA: &[&str] = &["objc_ehtype_vtable", "_objc_empty_cache"];
 
 /// An address for a trampoline the *host* does not have.
 ///
@@ -1844,6 +1843,22 @@ mod tests {
         let resolved = found.expect("the builtin runtime defines __objc_empty_vtable");
         assert_eq!(resolved.addr, 0);
         assert_eq!(resolved.kind, machish::resolve::SymbolKind::Absent);
+    }
+
+    #[test]
+    fn empty_cache_binds_to_an_empty_cache() {
+        let mut found = None;
+        machish::resolve::SymbolProvider::enumerate(&provider(), &mut |name, resolved| {
+            if name == "__objc_empty_cache" {
+                found = Some(resolved);
+            }
+        });
+        let resolved = found.expect("the selected runtime defines __objc_empty_cache");
+        assert_eq!(resolved.kind, machish::resolve::SymbolKind::Data);
+        assert_ne!(resolved.addr, 0);
+        // `mask` and `occupied` both zero: no buckets to probe.
+        let head = unsafe { *(resolved.addr as usize as *const u64) };
+        assert_eq!(head, 0);
     }
 
     /// The gaps are gaps, and not names that quietly started working.
