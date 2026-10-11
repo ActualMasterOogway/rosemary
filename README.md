@@ -36,11 +36,21 @@ Rosemary currently has two execution backends:
   native execution is normally selected because recompiling the same instruction
   set provides no benefit.
 
+## Installing
+
+Versioned releases are in Github releases. Rosemary is currently distributed as
+a Nix flake, an AppImage, and a Steam `compatibilitytools.d` tool.
+
+The Steam tool contains a README with installation and usage instructions.
+
 ## Building
 
 Rosemary uses the Rust 2024 edition and currently requires Rust 1.99 or newer.
 The Microlift and Microlift Wasmtime repositories are Git dependencies, so the
 build environment must be able to fetch them.
+
+Additionally, SDL 3.4.0 is required for GUI applications to run. Lower SDL
+versions may partially work, but are completely unsupported otherwise
 
 For a release build on the current host:
 
@@ -92,6 +102,9 @@ sudo apt-get install build-essential pkg-config libcurl4-openssl-dev \
     zlib1g-dev libsdl3-dev
 cargo build --release --bin rosemary
 ```
+
+Note that Rosemary may not run properly on Debian stable since we require
+SDL 3.4.0 minimum.
 
 On FreeBSD, install the native build and runtime dependencies first:
 
