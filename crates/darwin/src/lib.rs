@@ -92,6 +92,7 @@ pub mod spawn;
 pub mod stackprobe;
 pub mod stat;
 pub mod stdio;
+pub mod stdlib;
 pub mod strict;
 pub mod string;
 pub mod sysctl;
@@ -319,6 +320,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     regex::MODULE,
     resolv::MODULE,
     string::MODULE,
+    stdlib::MODULE,
     stat::MODULE,
     fcntl::entry::MODULE,
     stackprobe::MODULE,

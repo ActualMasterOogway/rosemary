@@ -169,9 +169,16 @@ macro_rules! call_as_darwin {
     }};
 }
 
-pub struct DarwinThread {
-    saved: Option<u64>,
-}
+/// Installs this thread's Darwin array, and leaves it installed.
+///
+/// Host code never reads the register, so there is nothing to restore - and
+/// restoring is what goes wrong: whatever was there before is the parent's
+/// array, which `clone` copied and which may since be freed, or nothing. Guest
+/// code that runs on this thread later without entering - a key destructor at
+/// thread exit, a callback a host library makes on its own - must still find
+/// this thread's array, as [`tsd_base`] already arranges for a thread that
+/// never entered.
+pub struct DarwinThread(());
 
 pub const fn can_enter_darwin() -> bool {
     cfg!(target_os = "macos")
@@ -187,20 +194,10 @@ const fn swaps() -> bool {
 
 impl DarwinThread {
     pub fn enter() -> DarwinThread {
-        if entered() {
-            return DarwinThread { saved: None };
+        if !entered() {
+            set_thread_pointer(tsd_base());
         }
-        let saved = host_thread_pointer();
-        set_thread_pointer(tsd_base());
-        DarwinThread { saved: Some(saved) }
-    }
-}
-
-impl Drop for DarwinThread {
-    fn drop(&mut self) {
-        if let Some(saved) = self.saved {
-            set_thread_pointer(saved);
-        }
+        DarwinThread(())
     }
 }
 
@@ -321,6 +318,32 @@ mod tests {
             .join()
             .expect("a thread has one too");
         assert_ne!(theirs, mine, "two threads must not share an array");
+    }
+
+    /// Guest code that runs after the scope, without entering, must still read
+    /// this thread's array through `%gs` - not the host's thread pointer.
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn leaving_a_darwin_scope_keeps_the_array_installed() {
+        /// `ARCH_GET_GS`, from `<asm/prctl.h>`. Not in the `libc` crate.
+        const ARCH_GET_GS: libc::c_int = 0x1004;
+        fn gs_base() -> u64 {
+            let mut base: u64 = 0;
+            // SAFETY: writes this thread's `%gs` base through a live local.
+            unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_GET_GS, &mut base) };
+            base
+        }
+        let (inside, after, own) = std::thread::spawn(|| {
+            let inside = {
+                let _darwin = DarwinThread::enter();
+                gs_base()
+            };
+            (inside, gs_base(), tsd_base())
+        })
+        .join()
+        .expect("the thread ran");
+        assert_eq!(inside, own);
+        assert_eq!(after, own, "the scope's end put something else in %gs");
     }
 
     #[test]
