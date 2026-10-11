@@ -1,4 +1,5 @@
 mod helpers;
+pub mod key;
 
 pub mod slot {
     pub const SELF: usize = 0;
@@ -8,7 +9,9 @@ pub mod slot {
     pub const PTR_MUNGE: usize = 7;
 }
 
-const SLOTS: usize = 512;
+/// libpthread's array: reserved slots, static keys, then `PTHREAD_KEYS_MAX` dynamic
+/// keys. See [`key`].
+const SLOTS: usize = key::END as usize;
 
 const HOST_THREAD_POINTER: usize = SLOTS;
 
@@ -76,6 +79,20 @@ unsafe extern "C" fn release(block: *mut core::ffi::c_void) {
         return;
     }
     let words = block as *mut u64;
+    // Darwin's keys are destructed first, with the array put back so that
+    // `tsd_base` - which a destructor reaches through `Key::get` or a guest's
+    // `%gs` - finds this array rather than allocating a fresh one.
+    // SAFETY: the key is this module's own and `block` is the array it held.
+    if unsafe { libc::pthread_setspecific(synthetic_key(), block as *const _) } == 0 {
+        // SAFETY: just installed as this thread's array.
+        #[cfg(all(
+            any(target_os = "linux", target_os = "freebsd"),
+            target_arch = "x86_64"
+        ))]
+        unsafe {
+            key::run_destructors(words)
+        };
+    }
     // SAFETY: the caller's guarantee, on the thread that owns the array.
     let passes = unsafe {
         let at = words.add(PASSES);
@@ -83,11 +100,13 @@ unsafe extern "C" fn release(block: *mut core::ffi::c_void) {
         *at
     };
     // SAFETY: the key is this module's own, taking back the array it just handed over.
-    if passes < DESTRUCTOR_PASSES
-        && unsafe { libc::pthread_setspecific(synthetic_key(), block as *const _) } == 0
-    {
+    // Still installed from above for the passes the host has left, so a later
+    // host destructor still finds it.
+    if passes < DESTRUCTOR_PASSES {
         return;
     }
+    // SAFETY: as above; the last pass takes the array away before freeing it.
+    unsafe { libc::pthread_setspecific(synthetic_key(), core::ptr::null()) };
     // SAFETY: as above. Reconstituting the same `Box<[u64]>` `allocate` leaked, with
     // the same length.
     drop(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(words, WORDS)) });

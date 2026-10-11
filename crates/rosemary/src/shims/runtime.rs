@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use machish::resolve::SyntheticDylib;
@@ -70,53 +70,6 @@ fn guest_environ() -> Option<u64> {
     Some(darwin::env::guest_environ_slot() as usize as u64)
 }
 
-/// A stable address inside *this* binary, for glibc's `dso_symbol` argument.
-///
-/// It is not read: `__cxa_thread_atexit_impl` looks the address up to find the
-/// object that owns the destructor and holds it in memory until the destructor
-/// has run. The guest's images are never unloaded, so this runtime's own handle
-/// says the true thing - the code will still be there.
-static DSO_ANCHOR: u8 = 0;
-
-/// `void _tlv_atexit(void (*dtor)(void *), void *obj)`, for a host without one.
-///
-/// Darwin registers a thread-local's destructor with dyld, which runs it when
-/// the thread ends. glibc's equivalent is `__cxa_thread_atexit_impl`, whose only
-/// difference is the third argument - see [`DSO_ANCHOR`].
-///
-/// A host with neither drops the destructor rather than faulting. That leaks
-/// whatever the thread-local owned, which is a worse program than one whose
-/// destructors run and a much better one than a null call in a constructor.
-///
-/// # Safety
-///
-/// Called through an import slot this module defines, with the two arguments the
-/// Darwin declaration gives it. `dtor` is guest code and `obj` is the guest's
-/// object; neither is touched here.
-unsafe extern "C" fn tlv_atexit(dtor: Option<unsafe extern "C" fn(*mut c_void)>, obj: *mut c_void) {
-    /// `__cxa_thread_atexit_impl`, looked up once.
-    static HOST: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-
-    let Some(dtor) = dtor else { return };
-    let Some(f) =
-        *HOST.get_or_init(|| crate::host::symbol("__cxa_thread_atexit_impl").map(|f| f as usize))
-    else {
-        return;
-    };
-    // SAFETY: glibc's `int __cxa_thread_atexit_impl(void (*)(void *), void *,
-    // void *)`, the prototype named here.
-    let register: unsafe extern "C" fn(
-        unsafe extern "C" fn(*mut c_void),
-        *mut c_void,
-        *mut c_void,
-    ) -> i32 = unsafe { core::mem::transmute(f as *const ()) };
-    // SAFETY: `dtor` and `obj` are the caller's own, and the handle is this
-    // binary's.
-    unsafe {
-        register(dtor, obj, &DSO_ANCHOR as *const u8 as *mut c_void);
-    }
-}
-
 /// `char ***_NSGetEnviron(void)`.
 extern "C" fn ns_get_environ() -> *mut *mut *mut c_char {
     darwin::env::guest_environ_slot()
@@ -176,14 +129,17 @@ pub fn provider() -> SyntheticDylib {
         "___stack_chk_guard",
         &STACK_CHK_GUARD as *const u64 as usize as u64,
     );
-    // dyld's TLV ABI preserves every register except the return value.
+    // Reached only through a descriptor `tls::register` declined; dyld's TLV ABI
+    // preserves every register except the return value.
     for name in machish::extensions::tlv::BOOTSTRAP_SYMBOLS {
-        lib.define_fn(name, crate::tls::bootstrap_thunk as *const ());
+        lib.define_fn(name, crate::tls::tlv_bootstrap_thunk as *const ());
     }
-    let atexit = crate::host::symbol("_tlv_atexit")
-        .map_or(tlv_atexit as *const (), |f| f as usize as *const ());
-    lib.define_fn("__tlv_atexit", atexit);
-    lib.define_fn("_tlv_atexit", atexit);
+    // This runtime's own on every host, so `thread_local` destructors run in
+    // Darwin's order. See [`crate::tls`].
+    lib.define_fn("__tlv_atexit", crate::tls::tlv_atexit as *const ());
+    lib.define_fn("_tlv_atexit", crate::tls::tlv_atexit as *const ());
+    // libSystem's `exit` runs those terminators before any `atexit` handler.
+    lib.define_fn("_exit", crate::tls::darwin_exit as *const ());
     super::openat::provide(&mut lib);
     lib.define_fn("__NSGetExecutablePath", ns_get_executable_path as *const ());
     lib.define_fn(

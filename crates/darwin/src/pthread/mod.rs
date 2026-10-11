@@ -836,8 +836,10 @@ fn host_cancel_asynchronous() -> libc::c_int {
 ///
 /// Called only through an import slot this crate defines.
 pub unsafe extern "C" fn key_delete(key: u64) -> i32 {
-    // SAFETY: `key` is one this process's `pthread_key_create` produced.
-    err::from_host(unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) })
+    match u32::try_from(key) {
+        Ok(key) => crate::tls::key::Key::from_index(key).delete(),
+        Err(_) => err::EINVAL,
+    }
 }
 
 /// `int pthread_key_create(pthread_key_t *, void (*destructor)(void *))`
@@ -862,16 +864,16 @@ pub unsafe extern "C" fn key_create(
     if out.is_null() {
         return err::EINVAL;
     }
-    let mut key: libc::pthread_key_t = 0;
-    // SAFETY: a live local, and the caller's destructor.
-    let rc = unsafe { libc::pthread_key_create(&mut key, destructor) };
-    if rc == 0 {
-        // SAFETY: the caller's eight bytes.
-        // `pthread_key_t` is unsigned on Linux and signed on FreeBSD, so it is
-        // widened with a cast rather than a `From`.
-        unsafe { out.write_unaligned(key as u64) };
+    // A Darwin key rather than the host's, so the number the guest holds indexes
+    // the array its thread pointer addresses. See [`crate::tls::key`].
+    match crate::tls::key::Key::create(destructor) {
+        Ok(key) => {
+            // SAFETY: the caller's eight bytes.
+            unsafe { out.write_unaligned(u64::from(key.index())) };
+            0
+        }
+        Err(rc) => rc,
     }
-    err::from_host(rc)
 }
 
 /// `int pthread_join(pthread_t, void **)`
@@ -1038,8 +1040,11 @@ pub unsafe extern "C" fn detach(thread: u64) -> i32 {
 ///
 /// As [`key_delete`].
 pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
-    // SAFETY: as above; a key nobody created reads null, which is what Darwin does.
-    unsafe { libc::pthread_getspecific(key as libc::pthread_key_t) as usize as u64 }
+    // A key nobody created reads null, which is what Darwin does.
+    match u32::try_from(key) {
+        Ok(key) => crate::tls::key::Key::from_index(key).get() as usize as u64,
+        Err(_) => 0,
+    }
 }
 
 /// # Safety
@@ -1047,12 +1052,12 @@ pub unsafe extern "C" fn getspecific(key: u64) -> u64 {
 /// As [`key_delete`]; `value` is the guest's own pointer, which only guest code
 /// dereferences.
 pub unsafe extern "C" fn setspecific(key: u64, value: u64) -> i32 {
-    err::from_host(unsafe {
-        libc::pthread_setspecific(
-            key as libc::pthread_key_t,
-            value as usize as *const libc::c_void,
-        )
-    })
+    match u32::try_from(key) {
+        Ok(key) => {
+            crate::tls::key::Key::from_index(key).set(value as usize as *mut core::ffi::c_void)
+        }
+        Err(_) => err::EINVAL,
+    }
 }
 
 unsafe extern "C" {

@@ -1562,6 +1562,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([0], "_tlv_atexit", V, P, P),
     // Both spellings of the thread-local bootstrap.
     sig!("_tlv_bootstrap", P, P),
+    // `void *tlv_allocate(tlv_descriptor *)`: the slow path of this runtime's
+    // guest-code `tlv_get_addr`. See `crate::tls`.
+    sig!("rosemary_tlv_allocate", P, P),
     sig!("abort", V),
     sig!("abs", I32, I32),
     sig!("accept", I32, I32, P, P),

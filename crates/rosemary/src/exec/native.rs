@@ -255,7 +255,7 @@ impl Native {
         }
 
         flush_icache(&report);
-        crate::tls::register(&report);
+        crate::tls::register(&report, super::Engine::Native);
         crate::dyld::set_executable_path(path, report.root().map_or(0, |i| i.slide));
         if let Some(root) = report.root() {
             crate::dyld::set_executable_header(root.base);

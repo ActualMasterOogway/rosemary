@@ -868,7 +868,8 @@ fn open_with<S: MachSpec + 'static>(
 
     // A loaded image's thread-locals are its own, and nothing else registers
     // them.
-    crate::tls::register(&leaked.report);
+    let engine = crate::exec::active().map_or(crate::exec::Engine::Emulated, |e| e.engine());
+    crate::tls::register(&leaked.report, engine);
 
     // Before any of this image's code runs, and after it is findable. Asked of
     // the *backend* rather than of a `Vm`, because a native guest has no `Vm` and

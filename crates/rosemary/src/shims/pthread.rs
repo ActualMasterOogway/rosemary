@@ -147,19 +147,20 @@ fn pthread_key_create(
         0 => 0,
         va => callbacks.substitute(symbol, va)?,
     };
-    let mut key: libc::pthread_key_t = 0;
-    type Destructor = unsafe extern "C" fn(*mut libc::c_void);
-    // SAFETY: a live local, and `entry` is either null or a thunk this runtime handed
-    // out for a guest function taking one pointer - which is what a destructor is.
-    let rc = unsafe {
-        libc::pthread_key_create(
-            &mut key,
-            (entry != 0).then(|| core::mem::transmute::<usize, Destructor>(entry as usize)),
-        )
+    // SAFETY: `entry` is either null or a thunk this runtime handed out for a guest
+    // function taking one pointer - which is what a destructor is.
+    let destructor = (entry != 0).then(|| unsafe {
+        core::mem::transmute::<usize, darwin::tls::key::Destructor>(entry as usize)
+    });
+    // A Darwin key, so the number the guest holds indexes the array its `%gs`
+    // addresses. See [`darwin::tls::key`].
+    let rc = match darwin::tls::key::Key::create(destructor) {
+        Ok(key) => {
+            mem.write_u64(out, u64::from(key.index()), symbol)?;
+            0
+        }
+        Err(rc) => rc,
     };
-    if rc == 0 {
-        mem.write_u64(out, key as u64, symbol)?;
-    }
     set_int_return(ctx, rc);
     Ok(())
 }

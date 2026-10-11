@@ -1,0 +1,339 @@
+//! Darwin's `pthread_key_t`: an index into the thread-specific data array a Darwin
+//! thread reaches through its thread pointer.
+//!
+//! The index is guest-visible in a way a host key is not. libpthread's own
+//! `pthread_getspecific` is `tsd[key]`, and dyld's `tlv_get_addr` reads a
+//! thread-local's block as `%gs:[key*8]` (`tpidrro_el0` on arm64) without calling
+//! anything. A key is only Darwin's if that read finds its value, so where the guest's
+//! array is this runtime's own, so are the keys.
+//!
+//! Three backends, fixed at build time:
+//!
+//! * **macOS**: the host's keys. The host's array *is* the Darwin array.
+//! * **x86-64 Linux and FreeBSD**: an allocator over the synthetic array
+//!   [`super::tsd_base`] builds, with libpthread's layout and teardown.
+//! * **Anywhere else** (AArch64 Linux): the host's keys, which nothing can read off a
+//!   thread pointer - see [`addressable`]. Until the guest's thread pointer can be set
+//!   there, a Darwin index would promise a read that does not work.
+
+use core::ffi::c_void;
+
+use crate::pthread::err;
+
+/// A key's destructor: called at thread exit with the thread's non-null value.
+pub type Destructor = unsafe extern "C" fn(*mut c_void);
+
+/// The first key `pthread_key_create` hands out. Below it are libpthread's reserved
+/// slots and the static keys frameworks claim by number.
+pub const FIRST_DYNAMIC: u32 = 256;
+
+/// One past the last key: `FIRST_DYNAMIC + PTHREAD_KEYS_MAX`.
+pub const END: u32 = 768;
+
+/// `PTHREAD_DESTRUCTOR_ITERATIONS`.
+pub const DESTRUCTOR_ITERATIONS: usize = 4;
+
+/// One Darwin thread-specific data key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Key(u32);
+
+/// Whether a key's value is the word at `index * 8` in the array the guest's thread
+/// pointer addresses - which is what lets a descriptor carry a key for `tlv_get_addr`
+/// to read directly.
+pub const fn addressable() -> bool {
+    cfg!(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "freebsd"),
+            target_arch = "x86_64"
+        )
+    ))
+}
+
+impl Key {
+    /// A new key, every thread's value for it null.
+    pub fn create(destructor: Option<Destructor>) -> Result<Key, i32> {
+        imp::create(destructor).map(Key)
+    }
+
+    /// The key a guest names by number.
+    pub const fn from_index(index: u32) -> Key {
+        Key(index)
+    }
+
+    /// What a guest's `pthread_key_t` holds for this key.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+
+    /// Give the key back. Threads' values for it are not destructed.
+    pub fn delete(self) -> i32 {
+        imp::delete(self.0)
+    }
+
+    /// This thread's value.
+    pub fn get(self) -> *mut c_void {
+        imp::get(self.0)
+    }
+
+    /// Set this thread's value.
+    pub fn set(self, value: *mut c_void) -> i32 {
+        imp::set(self.0, value)
+    }
+}
+
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    target_arch = "x86_64"
+)))]
+mod imp {
+    use super::*;
+
+    pub fn create(destructor: Option<Destructor>) -> Result<u32, i32> {
+        let mut key: libc::pthread_key_t = 0;
+        // SAFETY: a live local and the caller's destructor.
+        let rc = unsafe { libc::pthread_key_create(&mut key, destructor) };
+        // `pthread_key_t` is unsigned on Linux and macOS and signed on FreeBSD.
+        match rc {
+            0 => Ok(key as u32),
+            rc => Err(err::from_host(rc)),
+        }
+    }
+
+    pub fn delete(key: u32) -> i32 {
+        // SAFETY: a key nobody created is refused by the host, not undefined.
+        err::from_host(unsafe { libc::pthread_key_delete(key as libc::pthread_key_t) })
+    }
+
+    pub fn get(key: u32) -> *mut c_void {
+        // SAFETY: as above; an uncreated key reads null.
+        unsafe { libc::pthread_getspecific(key as libc::pthread_key_t) }
+    }
+
+    pub fn set(key: u32, value: *mut c_void) -> i32 {
+        // SAFETY: as above; the value is the caller's and only stored.
+        err::from_host(unsafe { libc::pthread_setspecific(key as libc::pthread_key_t, value) })
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    target_arch = "x86_64"
+))]
+mod imp {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// A key no one holds.
+    const FREE: usize = 0;
+    /// A key held with no destructor. Any other value is the destructor's address.
+    const HELD: usize = 1;
+
+    /// One word per dynamic key, which is the whole of the allocator: claiming a
+    /// key is a compare-exchange on its word, so creation never blocks a thread
+    /// that is reading another key.
+    static KEYS: [AtomicUsize; (END - FIRST_DYNAMIC) as usize] =
+        [const { AtomicUsize::new(FREE) }; (END - FIRST_DYNAMIC) as usize];
+
+    fn word(key: u32) -> Option<&'static AtomicUsize> {
+        key.checked_sub(FIRST_DYNAMIC)
+            .and_then(|i| KEYS.get(i as usize))
+    }
+
+    pub fn create(destructor: Option<Destructor>) -> Result<u32, i32> {
+        let claim = destructor.map_or(HELD, |d| d as usize);
+        (FIRST_DYNAMIC..END)
+            .find(|&key| {
+                word(key).is_some_and(|w| {
+                    w.compare_exchange(FREE, claim, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                })
+            })
+            .ok_or(err::EAGAIN)
+    }
+
+    pub fn delete(key: u32) -> i32 {
+        // libpthread also clears the slot in every live thread. This allocator has
+        // no list of threads, so a reused key can surface a value set under the old
+        // one - which POSIX leaves to the program to avoid.
+        match word(key) {
+            Some(w) if w.swap(FREE, Ordering::AcqRel) != FREE => 0,
+            _ => err::EINVAL,
+        }
+    }
+
+    pub fn get(key: u32) -> *mut c_void {
+        if key >= END {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: the thread's own array has `END` words of slots.
+        unsafe { *slots().add(key as usize) as usize as *mut c_void }
+    }
+
+    pub fn set(key: u32, value: *mut c_void) -> i32 {
+        // libpthread's rule: a reserved slot is always settable, a dynamic key
+        // only once created.
+        let settable = match word(key) {
+            Some(w) => w.load(Ordering::Acquire) != FREE,
+            None => key < FIRST_DYNAMIC,
+        };
+        if !settable {
+            return err::EINVAL;
+        }
+        // SAFETY: as in `get`, and `key < END` follows from `settable`.
+        unsafe { *slots().add(key as usize) = value as usize as u64 };
+        0
+    }
+
+    fn slots() -> *mut u64 {
+        crate::tls::tsd_base() as usize as *mut u64
+    }
+
+    /// libpthread's `_pthread_tsd_cleanup`, on the array at `slots`.
+    ///
+    /// In key order, each value cleared before its destructor sees it, and again
+    /// for as many passes as a destructor keeps setting values - up to
+    /// [`DESTRUCTOR_ITERATIONS`].
+    ///
+    /// # Safety
+    ///
+    /// `slots` is the calling thread's own array, installed as its
+    /// [`crate::tls::tsd_base`] for the duration.
+    pub(crate) unsafe fn run_destructors(slots: *mut u64) {
+        for _ in 0..DESTRUCTOR_ITERATIONS {
+            let mut ran = false;
+            for key in FIRST_DYNAMIC..END {
+                let Some(w) = word(key) else { continue };
+                let destructor = w.load(Ordering::Acquire);
+                if destructor == FREE || destructor == HELD {
+                    continue;
+                }
+                // SAFETY: the caller's array, `key < END`.
+                let at = unsafe { slots.add(key as usize) };
+                let value = unsafe { *at };
+                if value == 0 {
+                    continue;
+                }
+                // SAFETY: as above.
+                unsafe { *at = 0 };
+                // SAFETY: `destructor` was stored from a `Destructor` in `create`.
+                let f: Destructor = unsafe { core::mem::transmute(destructor) };
+                // A destructor is Darwin code, so it runs with the Darwin array
+                // in the thread pointer.
+                crate::call_as_darwin!(unsafe { f(value as usize as *mut c_void) });
+                ran = true;
+            }
+            if !ran {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    target_arch = "x86_64"
+))]
+pub(crate) use imp::run_destructors;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_value_is_per_thread() {
+        let key = Key::create(None).expect("a key is available");
+        assert_eq!(key.set(0x10 as *mut c_void), 0);
+        assert_eq!(key.get() as usize, 0x10);
+        let theirs = std::thread::spawn(move || key.get() as usize)
+            .join()
+            .unwrap();
+        assert_eq!(theirs, 0, "another thread starts at null");
+        assert_eq!(key.delete(), 0);
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "freebsd"),
+            target_arch = "x86_64"
+        )
+    ))]
+    fn dynamic_keys_are_numbered_as_darwin_numbers_them() {
+        let key = Key::create(None).unwrap();
+        assert!(
+            (FIRST_DYNAMIC..END).contains(&key.index()),
+            "key {} is outside libpthread's dynamic range",
+            key.index()
+        );
+        key.delete();
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "freebsd"),
+            target_arch = "x86_64"
+        )
+    ))]
+    fn the_value_is_the_word_the_thread_pointer_addresses() {
+        let key = Key::create(None).unwrap();
+        key.set(0x5eed as *mut c_void);
+        let base = crate::tls::tsd_base() as usize as *const u64;
+        // SAFETY: `key < END`, inside this thread's array.
+        assert_eq!(unsafe { *base.add(key.index() as usize) }, 0x5eed);
+        key.delete();
+    }
+
+    #[test]
+    fn a_destructor_runs_once_per_thread_with_its_value() {
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn record(value: *mut c_void) {
+            SEEN.fetch_add(value as usize, Ordering::SeqCst);
+        }
+        let key = Key::create(Some(record)).unwrap();
+        std::thread::spawn(move || {
+            key.set(7 as *mut c_void);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(SEEN.load(Ordering::SeqCst), 7);
+        key.delete();
+    }
+
+    #[test]
+    fn a_destructor_that_sets_its_key_again_is_called_again() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static KEY: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn again(_: *mut c_void) {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                Key::from_index(KEY.load(Ordering::SeqCst) as u32).set(std::ptr::dangling_mut());
+            }
+        }
+        let key = Key::create(Some(again)).unwrap();
+        KEY.store(key.index() as usize, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            key.set(std::ptr::dangling_mut());
+        })
+        .join()
+        .unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        key.delete();
+    }
+
+    #[test]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        target_arch = "x86_64"
+    ))]
+    fn an_uncreated_dynamic_key_cannot_be_set() {
+        let key = Key::create(None).unwrap();
+        assert_eq!(key.delete(), 0);
+        assert_eq!(key.set(std::ptr::dangling_mut()), err::EINVAL);
+        assert_eq!(key.delete(), err::EINVAL, "a key is deleted once");
+    }
+}

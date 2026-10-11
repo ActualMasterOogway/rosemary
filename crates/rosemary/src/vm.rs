@@ -534,7 +534,7 @@ impl Vm {
 
         // Every `_Thread_local` in the program becomes addressable here, before
         // a line of guest code runs - an initializer may touch one.
-        crate::tls::register(&program.report);
+        crate::tls::register(&program.report, crate::exec::Engine::Emulated);
         // Where `@executable_path` points, and where a guest `dlopen` of a bare
         // library name looks.
         crate::dyld::set_executable_path(exe_path, program.report.root().map_or(0, |i| i.slide));
@@ -1287,7 +1287,8 @@ impl Vm {
 
         // A host address the guest *loaded from an import slot* and then called
         // through a register, rather than at a `call` site the lifter could
-        // match. `_Thread_local` access is the case that forces this.
+        // match - a descriptor `tls::register` declined still calls its
+        // `__tlv_bootstrap` this way.
         if let Some(site) = self.program.import_by_target(callee) {
             // A host pointer that reached the guest by neither of the routes
             // [`crate::trampoline`] substitutes - not out of a slot, not out of

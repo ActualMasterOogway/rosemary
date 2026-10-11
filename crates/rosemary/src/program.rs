@@ -938,7 +938,10 @@ impl<M: Regions> Program<M> {
         }
         // Set rather than pushed one by one, because the field is shared.
         config.set_segments(segments);
-        for (&va, site) in &self.imports {
+        // `tlv_get_addr`'s slow path is an import like any other, so the policy
+        // that inlines the program's calls inlines it too.
+        let tls = crate::tls::import_site();
+        for (va, site) in self.imports.iter().map(|(&va, s)| (va, s)).chain(tls) {
             // A fast import is an **absolute native call** the lifter bakes
             // into the translation, so the address had better be native code.
             let promoted = policy
@@ -1032,7 +1035,9 @@ impl<M: Regions> Program<M> {
                 .or_else(|| crate::trampoline::lift_region(va))
                 // Including the one instruction that ends a call: the return
                 // address every entry into guest code pushes.
-                .or_else(|| crate::retstub::lift_region(va));
+                .or_else(|| crate::retstub::lift_region(va))
+                // And `tlv_get_addr`, which is guest code this runtime wrote.
+                .or_else(|| crate::tls::lift_region(va));
         };
         // A loaded image is not memory the guest writes, so the Mono call rule
         // does not apply to it. See [`crate::region`].
@@ -1070,6 +1075,8 @@ impl<M: Regions> Program<M> {
             || crate::trampoline::contains(va)
             // Or the return stub, which is guest code for the same reason.
             || crate::retstub::contains(va)
+            // Or `tlv_get_addr`, which every thread-local read calls.
+            || crate::tls::contains(va)
     }
 
     /// `va` as `image+offset`, in the image's *own* address space.
@@ -1086,6 +1093,7 @@ impl<M: Regions> Program<M> {
         crate::dyld::locate(va)
             .or_else(|| crate::trampoline::locate(va))
             .or_else(|| crate::retstub::locate(va))
+            .or_else(|| crate::tls::locate(va))
     }
 
     /// Point this program's import slots at [trampolines](crate::trampoline).
@@ -1095,7 +1103,13 @@ impl<M: Regions> Program<M> {
         let mut eligible: Vec<(u64, ImportSite)> = self
             .imports
             .iter()
-            .filter(|(_, site)| !site.is_stub && !self.is_guest_address(site.resolved))
+            // A descriptor's bootstrap is replaced by `tls::register`, which runs
+            // after this.
+            .filter(|(_, site)| {
+                !site.is_stub
+                    && !crate::tls::is_bootstrap(&site.symbol)
+                    && !self.is_guest_address(site.resolved)
+            })
             .map(|(&va, site)| (va, site.clone()))
             .collect();
         // In address order, so trampoline slots are handed out the same way on
@@ -1144,6 +1158,8 @@ impl<M: Regions> Program<M> {
         crate::dyld::import_at(va)
             // And the synthetic addresses a trampoline jumps to.
             .or_else(|| crate::trampoline::import_at(va))
+            // And the address `tlv_get_addr`'s slow path jumps to.
+            .or_else(|| crate::tls::import_at(va))
     }
 
     /// Whether [`import_filter`](Self::import_filter) has heard of `va`. A yes may be

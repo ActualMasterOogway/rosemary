@@ -44,6 +44,9 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     crate::thread::clear_errno();
     run_initializers(exec)?;
     let status = exec.enter_main()?;
+    // `exit(main(...))`, as dyld's start does: the main thread's thread-local
+    // terminators run before the process's `atexit` handlers.
+    crate::tls::exit();
     Ok((status & 0xff) as i32)
 }
 

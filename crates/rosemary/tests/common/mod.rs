@@ -1583,6 +1583,49 @@ pub fn profile_fixture() -> Option<String> {
         .clone()
 }
 
+/// `_tlv_atexit` - the call a C++ `thread_local` with a destructor compiles to -
+/// on two worker threads and the main thread, with a destructor that reads a
+/// thread-local, and a million thread-local reads in between.
+///
+/// What Darwin prints: each worker's terminators last-registered first, reading the
+/// worker's own value; the main thread's at `exit`, before any `atexit` handler.
+pub const TLV_EXIT_C: &str = r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+extern void _tlv_atexit(void (*)(void *), void *);
+_Thread_local int value = 7;
+static void bye(void *tag) { printf("bye %s value=%d\n", (const char *)tag, value); fflush(stdout); }
+static void at_exit(void) { printf("atexit\n"); fflush(stdout); }
+static void *worker(void *arg) {
+    value = 100 + (int)(long)arg;
+    _tlv_atexit(bye, "first");
+    _tlv_atexit(bye, "second");
+    return 0;
+}
+int main(void) {
+    atexit(at_exit);
+    for (long i = 0; i < 2; i++) {
+        pthread_t t;
+        pthread_create(&t, 0, worker, (void *)i);
+        pthread_join(t, 0);
+    }
+    long sum = 0;
+    for (int i = 0; i < 1000000; i++) { value += 1; sum += value; }
+    printf("sum %ld\n", sum);
+    _tlv_atexit(bye, "main");
+    return 0;
+}
+"#;
+
+/// Build [`TLV_EXIT_C`] for the guest, or `None` if this host cannot.
+pub fn tlv_exit_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("tlv_exit", TLV_EXIT_C, &[]))
+        .clone()
+}
+
 /// Build [`TLS_C`], or `None` if this host cannot.
 pub fn tls_fixture() -> Option<String> {
     static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
