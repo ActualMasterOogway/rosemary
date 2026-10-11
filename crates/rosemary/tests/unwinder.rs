@@ -45,7 +45,7 @@ fn fixture() -> Option<String> {
 
 /// The unwinder is mapped, and every `_Unwind_*` binding lands inside it.
 #[test]
-fn every_unwind_binding_lands_in_the_vendored_unwinder() {
+fn every_unwind_binding_lands_in_the_base_unwinder() {
     let Some(path) = fixture() else {
         skip!("no x86_64 C++ toolchain");
     };
@@ -75,7 +75,7 @@ fn every_unwind_binding_lands_in_the_vendored_unwinder() {
         seen += 1;
         assert!(
             extent.iter().any(|r| r.contains(&b.resolved)),
-            "{} resolved to {:#x}, outside the vendored libunwind - it went to the \
+            "{} resolved to {:#x}, outside the base libunwind - it went to the \
              host, which would walk the host's stack",
             b.symbol,
             b.resolved

@@ -773,11 +773,11 @@ fn open_with<S: MachSpec + 'static>(
         .map_err(|e| format!("{resolved}: {e}"))?;
 
     // The same repair the program's own link needs, for the same reason.
-    crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, flavor)
+    crate::cxxlib::bind_unwinder_to_the_runtime(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: unwinder: {e}"))?;
-    crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, flavor)
+    crate::cxxlib::bind_cxxabi_to_the_runtime(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: cxxabi: {e}"))?;
-    crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(&mut report, &mut memory, flavor)
+    crate::cxxlib::bind_objc_exceptions_to_the_runtime_cxxabi(&mut report, &mut memory, flavor)
         .map_err(|e| format!("{resolved}: objc exceptions: {e}"))?;
     // The program's allocator replacement reaches a plugin as it reaches every
     // image the program was linked with.

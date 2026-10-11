@@ -43,6 +43,10 @@ fn run(
             return ExitCode::FAILURE;
         }
     };
+    if let Err(e) = prefix_cli::ensure_cxx_runtime(engine) {
+        eprintln!("rosemary: {path}: {e}");
+        return ExitCode::FAILURE;
+    }
     prefix_cli::check_guest_arch(match engine {
         Engine::Native => prefix::pinned::host_arch(),
         Engine::Emulated => "x86_64",
@@ -397,6 +401,10 @@ fn analyze(path: OsString, show_ir: bool, audit_calls: bool) -> ExitCode {
         false => path,
     };
 
+    if let Err(e) = prefix_cli::ensure_cxx_runtime(Engine::Emulated) {
+        eprintln!("rosemary: {path}: {e}");
+        return ExitCode::FAILURE;
+    }
     let program = match Program::load(&path, &[]) {
         Ok(p) => p,
         Err(e) => {

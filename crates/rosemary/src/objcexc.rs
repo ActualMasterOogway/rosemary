@@ -150,7 +150,7 @@ fn class_named_in(
 /// Point every `_OBJC_EHTYPE_$_` binding at a record, and
 /// `___objc_personality_v0` at the vendored `__gxx_personality_v0`.
 ///
-/// Runs after [`crate::cxxlib::bind_cxxabi_to_the_vendored_one`], because the
+/// Runs after [`crate::cxxlib::bind_cxxabi_to_the_runtime`], because the
 /// vtable addresses it needs are that image's.
 pub fn bind<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,

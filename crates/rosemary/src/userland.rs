@@ -1,7 +1,5 @@
 use machish::error::Result;
-use machish::image::MachObject;
 use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};
-use machish::spec::arch::{Arm64, X86_64};
 
 use crate::cxxlib::Flavor;
 
@@ -86,16 +84,6 @@ impl<S: DylibSource> DylibSource for BaseLibraries<S> {
             bytes,
             implied: Vec::new(),
         }))
-    }
-}
-
-impl Flavor {
-    /// Whether `bytes` has a slice this flavor's backend can map.
-    fn can_load(self, bytes: &[u8]) -> bool {
-        match self {
-            Flavor::Intel => MachObject::parse_any(bytes, X86_64).is_ok(),
-            Flavor::Arm => MachObject::parse_any(bytes, Arm64).is_ok(),
-        }
     }
 }
 

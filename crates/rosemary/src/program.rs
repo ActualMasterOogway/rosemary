@@ -772,14 +772,14 @@ impl<M: Regions> Program<M> {
             Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
 
         // Before anything reads the report.
-        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)?;
+        crate::cxxlib::bind_unwinder_to_the_runtime(&mut report, &mut memory, Flavor::Intel)?;
 
         // And the same for the C++ ABI.
-        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, Flavor::Intel)?;
+        crate::cxxlib::bind_cxxabi_to_the_runtime(&mut report, &mut memory, Flavor::Intel)?;
 
         // And the Objective-C half of the same ABI, which is stated in terms of
         // the addresses the line above settled on.
-        crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
+        crate::cxxlib::bind_objc_exceptions_to_the_runtime_cxxabi(
             &mut report,
             &mut memory,
             Flavor::Intel,

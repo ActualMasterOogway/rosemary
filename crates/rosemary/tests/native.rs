@@ -235,7 +235,7 @@ fn native_constructors_run_in_order_before_main() {
     assert_eq!(out, native_out, "stderr: {err}");
 }
 
-/// The native backend links the vendored libc++ of this host's architecture
+/// The native backend links the base's libc++ of this host's architecture
 /// rather than the system's, so a C++ fixture printing what the host's own build
 /// prints is what says the substitution is ABI-faithful.
 #[test]

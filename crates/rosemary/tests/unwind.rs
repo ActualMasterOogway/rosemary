@@ -212,7 +212,7 @@ fn a_catch_needing_multiple_inheritance_works() {
     // of the most expensive kind, terminating a program whose handler is right
     // there in the source.
     //
-    // Vendoring a real `libc++abi` closed it: the offset adjustment is exactly
+    // Using a real `libc++abi` closed it: the offset adjustment is exactly
     // the sort of thing the Itanium ABI's own implementation does correctly, and
     // this test now asserts the clause runs. It is the clearest single win from
     // running the C++ runtime rather than reimplementing it, and it is checked

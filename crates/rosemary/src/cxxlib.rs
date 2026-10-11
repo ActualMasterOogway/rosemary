@@ -1,10 +1,13 @@
-use machish::error::Result;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use machish::error::{Error, Result};
 use machish::exports::ExportTable;
 use machish::image::MachObject;
 use machish::namespace::{DylibRequest, DylibSource, FetchedDylib};
 use machish::spec::arch::{Arm64, X86_64};
 
-/// Which architecture's vendored images a link wants.
+/// Which architecture's C++ runtime a link wants.
 ///
 /// The emulated backend is always [`Flavor::Intel`]; the native backend takes the
 /// host's, because the image it is linking is the host's.
@@ -21,37 +24,114 @@ pub const HOST: Flavor = match cfg!(target_arch = "aarch64") {
     false => Flavor::Intel,
 };
 
-mod intel {
-    pub const LIBCXX: &[u8] = include_bytes!("../vendor/libs/intel/libc++.1.dylib");
-    pub const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/intel/libc++abi.dylib");
-    pub const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/intel/libunwind.dylib");
+/// Where the runtime's three images live in a MiniDarwin base, as the guest
+/// spells them. There is no other source: a runtime comes from the prefix, or from
+/// the x86-64 or arm64 MiniDarwin base in the cache, and from nowhere else.
+const LIBCXX_FILE: &str = "/usr/lib/libc++.1.dylib";
+const LIBCXXABI_FILE: &str = "/usr/lib/libc++abi.dylib";
+const LIBUNWIND_FILE: &str = "/usr/lib/system/libunwind.dylib";
+
+/// Where one flavor's runtime was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The prefix's own `/usr/lib`.
+    Prefix,
+    /// A verified MiniDarwin tree in the rootfs cache, for a flavor the prefix's
+    /// base is not (an x86-64 base on an arm64 host) or when there is no prefix.
+    Base(PathBuf),
 }
 
-mod arm {
-    pub const LIBCXX: &[u8] = include_bytes!("../vendor/libs/arm/libc++.1.dylib");
-    pub const LIBCXXABI: &[u8] = include_bytes!("../vendor/libs/arm/libc++abi.dylib");
-    pub const LIBUNWIND: &[u8] = include_bytes!("../vendor/libs/arm/libunwind.dylib");
+impl Source {
+    fn file(&self, guest: &str) -> PathBuf {
+        match self {
+            Source::Prefix => prefix::ns::host_path(guest),
+            Source::Base(tree) => tree.join(guest.trim_start_matches('/')),
+        }
+    }
+
+    fn holds(&self, flavor: Flavor) -> bool {
+        [LIBCXX_FILE, LIBCXXABI_FILE, LIBUNWIND_FILE]
+            .iter()
+            .all(|file| std::fs::read(self.file(file)).is_ok_and(|b| flavor.can_load(&b)))
+    }
+}
+
+/// MiniDarwin's spelling of `flavor`'s architecture.
+fn arch(flavor: Flavor) -> &'static str {
+    match flavor {
+        Flavor::Intel => "x86_64",
+        Flavor::Arm => "aarch64",
+    }
+}
+
+/// The pinned base for `flavor`, if it is already in the cache.
+///
+/// A tree only enters the cache after it has been verified against its manifest,
+/// so finding one is enough; the full check is `provision::obtain`'s job.
+fn cached_base(flavor: Flavor) -> Option<PathBuf> {
+    let spec = prefix::pinned::spec(arch(flavor))?.ok()?;
+    let digest = spec.tree?;
+    let tree = prefix::cache::Cache::from_env()?.tree(&digest);
+    tree.is_dir().then_some(tree)
+}
+
+/// Where `flavor`'s C++ runtime comes from, or why there is none.
+///
+/// The prefix first, because it is what the user chose; then the pinned base
+/// for that architecture. On a native macOS host with no prefix this is still
+/// the arm64 base and not the system's: Apple's `operator new` calls the `malloc`
+/// dyld bound before this process started, which [`crate::interpose`] cannot
+/// reach.
+pub fn locate(flavor: Flavor) -> std::result::Result<Source, String> {
+    static FOUND: [OnceLock<Source>; 2] = [OnceLock::new(), OnceLock::new()];
+    let slot = &FOUND[flavor as usize];
+    if let Some(found) = slot.get() {
+        return Ok(found.clone());
+    }
+    let found = if Source::Prefix.holds(flavor) {
+        Source::Prefix
+    } else if let Some(tree) = cached_base(flavor).map(Source::Base)
+        && tree.holds(flavor)
+    {
+        tree
+    } else {
+        return Err(format!(
+            "no {} MiniDarwin base provides libc++: the prefix has none for this \
+             architecture and none is cached. Run `rosemary prefix create`, or \
+             set ROSEMARY_PREFIX_SETUP=download",
+            arch(flavor)
+        ));
+    };
+    Ok(slot.get_or_init(|| found).clone())
 }
 
 impl Flavor {
-    pub fn libcxx(self) -> &'static [u8] {
-        match self {
-            Flavor::Intel => intel::LIBCXX,
-            Flavor::Arm => arm::LIBCXX,
-        }
+    fn read(self, guest: &str) -> Result<Vec<u8>> {
+        let source = locate(self).map_err(|why| {
+            eprintln!("rosemary: {why}");
+            Error::Custom("no MiniDarwin base provides the C++ runtime")
+        })?;
+        std::fs::read(source.file(guest))
+            .map_err(|_| Error::Custom("the C++ runtime is unreadable"))
     }
 
-    pub fn libcxxabi(self) -> &'static [u8] {
-        match self {
-            Flavor::Intel => intel::LIBCXXABI,
-            Flavor::Arm => arm::LIBCXXABI,
-        }
+    pub fn libcxx(self) -> Result<Vec<u8>> {
+        self.read(LIBCXX_FILE)
     }
 
-    pub fn libunwind(self) -> &'static [u8] {
+    pub fn libcxxabi(self) -> Result<Vec<u8>> {
+        self.read(LIBCXXABI_FILE)
+    }
+
+    pub fn libunwind(self) -> Result<Vec<u8>> {
+        self.read(LIBUNWIND_FILE)
+    }
+
+    /// Whether `bytes` has a slice this flavor's backend can map.
+    pub(crate) fn can_load(self, bytes: &[u8]) -> bool {
         match self {
-            Flavor::Intel => intel::LIBUNWIND,
-            Flavor::Arm => arm::LIBUNWIND,
+            Flavor::Intel => MachObject::parse_any(bytes, X86_64).is_ok(),
+            Flavor::Arm => MachObject::parse_any(bytes, Arm64).is_ok(),
         }
     }
 
@@ -85,7 +165,7 @@ const UNWIND_NAMES: &[&str] = &[
     "/usr/lib/libunwind.dylib",
     "/usr/lib/libunwind.1.0.dylib",
     "@rpath/libunwind.1.dylib",
-    // The vendored image's own `LC_ID_DYLIB`, and where the unwinder actually
+    // The runtime image's own `LC_ID_DYLIB`, and where the unwinder actually
     // lives on a real system.
     "/usr/lib/system/libunwind.dylib",
 ];
@@ -100,7 +180,7 @@ const LIBSTDCXX_NAMES: &[&str] = &[
     "/usr/lib/libstdc++.6.0.9.dylib",
 ];
 
-/// The path the vendored image is known by once loaded.
+/// The path the runtime image is known by once loaded.
 const AS_PATH: &str = "/usr/lib/libc++.1.dylib";
 const CXXABI_PATH: &str = "/usr/lib/libc++abi.1.dylib";
 const UNWIND_PATH: &str = "/usr/lib/libunwind.1.dylib";
@@ -122,43 +202,42 @@ pub fn is_libstdcxx(install_name: &str) -> bool {
     LIBSTDCXX_NAMES.contains(&install_name)
 }
 
-/// A [`DylibSource`] that answers `/usr/lib/libc++` with a vendored libc++ of
-/// `flavor`, and delegates everything else.
-pub struct VendoredCxx<S> {
+/// A [`DylibSource`] that answers `/usr/lib/libc++` and its two companions from
+/// the base [`locate`] found, and delegates everything else.
+pub struct BaseCxx<S> {
     inner: S,
     flavor: Flavor,
 }
 
-impl<S> VendoredCxx<S> {
+impl<S> BaseCxx<S> {
     pub fn new(inner: S, flavor: Flavor) -> Self {
         Self { inner, flavor }
     }
 }
 
-impl<S: DylibSource> DylibSource for VendoredCxx<S> {
+impl<S: DylibSource> DylibSource for BaseCxx<S> {
     fn fetch(&mut self, request: &DylibRequest<'_>) -> Result<Option<FetchedDylib>> {
         if is_libcxx(request.install_name) {
             return Ok(Some(FetchedDylib {
                 path: AS_PATH.to_string(),
-                bytes: self.flavor.libcxx().to_vec(),
+                bytes: self.flavor.libcxx()?,
                 implied: Vec::new(),
             }));
         } else if is_libcxxabi(request.install_name) || is_libstdcxx(request.install_name) {
             return Ok(Some(FetchedDylib {
                 path: CXXABI_PATH.to_string(),
-                bytes: self.flavor.libcxxabi().to_vec(),
-                // The vendored `libc++abi` takes `_Unwind_*` from
-                // `libSystem`, which on a real system re-exports the
-                // unwinder. Nothing here loads `libSystem`, so the unwinder
-                // has to be named directly or it never enters the graph and
-                // [`bind_unwinder_to_the_vendored_one`] has nothing to bind
-                // to.
+                bytes: self.flavor.libcxxabi()?,
+                // `libc++abi` takes `_Unwind_*` from `libSystem`, which on a
+                // real system re-exports the unwinder. Nothing here loads
+                // `libSystem`, so the unwinder has to be named directly or it
+                // never enters the graph and [`bind_unwinder_to_the_runtime`]
+                // has nothing to bind to.
                 implied: vec![UNWIND_PATH.to_string()],
             }));
         } else if is_libunwind(request.install_name) {
             return Ok(Some(FetchedDylib {
                 path: UNWIND_PATH.to_string(),
-                bytes: self.flavor.libunwind().to_vec(),
+                bytes: self.flavor.libunwind()?,
                 implied: Vec::new(),
             }));
         }
@@ -166,49 +245,49 @@ impl<S: DylibSource> DylibSource for VendoredCxx<S> {
     }
 }
 
-/// Point every `_Unwind_*` binding at the **vendored** `libunwind`.
+/// Point every `_Unwind_*` binding at the runtime's `libunwind`.
 ///
 /// Slots are rewritten in guest memory *and* in the report, so everything built from
 /// the report afterwards - [`crate::Program`]'s import maps, the audit - describes what
 /// the slot actually holds.
-pub fn bind_unwinder_to_the_vendored_one<M: machish::memory::Regions>(
+pub fn bind_unwinder_to_the_runtime<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
     flavor: Flavor,
 ) -> Result<usize> {
     // The Mach-O spelling carries a leading underscore, so the C identifier
     // `_Unwind_Resume` arrives as `__Unwind_Resume`.
-    rebind_to_vendored(
+    rebind_to_runtime(
         report,
         memory,
         flavor,
-        flavor.libunwind(),
+        || flavor.libunwind(),
         &is_libunwind,
         |symbol| symbol.starts_with("__Unwind_"),
     )
 }
 
-/// Point every C++ ABI binding at the **vendored** `libc++abi`.
+/// Point every C++ ABI binding at the runtime's `libc++abi`.
 ///
 /// [`is_cxx_abi_symbol`] is deliberately a family test rather than "anything the
-/// vendored `libc++abi` exports".
-pub fn bind_cxxabi_to_the_vendored_one<M: machish::memory::Regions>(
+/// runtime `libc++abi` exports".
+pub fn bind_cxxabi_to_the_runtime<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
     flavor: Flavor,
 ) -> Result<usize> {
-    rebind_to_vendored(
+    rebind_to_runtime(
         report,
         memory,
         flavor,
-        flavor.libcxxabi(),
+        || flavor.libcxxabi(),
         &is_libcxxabi,
         is_cxx_abi_symbol,
     )
 }
 
 /// Whether `symbol` is part of the Itanium C++ ABI *runtime interface* - the half of
-/// `libstdc++` that the vendored `libc++abi` is a drop-in for.
+/// `libstdc++` that the runtime `libc++abi` is a drop-in for.
 ///
 /// The three prefixes are the ABI's own namespaces.
 fn is_cxx_abi_symbol(symbol: &str) -> bool {
@@ -235,15 +314,15 @@ fn is_cxx_abi_symbol(symbol: &str) -> bool {
 }
 
 /// The shared body of the two rebinds above.
-fn rebind_to_vendored<M: machish::memory::Regions>(
+fn rebind_to_runtime<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
     flavor: Flavor,
-    bytes: &[u8],
+    bytes: impl FnOnce() -> Result<Vec<u8>>,
     is_image: &dyn Fn(&str) -> bool,
     wanted: impl Fn(&str) -> bool,
 ) -> Result<usize> {
-    // Where the vendored image landed, if this link wanted one at all. A C
+    // Where the runtime image landed, if this link wanted one at all. A C
     // program does not, and neither does a C++ program that never throws.
     let Some((base, slide)) = report
         .images
@@ -253,7 +332,7 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
     else {
         return Ok(0);
     };
-    let exports = flavor.exports(bytes)?;
+    let exports = flavor.exports(&bytes()?)?;
 
     // Every address the loader mapped, which is what "already in the guest"
     // means.
@@ -267,7 +346,7 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
 
     let mut rebound = 0;
     for image in &mut report.images {
-        // The vendored image's own bindings are not rewritten: it is the thing
+        // The runtime image's own bindings are not rewritten: it is the thing
         // being bound *to*, and its internal references are already its own.
         if image.base == base {
             continue;
@@ -296,28 +375,33 @@ fn rebind_to_vendored<M: machish::memory::Regions>(
     Ok(rebound)
 }
 
-/// Bind the Objective-C exception machinery to the vendored `libc++abi`.
+/// Bind the Objective-C exception machinery to the runtime `libc++abi`.
 ///
 /// Last of the three, because every address it writes is one of that image's.
-pub fn bind_objc_exceptions_to_the_vendored_cxxabi<M: machish::memory::Regions>(
+pub fn bind_objc_exceptions_to_the_runtime_cxxabi<M: machish::memory::Regions>(
     report: &mut machish::report::LinkReport,
     memory: &mut M,
     flavor: Flavor,
 ) -> Result<usize> {
+    // No C++ runtime in the link is nothing to bind, and nothing to read.
+    if !report.images.iter().any(|i| is_libcxxabi(&i.name)) {
+        return Ok(0);
+    }
     crate::objcexc::bind(
         report,
         memory,
-        &flavor.exports(flavor.libcxxabi())?,
+        &flavor.exports(&flavor.libcxxabi()?)?,
         &is_libcxxabi,
     )
 }
 
-/// The source every link in this crate uses: vendored libc++ in front of the
-/// base's userland libraries (see [`crate::userland`]), in front of the filesystem.
+/// The source every link in this crate uses: the base's C++ runtime in front of
+/// its other userland libraries (see [`crate::userland`]), in front of the
+/// filesystem.
 pub fn source(
     flavor: Flavor,
-) -> VendoredCxx<crate::userland::BaseLibraries<machish::namespace::FsDylibSource>> {
-    VendoredCxx::new(
+) -> BaseCxx<crate::userland::BaseLibraries<machish::namespace::FsDylibSource>> {
+    BaseCxx::new(
         crate::userland::BaseLibraries::new(machish::namespace::FsDylibSource::new(), flavor),
         flavor,
     )
@@ -327,30 +411,16 @@ pub fn source(
 mod tests {
     use super::*;
 
-    fn parsed() -> MachObject<'static, X86_64> {
-        MachObject::parse_any(intel::LIBCXX, X86_64)
-            .expect("the vendored libc++ is an x86-64 Mach-O")
-    }
-
-    /// It has to be the *guest's* architecture, or none of this means anything.
-    #[test]
-    fn the_vendored_library_is_intel() {
-        let obj = parsed();
-        assert!(obj.section("__TEXT", "__text").is_some(), "no __text");
-    }
-
-    /// The vintage check.
-    #[test]
-    fn vendored_libcxx_is_the_abi_the_guest_expects() {
-        let exports = ExportTable::parse(&parsed()).expect("exports");
-        for symbol in [
-            "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE9__grow_byEmmmmmm",
-            "__ZNKSt3__121__basic_string_commonILb1EE20__throw_length_errorEv",
-            "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm",
-            "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEaSERKS5_",
-            "__ZNSt3__18ios_base4initEPv",
-        ] {
-            assert!(exports.contains(symbol), "vendored libc++ lacks {symbol}");
+    /// A flavor's three images, or `None` on a machine with no such base cached.
+    ///
+    /// A test that returns here has not run; CI has to provide the bases.
+    fn runtime(flavor: Flavor) -> Option<[Vec<u8>; 3]> {
+        match (flavor.libcxx(), flavor.libcxxabi(), flavor.libunwind()) {
+            (Ok(a), Ok(b), Ok(c)) => Some([a, b, c]),
+            _ => {
+                eprintln!("skipped: no {} MiniDarwin base is available", arch(flavor));
+                None
+            }
         }
     }
 
@@ -370,10 +440,55 @@ mod tests {
         assert!(is_libstdcxx("/usr/lib/libstdc++.6.dylib"));
     }
 
-    /// A `libstdc++` request loads the vendored `libc++abi`, **under its own name**.
+    /// The unwinder is where a MiniDarwin base keeps it, and the implied path
+    /// has to resolve back to it.
+    #[test]
+    fn the_unwinder_is_answered_under_its_base_install_name() {
+        assert!(is_libunwind(LIBUNWIND_FILE));
+        assert!(is_libunwind(UNWIND_PATH));
+    }
+
+    /// A base in a directory that holds nothing is not a runtime, and a wrong
+    /// architecture's is not one either.
+    #[test]
+    fn an_empty_tree_is_no_runtime() {
+        let empty = tempfile_dir("cxxlib-empty");
+        assert!(!Source::Base(empty.clone()).holds(Flavor::Intel));
+        assert!(!Source::Base(empty.clone()).holds(Flavor::Arm));
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    fn tempfile_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The vintage check.
+    #[test]
+    fn libcxx_is_the_abi_the_guest_expects() {
+        for flavor in [Flavor::Intel, Flavor::Arm] {
+            let Some([libcxx, ..]) = runtime(flavor) else {
+                continue;
+            };
+            let exports = flavor.exports(&libcxx).expect("exports");
+            for symbol in [
+                "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE9__grow_byEmmmmmm",
+                "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm",
+                "__ZNSt3__18ios_base4initEPv",
+            ] {
+                assert!(exports.contains(symbol), "{flavor:?} libc++ lacks {symbol}");
+            }
+        }
+    }
+
+    /// A `libstdc++` request loads `libc++abi`, **under its own name**.
     #[test]
     fn a_libstdcxx_request_gets_the_cxxabi_bytes_under_the_cxxabi_name() {
-        let mut source = VendoredCxx::new(machish::namespace::NoDylibSource, Flavor::Intel);
+        let Some([_, cxxabi, _]) = runtime(Flavor::Intel) else {
+            return;
+        };
+        let mut source = BaseCxx::new(machish::namespace::NoDylibSource, Flavor::Intel);
         let fetched = source
             .fetch(&DylibRequest {
                 install_name: "/usr/lib/libstdc++.6.dylib",
@@ -381,101 +496,84 @@ mod tests {
                 kind: machish::image::DependencyKind::Load,
                 loader_path: None,
             })
-            .expect("the vendored source does not fail")
+            .expect("the base answers")
             .expect("libstdc++ is answered");
         assert_eq!(fetched.path, CXXABI_PATH);
-        assert_eq!(fetched.bytes.len(), intel::LIBCXXABI.len());
+        assert_eq!(fetched.bytes.len(), cxxabi.len());
     }
 
     /// The unwinder has to enter the dependency graph even though nothing in it
-    /// names the unwinder.
-    ///
-    /// The vendored `libc++abi` takes `_Unwind_*` from `libSystem`, which is
-    /// never loaded as a guest image, so without the implied dependency the
-    /// unwinder is absent and [`bind_unwinder_to_the_vendored_one`] silently
-    /// rebinds nothing - which is how `__Unwind_RaiseException` ended up
-    /// reaching the host as an unsigned import.
+    /// names the unwinder: `libc++abi` takes `_Unwind_*` from `libSystem`, which is
+    /// never loaded as a guest image.
     #[test]
     fn a_cxxabi_request_pulls_in_the_unwinder() {
-        let mut source = VendoredCxx::new(machish::namespace::NoDylibSource, Flavor::Intel);
+        let Some([_, _, unwind]) = runtime(Flavor::Intel) else {
+            return;
+        };
+        let mut source = BaseCxx::new(machish::namespace::NoDylibSource, Flavor::Intel);
+        let request = |install_name| DylibRequest {
+            install_name,
+            candidates: &[],
+            kind: machish::image::DependencyKind::Load,
+            loader_path: None,
+        };
         let fetched = source
-            .fetch(&DylibRequest {
-                install_name: "/usr/lib/libc++abi.dylib",
-                candidates: &[],
-                kind: machish::image::DependencyKind::Load,
-                loader_path: None,
-            })
-            .expect("the vendored source does not fail")
+            .fetch(&request("/usr/lib/libc++abi.dylib"))
+            .expect("the base answers")
             .expect("libc++abi is answered");
         assert_eq!(fetched.implied, vec![UNWIND_PATH.to_string()]);
         assert!(is_libunwind(UNWIND_PATH), "the implied name must resolve");
 
-        // And the implied name really does reach the unwinder's bytes.
         let unwinder = source
-            .fetch(&DylibRequest {
-                install_name: UNWIND_PATH,
-                candidates: &[],
-                kind: machish::image::DependencyKind::Load,
-                loader_path: None,
-            })
-            .expect("the vendored source does not fail")
+            .fetch(&request(UNWIND_PATH))
+            .expect("the base answers")
             .expect("libunwind is answered");
-        assert_eq!(unwinder.bytes.len(), intel::LIBUNWIND.len());
+        assert_eq!(unwinder.bytes.len(), unwind.len());
     }
 
-    /// The unwinder the rebind points everything at actually defines the
-    /// entry points a throw goes through.
+    /// The unwinder and `libc++abi` define the entry points a throw goes through
+    /// and the ABI half a `libstdc++`-linked binary takes from `libstdc++`.
     #[test]
-    fn the_vendored_unwinder_exports_the_unwind_interface() {
-        let object = MachObject::parse_any(intel::LIBUNWIND, X86_64).expect("x86-64 Mach-O");
-        let exports = ExportTable::parse(&object).expect("exports");
-        for symbol in [
-            "__Unwind_RaiseException",
-            "__Unwind_Resume",
-            "__Unwind_DeleteException",
-            "__Unwind_GetLanguageSpecificData",
-            "__Unwind_SetIP",
-        ] {
-            assert!(
-                exports.contains(symbol),
-                "vendored libunwind lacks {symbol}"
-            );
+    fn the_runtime_covers_the_unwind_and_cxx_abi() {
+        for flavor in [Flavor::Intel, Flavor::Arm] {
+            let Some([_, cxxabi, unwind]) = runtime(flavor) else {
+                continue;
+            };
+            let unwind = flavor.exports(&unwind).expect("exports");
+            for symbol in [
+                "__Unwind_RaiseException",
+                "__Unwind_Resume",
+                "__Unwind_DeleteException",
+                "__Unwind_GetLanguageSpecificData",
+                "__Unwind_SetIP",
+            ] {
+                assert!(
+                    unwind.contains(symbol),
+                    "{flavor:?} libunwind lacks {symbol}"
+                );
+            }
+            let abi = flavor.exports(&cxxabi).expect("exports");
+            for symbol in [
+                "___cxa_begin_catch",
+                "___cxa_end_catch",
+                "___cxa_guard_acquire",
+                "___cxa_throw",
+                "___gxx_personality_v0",
+                "__ZSt9terminatev",
+                "__ZTVN10__cxxabiv117__class_type_infoE",
+                "__ZTVN10__cxxabiv120__si_class_type_infoE",
+            ] {
+                assert!(abi.contains(symbol), "{flavor:?} libc++abi lacks {symbol}");
+                assert!(is_cxx_abi_symbol(symbol), "{symbol} is not in the family");
+            }
+            // Not the ABI's `__cxa_atexit`: that one is shimmed, because the
+            // shim has to substitute the DSO handle as well.
+            assert!(!abi.contains("___cxa_atexit"));
         }
     }
 
-    /// The vendored `libc++abi` really does define every C++ ABI symbol a
-    /// `libstdc++`-linked binary takes from `libstdc++`.
-    ///
-    /// This is the list A Hat in Time imports, which is the whole of the ABI half.
-    #[test]
-    fn the_vendored_cxxabi_covers_what_libstdcxx_supplied() {
-        let object = MachObject::parse_any(intel::LIBCXXABI, X86_64).expect("x86-64 Mach-O");
-        let exports = ExportTable::parse(&object).expect("exports");
-        for symbol in [
-            "___cxa_begin_catch",
-            "___cxa_call_unexpected",
-            "___cxa_end_catch",
-            "___cxa_guard_abort",
-            "___cxa_guard_acquire",
-            "___cxa_guard_release",
-            "___cxa_pure_virtual",
-            "___gxx_personality_v0",
-            "__ZSt9terminatev",
-            "__ZTVN10__cxxabiv117__class_type_infoE",
-            "__ZTVN10__cxxabiv120__si_class_type_infoE",
-        ] {
-            assert!(
-                exports.contains(symbol),
-                "vendored libc++abi lacks {symbol}"
-            );
-            assert!(is_cxx_abi_symbol(symbol), "{symbol} is not in the family");
-        }
-    }
-
-    /// What the family test must *not* claim.
-    ///
-    /// `std::runtime_error`'s destructor is exported by the vendored `libc++abi` and by
-    /// `libstdc++`, and they are not the same object - see [`is_cxx_abi_symbol`].
+    /// What the family test must *not* claim: `std::runtime_error`'s destructor is
+    /// exported by `libc++abi` and by `libstdc++`, and they are not the same object.
     #[test]
     fn the_family_excludes_the_exception_types_and_the_containers() {
         assert!(!is_cxx_abi_symbol("__ZNSt13runtime_errorD1Ev"));
@@ -484,95 +582,43 @@ mod tests {
         assert!(!is_cxx_abi_symbol(
             "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm"
         ));
-        // Not the ABI's `__cxa_atexit`: that one is shimmed, because the shim
-        // has to substitute the DSO handle as well.
-        assert!(
-            !ExportTable::parse(&MachObject::parse_any(intel::LIBCXXABI, X86_64).unwrap())
-                .unwrap()
-                .contains("___cxa_atexit")
-        );
     }
 
-    /// Each flavor's images really are of that flavor. A vendored image of the
-    /// wrong architecture links as nothing rather than as wrong addresses.
+    /// Each flavor's images really are of that flavor, and a wrong one links as
+    /// nothing rather than as wrong addresses.
     #[test]
     fn each_flavor_carries_its_own_architecture() {
-        for (flavor, bytes) in [
-            (Flavor::Intel, intel::LIBCXX),
-            (Flavor::Arm, arm::LIBCXX),
-            (Flavor::Intel, intel::LIBCXXABI),
-            (Flavor::Arm, arm::LIBCXXABI),
-            (Flavor::Intel, intel::LIBUNWIND),
-            (Flavor::Arm, arm::LIBUNWIND),
-        ] {
-            let exports = flavor.exports(bytes).expect("a {flavor:?} Mach-O");
-            assert!(!exports.is_empty(), "{flavor:?} image exports nothing");
-        }
-        assert!(Flavor::Arm.exports(intel::LIBCXX).is_err());
-        assert!(Flavor::Intel.exports(arm::LIBCXX).is_err());
-    }
-
-    /// The ARM libc++ is the same ABI as the Intel one, which is what lets the
-    /// native backend take it in place of the system's.
-    #[test]
-    fn the_arm_libcxx_answers_for_the_same_names() {
-        let exports = Flavor::Arm.exports(arm::LIBCXX).expect("arm64 Mach-O");
-        for symbol in [
-            "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE9__grow_byEmmmmmm",
-            "__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm",
-            "__ZNSt3__18ios_base4initEPv",
-        ] {
-            assert!(
-                exports.contains(symbol),
-                "vendored arm libc++ lacks {symbol}"
-            );
+        for flavor in [Flavor::Intel, Flavor::Arm] {
+            let Some([libcxx, ..]) = runtime(flavor) else {
+                continue;
+            };
+            assert!(flavor.can_load(&libcxx));
+            let other = match flavor {
+                Flavor::Intel => Flavor::Arm,
+                Flavor::Arm => Flavor::Intel,
+            };
+            assert!(!other.can_load(&libcxx));
+            assert!(other.exports(&libcxx).is_err());
         }
     }
 
-    /// `operator new` and `operator delete` are `libc++abi`'s, reached through
-    /// `libc++`'s re-export of it. They are why the native backend takes the
-    /// vendored runtime on macOS too: these call the `malloc` and `free`
-    /// [`crate::interpose`] rewrites, where Apple's copy calls the ones dyld
-    /// bound before this process started.
+    /// `operator new` and `operator delete` are `libc++abi`'s. They are why even
+    /// the native backend on macOS takes the base's runtime: these call the
+    /// `malloc` and `free` [`crate::interpose`] rewrites, where Apple's copy calls
+    /// the ones dyld bound before this process started.
     #[test]
-    fn operator_new_comes_from_the_vendored_cxxabi() {
-        for (flavor, bytes) in [
-            (Flavor::Intel, intel::LIBCXXABI),
-            (Flavor::Arm, arm::LIBCXXABI),
-        ] {
-            let exports = flavor.exports(bytes).expect("a Mach-O of its own arch");
+    fn operator_new_comes_from_the_base_cxxabi() {
+        for flavor in [Flavor::Intel, Flavor::Arm] {
+            let Some([_, cxxabi, _]) = runtime(flavor) else {
+                continue;
+            };
+            let exports = flavor.exports(&cxxabi).expect("exports");
             for symbol in ["__Znwm", "__ZdlPv", "__ZnamSt11align_val_t"] {
                 assert!(
                     exports.contains(symbol),
-                    "vendored {flavor:?} libc++abi lacks {symbol}"
+                    "{flavor:?} libc++abi lacks {symbol}"
                 );
             }
-        }
-    }
-
-    /// And the ARM `libc++abi` and unwinder define what the two rebinds point at.
-    #[test]
-    fn the_arm_cxxabi_and_unwinder_cover_the_abi() {
-        let abi = Flavor::Arm.exports(arm::LIBCXXABI).expect("arm64 Mach-O");
-        for symbol in [
-            "___cxa_begin_catch",
-            "___cxa_end_catch",
-            "___cxa_throw",
-            "___gxx_personality_v0",
-            "__ZTVN10__cxxabiv117__class_type_infoE",
-            "__ZTVN10__cxxabiv120__si_class_type_infoE",
-        ] {
-            assert!(
-                abi.contains(symbol),
-                "vendored arm libc++abi lacks {symbol}"
-            );
-        }
-        let unwind = Flavor::Arm.exports(arm::LIBUNWIND).expect("arm64 Mach-O");
-        for symbol in ["__Unwind_RaiseException", "__Unwind_Resume"] {
-            assert!(
-                unwind.contains(symbol),
-                "vendored arm libunwind lacks {symbol}"
-            );
         }
     }
 }

@@ -215,11 +215,11 @@ impl Native {
             path: path.to_string(),
             reason: e.to_string(),
         };
-        crate::cxxlib::bind_unwinder_to_the_vendored_one(&mut report, &mut memory, cxxlib::HOST)
+        crate::cxxlib::bind_unwinder_to_the_runtime(&mut report, &mut memory, cxxlib::HOST)
             .map_err(load)?;
-        crate::cxxlib::bind_cxxabi_to_the_vendored_one(&mut report, &mut memory, cxxlib::HOST)
+        crate::cxxlib::bind_cxxabi_to_the_runtime(&mut report, &mut memory, cxxlib::HOST)
             .map_err(load)?;
-        crate::cxxlib::bind_objc_exceptions_to_the_vendored_cxxabi(
+        crate::cxxlib::bind_objc_exceptions_to_the_runtime_cxxabi(
             &mut report,
             &mut memory,
             cxxlib::HOST,

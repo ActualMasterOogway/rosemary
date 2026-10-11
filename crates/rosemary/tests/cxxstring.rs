@@ -12,7 +12,7 @@ const STRING_CPP: &str = r#"
 //
 // Out: the heap address; the bytes past the terminator, which libc++ never
 // initializes; and `capacity()`, which is implementation-defined
-// ([string.capacity]) and really does differ - the vendored Intel libc++ rounds
+// ([string.capacity]) and really does differ - the Intel base's libc++ rounds
 // its allocations to sixteen where the host's system copy rounds to eight, so a
 // 23-character string is `capacity() == 31` on one and `25` on the other. That
 // is a fact about two builds of libc++, not about this runtime, and asserting
@@ -178,7 +178,7 @@ fn the_slow_path_agrees_too() {
 }
 
 #[test]
-fn every_string_call_lands_in_the_vendored_libcxx() {
+fn every_string_call_lands_in_the_base_libcxx() {
     let Some(path) = fixture() else {
         skip!("no x86_64 C++ toolchain");
     };
@@ -207,7 +207,7 @@ fn every_string_call_lands_in_the_vendored_libcxx() {
         seen += 1;
         assert!(
             extent.iter().any(|r| r.contains(&b.resolved)),
-            "{} resolved to {:#x}, which is outside the vendored libc++ - it went \
+            "{} resolved to {:#x}, which is outside the base's libc++ - it went \
              to the host, which is the bug this exists to prevent",
             b.symbol,
             b.resolved

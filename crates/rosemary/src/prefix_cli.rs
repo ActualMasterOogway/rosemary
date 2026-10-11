@@ -93,7 +93,7 @@ const VERIFIED_AND_CACHED: &str = "It is checked against hashes built into Rosem
 fn question(request: &Request) -> String {
     let size = download_size(request.bytes);
     format!(
-        "This prefix needs a Darwin base system:\n  {}\n\n\
+        "Rosemary needs a Darwin base system:\n  {}\n\n\
          This will download {size} from\n  {}\n\n{VERIFIED_AND_CACHED}",
         request.spec.describe(),
         request.sources.first().copied().unwrap_or("(no source)"),
@@ -105,7 +105,7 @@ fn ask_with_dialog(request: &Request) -> Option<Answer> {
         return None;
     }
     let informative = RichText::new()
-        .plain("This prefix needs a Darwin base system:\n")
+        .plain("Rosemary needs a Darwin base system:\n")
         .bold(request.spec.describe())
         .plain(format!(
             "\n\nThis will download {} from\n",
@@ -432,6 +432,45 @@ pub fn check_guest_arch(guest_arch: &str) {
             base.arch
         );
     }
+}
+
+/// Make sure `engine`'s guests have a C++ runtime to link against: the prefix's
+/// base, else the pinned MiniDarwin base for the guest's architecture, asking
+/// before it is downloaded. There is no third source, so declining is an error.
+pub fn ensure_cxx_runtime(engine: rosemary::exec::Engine) -> Result<(), String> {
+    use rosemary::cxxlib::{self, Flavor};
+    let flavor = match engine {
+        rosemary::exec::Engine::Emulated => Flavor::Intel,
+        rosemary::exec::Engine::Native => cxxlib::HOST,
+    };
+    if cxxlib::locate(flavor).is_ok() {
+        return Ok(());
+    }
+    let arch = match flavor {
+        Flavor::Intel => "x86_64",
+        Flavor::Arm => "aarch64",
+    };
+    let chosen = Chosen::pinned(arch).map_err(|e| e.to_string())?;
+    let cache = Cache::from_env().ok_or("no $HOME, so there is nowhere to cache a base")?;
+    let mut ask = asker(true);
+    match provision::obtain(&cache, &chosen, &mut ask, &mut |l| {
+        eprintln!("rosemary: {l}")
+    }) {
+        Ok(_) => {}
+        Err(Error::Declined) if setup() == Setup::Fail => {
+            return Err(format!(
+                "the {arch} MiniDarwin base is not cached, and ROSEMARY_PREFIX_SETUP=fail"
+            ));
+        }
+        Err(Error::Declined) => {
+            return Err(format!(
+                "the {arch} MiniDarwin base provides this guest's libc++ and was not \
+                 downloaded; run `rosemary prefix create --arch {arch}` or use --bundle"
+            ));
+        }
+        Err(e) => return Err(e.to_string()),
+    }
+    cxxlib::locate(flavor).map(|_| ())
 }
 
 /// Obtain and install a base; the one path `create`, `update` and a first run
