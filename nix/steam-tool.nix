@@ -5,7 +5,7 @@
 # archive into compatibilitytools.d and Steam offers "Rosemary (macOS)".
 let
   arch = stdenv.hostPlatform.parsed.cpu.name;
-  name = "Rosemary-${rosemary.version}-${arch}";
+  name = "rosemary-steam-tool-${rosemary.version}-${arch}";
 
   tree = runCommand "rosemary-steam-tool-${rosemary.version}"
     {
@@ -23,7 +23,7 @@ let
       cp ${../packaging/steam/README.txt} $out/Rosemary/README.txt
     '';
 
-  archive = runCommand "${name}-steam-tool"
+  archive = runCommand name
     { nativeBuildInputs = [ gnutar gzip zstd ]; }
     ''
       mkdir -p $out
