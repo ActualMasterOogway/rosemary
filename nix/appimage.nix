@@ -20,8 +20,6 @@ runCommand "Rosemary-${rosemary.version}-${arch}.AppImage"
     cp -r ${bundle}/. AppDir/
     chmod -R u+w AppDir
     cp ${../packaging/appimage/rosemary.desktop} AppDir/rosemary.desktop
-    cp ${../packaging/appimage/rosemary.svg} AppDir/rosemary.svg
-    ln -s rosemary.svg AppDir/.DirIcon
     ln -s bin/rosemary AppDir/AppRun
 
     # zstd is what the runtime is built for. mksquashfs takes its timestamps

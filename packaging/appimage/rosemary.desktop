@@ -3,6 +3,5 @@ Type=Application
 Name=Rosemary
 Comment=Run macOS applications across architectures and operating systems
 Exec=rosemary %F
-Icon=rosemary
 Categories=Utility;
 Terminal=true
