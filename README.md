@@ -3,7 +3,7 @@
 Rosemary runs macOS applications across architectures and operating systems. It
 combines two closely related projects:
 
-* a high-level x86-64 emulator built on the Microlift binary lifter and JIT
+* a high-level x86-64 emulator built on the [Microlift](https://github.com/microlift/microlift) binary lifter and JIT
 * a macOS compatibility layer that reimplements Darwin APIs and Apple frameworks on non-macOS hosts.
 
 Rosemary aims to make macOS software portable across macOS and non-macOS systems while
@@ -17,7 +17,7 @@ Objective-C, Foundation, AppKit, CoreAudio, and IOKit. Together these pieces let
 the same runtime execute a host-architecture Mach-O directly or recompile an
 x86-64 image through Microlift.
 
-## Project goals
+Rosemary is designed with the following goals in mind:
 
 * Run x86-64 macOS applications through Microlift on supported host
   architectures.
@@ -123,9 +123,9 @@ falls back to an available emulated slice. A backend can also be selected
 explicitly:
 
 ```sh
-target/release/rosemary run /path/to/application [args...]
-target/release/rosemary run --emulated /path/to/application [args...]
-target/release/rosemary run --native /path/to/application [args...]
+target/release/rosemary /path/to/application [args...]
+target/release/rosemary --emulated /path/to/application [args...]
+target/release/rosemary --native /path/to/application [args...]
 ```
 
 See [`docs/usage.md`](docs/usage.md) for runtime options and environment
