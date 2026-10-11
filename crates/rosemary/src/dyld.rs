@@ -788,6 +788,7 @@ fn open_with<S: MachSpec + 'static>(
     // calling it. The program's own link says it the same way, and this is the
     // same announcement - see [`crate::program::announce_unbound_imports`].
     crate::program::announce_unbound_imports(&report, &format!("dlopen({resolved})"));
+    crate::fault::note_images(&report);
 
     let root = report
         .root()

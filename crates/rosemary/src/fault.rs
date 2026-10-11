@@ -257,16 +257,18 @@ static UNBOUND: Mutex<Vec<Unbound>> = Mutex::new(Vec::new());
 /// recover the stub, and this table turns the stub back into a name.
 pub fn note_unbound(entries: &[(&str, &machish::report::MissingSymbol)]) {
     let mut unbound = UNBOUND.lock().unwrap_or_else(|e| e.into_inner());
-    unbound.clear();
     for (_, m) in entries {
         let Some(stub) = m.stub_va else { continue };
         let bytes = m.symbol.as_bytes();
         let used = bytes.len().min(NAME);
         let mut name = [0u8; NAME];
         name[..used].copy_from_slice(&bytes[..used]);
-        unbound.push(Unbound { stub, name, used });
+        let entry = Unbound { stub, name, used };
+        match unbound.binary_search_by_key(&stub, |u| u.stub) {
+            Ok(i) => unbound[i] = entry,
+            Err(i) => unbound.insert(i, entry),
+        }
     }
-    unbound.sort_by_key(|u| u.stub);
 }
 
 /// Record the guest's image map, so a fault can name a guest address rather
@@ -277,7 +279,6 @@ pub fn note_unbound(entries: &[(&str, &machish::report::MissingSymbol)]) {
 /// exists is that the interesting crash is the one that does not come back.
 pub fn note_images(report: &machish::report::LinkReport) {
     let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
-    images.clear();
     for image in &report.images {
         let end = image
             .segments
@@ -291,13 +292,16 @@ pub fn note_images(report: &machish::report::LinkReport) {
         let used = bytes.len().min(NAME);
         let mut name = [0u8; NAME];
         name[..used].copy_from_slice(&bytes[..used]);
-        images.push(Image {
+        let entry = Image {
             range: (image.base, end),
             name,
             used,
-        });
+        };
+        match images.binary_search_by_key(&image.base, |i| i.range.0) {
+            Ok(i) => images[i] = entry,
+            Err(i) => images.insert(i, entry),
+        }
     }
-    images.sort_by_key(|i| i.range.0);
 }
 
 /// Install the reporter for the faults a translation can raise.
