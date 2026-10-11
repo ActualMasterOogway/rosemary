@@ -1968,15 +1968,18 @@ pub(crate) mod entry {
     pub unsafe extern "C" fn dladdr(addr: *const c_void, info: *mut u64) -> i32 {
         let addr = addr as usize as u64;
         let Some(found) = super::describe(addr) else {
-            // Not ours; the host knows its own images.
-            let Some(host) = crate::host::symbol("dladdr") else {
+            // Darwin apps have no business meddling around with non-guest shared objects
+            if !darwin::libc_backend::using_builtin() {
+                // Not ours; the host knows its own images.
+                let Some(host) = crate::host::symbol("dladdr") else {
+                    return 0;
+                };
+                let f: unsafe extern "C" fn(u64, *mut u64) -> i32 =
+                    unsafe { core::mem::transmute(host as usize as *const ()) };
+                return unsafe { f(addr, info) };
+            } else {
                 return 0;
-            };
-            // SAFETY: `int (const void *, Dl_info *)`; Darwin's and glibc's
-            // `Dl_info` are the same four pointers.
-            let f: unsafe extern "C" fn(u64, *mut u64) -> i32 =
-                unsafe { core::mem::transmute(host as usize as *const ()) };
-            return unsafe { f(addr, info) };
+            }
         };
         if info.is_null() {
             return 0;
