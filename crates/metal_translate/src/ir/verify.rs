@@ -389,6 +389,19 @@ fn verify_convert(op: ConvertOp, source: Option<Type>, result: Option<&Type>) ->
     let (Some(source), Some(result)) = (source, result) else {
         return false;
     };
+    let float2 = Type::Vector {
+        element: Box::new(Type::Float { bits: 32 }),
+        lanes: 2,
+    };
+    match op {
+        ConvertOp::UnpackHalf2x16 => {
+            return matches!(source, Type::Int { bits: 32, .. }) && *result == float2;
+        }
+        ConvertOp::PackHalf2x16 => {
+            return source == float2 && matches!(result, Type::Int { bits: 32, .. });
+        }
+        _ => {}
+    }
     if op == ConvertOp::Bitcast && reinterpretable(&source) && reinterpretable(result) {
         return total_bits(&source) == total_bits(result) && total_bits(&source).is_some();
     }

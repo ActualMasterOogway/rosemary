@@ -1,5 +1,6 @@
 mod cfg;
 mod emit;
+mod half;
 mod structurize;
 
 use cfg::{Merge, control_flow_merges};
@@ -263,6 +264,18 @@ pub fn emit_spirv(
             "the module's static initializers have not been run; specialize it first",
         ));
     }
+    let widened;
+    let module = match target.shader_float16 {
+        false => match half::widen(module) {
+            Some(module) => {
+                module.verify()?;
+                widened = module;
+                &widened
+            }
+            None => module,
+        },
+        true => module,
+    };
     let entries = module
         .entries
         .iter()

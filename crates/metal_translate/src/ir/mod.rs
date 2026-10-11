@@ -576,6 +576,10 @@ pub enum ConvertOp {
     FloatResize,
     /// Reinterpret the bits of an equally sized value.
     Bitcast,
+    /// A `uint` read as two `half`s, widened to a `float2`.
+    UnpackHalf2x16,
+    /// A `float2` narrowed to two `half`s, read as a `uint`.
+    PackHalf2x16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

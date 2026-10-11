@@ -102,8 +102,23 @@ impl Emitter {
                     .ok_or_else(|| emission("conversion has no result"))?;
                 let ty = self.type_id(&function.values[result.0 as usize])?;
                 let value = self.operand(value, values)?;
+                let glsl = self.glsl_std_450;
                 let b = &mut self.builder;
                 match op {
+                    ConvertOp::UnpackHalf2x16 => b.ext_inst(
+                        ty,
+                        result_id,
+                        glsl,
+                        GlslStd450Op::UnpackHalf2x16 as u32,
+                        [SpirvOperand::IdRef(value)],
+                    ),
+                    ConvertOp::PackHalf2x16 => b.ext_inst(
+                        ty,
+                        result_id,
+                        glsl,
+                        GlslStd450Op::PackHalf2x16 as u32,
+                        [SpirvOperand::IdRef(value)],
+                    ),
                     ConvertOp::UnsignedToFloat => b.convert_u_to_f(ty, result_id, value),
                     ConvertOp::SignedToFloat => b.convert_s_to_f(ty, result_id, value),
                     ConvertOp::FloatToUnsigned => b.convert_f_to_u(ty, result_id, value),
