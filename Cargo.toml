@@ -50,6 +50,7 @@ ureq = { version = "3", default-features = false, features = ["rustls", "gzip", 
 static_init = "1.0.4"
 owned_ttf_parser = "0.25"
 ab_glyph_rasterizer = "0.1.9"
+rust-fontconfig = { version = "5.0.1", default-features = false, features = ["std", "parsing", "multithreading"] }
 llvm-bitcode = "0.4.0"
 rspirv = "0.13.0"
 sha2 = "0.11.0"

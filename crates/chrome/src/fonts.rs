@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use owned_ttf_parser::{AsFaceRef, OwnedFace};
+use owned_ttf_parser::{AsFaceRef, FaceMut, OwnedFace};
+use rust_fontconfig::{FcFontCache, FcPattern, GenericFamily, OwnedFontSource, PatternMatch};
 
 /// One face a family offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -19,67 +20,118 @@ pub struct FaceInfo {
 
 static REGISTERED: Mutex<Vec<FaceInfo>> = Mutex::new(Vec::new());
 
+/// The host's font cache, scanned once.
+fn system_cache() -> &'static FcFontCache {
+    static CACHE: OnceLock<FcFontCache> = OnceLock::new();
+    CACHE.get_or_init(build_cache)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
+fn build_cache() -> FcFontCache {
+    FcFontCache::build()
+}
+
+/// rust-fontconfig only scans the hosts above, so parse the usual Unix font
+/// directories directly elsewhere (the BSDs).
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
+fn build_cache() -> FcFontCache {
+    use rust_fontconfig::{FcFallbackConfig, FcFontPath, OperatingSystem};
+    let os = OperatingSystem::current();
+    let cache = FcFontCache::default().with_fallback_config(FcFallbackConfig::os_defaults(os));
+    let mut pending = rust_fontconfig::config::font_directories(os);
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let path = path.to_string_lossy();
+            for (pattern, font) in
+                rust_fontconfig::FcParseFontBytes(&bytes, &path).unwrap_or_default()
+            {
+                cache.insert_builder_font(
+                    pattern,
+                    FcFontPath {
+                        path: path.to_string(),
+                        font_index: font.font_index,
+                        bytes_hash: 0,
+                    },
+                );
+            }
+        }
+    }
+    cache
+}
+
 /// The host's faces, listed once.
 fn system_faces() -> &'static [FaceInfo] {
     static FACES: OnceLock<Vec<FaceInfo>> = OnceLock::new();
     FACES.get_or_init(|| {
-        let output = std::process::Command::new("fc-list")
-            .arg("--format")
-            .arg("%{family[0]}\t%{style[0]}\t%{file}\t%{index}\t%{weight}\t%{slant}\t%{spacing}\t%{postscriptname}\n")
-            .output();
-        let Ok(output) = output else {
-            return Vec::new();
-        };
-        let mut faces: Vec<FaceInfo> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(parse_fc_line)
-            .collect();
+        let cache = system_cache();
+        let mut faces = Vec::new();
+        for (pattern, id) in cache.list() {
+            let Some(OwnedFontSource::Disk(path)) = cache.get_font_by_id(&id) else {
+                continue;
+            };
+            let Some(face) = face_from_pattern(&pattern, &path.path, path.font_index) else {
+                continue;
+            };
+            // The cache maps the file, so this touches only the tables read.
+            let instances = cache
+                .get_font_bytes(&id)
+                .map(|bytes| named_instances(bytes.as_slice(), &face))
+                .unwrap_or_default();
+            faces.push(face);
+            faces.extend(instances);
+        }
         faces.sort_by(|a, b| (&a.family, &a.style, &a.path).cmp(&(&b.family, &b.style, &b.path)));
         faces.dedup_by(|a, b| a.family == b.family && a.style == b.style);
         faces
     })
 }
 
-/// A line of the `fc-list` format [`system_faces`] asks for.
-fn parse_fc_line(line: &str) -> Option<FaceInfo> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    let [
-        family,
-        style,
-        path,
-        index,
-        weight,
-        slant,
-        spacing,
-        postscript,
-    ] = fields[..]
-    else {
-        return None;
-    };
-    if !(path.ends_with(".ttf") || path.ends_with(".otf") || path.ends_with(".ttc")) {
+/// A face rust-fontconfig parsed, named the way [`describe`] names one.
+fn face_from_pattern(pattern: &FcPattern, path: &str, index: usize) -> Option<FaceInfo> {
+    // owned_ttf_parser cannot read WOFF, so keep to plain sfnt files.
+    let lower = path.to_ascii_lowercase();
+    if !(lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc")) {
         return None;
     }
-    // fontconfig's weight scale: 80 regular, 100 medium, 180 demibold, 200
-    // bold, 210 black.
-    let weight = match weight.parse::<u32>().unwrap_or(80) {
-        0..=45 => 200,
-        46..=55 => 300,
-        56..=90 => 400,
-        91..=140 => 500,
-        141..=190 => 600,
-        191..=205 => 700,
-        206..=212 => 800,
-        _ => 900,
-    };
+    let metadata = &pattern.metadata;
+    let family = metadata
+        .preferred_family
+        .clone()
+        .or_else(|| pattern.family.clone())?;
     Some(FaceInfo {
-        family: family.to_string(),
-        style: style.to_string(),
-        postscript: postscript.to_string(),
+        family,
+        style: metadata
+            .preferred_subfamily
+            .clone()
+            .or_else(|| metadata.font_subfamily.clone())
+            .unwrap_or_else(|| "Regular".to_string()),
+        postscript: metadata.postscript_name.clone().unwrap_or_default(),
         path: path.to_string(),
-        index: index.parse().unwrap_or(0),
-        weight,
-        italic: slant.parse::<u32>().unwrap_or(0) >= 100,
-        monospace: spacing.parse::<u32>().unwrap_or(0) >= 90,
+        index: u32::try_from(index).ok()?,
+        weight: pattern.weight as u16,
+        // fontconfig's slant counts oblique faces as italic too.
+        italic: pattern.italic == PatternMatch::True || pattern.oblique == PatternMatch::True,
+        monospace: pattern.monospace == PatternMatch::True,
     })
 }
 
@@ -98,6 +150,10 @@ pub fn register_file(path: &str) -> Vec<FaceInfo> {
     let count = owned_ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
     let faces: Vec<FaceInfo> = (0..count)
         .filter_map(|index| describe(&bytes, index, path))
+        .flat_map(|face| {
+            let instances = named_instances(&bytes, &face);
+            std::iter::once(face).chain(instances)
+        })
         .collect();
     let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
     for face in &faces {
@@ -131,6 +187,128 @@ fn describe(bytes: &[u8], index: u32, path: &str) -> Option<FaceInfo> {
         italic: face.is_italic(),
         monospace: face.is_monospaced(),
     })
+}
+
+/// The named instances in a variable face's `fvar` table. fontconfig lists
+/// each as a face of its own at `instance << 16 | index`, and guests look
+/// them up by PostScript name, so they keep that numbering.
+fn named_instances(bytes: &[u8], base: &FaceInfo) -> Vec<FaceInfo> {
+    let Ok(face) = owned_ttf_parser::Face::parse(bytes, base.index) else {
+        return Vec::new();
+    };
+    let name = |id: u16| {
+        face.names()
+            .into_iter()
+            .filter(|name| name.name_id == id && name.is_unicode())
+            .find_map(|name| name.to_string())
+    };
+    use owned_ttf_parser::name_id;
+    let prefix = name(name_id::VARIATIONS_POST_SCRIPT_NAME_PREFIX)
+        .unwrap_or_else(|| base.family.replace(' ', ""));
+    fvar_instances(&face)
+        .into_iter()
+        .enumerate()
+        .filter_map(
+            |(
+                instance,
+                Instance {
+                    subfamily,
+                    postscript,
+                    coordinates,
+                },
+            )| {
+                let style = name(subfamily)?;
+                let coordinate = |tag: &[u8; 4]| {
+                    let tag = owned_ttf_parser::Tag::from_bytes(tag);
+                    coordinates
+                        .iter()
+                        .find(|(axis, _)| *axis == tag)
+                        .map(|&(_, value)| value)
+                };
+                // The PostScript name ID is optional; fontconfig derives one when
+                // it is missing.
+                let postscript = postscript
+                    .and_then(name)
+                    .unwrap_or_else(|| format!("{prefix}-{}", style.replace(' ', "")));
+                Some(FaceInfo {
+                    family: base.family.clone(),
+                    postscript,
+                    path: base.path.clone(),
+                    index: (u32::try_from(instance + 1).ok()? << 16) | base.index,
+                    weight: coordinate(b"wght").map_or(base.weight, |weight| {
+                        weight.round().clamp(1.0, 1000.0) as u16
+                    }),
+                    italic: base.italic
+                        || style.contains("Italic")
+                        || style.contains("Oblique")
+                        || coordinate(b"ital").is_some_and(|value| value >= 0.5)
+                        || coordinate(b"slnt").is_some_and(|value| value != 0.0),
+                    monospace: base.monospace,
+                    style,
+                })
+            },
+        )
+        .collect()
+}
+
+/// One named instance in an `fvar` table.
+struct Instance {
+    subfamily: u16,
+    postscript: Option<u16>,
+    coordinates: Vec<(owned_ttf_parser::Tag, f32)>,
+}
+
+/// The named instances a variable face declares, in table order.
+fn fvar_instances(face: &owned_ttf_parser::Face<'_>) -> Vec<Instance> {
+    let Some(fvar) = face
+        .raw_face()
+        .table(owned_ttf_parser::Tag::from_bytes(b"fvar"))
+    else {
+        return Vec::new();
+    };
+    let u16_at = |at: usize| {
+        fvar.get(at..at + 2)
+            .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+    };
+    let fixed_at = |at: usize| {
+        fvar.get(at..at + 4)
+            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as f32 / 65536.0)
+    };
+    let (Some(axes), Some(axis_count), Some(axis_size), Some(count), Some(size)) =
+        (u16_at(4), u16_at(8), u16_at(10), u16_at(12), u16_at(14))
+    else {
+        return Vec::new();
+    };
+    let tags: Vec<owned_ttf_parser::Tag> = (0..axis_count)
+        .map_while(|axis| {
+            let tag = fvar.get(axes + axis * axis_size..)?.get(..4)?;
+            Some(owned_ttf_parser::Tag::from_bytes(&[
+                tag[0], tag[1], tag[2], tag[3],
+            ]))
+        })
+        .collect();
+    if tags.len() != axis_count {
+        return Vec::new();
+    }
+    let first = axes + axis_count * axis_size;
+    (0..count)
+        .map_while(|instance| {
+            let at = first + instance * size;
+            let coordinates = tags
+                .iter()
+                .enumerate()
+                .map(|(axis, &tag)| Some((tag, fixed_at(at + 4 + axis * 4)?)))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Instance {
+                subfamily: u16::try_from(u16_at(at)?).ok()?,
+                postscript: (size >= axis_count * 4 + 6)
+                    .then(|| u16_at(at + 4 + axis_count * 4))
+                    .flatten()
+                    .and_then(|id| u16::try_from(id).ok()),
+                coordinates,
+            })
+        })
+        .collect()
 }
 
 /// A family name that is a Mac's monospace font rather than its UI font.
@@ -167,19 +345,25 @@ pub fn resolve(family: &str, weight: u16, italic: bool) -> Option<FaceInfo> {
     best(&fallback)
 }
 
-/// The family fontconfig chooses for `sans-serif` or `monospace`.
+/// The first installed family the host's configuration lists for `sans-serif`
+/// or `monospace`.
 pub fn default_family(monospace: bool) -> Option<String> {
     static DEFAULTS: OnceLock<[Option<String>; 2]> = OnceLock::new();
     let defaults = DEFAULTS.get_or_init(|| {
-        let ask = |pattern: &str| {
-            let output = std::process::Command::new("fc-match")
-                .args(["--format", "%{family[0]}", pattern])
-                .output()
-                .ok()?;
-            let family = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!family.is_empty()).then_some(family)
+        let config = system_cache().fallback_config();
+        let faces = system_faces();
+        let ask = |generic: GenericFamily| {
+            config
+                .generic_candidates(generic)
+                .iter()
+                .find_map(|wanted| {
+                    faces
+                        .iter()
+                        .find(|face| face.family.eq_ignore_ascii_case(wanted))
+                        .map(|face| face.family.clone())
+                })
         };
-        [ask("sans-serif"), ask("monospace")]
+        [ask(GenericFamily::SansSerif), ask(GenericFamily::Monospace)]
     });
     defaults[usize::from(monospace)].clone().or_else(|| {
         system_faces()
@@ -209,7 +393,17 @@ pub fn load(path: &str, index: u32) -> Option<Arc<LoadedFace>> {
         .entry((path.to_string(), index))
         .or_insert_with(|| {
             let bytes = std::fs::read(path).ok()?;
-            let face = OwnedFace::from_vec(bytes, index).ok()?;
+            // The high half picks a variable font's named instance, which
+            // ttf-parser only knows as a set of axis coordinates.
+            let mut face = OwnedFace::from_vec(bytes, index & 0xffff).ok()?;
+            if let Some(instance) = (index >> 16).checked_sub(1) {
+                let instance = fvar_instances(face.as_face_ref())
+                    .into_iter()
+                    .nth(usize::try_from(instance).ok()?)?;
+                for (axis, value) in instance.coordinates {
+                    face.set_variation(axis, value);
+                }
+            }
             Some(Arc::new(LoadedFace { face }))
         })
         .clone()
@@ -341,15 +535,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_fontconfig_lines() {
-        let face = parse_fc_line(
-            "Noto Sans\tBold Italic\t/fonts/NotoSans-BoldItalic.ttf\t0\t200\t100\t0\tNotoSans-BoldItalic",
-        )
-        .expect("a face");
-        assert_eq!(face.weight, 700);
+    fn names_faces_by_typographic_family() {
+        use rust_fontconfig::{FcFontMetadata, FcWeight};
+        let pattern = FcPattern {
+            family: Some("Noto Sans SemiBold".to_string()),
+            weight: FcWeight::SemiBold,
+            oblique: PatternMatch::True,
+            monospace: PatternMatch::False,
+            metadata: FcFontMetadata {
+                preferred_family: Some("Noto Sans".to_string()),
+                font_subfamily: Some("Italic".to_string()),
+                preferred_subfamily: Some("SemiBold Italic".to_string()),
+                postscript_name: Some("NotoSans-SemiBoldItalic".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let face =
+            face_from_pattern(&pattern, "/fonts/NotoSans-SemiBoldItalic.ttf", 0).expect("a face");
+        assert_eq!(face.family, "Noto Sans");
+        assert_eq!(face.style, "SemiBold Italic");
+        assert_eq!(face.postscript, "NotoSans-SemiBoldItalic");
+        assert_eq!(face.weight, 600);
         assert!(face.italic);
         assert!(!face.monospace);
-        assert!(parse_fc_line("Bitmap\tRegular\t/fonts/fixed.pcf.gz\t0\t80\t0\t100\t").is_none());
+        assert!(face_from_pattern(&pattern, "/fonts/NotoSans.woff2", 0).is_none());
     }
 
     #[test]
