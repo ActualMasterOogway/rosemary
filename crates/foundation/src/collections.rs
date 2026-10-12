@@ -1110,6 +1110,44 @@ unsafe extern "C" fn remove_all_objects(receiver: Id, _sel: Sel) {
     }
 }
 
+/// `-removeObject:` and `-removeObjectIdenticalTo:`: every element `matches`
+/// takes out, not just the first.
+///
+/// Released after the array is consistent, because a release can run a
+/// `dealloc` that looks at it.
+fn remove_matching(receiver: Id, sel: &str, matches: impl Fn(&Policy, CFTypeRef) -> bool) {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !a.mutable {
+        immutable("NSArray", sel);
+    }
+    let mut gone = Vec::new();
+    a.values.retain(|v| {
+        let keep = !matches(&a.policy, *v);
+        if !keep {
+            gone.push(*v);
+        }
+        keep
+    });
+    for value in gone {
+        a.policy.release(value);
+    }
+}
+
+unsafe extern "C" fn remove_object(receiver: Id, _sel: Sel, object: Id) {
+    remove_matching(receiver, "removeObject:", |policy, v| {
+        policy.equal(v, object as CFTypeRef)
+    });
+}
+
+unsafe extern "C" fn remove_object_identical_to(receiver: Id, _sel: Sel, object: Id) {
+    remove_matching(receiver, "removeObjectIdenticalTo:", |_, v| {
+        std::ptr::eq(v, object as CFTypeRef)
+    });
+}
+
 unsafe extern "C" fn contains_object(receiver: Id, _sel: Sel, object: Id) -> bool {
     // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
@@ -1596,6 +1634,19 @@ unsafe extern "C" fn data_with_bytes_no_copy(
             std::ptr::null(),
         )) as Id
     }
+}
+
+/// `+[NSData dataWithBytesNoCopy:length:freeWhenDone:]`, which is the copy above:
+/// the buffer a guest asked to be freed is simply left to it.
+unsafe extern "C" fn data_with_bytes_no_copy_free(
+    class: Id,
+    sel: Sel,
+    bytes: *const u8,
+    length: usize,
+    _free_when_done: u8,
+) -> Id {
+    // SAFETY: the same contract.
+    unsafe { data_with_bytes_no_copy(class, sel, bytes, length) }
 }
 
 /// The bytes of a data object, or empty for nil or anything else.
@@ -2192,6 +2243,8 @@ pub(crate) fn install() {
         "addObject:" => add_object, c"v24@0:8@16";
         "addObjectsFromArray:" => add_objects_from_array, c"v24@0:8@16";
         "removeObjectAtIndex:" => remove_object_at_index, c"v24@0:8Q16";
+        "removeObject:" => remove_object, c"v24@0:8@16";
+        "removeObjectIdenticalTo:" => remove_object_identical_to, c"v24@0:8@16";
         "removeLastObject" => remove_last_object, c"v16@0:8";
         "insertObject:atIndex:" => insert_object_at_index, c"v32@0:8@16Q24";
         "replaceObjectAtIndex:withObject:" => replace_object_at_index, c"v32@0:8Q16@24";
@@ -2275,6 +2328,8 @@ pub(crate) fn install() {
     class_methods!(data, {
         "dataWithBytes:length:" => data_with_bytes, c"@32@0:8^v16Q24";
         "dataWithBytesNoCopy:length:" => data_with_bytes_no_copy, c"@32@0:8^v16Q24";
+        "dataWithBytesNoCopy:length:freeWhenDone:"
+            => data_with_bytes_no_copy_free, c"@36@0:8^v16Q24c32";
         "dataWithContentsOfFile:" => data_with_contents_of_file, c"@24@0:8@16";
         "dataWithContentsOfFile:options:error:"
             => data_with_contents_of_file_options, c"@40@0:8@16Q24^@32";
