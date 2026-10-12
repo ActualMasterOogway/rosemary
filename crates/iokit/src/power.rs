@@ -57,8 +57,43 @@ pub unsafe extern "C" fn IOPSNotificationCreateRunLoopSource(
     std::ptr::null_mut()
 }
 
+/// Where the assertion ids come from. Zero is `kIOPMNullAssertionID`.
+static NEXT_ASSERTION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// `IOReturn IOPMAssertionCreateWithDescription(type, name, details, reason,
+/// bundle, timeout, timeoutAction, IOPMAssertionID *)`.
+///
+/// Granted and not enforced: a guest asks to keep the display awake while it runs,
+/// and a refusal would only make it report an error for something this host's
+/// idle policy does not let it do anything about. Each id is distinct, so a
+/// release names what it created.
+pub unsafe extern "C" fn IOPMAssertionCreateWithDescription(
+    _kind: CFTypeRef,
+    _name: CFTypeRef,
+    _details: CFTypeRef,
+    _reason: CFTypeRef,
+    _bundle: CFTypeRef,
+    _timeout: f64,
+    _timeout_action: CFTypeRef,
+    assertion: *mut u32,
+) -> i32 {
+    if !assertion.is_null() {
+        let id = NEXT_ASSERTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: an out parameter the caller sized.
+        unsafe { assertion.write(id) };
+    }
+    0
+}
+
+/// `IOReturn IOPMAssertionRelease(IOPMAssertionID)`.
+pub unsafe extern "C" fn IOPMAssertionRelease(_assertion: u32) -> i32 {
+    0
+}
+
 exports::exports! {
     functions {
+        "IOPMAssertionCreateWithDescription" => IOPMAssertionCreateWithDescription,
+        "IOPMAssertionRelease" => IOPMAssertionRelease,
         "IOPSCopyPowerSourcesInfo" => IOPSCopyPowerSourcesInfo,
         "IOPSCopyPowerSourcesList" => IOPSCopyPowerSourcesList,
         "IOPSGetPowerSourceDescription" => IOPSGetPowerSourceDescription,
