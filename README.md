@@ -1,5 +1,9 @@
 # Rosemary
 
+<a href="https://discord.gg/HUaPNwFwae">
+  <img alt="Discord" src="https://img.shields.io/discord/1558958766211338350?label=discord&cacheSeconds=3600">
+</a>
+
 Rosemary runs macOS applications across architectures and operating systems. It
 combines two closely related projects:
 
