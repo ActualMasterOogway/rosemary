@@ -38,6 +38,11 @@ Rosemary currently has two execution backends:
 
 ## Installing
 
+For non-development purposes, we recommend using our management application,
+[Butter](https://github.com/microlift/butter). It can automatically download
+prebuilt Rosemary binaries from our Github releases, and even build new commits
+from source if desired.
+
 Versioned releases are in Github releases. Rosemary is currently distributed as
 a Nix flake, an AppImage, and a Steam `compatibilitytools.d` tool.
 
