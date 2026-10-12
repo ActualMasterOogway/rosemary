@@ -10,7 +10,6 @@ extern "C" fn warnc(_: c_int, _: *const c_char) {
 }
 
 unsafe extern "C" {
-    fn __cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int;
     #[cfg(target_env = "gnu")]
     fn __register_atfork(
         prepare: *const (),
@@ -20,23 +19,40 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+#[cfg(target_env = "gnu")]
 static DSO_HANDLE: u8 = 0;
 
 pub unsafe extern "C" fn atexit(handler: *const ()) -> c_int {
-    crate::stdio::register_cleanup();
-    // SAFETY: registering against the host should be fine since the ABIs match
-    unsafe {
-        __cxa_atexit(
-            handler,
-            core::ptr::null_mut(),
-            &raw const DSO_HANDLE as *const (),
-        )
+    if handler.is_null() {
+        return -1;
     }
+    // SAFETY: a zero-argument handler ignores the register its argument arrives in.
+    let func = unsafe { std::mem::transmute::<*const (), crate::exit::Handler>(handler) };
+    crate::exit::register(func, core::ptr::null_mut(), 0, handler as u64)
+}
+
+/// `int __cxa_atexit(void (*func)(void *), void *arg, void *dso)`, which every
+/// static destructor is registered with. Into [`crate::exit`]'s list, so it shares
+/// one order with `atexit` and `dlclose` can finalize the image `dso` names.
+pub unsafe extern "C" fn cxa_atexit(func: *const (), arg: *mut c_void, dso: *const ()) -> c_int {
+    if func.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller states `func` takes `arg`.
+    let handler = unsafe { std::mem::transmute::<*const (), crate::exit::Handler>(func) };
+    crate::exit::register(handler, arg, dso as u64, func as u64)
+}
+
+/// `void __cxa_finalize(void *dso)`
+pub extern "C" fn cxa_finalize(dso: *const ()) {
+    crate::exit::finalize(dso as u64);
 }
 
 const BLOCK_IS_GLOBAL: u32 = 1 << 28;
 
 const BLOCK_FLAGS_OFFSET: u64 = 8;
+
+const BLOCK_INVOKE_OFFSET: u64 = 16;
 
 unsafe extern "C" fn run_exit_block(block: *mut c_void) {
     let block = block as u64;
@@ -62,16 +78,10 @@ pub unsafe extern "C" fn atexit_b(block: *mut c_void) -> c_int {
             block as u64
         }
     };
-    crate::stdio::register_cleanup();
-    // SAFETY: a handler of this crate's own, the kept block as its argument, and
-    // a DSO handle of this crate's own.
-    unsafe {
-        __cxa_atexit(
-            run_exit_block as *const (),
-            kept as *mut c_void,
-            &raw const DSO_HANDLE as *const (),
-        )
-    }
+    // The block's code is what ties it to an image, not the wrapper that calls it.
+    // SAFETY: a live block, whose `invoke` is at a fixed offset by the Block ABI.
+    let invoke = unsafe { ((kept + BLOCK_INVOKE_OFFSET) as *const u64).read() };
+    crate::exit::register(run_exit_block, kept as *mut c_void, 0, invoke)
 }
 
 #[cfg_attr(not(target_env = "gnu"), allow(unused_variables))]
@@ -381,6 +391,8 @@ exports::exports! {
         "__atomic_store" => atomic_store,
         "atexit" => atexit,
         "atexit_b" => atexit_b,
+        "__cxa_atexit" => cxa_atexit,
+        "__cxa_finalize" => cxa_finalize,
         "pthread_atfork" => pthread_atfork,
         "__assert_rtn" => assert_rtn,
         "srandomdev" => srandomdev,

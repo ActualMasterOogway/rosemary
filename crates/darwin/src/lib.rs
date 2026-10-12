@@ -43,6 +43,7 @@ pub mod dispatch;
 pub mod divergent;
 pub mod env;
 pub mod errno;
+pub mod exit;
 pub mod exe;
 pub mod fcntl;
 pub mod fmtcheck;

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::ops::Range;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::cxxlib::Flavor;
@@ -25,11 +25,10 @@ pub struct Image {
     /// process by construction and is the one value a crash dump can be read against.
     pub handle: u64,
     pub report: LinkReport,
-    /// The mapping, kept alive for the process. Leaked separately from the `Image` so
-    /// that [`regions`](Image::regions) can borrow from it.
-    _memory: &'static SharedSpace,
-    /// The mapped extents, for [`contains`] and [`lift_region`].
-    regions: Vec<(u64, &'static [u8])>,
+    /// The mapping, which [`unload`] drops - and so unmaps.
+    memory: Mutex<Option<SharedSpace>>,
+    /// The mapped extents as `(base, len)`, for [`contains`] and [`lift_region`].
+    regions: Vec<(u64, usize)>,
     /// Every address a call site in this image might name - both `slot_va` and
     /// `stub_va` - exactly as [`crate::Program`] keys its own.
     imports: BTreeMap<u64, ImportSite>,
@@ -41,16 +40,41 @@ pub struct Image {
     functions: Vec<Range<u64>>,
     exports: ExportTable,
     slide: u64,
+    /// One per `dlopen` not yet matched by a `dlclose`, and one per loaded image
+    /// bound against this one. Changed only under the [`IMAGES`] lock.
+    refs: AtomicUsize,
+    /// Never unloaded: `RTLD_NODELETE`, or content dyld never unloads either. See
+    /// [`never_unloadable`].
+    pinned: AtomicBool,
+    /// Set when the last reference goes, so a `dlopen` racing the unload maps a
+    /// fresh copy rather than reviving this one.
+    unloading: AtomicBool,
+    /// The loaded images this one bound against, each holding a reference for it.
+    dependencies: Vec<&'static Image>,
 }
 
-/// An [`MmapSpace`] shared across the threads running the guest.
-struct SharedSpace(MmapSpace);
+impl Image {
+    /// Every mapped segment of the image and the dependencies linked with it.
+    fn ranges(&self) -> Vec<Range<u64>> {
+        self.report
+            .images
+            .iter()
+            .flat_map(|i| &i.segments)
+            .filter(|s| s.vmsize != 0)
+            .map(|s| s.vmaddr..s.vmaddr.wrapping_add(s.vmsize))
+            .collect()
+    }
+}
+
+/// An [`MmapSpace`] shared across the threads running the guest. Held only to be
+/// dropped: its `Drop` is the unmap.
+struct SharedSpace(#[allow(dead_code)] MmapSpace);
 
 // SAFETY: see the type note.
 unsafe impl Sync for SharedSpace {}
 unsafe impl Send for SharedSpace {}
 
-/// Every image `dlopen` has produced, in load order.
+/// Every image `dlopen` has produced and `dlclose` has not unloaded, in load order.
 static IMAGES: Mutex<Vec<&'static Image>> = Mutex::new(Vec::new());
 
 /// The published, immutable view of [`IMAGES`]: a leaked slice, swapped whole.
@@ -256,7 +280,12 @@ impl machish::resolve::SymbolProvider for MainExports {
 /// ## Matching
 ///
 /// By **leaf name**, in both directions.
-struct LoadedImages;
+#[derive(Default)]
+struct LoadedImages {
+    /// Every image an answer came from, which the new image then holds a
+    /// reference to: unloading one would leave the other's bindings dangling.
+    bound: Mutex<Vec<&'static Image>>,
+}
 
 /// The file name of an install name or path, which is what both sides agree on.
 fn leaf(name: &str) -> &str {
@@ -275,12 +304,18 @@ impl machish::resolve::SymbolProvider for LoadedImages {
         // library through to here.
         let named = sym.library.install_name().map(leaf);
         find(|image| {
-            if named.is_some_and(|n| n != leaf(&image.path)) {
+            if named.is_some_and(|n| n != leaf(&image.path))
+                || image.unloading.load(Ordering::Acquire)
+            {
                 return None;
             }
             let export = image.exports.get(sym.name)?;
             // A re-export has no address of its own; see [`MainExports`].
             let addr = export.address(image.slide)?;
+            let mut bound = self.bound.lock().unwrap_or_else(|e| e.into_inner());
+            if !bound.iter().any(|b| std::ptr::eq(*b, image)) {
+                bound.push(image);
+            }
             Some(machish::resolve::Resolved {
                 addr,
                 kind: match export.kind {
@@ -621,11 +656,16 @@ pub fn lift_region(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
 }
 
 fn region_of(image: &'static Image, va: u64) -> Option<(u64, &'static [u8])> {
-    image
+    let &(base, len) = image
         .regions
         .iter()
-        .find(|(base, bytes)| va >= *base && va < base + bytes.len() as u64)
-        .copied()
+        .find(|(base, len)| va >= *base && va < base + *len as u64)?;
+    // SAFETY: mapped until `unload`, which first takes the image out of the
+    // published view. A reader holding an older view that asks about an address
+    // inside an unloaded image is following the guest's own use-after-free.
+    Some((base, unsafe {
+        std::slice::from_raw_parts(base as usize as *const u8, len)
+    }))
 }
 
 /// `va` as `image+offset`, for an image the guest loaded. See
@@ -658,8 +698,11 @@ pub fn open(path: &str) -> std::result::Result<u64, String> {
     }
     let resolved = resolve_path(path).ok_or_else(|| format!("no such file: {path}"))?;
 
-    if let Some(handle) = find(|i| (i.path == resolved).then_some(i.handle)) {
-        return Ok(handle);
+    if let Some(image) =
+        find(|i| (i.path == resolved && !i.unloading.load(Ordering::Acquire)).then_some(i))
+        && retain(image)
+    {
+        return Ok(image.handle);
     }
 
     let bytes = std::fs::read(&resolved).map_err(|e| format!("{resolved}: {e}"))?;
@@ -751,7 +794,7 @@ fn open_with<S: MachSpec + 'static>(
     // Everything already loaded, which is what dyld resolves a new image
     // against.
     let main = main_exports();
-    let loaded = LoadedImages;
+    let loaded = LoadedImages::default();
     let program = ProgramImages;
     let mut extra: Vec<&dyn machish::resolve::SymbolProvider> = main
         .map(|m| m as &dyn machish::resolve::SymbolProvider)
@@ -829,21 +872,30 @@ fn open_with<S: MachSpec + 'static>(
         &mut memory,
     );
 
-    // The space is leaked first so its regions really are `'static`; the image
-    // then holds both the borrow and the thing borrowed from, which is legal
-    // only because the space can no longer move.
-    let memory: &'static SharedSpace = Box::leak(Box::new(SharedSpace(memory)));
+    let regions = memory
+        .regions()
+        .into_iter()
+        .map(|(base, bytes)| (base, bytes.len()))
+        .collect();
+    let pinned = never_unloadable(&report);
+    let dependencies = loaded.bound.into_inner().unwrap_or_else(|e| e.into_inner());
+    // The `Image` itself is leaked even once unloaded: readers search the
+    // published view without a lock, so one may still hold it.
     let leaked: &'static Image = Box::leak(Box::new(Image {
         path: resolved.to_string(),
         handle: base,
         report,
-        regions: memory.0.regions(),
+        memory: Mutex::new(Some(SharedSpace(memory))),
+        regions,
         imports,
         imports_by_target,
         functions,
         exports,
         slide,
-        _memory: memory,
+        refs: AtomicUsize::new(1),
+        pinned: AtomicBool::new(pinned),
+        unloading: AtomicBool::new(false),
+        dependencies,
     }));
 
     // Published *before* the initializers run: an initializer is guest code in
@@ -851,20 +903,14 @@ fn open_with<S: MachSpec + 'static>(
     {
         let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
         images.push(leaked);
-        for &(base, bytes) in &leaked.regions {
-            REGION_LO.fetch_min(base, Ordering::Relaxed);
-            REGION_HI.fetch_max(base + bytes.len() as u64, Ordering::Relaxed);
+        for dependency in &leaked.dependencies {
+            dependency.refs.fetch_add(1, Ordering::Relaxed);
         }
-        // The extents and the filters go up before the view does, so a reader
-        // that sees the image also sees a range and a filter that contain it.
-        publish_filters(&images);
-        let published: &'static [&'static Image] = images.clone().leak();
-        let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
-        VIEW.store(cell as *mut _, Ordering::Release);
-        IMAGE_COUNT.store(images.len(), Ordering::Release);
-        // A whole image's worth of addresses that meant nothing a moment ago,
-        // imports among them. See [`crate::dispatch::invalidate`].
-        crate::dispatch::invalidate();
+        for &(base, len) in &leaked.regions {
+            REGION_LO.fetch_min(base, Ordering::Relaxed);
+            REGION_HI.fetch_max(base + len as u64, Ordering::Relaxed);
+        }
+        publish(&images);
     }
 
     // A loaded image's thread-locals are its own, and nothing else registers
@@ -893,6 +939,145 @@ fn open_with<S: MachSpec + 'static>(
 
     run_initializers(leaked)?;
     Ok(leaked.handle)
+}
+
+/// Publish `images` as the view readers search. Called under the [`IMAGES`] lock.
+fn publish(images: &[&'static Image]) {
+    // The extents and the filters go up before the view does, so a reader
+    // that sees the image also sees a range and a filter that contain it.
+    publish_filters(images);
+    let published: &'static [&'static Image] = images.to_vec().leak();
+    let cell: &'static mut &'static [&'static Image] = Box::leak(Box::new(published));
+    VIEW.store(cell as *mut _, Ordering::Release);
+    IMAGE_COUNT.store(images.len(), Ordering::Release);
+    // A whole image's worth of addresses that meant something else a moment
+    // ago, imports among them. See [`crate::dispatch::invalidate`].
+    crate::dispatch::invalidate();
+}
+
+/// What dyld never unloads either: an image the Objective-C runtime holds
+/// classes from, one with thread-locals - every thread's block for it is filed
+/// under a key it owns - and one whose interpositions rebound other images.
+fn never_unloadable(report: &LinkReport) -> bool {
+    report
+        .images
+        .iter()
+        .any(|i| i.objc.is_some() || !i.thread_locals.is_empty() || !i.interpositions.is_empty())
+}
+
+/// Take a reference to an already loaded image for another `dlopen`. False when
+/// it is being unloaded, which leaves the caller to map it afresh.
+fn retain(image: &'static Image) -> bool {
+    let _images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    if image.unloading.load(Ordering::Acquire) {
+        return false;
+    }
+    image.refs.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Keep the image at `handle` for the life of the process, as `RTLD_NODELETE`
+/// asks.
+fn pin(handle: u64) {
+    if let Some(image) = find(|i| (i.handle == handle).then_some(i)) {
+        image.pinned.store(true, Ordering::Release);
+    }
+}
+
+/// Whether `dlclose` unloads anything under the active backend.
+///
+/// Not under emulation: translations are cached by guest address and nothing
+/// evicts them yet, so code at a reused address would run the unloaded image's.
+fn unloads() -> bool {
+    crate::exec::active().is_some_and(|e| e.engine() == crate::exec::Engine::Native)
+}
+
+/// `dlclose(handle)`.
+fn close(handle: u64) -> std::result::Result<(), String> {
+    if !unloads()
+        || handle == global_handle()
+        || synthetic::by_handle(handle).is_some()
+        || native_handle(handle).is_some()
+    {
+        return Ok(());
+    }
+    let image = find(|i| (i.handle == handle).then_some(i))
+        .ok_or_else(|| format!("dlclose({handle:#x}): invalid handle"))?;
+    release(image).map_err(|reason| format!("dlclose({}): {reason}", image.path))
+}
+
+/// Drop one reference to `image`, unloading it when that was the last.
+fn release(image: &'static Image) -> std::result::Result<(), String> {
+    {
+        let _images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let refs = image.refs.load(Ordering::Relaxed);
+        if refs == 0 || image.unloading.load(Ordering::Acquire) {
+            return Err("closed more times than it was opened".to_string());
+        }
+        image.refs.store(refs - 1, Ordering::Relaxed);
+        if refs > 1 || image.pinned.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        image.unloading.store(true, Ordering::Release);
+    }
+    unload(image);
+    Ok(())
+}
+
+/// Unload an image nothing references any more, in dyld's order: its exit
+/// handlers, its static terminators and the remove-image callbacks, all while
+/// its code is still mapped; then unlist and unmap it; then release what it
+/// bound against.
+fn unload(image: &'static Image) {
+    if crate::shims::vmmap::tracing() {
+        eprintln!("rosemary: dlclose: unloading {}", image.path);
+    }
+    let ranges = image.ranges();
+    darwin::exit::finalize_ranges(&ranges);
+    run_terminators(image);
+    let callbacks = REMOVE_IMAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    for thunk in callbacks {
+        notify(thunk, image.handle, image.slide);
+    }
+    {
+        let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        images.retain(|i| !std::ptr::eq(*i, image));
+        publish(&images);
+    }
+    crate::fault::forget_images(&ranges);
+    // Dropping the space unmaps it.
+    drop(
+        image
+            .memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(),
+    );
+    // After this image's own teardown, which may still call into them.
+    for dependency in &image.dependencies {
+        let _ = release(dependency);
+    }
+}
+
+/// Every `__mod_term_func` of the image, as dyld runs them: the image itself
+/// before the libraries linked with it, each one's in reverse.
+fn run_terminators(image: &'static Image) {
+    let Some(exec) = crate::exec::active() else {
+        return;
+    };
+    let terminators = image
+        .report
+        .images
+        .iter()
+        .flat_map(|i| i.terminators.iter().rev().copied());
+    for term in terminators {
+        if let Err(e) = exec.call(term, &[]) {
+            eprintln!("rosemary: {}: terminator at {term:#x}: {e}", image.path);
+        }
+    }
 }
 
 /// Every address a call site in `report` might name, both directions.
@@ -1321,6 +1506,10 @@ pub fn native_symbol_at(host: u64) -> Option<&'static ImportSite> {
 /// addresses.
 static ADD_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
+/// The `remove image` callbacks, likewise. libunwind's is one: it purges its
+/// cache of an unloaded image's frames.
+static REMOVE_IMAGE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// Tell one callback about one image.
 ///
 /// The two arguments are dyld's: the image's `mach_header` and its slide.
@@ -1329,7 +1518,7 @@ fn notify(thunk: u64, header: u64, slide: u64) {
         return;
     }
     if crate::shims::vmmap::tracing() {
-        eprintln!("rosemary: add-image notice: header {header:#x}, slide {slide:#x}");
+        eprintln!("rosemary: image notice: header {header:#x}, slide {slide:#x}");
     }
     // SAFETY: `thunk` is native code of dyld's callback signature - the guest's
     // own function, or a [`crate::thunk`] standing for it.
@@ -1688,6 +1877,9 @@ pub(crate) mod entry {
 
     use super::Ordering;
 
+    /// Darwin's value, not the host's.
+    const RTLD_NODELETE: i32 = 0x80;
+
     // A guest pointer is a host pointer under both backends: the emulated
     // guest is identity-mapped.
 
@@ -1754,9 +1946,16 @@ pub(crate) mod entry {
         }
     }
 
-    /// `void _dyld_register_func_for_remove_image(...)`. Accepted and never
-    /// called, because nothing is ever unloaded.
-    pub extern "C" fn dyld_register_func_for_remove_image(_f: u64) {}
+    /// `void _dyld_register_func_for_remove_image(void (*)(const struct
+    /// mach_header *, intptr_t))`. Called for each image `dlclose` unloads.
+    pub extern "C" fn dyld_register_func_for_remove_image(f: u64) {
+        if f != 0 {
+            super::REMOVE_IMAGE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(f);
+        }
+    }
 
     /// `bool _dyld_find_unwind_sections(void *addr, struct dyld_unwind_sections *)`
     ///
@@ -1894,7 +2093,12 @@ pub(crate) mod entry {
             eprintln!("rosemary: dlopen({path:?}, flags {mode:#x})");
         }
         let handle = match super::open(&path) {
-            Ok(handle) => Some(handle),
+            Ok(handle) => {
+                if mode & RTLD_NODELETE != 0 {
+                    super::pin(handle);
+                }
+                Some(handle)
+            }
             // No Mach-O for this backend on disk under that name.
             Err(reason) => super::open_native(&path).or_else(|| {
                 super::set_error(format!("dlopen({path}): {reason}"));
@@ -1941,11 +2145,19 @@ pub(crate) mod entry {
         }
     }
 
-    /// `int dlclose(void *handle)`. Nothing is unloaded, so no terminator runs
-    /// yet; the table still marks it as reentering for when one does.
-    pub extern "C" fn dlclose(_handle: *mut c_void) -> i32 {
-        super::clear_error();
-        0
+    /// `int dlclose(void *handle)`, which unloads the image once every `dlopen`
+    /// of it is matched, running its terminators first.
+    pub extern "C" fn dlclose(handle: *mut c_void) -> i32 {
+        match super::close(handle as usize as u64) {
+            Ok(()) => {
+                super::clear_error();
+                0
+            }
+            Err(reason) => {
+                super::set_error(reason);
+                -1
+            }
+        }
     }
 
     /// `char *dlerror(void)`, which clears the error it reports.

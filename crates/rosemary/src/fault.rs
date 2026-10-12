@@ -304,6 +304,20 @@ pub fn note_images(report: &machish::report::LinkReport) {
     }
 }
 
+/// Drop what [`note_images`] and [`note_unbound`] recorded for an unloaded
+/// image, so a later mapping at the same address is not named after it.
+pub fn forget_images(ranges: &[std::ops::Range<u64>]) {
+    let inside = |va: u64| ranges.iter().any(|r| r.contains(&va));
+    IMAGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|i| !inside(i.range.0));
+    UNBOUND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|u| !inside(u.stub));
+}
+
 /// Install the reporter for the faults a translation can raise.
 ///
 /// Idempotent, and safe to call before any guest code runs - which is where

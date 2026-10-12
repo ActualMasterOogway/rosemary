@@ -329,6 +329,28 @@ fn the_native_guest_loads_a_dylib_and_runs_its_constructor() {
     );
 }
 
+/// dyld's reference count: the last `dlclose` runs the image's destructor and
+/// unmaps it, one more fails, and a later `dlopen` maps and initializes it again.
+/// Native only - the emulated backend keeps every image.
+#[test]
+fn the_last_dlclose_of_a_native_image_finalizes_and_unloads_it() {
+    if !cfg!(target_arch = "x86_64") {
+        skip!("the x86-64 fixture is not native on this host")
+    }
+    let Some(path) = common::dlclose_fixture() else {
+        skip!("cannot build x86_64 fixtures")
+    };
+    let (status, out, err) = run_guest_with(&["--native"], &path, &[]);
+
+    assert_eq!(status, Some(0), "stdout: {out:?} stderr: {err}");
+    assert_eq!(
+        out,
+        "plugin constructor\nsame=1\nvalue=7\nclose1=0\nplugin destructor\nclose2=0\n\
+         close3=-1\nplugin constructor\nreopened=1\nplugin destructor\nmain destructor\n",
+        "stderr: {err}"
+    );
+}
+
 #[test]
 fn a_dynamically_loaded_image_runs_the_same_bridged_and_exited() {
     // The falsifiable half of the lift-time import registry, and the reason it

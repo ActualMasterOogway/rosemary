@@ -1493,6 +1493,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // Listed to keep it off the fast path and out of the audit's unknown list.
     // The handler is a guest function pointer, but no `cbsig!` marks it.
     sig!("__cxa_atexit", I32, P, P, P),
+    sig!("__cxa_finalize", V, P),
     sig!("__darwin_check_fd_set_overflow", I32, I32, P, I32),
     sig!("__error", P),
     sig!("__exp10f", F32, F32),

@@ -1835,6 +1835,54 @@ pub fn dlopen_fixture() -> Option<String> {
         .clone()
 }
 
+pub const UNLOADABLE_C: &str = r#"
+#include <stdio.h>
+
+__attribute__((constructor)) static void hi(void) { printf("plugin constructor\n"); }
+/* Registered with `__cxa_atexit` against this image's `__dso_handle`. */
+__attribute__((destructor)) static void bye(void) { printf("plugin destructor\n"); }
+
+int plugin_value(void) { return 7; }
+"#;
+
+/// Opens [`UNLOADABLE_C`] twice and closes it three times. Stdout is a pipe, so
+/// every line is buffered until exit: the destructors' lines appear only if the
+/// flush runs after them.
+pub const DLCLOSE_C: &str = r#"
+#include <dlfcn.h>
+#include <stdio.h>
+
+__attribute__((destructor)) static void late(void) { printf("main destructor\n"); }
+
+int main(void) {
+    void *a = dlopen("libunloadable.dylib", RTLD_NOW);
+    void *b = dlopen("libunloadable.dylib", RTLD_NOW);
+    printf("same=%d\n", a == b);
+    int (*value)(void) = (int (*)(void))dlsym(a, "plugin_value");
+    printf("value=%d\n", value());
+    printf("close1=%d\n", dlclose(a));
+    printf("close2=%d\n", dlclose(b));
+    printf("close3=%d\n", dlclose(b));
+    void *c = dlopen("libunloadable.dylib", RTLD_NOW);
+    printf("reopened=%d\n", c != NULL);
+    return 0;
+}
+"#;
+
+pub fn dlclose_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_x86_64(
+                "libunloadable.dylib",
+                UNLOADABLE_C,
+                &["-dynamiclib", "-install_name", "@rpath/libunloadable.dylib"],
+            )?;
+            build_x86_64("dlcloser", DLCLOSE_C, &[])
+        })
+        .clone()
+}
+
 pub const OBJC_PLUGIN_M: &str = r#"
 #import <Foundation/Foundation.h>
 #include <stdio.h>

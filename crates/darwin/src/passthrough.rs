@@ -60,6 +60,11 @@ pub const CLAIMED: &[&str] = &[
     "tolower",
     "toupper",
     "_exit",
+    // Ends the process without running a handler, the same on every host.
+    "_Exit",
+    // Reports and aborts; it reads no guard value, so this runtime's own
+    // `___stack_chk_guard` is not at odds with it.
+    "__stack_chk_fail",
     "alarm",
     "fsync",
     "ftruncate",
