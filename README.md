@@ -45,11 +45,6 @@ from source if desired.
 
 For supported distribution packages without using Butter, see [our installation guide](docs/installing.md).
 
-Versioned releases are in Github releases. Rosemary is currently distributed as
-a Nix flake, an AppImage, and a Steam `compatibilitytools.d` tool.
-
-The Steam tool contains a README with installation and usage instructions.
-
 ## Building
 
 Rosemary uses the Rust 2024 edition and currently requires Rust 1.99 or newer.
