@@ -16,6 +16,26 @@ or missing name falls back to `NSExecutable`, then the bundle's name without
 `.app`. Arguments go to that executable, and the usual backend selection and
 bundle resource lookup apply. Invalid bundles report an error.
 
+Binaries and apps installed in the prefix take priority over host filesystem paths. Think of this as a sort of "overlay" - if `/Applications/MyApp.app` is present in your prefix, Rosemary prioritizes the prefix first. If not, it will search the host filesystem for that directory.
+
+## Entering a shell
+
+Rosemary ships a full MiniDarwin base system, including basic utilities like `bash` and `zsh`.
+
+To enter a shell in the Rosemary prefix, first create one with `rosemary prefix create`, then simply run either:
+
+```sh
+rosemary /bin/bash
+```
+
+or
+
+```sh
+rosemary /bin/zsh
+```
+
+depending on your preference.
+
 ## The process server
 
 On non-macOS, every guest is a host process of its own and none can see the
@@ -78,11 +98,9 @@ rosemary prefix info              # where it is, and what it says about itself
 
 A guest does **not** have to be inside the prefix to run: the app stays wherever
 it is and the guest sees it under `/Volumes/Host`, so
-`rosemary run ~/games/Foo.app/Contents/MacOS/Foo` works with no setup. What
-changes is where the guest *writes*: `~/Library/Application Support/...` is the
-prefix's, not this host's.
+`rosemary run ~/games/Foo.app/Contents/MacOS/Foo` works with no setup.
 
-To run a guest in a prefix of its own - separate saves, separate preferences:
+To run a guest in a prefix of its own for separate saves/preferences:
 
 ```sh
 ROSEMARY_PREFIX=~/prefixes/game rosemary run ~/games/Foo.app/Contents/MacOS/Foo
@@ -138,7 +156,7 @@ see which one is wrong.
 
 ## GUI
 
-Rosemary has a built in GUI that can be toggled with `SHIFT` + `F7`. This GUI shows the framerate of the application, and has various profiling utilities built in, useful for narrowing down performance bottlenecks.
+On macOS with native Objective C, Rosemary has a built in GUI that can be toggled with `SHIFT` + `F7`. This GUI shows the framerate of the application, and has various profiling utilities built in, useful for narrowing down performance bottlenecks.
 
 ## Execution modes
 
