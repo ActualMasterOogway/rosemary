@@ -1231,6 +1231,42 @@ pub mod bitmap {
         receiver
     }
 
+    /// The ten-argument form every SDL 2 Cocoa build uses: the designated
+    /// initialiser with `NSBitmapFormat` zero, which is what Apple documents it as.
+    unsafe extern "C" fn init_with_planes_default_format(
+        receiver: Id,
+        sel: Sel,
+        planes: *mut *mut u8,
+        width: isize,
+        height: isize,
+        bits_per_sample: isize,
+        samples: isize,
+        has_alpha: u8,
+        is_planar: u8,
+        colour_space: Id,
+        bytes_per_row: isize,
+        bits_per_pixel: isize,
+    ) -> Id {
+        // SAFETY: the same contract, with the format filled in.
+        unsafe {
+            init_with_planes(
+                receiver,
+                sel,
+                planes,
+                width,
+                height,
+                bits_per_sample,
+                samples,
+                has_alpha,
+                is_planar,
+                colour_space,
+                0,
+                bytes_per_row,
+                bits_per_pixel,
+            )
+        }
+    }
+
     /// The rep's pixels as a bitmap, for the image that holds it.
     ///
     /// Only the layout this module produces and accepts: eight bits a sample,
@@ -1374,6 +1410,8 @@ pub mod bitmap {
                 c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
             "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bitmapFormat:bytesPerRow:bitsPerPixel:"
                 => init_with_planes, c"@104@0:8^*16q24q32q40q48c56c64@72Q80q88q96";
+            "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:"
+                => init_with_planes_default_format, c"@96@0:8^*16q24q32q40q48c56c64@72q80q88";
             "bitmapData" => bitmap_data, c"^v16@0:8";
             "pixelsWide" => pixels_wide, c"q16@0:8";
             "pixelsHigh" => pixels_high, c"q16@0:8";

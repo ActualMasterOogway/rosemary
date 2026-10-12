@@ -1790,6 +1790,8 @@ unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
+unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
+
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
 /// `-addCursorRect:cursor:`, which is only ever called from inside a view's own
@@ -1901,6 +1903,8 @@ pub(crate) fn install() {
         "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setNeedsDisplay:" => set_needs_display, c"v20@0:8c16";
         "setNeedsDisplay" => mark_needs_display, c"v16@0:8";
+        // There is no trackpad touch stream to opt in to.
+        "setAcceptsTouchEvents:" => ignored_flag, c"v20@0:8c16";
         "setHidden:" => set_hidden, c"v20@0:8c16";
         "setAlphaValue:" => set_alpha_value, c"v24@0:8d16";
         "alphaValue" => alpha_value, c"d16@0:8";

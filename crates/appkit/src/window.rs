@@ -83,6 +83,8 @@ pub const INSTANCE_SIZE: usize = size_of::<Window>();
 pub const DID_RESIZE: &str = "NSWindowDidResizeNotification";
 pub const DID_MOVE: &str = "NSWindowDidMoveNotification";
 pub const DID_CHANGE_SCREEN: &str = "NSWindowDidChangeScreenNotification";
+pub const DID_CHANGE_SCREEN_PROFILE: &str = "NSWindowDidChangeScreenProfileNotification";
+pub const DID_EXPOSE: &str = "NSWindowDidExposeNotification";
 pub const WILL_CLOSE: &str = "NSWindowWillCloseNotification";
 pub const DID_BECOME_KEY: &str = "NSWindowDidBecomeKeyNotification";
 pub const DID_RESIGN_KEY: &str = "NSWindowDidResignKeyNotification";
@@ -1046,6 +1048,50 @@ unsafe extern "C" fn content_rect_for_frame(receiver: Id, _sel: Sel, rect: NSRec
 
 unsafe extern "C" fn frame_rect_for_content(receiver: Id, _sel: Sel, rect: NSRect) -> NSRect {
     frame_for_content(rect, content_inset(receiver))
+}
+
+/// `-contentLayoutRect`: in window coordinates, the part of the frame the chrome
+/// this runtime draws does not cover.
+unsafe extern "C" fn content_layout_rect(receiver: Id, _sel: Sel) -> NSRect {
+    // SAFETY: the receiver is a window of this crate's.
+    let size = unsafe { frame(receiver, objc::sel::get("frame")) }.size;
+    let whole = NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size,
+    };
+    content_for_frame(whole, content_inset(receiver))
+}
+
+/// `-setMouseConfinementRect:` (10.13): keep the pointer inside `rect`, in window
+/// coordinates, while the window has focus. An empty rectangle lifts it.
+///
+/// SDL2 sends it unasked-about whenever `NSAppKitVersionNumber` says 10.13, to
+/// implement a grabbed or confined window.
+unsafe extern "C" fn set_mouse_confinement_rect(receiver: Id, _sel: Sel, rect: NSRect) {
+    // SAFETY: the receiver is a window of this crate's.
+    let sdl = unsafe { sdl_window(receiver) };
+    if sdl.is_null() {
+        return;
+    }
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        sdl3::video::set_mouse_rect(sdl, None);
+        return;
+    }
+    // SAFETY: as above.
+    let height = unsafe { frame(receiver, objc::sel::get("frame")) }
+        .size
+        .height;
+    // Window coordinates rise from the bottom of the frame; SDL's fall from its top.
+    let top = height - (rect.origin.y + rect.size.height);
+    sdl3::video::set_mouse_rect(
+        sdl,
+        Some(sdl3::Rect {
+            x: rect.origin.x.round() as i32,
+            y: top.round() as i32,
+            w: rect.size.width.round() as i32,
+            h: rect.size.height.round() as i32,
+        }),
+    );
 }
 
 /// The spellings that take the style explicitly, on the class and - for some
@@ -2130,6 +2176,8 @@ unsafe extern "C" fn window_number(receiver: Id, _sel: Sel) -> isize {
 /// on a line that changes nothing about whether it can draw.
 unsafe extern "C" fn ignored_flag(_receiver: Id, _sel: Sel, _flag: u8) {}
 
+unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
+
 unsafe extern "C" fn set_titlebar_transparent(receiver: Id, _sel: Sel, flag: u8) {
     window_of(receiver).titlebar_transparent = usize::from(flag != 0);
 }
@@ -2278,6 +2326,9 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "frameRectForContentRect:" => frame_rect_for_content,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "contentLayoutRect" => content_layout_rect, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
+        "setMouseConfinementRect:" => set_mouse_confinement_rect,
+            c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "contentRectForFrameRect:styleMask:" => content_rect_for_frame_style,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16Q48";
         "frameRectForContentRect:styleMask:" => frame_rect_for_content_style,
@@ -2360,6 +2411,13 @@ pub(crate) fn install() {
         "setTabbingMode:" => ignored_integer, c"v24@0:8q16";
         "setAnimationBehavior:" => ignored_integer, c"v24@0:8q16";
         "setHasShadow:" => ignored_flag, c"v20@0:8c16";
+        "setOneShot:" => ignored_flag, c"v20@0:8c16";
+        // Drag-and-drop from the host is not delivered; accepting the registration
+        // keeps SDL's window setup from failing on it.
+        "registerForDraggedTypes:" => ignored_object, c"v24@0:8@16";
+        "unregisterDraggedTypes" => ignored, c"v16@0:8";
+        // The window is always presented in the host's colour space; SDL 1.2 sets sRGB.
+        "setColorSpace:" => ignored_object, c"v24@0:8@16";
         // No shadow is drawn, so there is none to recompute.
         "invalidateShadow" => ignored, c"v16@0:8";
         // A no-op on every macOS since 10.10; Unity 5 still sends it.

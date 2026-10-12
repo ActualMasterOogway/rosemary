@@ -445,6 +445,119 @@ pub unsafe extern "C" fn CGDisplayBounds(display: u32) -> NSRect {
     }
 }
 
+/// `size_t CGDisplayPixelsWide(CGDirectDisplayID)` and `CGDisplayPixelsHigh`.
+///
+/// The display's size in the global space's own units, which is what
+/// [`CGDisplayBounds`] reports and what a guest sizes a full-screen window from.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayPixelsWide(display: u32) -> u64 {
+    // SAFETY: a plain call.
+    unsafe { CGDisplayBounds(display) }.size.width as u64
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayPixelsHigh(display: u32) -> u64 {
+    // SAFETY: a plain call.
+    unsafe { CGDisplayBounds(display) }.size.height as u64
+}
+
+/// `CGError CGDisplayMoveCursorToPoint(CGDirectDisplayID, CGPoint)`.
+///
+/// The point is relative to the display's origin; the warp wants global space.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayMoveCursorToPoint(
+    display: u32,
+    point: foundation::geometry::NSPoint,
+) -> i32 {
+    // SAFETY: a plain call.
+    let origin = unsafe { CGDisplayBounds(display) }.origin;
+    let global = foundation::geometry::NSPoint {
+        x: origin.x + point.x,
+        y: origin.y + point.y,
+    };
+    // SAFETY: a plain call.
+    unsafe { CGWarpMouseCursorPosition(global) }
+}
+
+/// `kCGErrorFailure`: what a request for something this host cannot do answers.
+const CG_ERROR_FAILURE: i32 = 1001;
+
+/// `CGError CGDisplayCapture(CGDirectDisplayID)` and `CGCaptureAllDisplays`.
+///
+/// Refused: SDL gives no exclusive claim on a display, and a caller told it has one
+/// would go on to assume it can change the mode. The caller is expected to carry on
+/// with a window, as it does when another process holds the display.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayCapture(_display: u32) -> i32 {
+    CG_ERROR_FAILURE
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGCaptureAllDisplays() -> i32 {
+    CG_ERROR_FAILURE
+}
+
+/// `CGError CGReleaseAllDisplays(void)`: nothing is ever captured.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGReleaseAllDisplays() -> i32 {
+    0
+}
+
+/// `CGError CGDisplaySetDisplayMode(display, mode, CFDictionaryRef options)`.
+///
+/// Refused: this host's display mode is not the guest's to change.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplaySetDisplayMode(
+    _display: u32,
+    _mode: *const std::ffi::c_void,
+    _options: *const std::ffi::c_void,
+) -> i32 {
+    CG_ERROR_FAILURE
+}
+
+/// The fade-reservation token written by [`CGAcquireDisplayFadeReservation`].
+const FADE_TOKEN: u32 = 1;
+
+/// `CGError CGAcquireDisplayFadeReservation(CGDisplayReservationInterval, token *)`.
+///
+/// Granted, and the fade itself is a no-op: there is no gamma ramp to fade here,
+/// and a display that does not fade is merely less polished, not wrong.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGAcquireDisplayFadeReservation(_seconds: f32, token: *mut u32) -> i32 {
+    if !token.is_null() {
+        // SAFETY: an out parameter the caller sized.
+        unsafe { token.write(FADE_TOKEN) };
+    }
+    0
+}
+
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGReleaseDisplayFadeReservation(_token: u32) -> i32 {
+    0
+}
+
+/// `CGError CGDisplayFade(token, seconds, startBlend, endBlend, r, g, b, synchronous)`.
+#[allow(non_snake_case)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn CGDisplayFade(
+    _token: u32,
+    _seconds: f32,
+    _start_blend: f32,
+    _end_blend: f32,
+    _red: f32,
+    _green: f32,
+    _blue: f32,
+    _synchronous: i32,
+) -> i32 {
+    0
+}
+
+/// `CGWindowLevel CGShieldingWindowLevel(void)`: `kCGMaximumWindowLevel - 3`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGShieldingWindowLevel() -> i32 {
+    2147483628
+}
+
 /// `boolean_t CGDisplayIsMain(CGDirectDisplayID)`
 ///
 /// The primary display, which is the one SDL lists first.

@@ -1107,6 +1107,8 @@ fn delegate_selector(name: &str) -> &'static str {
         window::DID_RESIZE => "windowDidResize:",
         window::DID_MOVE => "windowDidMove:",
         window::DID_CHANGE_SCREEN => "windowDidChangeScreen:",
+        window::DID_CHANGE_SCREEN_PROFILE => "windowDidChangeScreenProfile:",
+        window::DID_EXPOSE => "windowDidExpose:",
         window::WILL_CLOSE => "windowWillClose:",
         window::DID_BECOME_KEY => "windowDidBecomeKey:",
         window::DID_RESIGN_KEY => "windowDidResignKey:",
