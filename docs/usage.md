@@ -80,6 +80,7 @@ rosemary server --stop         # ask this prefix's server to exit
 | `ROSEMARY_CONFINE_POINTER` | unset | Keep the pointer inside the focused window's content, off the titlebar Rosemary draws; pushed against the edge it holds still and keeps reporting deltas. A workaround, not Mac behavior: some ports (Feral's, e.g. Life Is Strange) confine the cursor with a Win32 `ClipCursor` emulation that clamps only once and counts on warping the pointer back when it strays, which cannot reach a pointer that has left the window on Wayland. Their drag interactions stop short without it. |
 | `ROSEMARY_GLIBC` | `auto` | (packaged builds) Which glibc the launcher runs Rosemary on: `host`, `bundled`, or `auto`, which uses the host's when it defines every symbol version the bundle's libraries need and the bundled one otherwise. |
 | `ROSEMARY_EXE` | (set by the launcher) | The path that starts another copy of Rosemary. Under the bundled glibc the kernel reports the bundled dynamic loader as this process's executable, so the runtime re-launches itself (`rosemary server`, a guest spawning a Mach-O) through this instead. |
+| `ROSEMARY_METAL_PRESENTATION_MODE` | unset | Set the presentation mode used by Vulkan in Rosemary's Metal translation. Valid values are `immediate`, `fifo`, `fifo_relaxed`, and `mailbox`. |
 
 ## Prefixes
 

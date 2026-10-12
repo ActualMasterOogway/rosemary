@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use super::*;
 
 /// A surface format to present in.
@@ -23,9 +25,32 @@ pub(super) fn choose_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::Surf
 /// `FIFO` is required by Vulkan, so it is the safe fallback even if a broken
 /// implementation returns an empty list.
 pub(super) fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
-    if modes.contains(&vk::PresentModeKHR::MAILBOX) {
-        vk::PresentModeKHR::MAILBOX
+    static USER_PRESENTATION_MODE: LazyLock<Option<vk::PresentModeKHR>> = LazyLock::new(|| {
+        match std::env::var("ROSEMARY_METAL_PRESENTATION_MODE").as_deref() {
+            Ok("immediate") => Some(vk::PresentModeKHR::IMMEDIATE),
+            Ok("mailbox") => Some(vk::PresentModeKHR::MAILBOX),
+            Ok("fifo") => Some(vk::PresentModeKHR::FIFO),
+            Ok("fifo_relaxed") => Some(vk::PresentModeKHR::FIFO_RELAXED),
+            Ok(other) => {
+                eprintln!(
+                    "rosemary: invalid metal presentation mode {other} - ignoring and using default."
+                );
+                None
+            }
+            Err(_) => None,
+        }
+    });
+
+    let default_mode = USER_PRESENTATION_MODE.unwrap_or(vk::PresentModeKHR::MAILBOX);
+    if modes.contains(&default_mode) {
+        default_mode
     } else {
+        if USER_PRESENTATION_MODE.is_some() {
+            eprintln!(
+                "rosemary: tried to use user specified presentation mode {:?} but the compositor didn't support it. falling back to fifo.",
+                USER_PRESENTATION_MODE
+            );
+        }
         vk::PresentModeKHR::FIFO
     }
 }
