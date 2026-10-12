@@ -43,6 +43,8 @@ For non-development purposes, we recommend using our management application,
 prebuilt Rosemary binaries from our Github releases, and even build new commits
 from source if desired.
 
+For supported distribution packages without using Butter, see [our installation guide](docs/installing.md).
+
 Versioned releases are in Github releases. Rosemary is currently distributed as
 a Nix flake, an AppImage, and a Steam `compatibilitytools.d` tool.
 
