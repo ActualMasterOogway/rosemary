@@ -1,6 +1,18 @@
 # Installing Rosemary
 
-Rosemary supports a variety of distributions and package formats. This document goes through each supported method.
+Rosemary supports a variety of distributions and installation methods. This document goes through each supported method.
+
+## With Butter
+
+[Butter](https://github.com/microlift/butter) is our official Rosemary GUI frontend, akin to Bottles for Wine. It helps maintain isolation between different macOS apps by allowing you to separate them into isolated, tidy containers. It's designed for ease of use and includes guided onboarding, automated compiling of nightly builds, and deterministic execution of prebuilt binaries from our GitHub releases.
+
+See Butter's installation page for further documentation.
+
+## As a Steam Compatibility Tool
+
+Rosemary has official releases as a Steam compatibility tool, similar to Proton GE. Installing Rosemary this way allows running macOS Steam games in your native Linux Steam client with no further setup, and without a macOS Steam installation in the prefix.
+
+To install it, head over to [releases](https://github.com/microlift/rosemary/releases), download rosemary-steam-tool in your preferred format, and follow the README in the "Rosemary" folder.
 
 ## Nix
 
@@ -53,7 +65,7 @@ Import the module and add the package. The module itself only manages the Steam 
 
 (Add `config` to the function arguments: `{ config, pkgs, inputs, ... }:`.)
 
-### Steam compatibility tool
+### Declarative Nix Steam compatibility tool
 
 To install Rosemary as a Steam compatibility tool, enable it in Home Manager:
 
