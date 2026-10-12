@@ -143,6 +143,10 @@ pub struct NamespaceImage {
     /// The path it was loaded from, which also satisfies a dependency recorded
     /// by path rather than by install name.
     pub path: String,
+    /// The names dependents recorded for it, which a compatibility name lets
+    /// differ from both: a dependency on `/usr/lib/libstdc++.6.dylib` answered
+    /// by an image elsewhere must still satisfy that dependency's binds.
+    pub aliases: Vec<String>,
     pub exports: ExportTable,
     pub slide: Word,
     /// This image's own dependency install names, in ordinal order, so a
@@ -156,11 +160,13 @@ pub struct NamespaceImage {
 impl NamespaceImage {
     /// Whether `name` refers to this image.
     ///
-    /// Matched on install name *or* path: an image may be depended on by the
-    /// `@rpath` name it records and found at a concrete path, and a dependent
-    /// linked against the concrete path must still be satisfied.
+    /// Matched on install name, path, *or* any name it was requested as: an
+    /// image may be depended on by the `@rpath` name it records and found at a
+    /// concrete path, and a dependent linked against either must be satisfied.
     pub fn answers_to(&self, name: &str) -> bool {
-        self.install_name.as_deref() == Some(name) || self.path == name
+        self.install_name.as_deref() == Some(name)
+            || self.path == name
+            || self.aliases.iter().any(|a| a == name)
     }
 }
 
@@ -308,6 +314,7 @@ mod tests {
         NamespaceImage {
             install_name: Some(install.to_string()),
             path: install.to_string(),
+            aliases: Vec::new(),
             exports: ExportTable::from_entries(exports),
             slide,
             dependencies: deps.iter().map(|s| s.to_string()).collect(),
@@ -443,6 +450,7 @@ mod tests {
         ns.push(NamespaceImage {
             install_name: Some("@rpath/libmath.dylib".to_string()),
             path: "/tmp/build/libmath.dylib".to_string(),
+            aliases: Vec::new(),
             exports: ExportTable::from_entries(vec![direct("_add", 0x10)]),
             slide: 0,
             dependencies: Vec::new(),
@@ -450,5 +458,25 @@ mod tests {
         });
         assert!(ns.provides("@rpath/libmath.dylib"));
         assert!(ns.provides("/tmp/build/libmath.dylib"));
+    }
+
+    #[test]
+    fn an_image_answers_to_the_names_it_was_requested_as() {
+        let mut ns = Namespace::new();
+        ns.push(NamespaceImage {
+            install_name: Some("/compat/usr/lib/libstdc++.6.dylib".to_string()),
+            path: "/compat/usr/lib/libstdc++.6.dylib".to_string(),
+            aliases: vec![
+                "/usr/lib/libstdc++.6.dylib".to_string(),
+                "/usr/lib/libstdc++.dylib".to_string(),
+            ],
+            exports: ExportTable::from_entries(vec![direct("_add", 0x10)]),
+            slide: 0,
+            dependencies: Vec::new(),
+            reexports: Vec::new(),
+        });
+        assert!(ns.provides("/usr/lib/libstdc++.6.dylib"));
+        assert!(ns.provides("/usr/lib/libstdc++.dylib"));
+        assert!(!ns.provides("/usr/lib/libc++.1.dylib"));
     }
 }

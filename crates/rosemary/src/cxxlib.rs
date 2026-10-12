@@ -31,6 +31,11 @@ const LIBCXX_FILE: &str = "/usr/lib/libc++.1.dylib";
 const LIBCXXABI_FILE: &str = "/usr/lib/libc++abi.dylib";
 const LIBUNWIND_FILE: &str = "/usr/lib/system/libunwind.dylib";
 
+/// The GNU `libstdc++` an x86-64 base keeps for pre-libc++ binaries, under the
+/// install name it identifies as. Optional: an arm64 base has none, because no
+/// arm64 binary ever linked it.
+const LIBSTDCXX_FILE: &str = "/compat/OS X/10.8/usr/lib/libstdc++.6.dylib";
+
 /// Where one flavor's runtime was found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -127,6 +132,12 @@ impl Flavor {
         self.read(LIBUNWIND_FILE)
     }
 
+    /// The base's GNU `libstdc++`, if it has one this flavor can map.
+    fn libstdcxx(self) -> Option<Vec<u8>> {
+        let bytes = std::fs::read(locate(self).ok()?.file(LIBSTDCXX_FILE)).ok()?;
+        self.can_load(&bytes).then_some(bytes)
+    }
+
     /// Whether `bytes` has a slice this flavor's backend can map.
     pub(crate) fn can_load(self, bytes: &[u8]) -> bool {
         match self {
@@ -221,6 +232,17 @@ impl<S: DylibSource> DylibSource for BaseCxx<S> {
             return Ok(Some(FetchedDylib {
                 path: AS_PATH.to_string(),
                 bytes: self.flavor.libcxx()?,
+                implied: Vec::new(),
+            }));
+        } else if is_libstdcxx(request.install_name)
+            && let Some(bytes) = self.flavor.libstdcxx()
+        {
+            // The real library: it re-exports the ABI half from `libc++abi`, so
+            // both halves come from one runtime rather than the ABI from here and
+            // the containers and streams from whatever the host has loaded.
+            return Ok(Some(FetchedDylib {
+                path: LIBSTDCXX_FILE.to_string(),
+                bytes,
                 implied: Vec::new(),
             }));
         } else if is_libcxxabi(request.install_name) || is_libstdcxx(request.install_name) {
@@ -482,9 +504,10 @@ mod tests {
         }
     }
 
-    /// A `libstdc++` request loads `libc++abi`, **under its own name**.
+    /// A `libstdc++` request loads the base's real `libstdc++` when it has one,
+    /// and otherwise `libc++abi`, **under its own name**.
     #[test]
-    fn a_libstdcxx_request_gets_the_cxxabi_bytes_under_the_cxxabi_name() {
+    fn a_libstdcxx_request_gets_the_base_libstdcxx_or_else_cxxabi() {
         let Some([_, cxxabi, _]) = runtime(Flavor::Intel) else {
             return;
         };
@@ -498,8 +521,37 @@ mod tests {
             })
             .expect("the base answers")
             .expect("libstdc++ is answered");
-        assert_eq!(fetched.path, CXXABI_PATH);
-        assert_eq!(fetched.bytes.len(), cxxabi.len());
+        match Flavor::Intel.libstdcxx() {
+            Some(real) => {
+                assert_eq!(fetched.path, LIBSTDCXX_FILE);
+                assert_eq!(fetched.bytes.len(), real.len());
+            }
+            None => {
+                assert_eq!(fetched.path, CXXABI_PATH);
+                assert_eq!(fetched.bytes.len(), cxxabi.len());
+            }
+        }
+    }
+
+    /// The GNU runtime takes its ABI half from `libc++abi` by re-export, which is
+    /// what keeps a `libstdc++` binary on one exception runtime.
+    #[test]
+    fn the_base_libstdcxx_reexports_the_abi_from_cxxabi() {
+        let Some(real) = Flavor::Intel.libstdcxx() else {
+            eprintln!("skipped: the x86_64 base has no libstdc++");
+            return;
+        };
+        let exports = Flavor::Intel.exports(&real).expect("exports");
+        for symbol in ["___cxa_throw", "___gxx_personality_v0", "__ZTISt8bad_cast"] {
+            let export = exports.get(symbol).expect("libstdc++ exports the ABI");
+            assert!(
+                matches!(export.value, machish::exports::ExportValue::Reexport { .. }),
+                "{symbol} is defined by libstdc++ rather than re-exported"
+            );
+        }
+        assert!(exports.contains("__ZNSt8ios_base4InitC1Ev"));
+        // Nothing an arm64 link could take.
+        assert!(Flavor::Arm.libstdcxx().is_none());
     }
 
     /// The unwinder has to enter the dependency graph even though nothing in it

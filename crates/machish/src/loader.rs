@@ -60,9 +60,9 @@ pub struct Loader<S: MachSpec> {
 struct Collected {
     path: String,
     bytes: Vec<u8>,
-    /// Install name recorded by the *dependent*, which is how bind ordinals
-    /// name it and is not always the same as its own `LC_ID_DYLIB`.
-    requested_as: Option<String>,
+    /// Install names recorded by its *dependents*, which are how their bind
+    /// ordinals name it and are not always the same as its own `LC_ID_DYLIB`.
+    requested_as: Vec<String>,
     /// `LC_RPATH` entries in scope for this image: its own, then its loader's.
     rpaths: Vec<String>,
     /// Dependencies the source added, which are not in the load commands.
@@ -172,7 +172,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             // `parse_any` may have narrowed a fat file; store the thin slice so
             // every later phase sees the same bytes at the same offsets.
             bytes: root_obj.bytes().to_vec(),
-            requested_as: None,
+            requested_as: Vec::new(),
             rpaths: root_obj.rpaths().map(|r| r.to_string()).collect(),
             implied: Vec::new(),
         }];
@@ -239,6 +239,13 @@ impl<S: MachSpec + 'static> Loader<S> {
                     // fallback.
                     continue;
                 };
+                if let Some(loaded) = images.iter_mut().find(|i| i.path == fetched.path) {
+                    // Another name for an image already loaded, which binds
+                    // against that name have to find.
+                    loaded.requested_as.push(install_name.clone());
+                    visited.push(install_name);
+                    continue;
+                }
                 if visited.iter().any(|v| v == &fetched.path) {
                     continue;
                 }
@@ -255,7 +262,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 images.push(Collected {
                     path: fetched.path,
                     bytes: obj.bytes().to_vec(),
-                    requested_as: Some(install_name),
+                    requested_as: alloc::vec![install_name],
                     rpaths: inherited,
                     implied: fetched.implied,
                 });
@@ -304,8 +311,9 @@ impl<S: MachSpec + 'static> Loader<S> {
                     .obj
                     .install_name()
                     .map(|n| n.to_string())
-                    .or_else(|| c.requested_as.clone()),
+                    .or_else(|| c.requested_as.first().cloned()),
                 path: m.path.clone(),
+                aliases: c.requested_as.clone(),
                 exports: m.exports.clone(),
                 slide: m.slide,
                 dependencies: m
