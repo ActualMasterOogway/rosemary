@@ -370,6 +370,7 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
 pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSProcessInfoThermalStateDidChangeNotification",
     "NSProcessInfoPowerStateDidChangeNotification",
+    "NSCurrentLocaleDidChangeNotification",
 ];
 
 #[cfg(test)]
