@@ -524,6 +524,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // out-parameter, which the guest may pass as null and which the host writes
     // through directly.
     sig!("CFPreferencesCopyAppValue", P, P, P),
+    sig!("CFPropertyListCreateWithData", P, P, P, U64, P, P),
     sig!("CFPreferencesCopyValue", P, P, P, P, P),
     sig!("CFPreferencesCopyKeyList", P, P, P, P),
     sig!("CFPreferencesCopyMultiple", P, P, P, P, P),
@@ -2795,6 +2796,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("posix_spawnattr_getsigdefault", I32, P, P),
     sig!("posix_spawnattr_setpgroup", I32, P, I32),
     sig!("posix_spawnattr_setbinpref_np", I32, P, U64, P, P),
+    sig!("posix_spawnattr_setarchpref_np", I32, P, U64, P, P, P),
     // `short flags`, which SysV passes in the low half of a register and
     // AAPCS64 reads back out of one: narrower than the slot on both sides.
     sig!("posix_spawnattr_setflags", I32, P, U32),
@@ -2945,6 +2947,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("putc", I32, I32, P),
     sig!("putchar", I32, I32),
     sig!("putenv", I32, P),
+    sig!("_setenvp", I32, P, P, I32, P, P),
+    sig!("_unsetenvp", I32, P, P, P),
+    sig!("_copyenv", P, P),
+    sig!("_cthread_init", V),
+    sig!("_cthread_init_routine", V),
+    sig!("sysdir_start_search_path_enumeration", U32, U32, U32),
+    sig!("sysdir_get_next_search_path_enumeration", U32, U32, P),
+    sig!("mach_init_routine", I32),
+    sig!("__keymgr_dwarf2_register_sections", V),
     sig!("puts", I32, P),
     sig!("putwchar", I32, I32),
     sig!("pwrite", I64, I32, P, U64, I64),

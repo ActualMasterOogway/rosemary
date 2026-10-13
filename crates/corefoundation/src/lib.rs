@@ -18,7 +18,9 @@ pub mod eightbit;
 #[cfg(target_os = "macos")]
 pub mod foreign;
 mod fsevents;
+pub mod plist;
 pub mod preferences;
+mod propertylist;
 pub mod runloop;
 mod send;
 mod socket;
@@ -232,6 +234,7 @@ exports::exports! {
     groups {
         calendar,
         preferences,
+        propertylist,
         diskarbitration,
         fsevents,
         urlresource,

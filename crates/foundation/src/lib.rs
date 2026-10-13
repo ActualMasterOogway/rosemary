@@ -32,7 +32,7 @@ pub mod notification;
 pub mod objectify;
 pub mod operation;
 pub mod paths;
-pub mod plist;
+pub use corefoundation::plist;
 pub mod pool;
 pub mod processinfo;
 pub mod proxy;
