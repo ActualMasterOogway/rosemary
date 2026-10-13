@@ -281,6 +281,36 @@ pub fn modifiers(sdl_modifiers: u16) -> u64 {
     out
 }
 
+/// The flags a key event carries for the key itself, on top of the held
+/// modifiers. `NumericPad` is a property of the key, never of Num Lock: the
+/// keypad keys have it, and so do the arrows, which also carry `Function`.
+pub fn key_flags(scancode: u32) -> u64 {
+    match scancode {
+        scancode::UP | scancode::DOWN | scancode::LEFT | scancode::RIGHT => {
+            flags::NUMERIC_PAD | flags::FUNCTION
+        }
+        scancode::NUMLOCKCLEAR
+        | scancode::KP_DIVIDE
+        | scancode::KP_MULTIPLY
+        | scancode::KP_MINUS
+        | scancode::KP_PLUS
+        | scancode::KP_ENTER
+        | scancode::KP_1
+        | scancode::KP_2
+        | scancode::KP_3
+        | scancode::KP_4
+        | scancode::KP_5
+        | scancode::KP_6
+        | scancode::KP_7
+        | scancode::KP_8
+        | scancode::KP_9
+        | scancode::KP_0
+        | scancode::KP_PERIOD
+        | scancode::KP_EQUALS => flags::NUMERIC_PAD,
+        _ => 0,
+    }
+}
+
 /// Carbon's `EventModifiers` bits, which `GetCurrentKeyModifiers` answers in.
 mod carbon {
     pub const CMD_KEY: u32 = 1 << 8;
@@ -426,6 +456,17 @@ mod tests {
     #[test]
     fn num_lock_is_not_the_numeric_keypad_modifier() {
         assert_eq!(modifiers(keymod::NUM), 0);
+    }
+
+    #[test]
+    fn keypad_and_arrow_keys_carry_the_numeric_pad_flag() {
+        assert_eq!(key_flags(scancode::KP_5), flags::NUMERIC_PAD);
+        assert_eq!(key_flags(scancode::KP_ENTER), flags::NUMERIC_PAD);
+        assert_eq!(
+            key_flags(scancode::UP),
+            flags::NUMERIC_PAD | flags::FUNCTION
+        );
+        assert_eq!(key_flags(scancode::A), 0, "a letter with Num Lock held");
     }
 
     #[test]

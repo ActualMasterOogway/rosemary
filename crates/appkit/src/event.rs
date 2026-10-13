@@ -373,7 +373,8 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 scancode,
                 crate::keymap::typed_key(scancode, key, modifiers),
             );
-            let modifiers = crate::keymap::modifiers(modifiers);
+            let modifiers =
+                crate::keymap::modifiers(modifiers) | crate::keymap::key_flags(scancode);
             let code = crate::keymap::virtual_key(scancode);
             if down && !crate::keymap::is_modifier(scancode) {
                 let window = object_for(id);
