@@ -305,6 +305,46 @@ impl<'a, S: MachSpec> MachObject<'a, S> {
         })
     }
 
+    /// Whether dyld would ignore `DYLD_*` environment variables for this image.
+    pub fn restricts_dyld_environment(&self) -> bool {
+        const CS_RUNTIME: u32 = 0x1_0000;
+        const SUPER_BLOB: u32 = 0xfade_0cc0;
+        const CODE_DIRECTORY: u32 = 0xfade_0c02;
+        const ALLOW_ENV: &[u8] = b"com.apple.security.cs.allow-dyld-environment-variables";
+
+        if self.section("__RESTRICT", "__restrict").is_some() {
+            return true;
+        }
+        let Some(sig) = self.commands.iter().find_map(|cmd| match cmd {
+            LoadCommand::CodeSignature(d) => Some(*d),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let view = &self.view;
+        let Ok(blob) = view.slice(
+            sig.dataoff as usize,
+            sig.datasize as usize,
+            "code signature",
+        ) else {
+            return false;
+        };
+        let be = |off: usize| {
+            blob.get(off..off + 4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        if be(0) != Some(SUPER_BLOB) {
+            return false;
+        }
+        let hardened = (0..be(8).unwrap_or(0).min(64) as usize).any(|i| {
+            let Some(at) = be(16 + i * 8).map(|o| o as usize) else {
+                return false;
+            };
+            be(at) == Some(CODE_DIRECTORY) && be(at + 12).is_some_and(|f| f & CS_RUNTIME != 0)
+        });
+        hardened && !blob.windows(ALLOW_ENV.len()).any(|w| w == ALLOW_ENV)
+    }
+
     pub fn symtab(&self) -> Option<Symtab> {
         self.commands.iter().find_map(|cmd| match cmd {
             LoadCommand::Symtab(s) => Some(*s),

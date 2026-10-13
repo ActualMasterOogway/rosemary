@@ -1173,17 +1173,66 @@ fn run_initializers(image: &'static Image) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Where a `dlopen` argument actually points.
 fn search_path(var: &str, name: &str) -> Vec<String> {
-    let Some(value) = std::env::var_os(var) else {
+    let Some(value) = darwin::guest_env_var(var) else {
         return Vec::new();
     };
     value
-        .to_string_lossy()
         .split(':')
         .filter(|dir| !dir.is_empty())
         .map(|dir| format!("{}/{name}", dir.trim_end_matches('/')))
         .collect()
+}
+
+pub fn inserted_libraries<S: machish::spec::MachSpec + 'static>(
+    bytes: &[u8],
+    spec: S,
+) -> Vec<String> {
+    let host = std::env::var("ROSEMARY_DYLD_INSERT_LIBRARIES").ok();
+    let guest = darwin::guest_env_var("DYLD_INSERT_LIBRARIES");
+    let requested: Vec<String> = host
+        .iter()
+        .chain(guest.iter())
+        .flat_map(|list| list.split([':', ' ']))
+        .filter(|lib| !lib.is_empty())
+        .map(str::to_string)
+        .collect();
+    if requested.is_empty() {
+        return requested;
+    }
+    match machish::image::MachObject::parse_any(bytes, spec) {
+        Ok(obj) if obj.restricts_dyld_environment() => {
+            eprintln!(
+                "rosemary: DYLD_INSERT_LIBRARIES ignored: the image is hardened or restricted"
+            );
+            Vec::new()
+        }
+        _ => requested,
+    }
+}
+
+/// A source that searches the guest's `DYLD_LIBRARY_PATH` before anything else
+/// and its `DYLD_FALLBACK_LIBRARY_PATH` last, for the program's own link.
+pub struct GuestSearchPaths<D>(pub D);
+
+impl<D: machish::namespace::DylibSource> machish::namespace::DylibSource for GuestSearchPaths<D> {
+    fn fetch(
+        &mut self,
+        request: &machish::namespace::DylibRequest<'_>,
+    ) -> machish::Result<Option<machish::namespace::FetchedDylib>> {
+        let name = request
+            .install_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(request.install_name);
+        let mut candidates = search_path("DYLD_LIBRARY_PATH", name);
+        candidates.extend(request.candidates.iter().cloned());
+        candidates.extend(search_path("DYLD_FALLBACK_LIBRARY_PATH", name));
+        self.0.fetch(&machish::namespace::DylibRequest {
+            candidates: &candidates,
+            ..*request
+        })
+    }
 }
 
 fn resolve_path(path: &str) -> Option<String> {

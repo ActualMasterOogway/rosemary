@@ -757,7 +757,7 @@ impl<M: Regions> Program<M> {
         mut memory: M,
     ) -> Result<Self, ProgramError> {
         // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
-        let mut source = crate::cxxlib::source(Flavor::Intel);
+        let mut source = crate::dyld::GuestSearchPaths(crate::cxxlib::source(Flavor::Intel));
         let hosts = HostProviders::new();
         let providers = hosts.chain(extra);
 
@@ -768,8 +768,9 @@ impl<M: Regions> Program<M> {
         darwin::sysctl::set_guest_arch(darwin::sysctl::GuestArch::X86_64);
         darwin::sysctl::set_is_translated(true);
 
-        let mut report =
-            Loader::new(X86_64).link_with(bytes, path, &mut memory, &mut source, &providers)?;
+        let mut loader = Loader::new(X86_64);
+        loader.insert_libraries(crate::dyld::inserted_libraries(bytes, X86_64));
+        let mut report = loader.link_with(bytes, path, &mut memory, &mut source, &providers)?;
 
         // Before anything reads the report.
         crate::cxxlib::bind_unwinder_to_the_runtime(&mut report, &mut memory, Flavor::Intel)?;

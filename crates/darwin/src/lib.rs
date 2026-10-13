@@ -131,6 +131,16 @@ pub fn guest_environment() -> Vec<CString> {
         .collect()
 }
 
+/// The value of `name` in the guest's environment block, which is not the
+/// host's: see [`guest_environment`].
+pub fn guest_env_var(name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    guest_environment().iter().find_map(|entry| {
+        let entry = entry.to_string_lossy();
+        entry.strip_prefix(&prefix).map(str::to_string)
+    })
+}
+
 /// Strip the leading underscore a Mach-O symbol carries.
 pub fn c_name(symbol: &str) -> &str {
     symbol.strip_prefix('_').unwrap_or(symbol)

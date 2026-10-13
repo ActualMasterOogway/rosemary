@@ -198,12 +198,14 @@ impl Native {
         });
         darwin::sysctl::set_runs_host_instructions(true);
 
-        let mut report = Loader::new(HOST_SPEC)
+        let mut loader = Loader::new(HOST_SPEC);
+        loader.insert_libraries(crate::dyld::inserted_libraries(&bytes, HOST_SPEC));
+        let mut report = loader
             .link_with(
                 &bytes,
                 path,
                 &mut memory,
-                &mut crate::cxxlib::source(cxxlib::HOST),
+                &mut crate::dyld::GuestSearchPaths(crate::cxxlib::source(cxxlib::HOST)),
                 &providers,
             )
             .map_err(|e| VmError::Load {

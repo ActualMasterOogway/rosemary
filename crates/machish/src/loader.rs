@@ -54,6 +54,7 @@ pub struct Loader<S: MachSpec> {
     spec: S,
     policy: LoadPolicy,
     extensions: ExtensionSet<S>,
+    inserted: Vec<String>,
 }
 
 /// An image's bytes plus where they came from, owned for the link's duration.
@@ -88,6 +89,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             spec,
             policy: LoadPolicy::default(),
             extensions: ExtensionSet::defaults(),
+            inserted: Vec::new(),
         }
     }
 
@@ -96,6 +98,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             spec,
             policy,
             extensions: ExtensionSet::defaults(),
+            inserted: Vec::new(),
         }
     }
 
@@ -105,12 +108,18 @@ impl<S: MachSpec + 'static> Loader<S> {
             spec,
             policy: LoadPolicy::default(),
             extensions: ExtensionSet::empty(),
+            inserted: Vec::new(),
         }
     }
 
     /// The extension set, to add to or replace.
     pub fn extensions_mut(&mut self) -> &mut ExtensionSet<S> {
         &mut self.extensions
+    }
+
+    pub fn insert_libraries(&mut self, libraries: Vec<String>) -> &mut Self {
+        self.inserted = libraries;
+        self
     }
 
     pub fn policy(&self) -> LoadPolicy {
@@ -174,7 +183,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             bytes: root_obj.bytes().to_vec(),
             requested_as: Vec::new(),
             rpaths: root_obj.rpaths().map(|r| r.to_string()).collect(),
-            implied: Vec::new(),
+            implied: self.inserted.clone(),
         }];
         if !self.policy.load_dependencies {
             return Ok(images);
