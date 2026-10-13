@@ -199,18 +199,19 @@ unsafe extern "C" fn environment(_receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
-/// `-systemUptime`, seconds since boot as a `double`.
+/// `-systemUptime`, seconds the machine has been awake since boot as a `double`.
+///
+/// The clock `mach_absolute_time` reads, and so the one `-[NSEvent timestamp]`
+/// is on: a program stamps a moment with this and compares later events against
+/// it. Time asleep is not counted by either, and a clock that did count it would
+/// put the stamp ahead of every event from the first suspend on.
 unsafe extern "C" fn system_uptime(_receiver: Id, _sel: Sel) -> f64 {
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: a writable `timespec` and a clock every platform here has.
-    #[cfg(not(target_os = "macos"))]
-    let clock = libc::CLOCK_BOOTTIME;
-    #[cfg(target_os = "macos")]
-    let clock = libc::CLOCK_MONOTONIC;
-    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
         return 0.0;
     }
     now.tv_sec as f64 + now.tv_nsec as f64 / 1e9
