@@ -380,6 +380,34 @@ pub unsafe extern "C" fn csops(
     0
 }
 
+/// `void _cthread_init(void)`
+///
+/// libSystem's start-up hook for the Mach cthreads package, which `pthread`
+/// replaced. A guest that calls it wants the threading state to exist, and it
+/// always does here.
+pub extern "C" fn cthread_init() {}
+
+/// `void _cthread_init_routine(void)`
+///
+/// The hook [`cthread_init`] runs from; nothing to do for the same reason.
+pub extern "C" fn cthread_init_routine() {}
+
+/// `int mach_init_routine(void)`
+///
+/// The hook `mach_init` calls to set up the task's Mach ports. They are made
+/// when the runtime starts, so there is nothing left to initialise;
+/// `KERN_SUCCESS` is what a repeated initialisation answers.
+pub extern "C" fn mach_init_routine() -> c_int {
+    0
+}
+
+/// `void __keymgr_dwarf2_register_sections(void)`
+///
+/// libkeymgr's hand-off of an image's `__eh_frame` to the unwinder. Unwinding
+/// here reads each mapped image's sections itself, so a guest asking for them to
+/// be registered has nothing to wait for.
+pub extern "C" fn keymgr_dwarf2_register_sections() {}
+
 exports::exports! {
     functions {
         "errc" => errc,
@@ -387,6 +415,10 @@ exports::exports! {
         #[cfg(target_os = "linux")]
         "sigsetjmp" => sigsetjmp,
         "csops" => csops,
+        "_cthread_init" => cthread_init,
+        "_cthread_init_routine" => cthread_init_routine,
+        "mach_init_routine" => mach_init_routine,
+        "__keymgr_dwarf2_register_sections" => keymgr_dwarf2_register_sections,
         "__atomic_load" => atomic_load,
         "__atomic_store" => atomic_store,
         "atexit" => atexit,
