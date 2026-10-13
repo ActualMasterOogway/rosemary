@@ -404,7 +404,7 @@ struct Launch {
 /// Read here rather than left to the kernel, because the interpreter is a
 /// guest path - `#!/bin/sh` inside a prefix means the prefix's - and it may
 /// be a Mach-O the kernel cannot run.
-fn interpreter(on_disk: &CStr) -> Option<(CString, Option<CString>)> {
+pub fn interpreter(on_disk: &CStr) -> Option<(CString, Option<CString>)> {
     use std::io::Read;
     let mut head = [0u8; 512];
     let mut file = std::fs::File::open(on_disk.to_str().ok()?).ok()?;

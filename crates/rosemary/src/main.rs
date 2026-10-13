@@ -144,6 +144,47 @@ fn program_path(path: &str) -> String {
     }
 }
 
+/// How many nested `#!` interpreters are followed, as Darwin's kernel does.
+const SHEBANG_DEPTH: usize = 4;
+
+/// Resolve `path` through its `#!` lines to the Mach-O that really runs,
+/// with the arguments that interpreter gets: `[argument] script args...`.
+///
+/// The interpreter is a guest path, so `#!/bin/sh` is the prefix's shell
+/// and not this host's. A file with no `#!` line is returned unchanged.
+fn shebang(path: &str, mut args: Vec<OsString>) -> Result<(String, Vec<OsString>), String> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut path = path.to_owned();
+    for _ in 0..SHEBANG_DEPTH {
+        let Ok(on_disk) = std::ffi::CString::new(path.as_str()) else {
+            break;
+        };
+        let Some((program, argument)) = darwin::spawn::interpreter(&on_disk) else {
+            return Ok((path, args));
+        };
+        let program = program
+            .into_string()
+            .map_err(|_| "the #! interpreter's path is not valid UTF-8".to_string())?;
+        let resolved = program_path(&program);
+        if !std::path::Path::new(&resolved).is_file() {
+            return Err(format!("bad interpreter: {program}: no such file"));
+        }
+        // The script keeps the spelling the guest would give it.
+        let mut next: Vec<OsString> = argument
+            .map(|a| OsString::from_vec(a.into_bytes()))
+            .into_iter()
+            .collect();
+        next.push(OsString::from(guest_spelling(&path)));
+        next.append(&mut args);
+        args = next;
+        path = resolved;
+    }
+    match darwin::spawn::interpreter(&std::ffi::CString::new(path.as_str()).unwrap_or_default()) {
+        Some(_) => Err("too many levels of #! interpreters".to_string()),
+        None => Ok((path, args)),
+    }
+}
+
 /// A host path as the guest spells it, or the path itself when no mount
 /// reaches it - which is every path in identity mode.
 ///
@@ -362,6 +403,17 @@ fn launch(path: OsString, options: &RunOptions, args: Vec<OsString>) -> ExitCode
         eprintln!("rosemary: the bundle executable's path is not valid UTF-8");
         return ExitCode::FAILURE;
     };
+    // A script runs as its `#!` interpreter does, with the script as an
+    // argument, so every later use of the executable path names the
+    // interpreter - as `_NSGetExecutablePath` does on a Mac.
+    let (path, args) = match shebang(path, args) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            eprintln!("rosemary: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = path.as_str();
     rosemary::shims::runtime::set_executable_path(std::path::Path::new(path));
     rosemary::frameworks::set_main_bundle(std::path::Path::new(path));
     // The same path as the guest spells it, for `argv[0]`.
