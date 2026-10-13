@@ -143,6 +143,8 @@ fn child_launches_preserve_the_selected_libcs_environment_and_path() {
                     .env("ROSEMARY_LIBC", libc)
                     .env_remove("ROSEMARY_STATS")
                     .env_remove("ROSEMARY_TRACE_PREFIX")
+                    // The guest sets both for its child, which must be allowed.
+                    .env("ROSEMARY_FORWARD_ENV_VARS", "ROSEMARY_STATS,ROSEMARY_TRACE_PREFIX")
                     .arg("run")
                     .args(flags)
                     .args([path, mode, directory])
@@ -190,6 +192,8 @@ fn child_launches_use_rosemary_and_preserve_explicit_emulation() {
                 .env("ROSEMARY_PREFIX", "off")
                 .env_remove("ROSEMARY_STATS")
                 .env_remove("ROSEMARY_TRACE_PREFIX")
+                // The guest sets both for its child, which must be allowed.
+                .env("ROSEMARY_FORWARD_ENV_VARS", "ROSEMARY_STATS,ROSEMARY_TRACE_PREFIX")
                 .arg("run")
                 .args(flags)
                 .args([&path, mode, directory])
@@ -284,6 +288,8 @@ fn framework_tasks_preserve_emulation_cwd_and_redirected_stdio() {
             .env("ROSEMARY_BUNDLED", "1")
             .env_remove("ROSEMARY_STATS")
             .env_remove("ROSEMARY_TRACE_PREFIX")
+            // The guest sets both for its child, which must be allowed.
+            .env("ROSEMARY_FORWARD_ENV_VARS", "ROSEMARY_STATS,ROSEMARY_TRACE_PREFIX")
             .args(["run", "--emulated", &parent, &child, directory])
             .output()
             .expect("run task fixture");

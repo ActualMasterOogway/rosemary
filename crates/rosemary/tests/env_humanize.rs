@@ -43,7 +43,8 @@ int main(int argc, char **argv, char **envp) {
     if (set_value("PORT_DYNAMIC", "lookup", 1) || strcmp(getenv("PORT_DYNAMIC"), "lookup") ||
         get_value("PORT_DYNAMIC") != getenv("PORT_DYNAMIC") || unsetenv("PORT_DYNAMIC")) return 14;
     if (argc > 1) {
-        if (getenv("ROSEMARY_GUEST_PATH") || strcmp(getenv("PATH"), "/guest/bin")) return 13;
+        if (getenv("ROSEMARY_ENVIRON") || getenv("PORT_HOST_ONLY") ||
+            strcmp(getenv("PATH"), "/guest/bin")) return 13;
         puts("prefix environment agrees");
         return 0;
     }
@@ -129,7 +130,6 @@ fn environment_and_blocksize_agree_with_macos_on_both_backends() {
         let reference = std::process::Command::new(&native)
             .env("PORT_INITIAL", "inherited")
             .env_remove("PORT_CONSTRUCTOR")
-            .env_remove("ROSEMARY_GUEST_PATH")
             .output()
             .unwrap();
         assert!(reference.status.success(), "host: {reference:?}");
@@ -139,8 +139,9 @@ fn environment_and_blocksize_agree_with_macos_on_both_backends() {
                 .env("ROSEMARY_LIBC", mode)
                 .env("ROSEMARY_GUI", "0")
                 .env("PORT_INITIAL", "inherited")
+                // The builtin libc copies only what is asked for.
+                .env("ROSEMARY_ENVIRON", "PORT_INITIAL")
                 .env_remove("PORT_CONSTRUCTOR")
-                .env_remove("ROSEMARY_GUEST_PATH")
                 .arg("run")
                 .args(flags)
                 .arg(path)
@@ -165,7 +166,8 @@ fn environment_and_blocksize_agree_with_macos_on_both_backends() {
         let output = common::driver_command()
             .env("ROSEMARY_LIBC", "builtin")
             .env("ROSEMARY_GUI", "0")
-            .env("ROSEMARY_GUEST_PATH", "/guest/bin")
+            .env("ROSEMARY_ENVIRON", "PORT_INITIAL\nPATH=/guest/bin")
+            .env("PORT_HOST_ONLY", "leaked")
             .env("PORT_INITIAL", "inherited")
             .env_remove("PORT_CONSTRUCTOR")
             .arg("run")

@@ -11,7 +11,7 @@ static ENVIRON: AtomicPtr<*mut c_char> = AtomicPtr::new(std::ptr::null_mut());
 // Direct guest edits must not race environment API calls.
 static INITIALIZED: Mutex<bool> = Mutex::new(false);
 
-/// Build the block from this process's environment, once.
+/// Build the block, once.
 ///
 /// Called by every entry point below rather than from a start-up hook: a guest
 /// can read `environ` before anything else runs, and a block that is empty
@@ -21,108 +21,213 @@ fn block() -> std::sync::MutexGuard<'static, bool> {
     if *initialized {
         return initialized;
     }
-    let mut entries = Vec::new();
-    let mut has_path = false;
-    for (name, value) in std::env::vars_os() {
-        use std::os::unix::ffi::OsStrExt;
-        // The hand-off from a parent guest, which is this runtime's and not
-        // the guest's; see [`host_spelling`].
-        if name.to_str().is_some_and(is_hand_off) {
-            continue;
-        }
-        has_path |= name == "PATH";
-        let value = match corrected(&name) {
-            Some(replacement) => std::ffi::OsString::from(replacement),
-            None => value,
-        };
-        let mut entry = name.as_bytes().to_vec();
-        entry.push(b'=');
-        entry.extend_from_slice(value.as_bytes());
+    let entries = handed_off().unwrap_or_else(|| {
+        let host: Vec<_> = std::env::vars_os().collect();
+        initial(&host, &guest_value)
+    });
+    let entries: Vec<_> = entries
+        .into_iter()
         // A variable whose name or value holds a NUL cannot be spelled in a
         // block at all, and is dropped rather than truncated.
-        if let Ok(entry) = CString::new(entry) {
-            entries.push(entry.into_raw());
-        }
-    }
-    // A prefixed guest has a `PATH` even when this process has none.
-    if !has_path
-        && let Some(path) = corrected(std::ffi::OsStr::new("PATH"))
-        && let Ok(entry) = CString::new(format!("PATH={path}"))
-    {
-        entries.push(entry.into_raw());
-    }
+        .filter_map(|entry| CString::new(entry).ok())
+        .map(CString::into_raw)
+        .collect();
     publish(&entries);
     *initialized = true;
     initialized
 }
 
+/// The variables a guest is asked to start with, one `NAME=VALUE` per line.
+///
+/// The guest's block is not this process's: host variables name host libraries
+/// and host servers (`QT_PLUGIN_PATH`, `DISPLAY`, `LD_LIBRARY_PATH`), and a
+/// Darwin program that follows them loads or talks to things that are not
+/// Darwin's. So nothing is copied unless asked for here. A line that is a bare
+/// `NAME` copies this process's value of it, if it has one.
+pub const ENVIRON_VAR: &str = "ROSEMARY_ENVIRON";
+
+/// What every guest starts with: the variables a Mac's `login` and terminal
+/// set, each with the guest's own value. See [`guest_value`].
+const BASELINE: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "PWD"];
+
+/// Host variables copied without being asked for: the terminal and the locale,
+/// which describe the user rather than the host's software, and which a
+/// command-line guest is lost without.
+fn passes_through(name: &[u8]) -> bool {
+    matches!(name, b"TERM" | b"COLORTERM" | b"LANG") || name.starts_with(b"LC_")
+}
+
+/// The starting block of a guest no other guest launched, as `NAME=VALUE`.
+///
+/// `host` is this process's environment and `baseline` the guest's value for a
+/// [`BASELINE`] name; both are parameters so tests need not touch either.
+fn initial(
+    host: &[(std::ffi::OsString, std::ffi::OsString)],
+    baseline: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let host_value = |name: &[u8]| {
+        host.iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|(_, value)| value.as_bytes())
+    };
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    let mut set = |name: &[u8], value: &[u8]| {
+        let entry = [name, b"=", value].concat();
+        match entries
+            .iter()
+            .position(|e| e.len() > name.len() && e[name.len()] == b'=' && e.starts_with(name))
+        {
+            Some(at) => entries[at] = entry,
+            None => entries.push(entry),
+        }
+    };
+    for name in BASELINE {
+        if let Some(value) = baseline(name) {
+            set(name.as_bytes(), value.as_bytes());
+        }
+    }
+    for (name, value) in host {
+        if passes_through(name.as_bytes()) {
+            set(name.as_bytes(), value.as_bytes());
+        }
+    }
+    let requested = host_value(ENVIRON_VAR.as_bytes()).unwrap_or_default();
+    for line in requested.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        match line.iter().position(|&b| b == b'=') {
+            // An empty name is not a variable `getenv` could ever answer for.
+            Some(0) => {}
+            Some(split) => set(&line[..split], &line[split + 1..]),
+            None if line.is_empty() => {}
+            None => {
+                if let Some(value) = host_value(line) {
+                    set(line, value);
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// The guest variables that may reach the environment of a runtime a guest
+/// launches, as comma-separated names; a name ending in `*` is a prefix.
+///
+/// Read from this process's environment, never the guest's, so a guest cannot
+/// widen it - unless the list names itself, which lets the guest's value
+/// replace it for the child.
+pub const FORWARD_VAR: &str = "ROSEMARY_FORWARD_ENV_VARS";
+
+/// Whether the guest's `name` crosses into a child runtime's environment.
+pub fn is_forwarded(name: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let list = std::env::var_os(FORWARD_VAR).unwrap_or_default();
+    allows(list.as_bytes(), name)
+}
+
+fn allows(list: &[u8], name: &[u8]) -> bool {
+    if name.is_empty() || is_hand_off(name) {
+        return false;
+    }
+    list.split(|&b| b == b',')
+        .map(<[u8]>::trim_ascii)
+        .any(|pattern| match pattern.strip_suffix(b"*") {
+            Some(prefix) => name.starts_with(prefix),
+            None => pattern == name,
+        })
+}
+
 /// A Mac's default `PATH`: `/etc/paths`, in its order.
 pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// Where a parent guest leaves its own `PATH` for a child it execs.
+/// How a parent guest's block reaches a child it execs: the count here, and
+/// each entry as `ROSEMARY_GUEST_ENVIRON_<n>`.
 ///
-/// The child is another copy of this runtime, and [`host_spelling`] gives it
-/// this machine's `PATH` - host libraries in it may launch host helpers - so
-/// the guest's value, which may be one the guest set itself, travels here and
-/// becomes the child guest's `PATH` in place of [`DEFAULT_PATH`].
-pub const GUEST_PATH_VAR: &str = "ROSEMARY_GUEST_PATH";
+/// The child is another copy of this runtime, which needs this machine's
+/// environment for itself and the host libraries in it, so the guest's block
+/// travels beside that one rather than in place of it. One variable per entry
+/// keeps any value spellable without an encoding, and within the kernel's
+/// limit on one string.
+const HAND_OFF_COUNT: &str = "ROSEMARY_GUEST_ENVIRON";
 
-/// The corrected variables whose guest value a parent guest hands to a child it
-/// execs, each as `ROSEMARY_GUEST_<NAME>` - [`GUEST_PATH_VAR`] is `PATH`'s.
+fn hand_off_var(index: usize) -> String {
+    format!("{HAND_OFF_COUNT}_{index}")
+}
+
+/// Whether `name` is part of a hand-off, which belongs to this runtime.
+pub fn is_hand_off(name: &[u8]) -> bool {
+    name.strip_prefix(HAND_OFF_COUNT.as_bytes())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"_"))
+}
+
+/// The block a parent guest handed over, verbatim, if one did.
 ///
-/// [`host_spelling`] gives the child runtime this machine's value back, which
-/// is right for the runtime and the host libraries in it, and the child then
-/// corrects it again for its guest. Without the hand-off what a guest set
-/// itself would stop at the `exec`: `su -`'s `HOME=/var/root` and the
-/// `SHELL` it names would become the user's again in every child.
-const HANDED_OFF: &[&str] = &["PATH", "HOME", "SHELL"];
-
-fn hand_off_var(name: &str) -> String {
-    format!("ROSEMARY_GUEST_{name}")
+/// Verbatim because it is already the guest's: what that guest set itself -
+/// `su -`'s `HOME=/var/root`, `env -i`'s nothing at all - is what its child
+/// must start with.
+fn handed_off() -> Option<Vec<Vec<u8>>> {
+    use std::os::unix::ffi::OsStringExt;
+    let count: usize = std::env::var(HAND_OFF_COUNT).ok()?.parse().ok()?;
+    Some(
+        (0..count)
+            .filter_map(|index| std::env::var_os(hand_off_var(index)))
+            .map(OsStringExt::into_vec)
+            .collect(),
+    )
 }
 
-/// Whether `name` is one of the hand-offs, which belong to this runtime.
-pub fn is_hand_off(name: &str) -> bool {
-    name.strip_prefix("ROSEMARY_GUEST_")
-        .is_some_and(|rest| HANDED_OFF.contains(&rest))
-}
-
-/// What a parent guest handed over for `name`, if it did.
-fn handed_off(name: &str) -> Option<String> {
-    std::env::var(hand_off_var(name)).ok()
-}
-
-/// The `PATH` a prefixed guest starts with: its parent's, if it has one.
-fn guest_path(inherited: Option<String>) -> String {
-    inherited.unwrap_or_else(|| DEFAULT_PATH.to_string())
-}
-
-/// The value this runtime gives `name` instead of the host's, if any.
+/// `envp` as the variables that hand it to a child runtime.
 ///
-/// `None` in identity mode for every name: with no prefix the guest's paths are
-/// this host's, and correcting them would only make them wrong.
-fn corrected(name: &std::ffi::OsStr) -> Option<String> {
-    prefix::ns::current()?;
-    match name.to_str()? {
-        // Where the guest's files go, and the reason this module exists.
-        "HOME" => Some(handed_off("HOME").unwrap_or_else(|| prefix::ns::home().to_string())),
+/// # Safety
+///
+/// `envp` is null or a null-terminated array of NUL-terminated strings.
+pub unsafe fn hand_off(envp: *const *const c_char) -> Vec<CString> {
+    // SAFETY: the caller's guarantee.
+    let entries = unsafe { vector_entries(envp.cast()) };
+    let mut out = Vec::with_capacity(entries.len() + 1);
+    out.push(CString::new(format!("{HAND_OFF_COUNT}={}", entries.len())).expect("no NUL"));
+    for (index, entry) in entries.into_iter().enumerate() {
+        // SAFETY: as above, each entry is NUL-terminated.
+        let entry = unsafe { CStr::from_ptr(entry) }.to_bytes();
+        let var = [hand_off_var(index).as_bytes(), b"=", entry].concat();
+        out.push(CString::new(var).expect("from a C string"));
+    }
+    out
+}
+
+/// The guest's value for a [`BASELINE`] name.
+///
+/// In identity mode that is this host's, if it has one: with no prefix the
+/// guest's paths are this host's, and correcting them would only make them
+/// wrong.
+fn guest_value(name: &str) -> Option<std::ffi::OsString> {
+    if prefix::ns::current().is_none() {
+        return std::env::var_os(name);
+    }
+    let value = match name {
+        // Where the guest's files go.
+        "HOME" => prefix::ns::home().to_string(),
+        // What `/Users/<name>` is called, and what `getpwuid` answers.
+        "USER" | "LOGNAME" => prefix::layout::user_name(),
         // A login shell the prefix has; see `guest_shell`.
-        "SHELL" => Some(handed_off("SHELL").unwrap_or_else(|| {
+        "SHELL" => {
             let host = std::env::var_os("SHELL").unwrap_or_default();
             let guest = guest_shell(host.as_encoded_bytes());
             String::from_utf8_lossy(&guest).into_owned()
-        })),
+        }
         // Darwin's is per-session and ends in a separator, which a program that
         // concatenates rather than joining depends on.
-        "TMPDIR" => Some("/tmp/".to_string()),
+        "TMPDIR" => "/tmp/".to_string(),
         // Directories in the guest's namespace, not this machine's.
-        "PATH" => Some(guest_path(std::env::var(GUEST_PATH_VAR).ok())),
+        "PATH" => DEFAULT_PATH.to_string(),
         // A shell sets this to the directory it started the program in. It is
         // the same directory `getcwd` reports, so it gets the same spelling.
-        "PWD" => prefix::ns::to_guest(&std::env::current_dir().ok()?)
-            .map(|path| path.to_string_lossy().into_owned()),
-        _ => None,
-    }
+        "PWD" => prefix::ns::to_guest(&std::env::current_dir().ok()?)?
+            .to_string_lossy()
+            .into_owned(),
+        _ => return None,
+    };
+    Some(value.into())
 }
 
 /// The guest's spelling of a host account's login shell.
@@ -502,81 +607,6 @@ pub unsafe extern "C" fn _copyenv(env: *mut *mut c_char) -> *mut *mut c_char {
     vector
 }
 
-/// A guest environment block with this runtime's corrections undone.
-///
-/// For the one place the two environments meet: a guest that `exec`s another
-/// Mach-O is rewritten into `rosemary run ...`, and the child is a *host*
-/// process that resolves its own prefix from `HOME` before it builds a guest
-/// block of its own. Handing it the guest's `HOME` would have it look for the
-/// prefix inside the prefix.
-///
-/// Variables the guest set itself are carried through untouched, which is the
-/// reason this undoes the corrections rather than simply using the host block.
-///
-/// # Safety
-///
-/// `envp` is null or a null-terminated array of NUL-terminated strings.
-pub unsafe fn host_spelling(envp: *const *const c_char) -> Vec<CString> {
-    let mut out = Vec::new();
-    if envp.is_null() {
-        return out;
-    }
-    let mut at = envp;
-    loop {
-        // SAFETY: the array is null-terminated.
-        let entry = unsafe { *at };
-        if entry.is_null() {
-            break;
-        }
-        // SAFETY: as above, each entry is NUL-terminated.
-        let bytes = unsafe { CStr::from_ptr(entry) }.to_bytes();
-        let name = match bytes.iter().position(|b| *b == b'=') {
-            Some(split) => &bytes[..split],
-            None => bytes,
-        };
-        if let Ok(text) = std::str::from_utf8(name)
-            && HANDED_OFF.contains(&text)
-            && prefix::ns::current().is_some()
-            && let Some(value) = bytes.get(name.len() + 1..)
-            && let Ok(entry) = CString::new([hand_off_var(text).as_bytes(), b"=", value].concat())
-        {
-            // The guest's own value, for the child to take back; see
-            // [`HANDED_OFF`].
-            out.push(entry);
-        }
-        let restored = std::str::from_utf8(name)
-            .ok()
-            .filter(|name| corrected(std::ffi::OsStr::new(name)).is_some())
-            .and_then(|name| {
-                let value = host_value(name)?;
-                let mut entry = name.as_bytes().to_vec();
-                entry.push(b'=');
-                entry.extend_from_slice(value.as_bytes());
-                CString::new(entry).ok()
-            });
-        if let Some(entry) = restored.or_else(|| CString::new(bytes).ok()) {
-            out.push(entry);
-        }
-        // SAFETY: not past the null, which ends the loop above.
-        at = unsafe { at.add(1) };
-    }
-    out
-}
-
-/// This process's own value for a name [`corrected`] replaces.
-fn host_value(name: &str) -> Option<String> {
-    match name {
-        "HOME" => Some(prefix::ns::host_home_directory()),
-        "TMPDIR" => std::env::var("TMPDIR").ok(),
-        "PATH" => std::env::var("PATH").ok(),
-        "SHELL" => std::env::var("SHELL").ok(),
-        "PWD" => std::env::current_dir()
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned()),
-        _ => None,
-    }
-}
-
 exports::exports! {
     functions {
         "getenv" => getenv,
@@ -599,11 +629,81 @@ mod tests {
         CString::new(format!("ROSEMARY_TEST_{what}_{}", std::process::id())).expect("no NUL")
     }
 
+    fn host(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect()
+    }
+
+    fn texts(entries: Vec<Vec<u8>>) -> Vec<String> {
+        entries
+            .into_iter()
+            .map(|e| String::from_utf8(e).unwrap())
+            .collect()
+    }
+
+    /// Host variables name host software; a guest gets none of them unless
+    /// they are asked for.
     #[test]
-    fn a_guest_path_is_the_parents_or_a_macs_default() {
-        assert_eq!(guest_path(None), DEFAULT_PATH);
-        assert_eq!(guest_path(Some("/opt/bin".into())), "/opt/bin");
-        assert!(DEFAULT_PATH.split(':').any(|d| d == "/usr/local/bin"));
+    fn a_guest_starts_without_the_hosts_variables() {
+        let host = host(&[
+            ("DISPLAY", ":0"),
+            ("QT_PLUGIN_PATH", "/usr/lib/qt6/plugins"),
+            ("LD_LIBRARY_PATH", "/opt/lib"),
+            ("HOME", "/home/user"),
+            ("TERM", "xterm-256color"),
+            ("LC_CTYPE", "en_US.UTF-8"),
+        ]);
+        let baseline = |name: &str| (name == "HOME").then(|| "/Users/user".into());
+        let got = texts(initial(&host, &baseline));
+        assert_eq!(
+            got,
+            [
+                "HOME=/Users/user",
+                "TERM=xterm-256color",
+                "LC_CTYPE=en_US.UTF-8"
+            ]
+        );
+    }
+
+    /// `ROSEMARY_ENVIRON` sets a variable, copies a bare name's host value,
+    /// and wins over the baseline.
+    #[test]
+    fn requested_variables_are_set_or_copied() {
+        let host = host(&[
+            ("DISPLAY", ":0"),
+            (
+                ENVIRON_VAR,
+                "FOO=bar=baz\nDISPLAY\nMISSING\n\n=nameless\nPATH=/opt/bin\r\n",
+            ),
+        ]);
+        let baseline = |name: &str| (name == "PATH").then(|| DEFAULT_PATH.into());
+        let got = texts(initial(&host, &baseline));
+        assert_eq!(got, ["PATH=/opt/bin", "FOO=bar=baz", "DISPLAY=:0"]);
+    }
+
+    /// Nothing crosses by default, a `*` pattern is a prefix, and a hand-off
+    /// is never a guest's to forward.
+    #[test]
+    fn only_listed_variables_are_forwarded() {
+        assert!(!allows(b"", b"ROSEMARY_STATS"));
+        let list = b"ROSEMARY_STATS, FOO_* ,ROSEMARY_FORWARD_ENV_VARS";
+        assert!(allows(list, b"ROSEMARY_STATS"));
+        assert!(!allows(list, b"ROSEMARY_STATSX"));
+        assert!(allows(list, b"FOO_BAR"));
+        assert!(!allows(list, b"FOO"));
+        assert!(allows(list, FORWARD_VAR.as_bytes()));
+        assert!(!allows(b"ROSEMARY_*", b"ROSEMARY_GUEST_ENVIRON_0"));
+        assert!(!allows(b"*", b""));
+    }
+
+    #[test]
+    fn hand_off_names_belong_to_the_runtime() {
+        assert!(is_hand_off(b"ROSEMARY_GUEST_ENVIRON"));
+        assert!(is_hand_off(b"ROSEMARY_GUEST_ENVIRON_12"));
+        assert!(!is_hand_off(b"ROSEMARY_GUEST_ENVIRONMENT"));
+        assert!(!is_hand_off(b"ROSEMARY_ENVIRON"));
     }
 
     /// `PATH` is not `PATHX`. Comparing the prefix alone would have `getenv`
@@ -823,34 +923,53 @@ mod tests {
         unsafe { unsetenv(name.as_ptr()) };
     }
 
-    /// The child of a rewritten `exec` is another copy of this runtime, and it
-    /// resolves its own prefix from `HOME` before it has a guest block. So the
-    /// corrections are undone on the way out - and everything the guest set
-    /// itself is carried through untouched.
+    /// The child of a rewritten `exec` gets the guest's block entry by entry,
+    /// including a value with a newline and an empty block.
     #[test]
-    fn a_rewritten_exec_gets_the_hosts_spelling_back() {
+    fn a_guest_block_is_handed_off_entry_by_entry() {
         let entries = [
-            CString::new("HOME=/Users/user").unwrap(),
-            CString::new("GUEST_ONLY=kept").unwrap(),
+            CString::new("HOME=/var/root").unwrap(),
+            CString::new("MULTI=a\nb").unwrap(),
         ];
         let mut envp: Vec<*const c_char> = entries.iter().map(|e| e.as_ptr()).collect();
         envp.push(std::ptr::null());
         // SAFETY: a null-terminated array of NUL-terminated strings.
-        let restored = unsafe { host_spelling(envp.as_ptr()) };
-        let restored: Vec<&str> = restored.iter().filter_map(|e| e.to_str().ok()).collect();
-        assert!(
-            restored.contains(&"GUEST_ONLY=kept"),
-            "a variable the guest set was dropped: {restored:?}"
+        let out = unsafe { hand_off(envp.as_ptr()) };
+        let out: Vec<&str> = out.iter().map(|e| e.to_str().unwrap()).collect();
+        assert_eq!(
+            out,
+            [
+                "ROSEMARY_GUEST_ENVIRON=2",
+                "ROSEMARY_GUEST_ENVIRON_0=HOME=/var/root",
+                "ROSEMARY_GUEST_ENVIRON_1=MULTI=a\nb",
+            ]
         );
-        let home = restored
-            .iter()
-            .find(|e| e.starts_with("HOME="))
-            .expect("HOME is still there");
-        match prefix::ns::current() {
-            // Under a prefix it is put back to this host's.
-            Some(_) => assert_eq!(*home, format!("HOME={}", prefix::ns::host_home_directory())),
-            // With no prefix nothing was corrected, so nothing is undone.
-            None => assert_eq!(*home, "HOME=/Users/user"),
+        // SAFETY: null is an empty block.
+        let empty = unsafe { hand_off(std::ptr::null()) };
+        assert_eq!(empty, [c"ROSEMARY_GUEST_ENVIRON=0".to_owned()]);
+    }
+
+    #[test]
+    fn handed_off_block_child() {
+        if std::env::var("ROSEMARY_ENV_TEST_CHILD").as_deref() != Ok("handed") {
+            return;
         }
+        assert_eq!(entries(), [c"ONLY=this".to_owned()]);
+        // SAFETY: a literal name.
+        assert!(unsafe { getenv(c"ROSEMARY_ENV_TEST_CHILD".as_ptr()) }.is_null());
+    }
+
+    /// A handed-off block is the whole of the child's, with nothing of this
+    /// process's environment mixed in.
+    #[test]
+    fn a_handed_off_block_replaces_the_hosts() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "env::tests::handed_off_block_child"])
+            .env("ROSEMARY_ENV_TEST_CHILD", "handed")
+            .env("ROSEMARY_GUEST_ENVIRON", "1")
+            .env("ROSEMARY_GUEST_ENVIRON_0", "ONLY=this")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 }

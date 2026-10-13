@@ -170,14 +170,25 @@ unsafe extern "C" fn arguments(_receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn environment(_receiver: Id, _sel: Sel) -> Id {
+    // The guest's block, which is not this process's under the builtin libc.
+    let mut seen = std::collections::HashSet::new();
     let entries: Vec<(
         corefoundation::base::CFTypeRef,
         corefoundation::base::CFTypeRef,
-    )> = std::env::vars_os()
+    )> = darwin::guest_environment()
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.to_bytes();
+            let split = entry.iter().position(|&b| b == b'=')?;
+            Some((&entry[..split], &entry[split + 1..]))
+        })
+        // The first of a duplicated name, as `getenv` answers.
+        .filter(|(name, _)| seen.insert(*name))
         .map(|(name, value)| {
             (
-                crate::string::from_str(&name.to_string_lossy()) as corefoundation::base::CFTypeRef,
-                crate::string::from_str(&value.to_string_lossy())
+                crate::string::from_str(&String::from_utf8_lossy(name))
+                    as corefoundation::base::CFTypeRef,
+                crate::string::from_str(&String::from_utf8_lossy(value))
                     as corefoundation::base::CFTypeRef,
             )
         })

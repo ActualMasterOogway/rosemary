@@ -139,24 +139,60 @@ unsafe fn destroy<T>(at: *mut c_void) -> c_int {
     0
 }
 
-/// The environment for a rewritten exec: the guest's, with this runtime's own
-/// corrections undone.
+/// The environment for a rewritten exec.
 ///
 /// The child is another copy of *this runtime*, and it resolves its prefix and
-/// its own host paths before it builds a guest environment of its own. Handed
-/// the guest's `HOME` it would look for the prefix inside the prefix. See
-/// [`crate::env::host_spelling`], which keeps everything the guest set itself.
+/// its own host paths before it builds a guest environment of its own. Under
+/// the builtin libc the two never mix: the child gets this process's own
+/// environment, and the guest's block beside it as a hand-off (see
+/// [`crate::env::hand_off`]) that becomes the child guest's, verbatim.
+///
+/// The one crossing is what [`crate::env::FORWARD_VAR`] allows, so that a
+/// guest shell's `ROSEMARY_STATS=1 cmd` can configure the runtime it launches
+/// when the user asked for that.
 ///
 /// # Safety
 ///
 /// `envp` is null or a null-terminated array of NUL-terminated strings.
 unsafe fn runtime_environ(envp: *const *const c_char) -> Vec<CString> {
-    let mut out = match crate::libc_backend::using_builtin() {
-        true => unsafe { crate::env::host_spelling(envp) },
-        false => unsafe { argv_of(envp) },
-    };
+    if crate::libc_backend::using_builtin() {
+        let mut out = host_environ();
+        for entry in unsafe { argv_of(envp) } {
+            let bytes = entry.as_bytes();
+            let Some(split) = bytes.iter().position(|&b| b == b'=') else {
+                continue;
+            };
+            let name = &bytes[..split];
+            if !crate::env::is_forwarded(name) {
+                continue;
+            }
+            let existing = out.iter().position(|e| {
+                let e = e.as_bytes();
+                e.starts_with(name) && e.get(name.len()) == Some(&b'=')
+            });
+            match existing {
+                Some(at) => out[at] = entry,
+                None => out.push(entry),
+            }
+        }
+        out.extend(unsafe { crate::env::hand_off(envp) });
+        return out;
+    }
+    let mut out = unsafe { argv_of(envp) };
     keep_runtime_settings(&mut out);
     out
+}
+
+/// This process's environment, without the hand-off it may itself have been
+/// given, which is its parent guest's and not the child's.
+fn host_environ() -> Vec<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::env::vars_os()
+        .filter(|(name, _)| !crate::env::is_hand_off(name.as_bytes()))
+        .filter_map(|(name, value)| {
+            CString::new([name.as_bytes(), b"=", value.as_bytes()].concat()).ok()
+        })
+        .collect()
 }
 
 /// Put back what this runtime was started with if the guest dropped it.
@@ -172,10 +208,8 @@ fn keep_runtime_settings(out: &mut Vec<CString>) {
     use std::os::unix::ffi::OsStrExt;
     for (name, value) in std::env::vars_os() {
         let name = name.as_bytes();
-        // The guest's own `PATH`, `HOME` and `SHELL` travel as variables of
-        // their own, made from what the guest has now; the ones this process
-        // was given are its parent's.
-        let handed_off = std::str::from_utf8(name).is_ok_and(crate::env::is_hand_off);
+        // A hand-off this process was given is its parent's, not the child's.
+        let handed_off = crate::env::is_hand_off(name);
         let ours = (name.starts_with(b"ROSEMARY_") || name == b"XDG_RUNTIME_DIR") && !handed_off;
         let kept = out.iter().any(|entry| {
             let entry = entry.as_bytes();
