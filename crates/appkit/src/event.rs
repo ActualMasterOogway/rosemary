@@ -541,9 +541,13 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 crate::window::end_drag();
             }
             let (x, y) = track_pointer(id, x, y);
+            let modifiers = match button == sdl3::mouse::LEFT && plain_control_click() {
+                true => without_control(current_modifiers()),
+                false => current_modifiers(),
+            };
             send(id, Some((x, y)), |window, location| Fields {
                 kind,
-                modifiers: current_modifiers(),
+                modifiers,
                 location,
                 button: crate::button::number(button),
                 clicks: i64::from(clicks),
@@ -607,6 +611,21 @@ pub fn window_geometry_changed(object: Id) {
 
 fn current_modifiers() -> u64 {
     crate::keymap::modifiers(sdl3::video::keyboard_modifiers())
+}
+
+/// `ROSEMARY_PLAIN_CTRL_CLICK=1`: report a left click made with Control held
+/// as one made without it. A workaround
+pub const PLAIN_CTRL_CLICK_ENV: &str = "ROSEMARY_PLAIN_CTRL_CLICK";
+
+fn plain_control_click() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(PLAIN_CTRL_CLICK_ENV).is_some_and(|v| v != "0"))
+}
+
+/// Modifier flags with Control taken out, the side bits included.
+fn without_control(modifiers: u64) -> u64 {
+    use crate::keymap::flags;
+    modifiers & !(flags::CONTROL | flags::DEVICE_LCTL | flags::DEVICE_RCTL)
 }
 
 /// Offer a key press to whatever takes it as a key equivalent: the window's
@@ -1196,6 +1215,13 @@ mod tests {
         assert!(!take_warp_echo(405.0, 300.0));
         assert!(take_warp_echo(400.2, 299.9));
         assert!(!take_warp_echo(400.0, 300.0));
+    }
+
+    #[test]
+    fn a_plain_control_click_keeps_the_other_modifiers() {
+        use crate::keymap::flags;
+        let held = flags::CONTROL | flags::DEVICE_LCTL | flags::SHIFT | flags::DEVICE_LSHIFT;
+        assert_eq!(without_control(held), flags::SHIFT | flags::DEVICE_LSHIFT);
     }
 
     #[test]
