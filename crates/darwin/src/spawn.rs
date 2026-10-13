@@ -1306,6 +1306,25 @@ pub unsafe extern "C" fn attr_setbinpref_np(
     0
 }
 
+/// `int posix_spawnattr_setarchpref_np(posix_spawnattr_t *, size_t,
+/// cpu_type_t *, cpu_subtype_t *, size_t *)`
+///
+/// Ignored for the reason [`attr_setbinpref_np`] is: the slice is chosen when
+/// the image is loaded. The out-parameter is filled all the same.
+///
+/// # Safety
+///
+/// As above, and `taken` is null or a writable `size_t`.
+pub unsafe extern "C" fn attr_setarchpref_np(
+    at: *mut c_void,
+    count: usize,
+    prefs: *mut u32,
+    _subprefs: *mut u32,
+    taken: *mut usize,
+) -> c_int {
+    unsafe { attr_setbinpref_np(at, count, prefs, taken) }
+}
+
 /// Spawn a child for a framework's process API, such as `NSTask`.
 ///
 /// Launched as the guest's own `posix_spawn` would launch it, so `path` and
@@ -1398,6 +1417,7 @@ exports::exports! {
         "posix_spawnattr_setsigmask" => attr_setsigmask,
         "posix_spawnattr_setsigdefault" => attr_setsigdefault,
         "posix_spawnattr_setbinpref_np" => attr_setbinpref_np,
+        "posix_spawnattr_setarchpref_np" => attr_setarchpref_np,
     }
 }
 
