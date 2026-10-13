@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -334,6 +334,174 @@ pub unsafe extern "C" fn putenv(entry: *mut c_char) -> c_int {
     0
 }
 
+/// The entries of a guest-supplied environment vector, up to its null.
+///
+/// # Safety
+///
+/// `vector` is null or a null-terminated array of NUL-terminated strings.
+unsafe fn vector_entries(vector: *const *mut c_char) -> Vec<*mut c_char> {
+    let mut entries = Vec::new();
+    if vector.is_null() {
+        return entries;
+    }
+    let mut at = vector;
+    // SAFETY: walked only as far as the null that ends it.
+    unsafe {
+        while !(*at).is_null() {
+            entries.push(*at);
+            at = at.add(1);
+        }
+    }
+    entries
+}
+
+/// A null-terminated vector of `entries`, from the allocator the guest frees
+/// with, or null when it is out of memory.
+fn allocate_vector(entries: &[*mut c_char]) -> *mut *mut c_char {
+    // SAFETY: sized for the entries and the terminating null.
+    let vector = unsafe { crate::heap::malloc((entries.len() + 1) * size_of::<*mut c_char>()) }
+        .cast::<*mut c_char>();
+    if vector.is_null() {
+        return vector;
+    }
+    // SAFETY: `vector` holds `entries.len() + 1` pointers.
+    unsafe {
+        std::ptr::copy_nonoverlapping(entries.as_ptr(), vector, entries.len());
+        *vector.add(entries.len()) = std::ptr::null_mut();
+    }
+    vector
+}
+
+/// Whether `envp` is the process's own `environ`, whose block this module keeps
+/// authoritative and which therefore goes through the public entry points.
+fn is_process_environ(envp: *mut *mut *mut c_char) -> bool {
+    envp == environ_slot() || envp == guest_environ_slot()
+}
+
+/// `int _setenvp(const char *name, const char *value, int rewrite, char ***envp,
+/// void *state)`
+///
+/// `setenv` against a vector of the caller's choosing, which libc's own `setenv`
+/// calls with `&environ`. The vector is replaced rather than edited, as the
+/// process's is, so a guest still holding the old one reads a coherent block.
+/// `state` is libc's bookkeeping for which entries it allocated; nothing here
+/// frees an entry, so it is never consulted.
+///
+/// # Safety
+///
+/// Both strings are null or NUL-terminated; `envp` is null or points at a
+/// null-terminated vector, or at null for an empty one.
+pub unsafe extern "C" fn _setenvp(
+    name: *const c_char,
+    value: *const c_char,
+    rewrite: c_int,
+    envp: *mut *mut *mut c_char,
+    _state: *mut c_void,
+) -> c_int {
+    if envp.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    if is_process_environ(envp) {
+        return unsafe { setenv(name, value, rewrite) };
+    }
+    if name.is_null() || value.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let (name, value) = unsafe { (CStr::from_ptr(name), CStr::from_ptr(value)) };
+    let name = name.to_bytes();
+    if name.is_empty() || name.contains(&b'=') {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let mut entries = unsafe { vector_entries(*envp) };
+    let at = position(&entries, name);
+    if at.is_some() && rewrite == 0 {
+        return 0;
+    }
+    let mut entry = name.to_vec();
+    entry.push(b'=');
+    entry.extend_from_slice(value.to_bytes());
+    let entry = CString::new(entry)
+        .expect("neither part holds a NUL")
+        .into_raw();
+    match at {
+        Some(at) => entries[at] = entry,
+        None => entries.push(entry),
+    }
+    let vector = allocate_vector(&entries);
+    if vector.is_null() {
+        // SAFETY: the entry was made above and is not in any vector.
+        drop(unsafe { CString::from_raw(entry) });
+        crate::errno::set(libc::ENOMEM);
+        return -1;
+    }
+    // The old vector is left alone: the guest may hold it, as for `publish`.
+    unsafe { *envp = vector };
+    0
+}
+
+/// `int _unsetenvp(const char *name, char ***envp, void *state)`
+///
+/// `unsetenv` against the caller's vector, which is edited in place: removal
+/// only ever shortens it.
+///
+/// # Safety
+///
+/// As [`_setenvp`].
+pub unsafe extern "C" fn _unsetenvp(
+    name: *const c_char,
+    envp: *mut *mut *mut c_char,
+    _state: *mut c_void,
+) -> c_int {
+    if name.is_null() || envp.is_null() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    if is_process_environ(envp) {
+        return unsafe { unsetenv(name) };
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    if name.is_empty() || name.contains(&b'=') {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let mut entries = unsafe { vector_entries(*envp) };
+    let old_len = entries.len();
+    while let Some(at) = position(&entries, name) {
+        entries.remove(at);
+    }
+    if entries.len() != old_len {
+        // SAFETY: the vector held `old_len` entries and a null, which is room
+        // for the shorter one.
+        unsafe {
+            let vector = *envp;
+            std::ptr::copy(entries.as_ptr(), vector, entries.len());
+            *vector.add(entries.len()) = std::ptr::null_mut();
+        }
+    }
+    0
+}
+
+/// `char **_copyenv(char **env)`
+///
+/// A new vector of the same entries, which the caller may edit without touching
+/// the original's. The strings are shared, as a vector's entries are everywhere
+/// else in this module, and the result is null with `ENOMEM` when out of memory.
+///
+/// # Safety
+///
+/// `env` is null or a null-terminated array of NUL-terminated strings.
+pub unsafe extern "C" fn _copyenv(env: *mut *mut c_char) -> *mut *mut c_char {
+    let entries = unsafe { vector_entries(env) };
+    let vector = allocate_vector(&entries);
+    if vector.is_null() {
+        crate::errno::set(libc::ENOMEM);
+    }
+    vector
+}
+
 /// A guest environment block with this runtime's corrections undone.
 ///
 /// For the one place the two environments meet: a guest that `exec`s another
@@ -415,6 +583,9 @@ exports::exports! {
         "setenv" => setenv,
         "unsetenv" => unsetenv,
         "putenv" => putenv,
+        "_setenvp" => _setenvp,
+        "_unsetenvp" => _unsetenvp,
+        "_copyenv" => _copyenv,
     }
 }
 
@@ -571,6 +742,63 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+    }
+
+    /// `_setenvp` and `_unsetenvp` edit the vector they are given, not the
+    /// process's, and a copy is independent of its original.
+    #[test]
+    fn a_private_vector_is_edited_without_touching_the_process() {
+        let name = unique("PRIVATE");
+        let first = CString::new("A=1").unwrap();
+        let mut original = [first.as_ptr().cast_mut(), std::ptr::null_mut()];
+        // SAFETY: strings and vectors this test owns, null-terminated.
+        unsafe {
+            let mut copy = _copyenv(original.as_mut_ptr());
+            assert_eq!(vector_entries(copy).len(), 1);
+            assert_eq!(
+                _setenvp(
+                    c"B".as_ptr(),
+                    c"2".as_ptr(),
+                    1,
+                    &mut copy,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            assert_eq!(
+                _setenvp(
+                    c"A".as_ptr(),
+                    c"9".as_ptr(),
+                    0,
+                    &mut copy,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            let got: Vec<_> = vector_entries(copy)
+                .iter()
+                .map(|e| CStr::from_ptr(*e).to_owned())
+                .collect();
+            assert_eq!(got, [c"A=1".to_owned(), c"B=2".to_owned()]);
+            assert_eq!(
+                _unsetenvp(c"A".as_ptr(), &mut copy, std::ptr::null_mut()),
+                0
+            );
+            assert_eq!(vector_entries(copy).len(), 1);
+            assert_eq!(vector_entries(original.as_ptr()).len(), 1, "original kept");
+            assert_eq!(
+                _setenvp(
+                    c"=".as_ptr(),
+                    c"x".as_ptr(),
+                    1,
+                    &mut copy,
+                    std::ptr::null_mut()
+                ),
+                -1
+            );
+            assert!(getenv(name.as_ptr()).is_null());
+            assert!(getenv(c"B".as_ptr()).is_null(), "the process was written");
+        }
     }
 
     /// `environ` is null-terminated and holds what the block holds, so a guest
