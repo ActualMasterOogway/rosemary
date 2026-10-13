@@ -1158,16 +1158,23 @@ unsafe extern "C" fn contains_object(receiver: Id, _sel: Sel, object: Id) -> boo
         .any(|v| a.policy.equal(*v, object as CFTypeRef))
 }
 
-/// `-indexOfObject:`: the first index whose element is equal to `object`, or
-/// `NSNotFound`.
 unsafe extern "C" fn index_of_object(receiver: Id, _sel: Sel, object: Id) -> usize {
-    // SAFETY: an array.
     let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
         return NOT_FOUND;
     };
     a.values
         .iter()
         .position(|v| a.policy.equal(*v, object as CFTypeRef))
+        .unwrap_or(NOT_FOUND)
+}
+
+unsafe extern "C" fn index_of_object_identical_to(receiver: Id, _sel: Sel, object: Id) -> usize {
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return NOT_FOUND;
+    };
+    a.values
+        .iter()
+        .position(|v| std::ptr::eq(*v, object as CFTypeRef))
         .unwrap_or(NOT_FOUND)
 }
 
@@ -2219,6 +2226,7 @@ pub(crate) fn install() {
         "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
         "containsObject:" => contains_object, c"B24@0:8@16";
         "indexOfObject:" => index_of_object, c"Q24@0:8@16";
+        "indexOfObjectIdenticalTo:" => index_of_object_identical_to, c"Q24@0:8@16";
         "firstObject" => first_object, c"@16@0:8";
         "lastObject" => last_object, c"@16@0:8";
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
