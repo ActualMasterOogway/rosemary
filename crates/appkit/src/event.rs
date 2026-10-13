@@ -445,6 +445,8 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             if take_warp_echo(x, y) {
                 return;
             }
+            // The first real motion after a warp is the one that reports it.
+            let warped = take_warp_delta();
             crate::cgevent::note_mouse_delta(dx, dy);
             crate::screen::hold_at_edge(id, x, y, dx, dy);
             // SDL's position keeps integrating the deltas of a disassociated
@@ -480,8 +482,8 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 modifiers: current_modifiers(),
                 location,
                 delta: NSPoint {
-                    x: dx as f64,
-                    y: dy as f64,
+                    x: dx as f64 + warped.0,
+                    y: dy as f64 + warped.1,
                 },
                 button: held.map_or(0, crate::button::number),
                 window,
@@ -930,6 +932,28 @@ fn take_warp_echo(x: f32, y: f32) -> bool {
     hit
 }
 
+/// How far guest warps have moved the cursor since the last motion event.
+///
+/// A warp posts no event, but the window server folds its jump into the next
+/// one: `-deltaX` and `-deltaY` of the first motion after a warp are the mouse's
+/// movement plus `target - previous`. Programs written against that take it
+/// back out - GLFW keeps a warp delta to subtract, and Roblox subtracts the
+/// distance to the lock point from the first event after it centres the cursor
+/// for shift lock. Handed a delta without the jump, the subtraction turns the
+/// camera by however far the cursor was from the centre.
+static WARP_DELTA: std::sync::Mutex<(f64, f64)> = std::sync::Mutex::new((0.0, 0.0));
+
+/// Record a guest warp's displacement for the next motion event to carry.
+pub(crate) fn note_warp_delta(dx: f64, dy: f64) {
+    let mut delta = WARP_DELTA.lock().unwrap_or_else(|e| e.into_inner());
+    delta.0 += dx;
+    delta.1 += dy;
+}
+
+fn take_warp_delta() -> (f64, f64) {
+    std::mem::take(&mut *WARP_DELTA.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Within half a pixel: SDL converts between desktop and window coordinates.
 fn lands_on(target: (f32, f32), point: (f32, f32)) -> bool {
     (target.0 - point.0).abs() < 0.5 && (target.1 - point.1).abs() < 0.5
@@ -957,6 +981,28 @@ fn track_pointer(window: u32, x: f32, y: f32) -> (f32, f32) {
         *pointer = (x, y);
     }
     *pointer
+}
+
+/// Bring [`POINTER`] up to where the cursor is now, as a guest is about to
+/// break the link between the two.
+///
+/// What freezes is the cursor, not the last event handed on: motion SDL has
+/// already taken in but this loop has not dispatched has moved the cursor, and
+/// `+[NSEvent mouseLocation]` has been saying so. A guest that reads the
+/// position, disassociates and then warps measures its warp from that answer,
+/// so the frozen point has to be the same one.
+pub(crate) fn settle_pointer() {
+    // A scripted pointer is where its script put it, not where SDL's is.
+    if crate::script::pointer().is_some() {
+        return;
+    }
+    let Some((x, y, _)) = window::desktop_mouse_state() else {
+        return;
+    };
+    let origin = pointer_window()
+        .and_then(window::global_position)
+        .unwrap_or((0, 0));
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = (x - origin.0 as f32, y - origin.1 as f32);
 }
 
 /// Where the guest is to be told the pointer is on the desktop, for the calls
@@ -1150,6 +1196,15 @@ mod tests {
         assert!(!take_warp_echo(405.0, 300.0));
         assert!(take_warp_echo(400.2, 299.9));
         assert!(!take_warp_echo(400.0, 300.0));
+    }
+
+    #[test]
+    fn warps_add_up_until_a_motion_event_takes_them() {
+        take_warp_delta();
+        note_warp_delta(120.0, -80.0);
+        note_warp_delta(-20.0, 5.0);
+        assert_eq!(take_warp_delta(), (100.0, -75.0));
+        assert_eq!(take_warp_delta(), (0.0, 0.0));
     }
 
     /// Every name this crate publishes has a delegate method, so a notification
