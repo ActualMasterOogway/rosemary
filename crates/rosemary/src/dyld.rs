@@ -435,7 +435,16 @@ mod synthetic {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|l| l.names.iter().any(|n| n == path || n == leaf))
+            .find(|l| {
+                l.names.iter().any(|n| {
+                    n == path
+                        || n == leaf
+                        // dyld falls back to `/usr/lib/<name>` for a bare
+                        // name, which is how Mono's `DllImport("libc")`
+                        // reaches `libc.dylib`.
+                        || (leaf == path && n.rsplit('/').next() == Some(leaf))
+                })
+            })
             .copied()
     }
 
@@ -2329,6 +2338,17 @@ mod tests {
         assert!(!virtual_directory(
             "/Library/Frameworks/RosemaryProbe.framework"
         ));
+    }
+
+    /// Mono probes `DllImport("libc")` as the bare `libc.dylib`, which dyld
+    /// finds through its `/usr/lib` fallback.
+    #[test]
+    fn a_bare_leaf_finds_the_library_installed_under_usr_lib() {
+        synthetic::register(&["/usr/lib/librosemaryprobe.dylib"], |_| None);
+        let by_path = synthetic::find("/usr/lib/librosemaryprobe.dylib").unwrap();
+        let by_leaf = synthetic::find("librosemaryprobe.dylib").unwrap();
+        assert_eq!(by_leaf.handle, by_path.handle);
+        assert!(synthetic::find("librosemaryabsent.dylib").is_none());
     }
 
     #[test]
