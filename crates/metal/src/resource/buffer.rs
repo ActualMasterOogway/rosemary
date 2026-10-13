@@ -25,15 +25,27 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
         );
     }
     let private = (options >> 4) & 0xf == STORAGE_MODE_PRIVATE;
-    let inner = match crate::stats::timed(crate::stats::Counter::BufferMicros, || match private {
-        true => gpu.create_private_buffer(length as u64),
-        false => gpu.create_buffer(length as u64),
-    }) {
-        Ok(inner) => inner,
-        Err(reason) => {
-            gpu::trace(format!("newBufferWithLength: failed: {reason}"));
-            return std::ptr::null_mut();
-        }
+    let host = match private {
+        true => None,
+        false => gpu.create_host_pages(length as u64),
+    };
+    let inner = match &host {
+        // The device reaches these bytes by importing them when it uses them.
+        Some(pages) => GpuBuffer {
+            contents: pages.contents(),
+            length: length as u64,
+            ..GpuBuffer::none()
+        },
+        None => match crate::stats::timed(crate::stats::Counter::BufferMicros, || match private {
+            true => gpu.create_private_buffer(length as u64),
+            false => gpu.create_buffer(length as u64),
+        }) {
+            Ok(inner) => inner,
+            Err(reason) => {
+                gpu::trace(format!("newBufferWithLength: failed: {reason}"));
+                return std::ptr::null_mut();
+            }
+        },
     };
     crate::account(length as i64);
     if !private {
@@ -47,8 +59,29 @@ pub(crate) fn new_buffer(gpu: &'static Gpu, length: usize, options: u64) -> Id {
             gpu,
             inner,
             options,
+            host,
         },
     )
+}
+
+impl Buffer {
+    /// The buffer the device sees all of this one through, for a use whose
+    /// extent no call states.
+    pub(crate) fn device_buffer(&self) -> vk::Buffer {
+        match &self.host {
+            Some(pages) => self.gpu.host_buffer(pages),
+            None => self.inner.buffer,
+        }
+    }
+
+    /// The buffer and offset the device sees `offset..offset + size` of this
+    /// one through, for a copy. The caller has checked the range is inside.
+    pub(crate) fn device_range(&self, offset: u64, size: u64) -> (vk::Buffer, u64) {
+        match &self.host {
+            Some(pages) => self.gpu.host_range(pages, offset, size),
+            None => (self.inner.buffer, offset),
+        }
+    }
 }
 
 pub(super) unsafe extern "C" fn buffer_contents(receiver: Id, _sel: Sel) -> *mut u8 {
@@ -103,7 +136,10 @@ pub(super) unsafe extern "C" fn buffer_dealloc(receiver: Id, _sel: Sel) {
     heap::leave(receiver);
     let inner = std::mem::replace(&mut buffer.inner, GpuBuffer::none());
     if !leaking() {
-        buffer.gpu.destroy_buffer(inner);
+        match buffer.host.take() {
+            Some(pages) => buffer.gpu.destroy_host_pages(pages),
+            None => buffer.gpu.destroy_buffer(inner),
+        }
     }
     objc::arc::finalize(receiver);
 }

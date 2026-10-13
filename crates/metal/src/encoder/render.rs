@@ -211,7 +211,7 @@ pub(super) unsafe extern "C" fn draw_primitives_indirect(
         return;
     };
     // SAFETY: only a buffer of this crate's is ever bound.
-    let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
+    let buffer = unsafe { object::body::<Buffer>(indirect) }.device_buffer();
     encoder.command().retain(indirect);
     // SAFETY: recording into this command buffer.
     encoder.record(|| unsafe { device.cmd_draw_indirect(command, buffer, offset, 1, 16) });
@@ -252,7 +252,7 @@ pub(super) unsafe extern "C" fn draw_indexed_primitives_indirect(
         )
     };
     // SAFETY: only a buffer of this crate's is ever bound.
-    let buffer = unsafe { object::body::<Buffer>(indirect) }.inner.buffer;
+    let buffer = unsafe { object::body::<Buffer>(indirect) }.device_buffer();
     encoder.command().retain(indirect);
     // SAFETY: recording into this command buffer.
     encoder.record(|| unsafe { device.cmd_draw_indexed_indirect(command, buffer, offset, 1, 20) });
@@ -273,7 +273,7 @@ unsafe fn bind_index_buffer(
     let buffer = unsafe { object::body::<Buffer>(index_buffer) };
     encoder.command().retain(index_buffer);
     let binding = (
-        buffer.inner.buffer,
+        buffer.device_buffer(),
         index_offset,
         match index_type {
             1 => vk::IndexType::UINT32,

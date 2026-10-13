@@ -97,18 +97,18 @@ pub(super) unsafe extern "C" fn copy_buffer_to_buffer(
             ),
         );
     }
+    let (from, source_offset) = from.device_range(source_offset, size);
+    let (to, destination_offset) = to.device_range(destination_offset, size);
     let region = vk::BufferCopy::default()
         .src_offset(source_offset)
         .dst_offset(destination_offset)
         .size(size);
     // SAFETY: recording into this command buffer.
     encoder.record_named("blit copyBuffer", || unsafe {
-        command.gpu.device.cmd_copy_buffer(
-            command.command_buffer,
-            from.inner.buffer,
-            to.inner.buffer,
-            &[region],
-        );
+        command
+            .gpu
+            .device
+            .cmd_copy_buffer(command.command_buffer, from, to, &[region]);
     });
     command.retain(source);
     command.retain(destination);
@@ -214,6 +214,7 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture_options(
             ),
         );
     }
+    let (buffer, source_offset) = from.device_range(source_offset, total);
     let region = vk::BufferImageCopy::default()
         .buffer_offset(source_offset)
         .buffer_row_length(row_texels as u32)
@@ -238,7 +239,7 @@ pub(super) unsafe extern "C" fn copy_buffer_to_texture_options(
     encoder.record_named("blit copyBufferToTexture", || unsafe {
         command.gpu.device.cmd_copy_buffer_to_image(
             command.command_buffer,
-            from.inner.buffer,
+            buffer,
             to.image.image,
             vk::ImageLayout::GENERAL,
             &[region],
@@ -334,6 +335,7 @@ pub(super) unsafe extern "C" fn copy_texture_to_buffer_options(
             ),
         );
     }
+    let (buffer, destination_offset) = to.device_range(destination_offset, total);
     let region = vk::BufferImageCopy::default()
         .buffer_offset(destination_offset)
         .buffer_row_length(row_texels as u32)
@@ -360,7 +362,7 @@ pub(super) unsafe extern "C" fn copy_texture_to_buffer_options(
             command.command_buffer,
             from.image.image,
             vk::ImageLayout::GENERAL,
-            to.inner.buffer,
+            buffer,
             &[region],
         );
     });

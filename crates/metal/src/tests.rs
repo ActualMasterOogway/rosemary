@@ -473,10 +473,94 @@ fn a_private_buffer_is_filled_written_and_copied_by_the_device() {
     }
 }
 
+/// A large shared buffer is host pages the device imports as it uses them: a
+/// copy imports only the range it names and a binding the whole buffer, over
+/// pages a copy already imported. Each must see what the host wrote, and the
+/// host what each wrote.
+#[test]
+fn a_large_shared_buffer_is_seen_through_its_host_pages() {
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const LENGTH: usize = 4 << 20;
+    // Inside a page, so a copy's import starts below it.
+    const OFFSET: usize = (3 << 20) + 100;
+    let library = source_library(device, TEST_KERNEL);
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null());
+        let large = new_buffer(device, std::ptr::null(), LENGTH, 0);
+        let other = new_buffer(device, std::ptr::null(), LENGTH, 0);
+        let small = new_buffer(device, std::ptr::null(), 16, 0);
+        let contents = object::body::<resource::Buffer>(large).inner.contents;
+        std::ptr::copy_nonoverlapping([1u32, 2, 3, 4].as_ptr(), contents.add(OFFSET).cast(), 4);
+        let queue = new_command_queue(device, std::ptr::null());
+
+        let command = send(queue, "commandBuffer");
+        let blit = send(command, "blitCommandEncoder");
+        copy_buffer_range(blit, large, OFFSET as u64, small, 0, 16);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        let small_contents = object::body::<resource::Buffer>(small).inner.contents;
+        assert_eq!(
+            std::slice::from_raw_parts(small_contents as *const u32, 4),
+            [1, 2, 3, 4]
+        );
+
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        set_buffer_at(encoder, large, 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        let blit = send(command, "blitCommandEncoder");
+        copy_buffer_range(blit, small, 0, other, (LENGTH - 16) as u64, 16);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        assert_eq!(std::ptr::read(contents as *const u32), 42);
+        assert_eq!(
+            std::slice::from_raw_parts(contents.add(OFFSET) as *const u32, 4),
+            [1, 2, 3, 4]
+        );
+        let other_contents = object::body::<resource::Buffer>(other).inner.contents;
+        assert_eq!(
+            std::slice::from_raw_parts(other_contents.add(LENGTH - 16) as *const u32, 4),
+            [1, 2, 3, 4]
+        );
+        for buffer in [large, other, small] {
+            objc::arc::release(buffer);
+        }
+    }
+}
+
 /// # Safety
 ///
 /// `blit` must be a blit encoder of this crate's, and both buffers its own.
 unsafe fn copy_buffer(blit: Id, from: Id, to: Id, size: u64) {
+    // SAFETY: as the caller promised.
+    unsafe { copy_buffer_range(blit, from, 0, to, 0, size) }
+}
+
+/// # Safety
+///
+/// As for [`copy_buffer`], with both ranges inside their buffers.
+unsafe fn copy_buffer_range(
+    blit: Id,
+    from: Id,
+    from_offset: u64,
+    to: Id,
+    to_offset: u64,
+    size: u64,
+) {
     let sel = objc::sel::get("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:");
     // SAFETY: an object the runtime allocated.
     let method = unsafe { objc::object::class_of(blit) }
@@ -485,7 +569,7 @@ unsafe fn copy_buffer(blit: Id, from: Id, to: Id, size: u64) {
     // SAFETY: the registered signature.
     let call: unsafe extern "C" fn(Id, Sel, Id, u64, Id, u64, u64) =
         unsafe { std::mem::transmute(method.implementation()) };
-    unsafe { call(blit, sel, from, 0, to, 0, size) };
+    unsafe { call(blit, sel, from, from_offset, to, to_offset, size) };
 }
 
 /// `MTLSamplerAddressModeMirrorClampToEdge` is the one Metal wrap mode Vulkan

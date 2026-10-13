@@ -35,8 +35,11 @@ pub(crate) use vertex::{
 
 pub(crate) struct Buffer {
     pub gpu: &'static Gpu,
+    /// For a buffer with host pages, `buffer` is null: the device reaches
+    /// the bytes through [`Buffer::device_buffer`] and [`Buffer::device_range`].
     pub inner: GpuBuffer,
     pub options: u64,
+    host: Option<gpu::HostPages>,
 }
 
 impl Default for SamplerDescriptor {
