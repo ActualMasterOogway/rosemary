@@ -11,9 +11,10 @@ use crate::passes::Substitution;
 /// to change or it can't be changed.
 pub(super) fn widen(module: &Module) -> Option<Module> {
     let any = module.globals.iter().any(|global| has_half(&global.ty))
-        || module.functions.iter().any(|function| {
-            has_half(&function.result) || function.values.iter().any(has_half)
-        });
+        || module
+            .functions
+            .iter()
+            .any(|function| has_half(&function.result) || function.values.iter().any(has_half));
     if !any {
         return None;
     }
