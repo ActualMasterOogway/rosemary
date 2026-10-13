@@ -581,6 +581,22 @@ pub unsafe extern "C" fn getname_np(thread: u64, name: u64, len: u64) -> i32 {
     })
 }
 
+/// `void pthread_jit_write_protect_np(int enabled)`
+///
+/// Apple Silicon's per-thread switch between writing and executing `MAP_JIT`
+/// memory. Off a Mac nothing enforces it - `map_flags` drops `MAP_JIT` - so
+/// there is nothing to toggle. On one the guest's own `MAP_JIT` mappings are
+/// the host's, and the toggle has to reach it or the guest's code writes fault.
+pub extern "C" fn jit_write_protect_np(enabled: i32) {
+    #[cfg(target_os = "macos")]
+    // SAFETY: a thread-local toggle with no memory effects of its own.
+    unsafe {
+        libc::pthread_jit_write_protect_np(enabled)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = enabled;
+}
+
 /// Non-zero on the thread that ran `main`. Answered by comparing thread ids rather
 /// than by asking libpthread, which has no such call here.
 pub unsafe extern "C" fn main_np() -> i32 {
@@ -1144,6 +1160,7 @@ exports::exports! {
         "pthread_setname_np" => setname_np,
         "pthread_getname_np" => getname_np,
         "pthread_main_np" => main_np,
+        "pthread_jit_write_protect_np" => jit_write_protect_np,
         "pthread_threadid_np" => threadid_np,
         #[cfg(not(target_os = "macos"))]
         "pthread_cpu_number_np" => cpu_number_np,
