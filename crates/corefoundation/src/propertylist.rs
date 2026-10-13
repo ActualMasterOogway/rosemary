@@ -118,6 +118,91 @@ fn build(value: &Value, mutability: u64, depth: usize) -> Result<CFTypeRef, Stri
     })
 }
 
+/// `value` as a retained object, for the preferences store.
+///
+/// Containers are immutable: what a caller reads back from a domain is a
+/// snapshot, and a change goes through a set.
+pub fn object_from_value(value: &Value) -> Option<CFTypeRef> {
+    build(value, 0, 0).ok()
+}
+
+/// The property list value of `object`, or `None` when it holds anything a
+/// property list cannot: a dictionary with a non-string key, or an object of
+/// some other class. Booleans, numbers, strings, data, dates, arrays and
+/// dictionaries are the six.
+///
+/// # Safety
+///
+/// `object` is null or an object this runtime allocated or bound.
+pub unsafe fn value_of(object: CFTypeRef) -> Option<Value> {
+    unsafe { value_at(object, 0) }
+}
+
+unsafe fn value_at(object: CFTypeRef, depth: usize) -> Option<Value> {
+    if object.is_null() || depth > MAX_DEPTH {
+        return None;
+    }
+    // SAFETY: the caller's guarantee, for each check below.
+    unsafe {
+        if let Some(string) = crate::string::as_string(object) {
+            return Some(Value::String(
+                String::from_utf8_lossy(&string.utf8()).into_owned(),
+            ));
+        }
+        if std::ptr::eq(object, collections::boolean(true)) {
+            return Some(Value::Bool(true));
+        }
+        if std::ptr::eq(object, collections::boolean(false)) {
+            return Some(Value::Bool(false));
+        }
+        if let Some((number, kind)) = collections::number_value(object) {
+            // A `BOOL` stored through `+numberWithBool:` is a char-typed
+            // number here; Apple's stores it as a boolean, and so does this.
+            if kind == crate::collections::number_type::CHAR
+                && crate::base::is_kind_of(object, collections::boolean_class())
+            {
+                return Some(Value::Bool(number.as_i64() != 0));
+            }
+            return Some(match number {
+                Number::Integer(v) => Value::Integer(v),
+                Number::Float(v) => Value::Real(v),
+            });
+        }
+        if let Some(bytes) = collections::data(object) {
+            return Some(Value::Data(bytes.clone()));
+        }
+        if let Some(array) = collections::array(object) {
+            let values = array.values.clone();
+            return values
+                .iter()
+                .map(|v| value_at(*v, depth + 1))
+                .collect::<Option<Vec<_>>>()
+                .map(Value::Array);
+        }
+        if let Some(dictionary) = collections::dictionary(object) {
+            let entries = dictionary.entries.clone();
+            let mut out = std::collections::BTreeMap::new();
+            for (key, value) in entries {
+                let Value::String(key) = value_at(key, depth + 1)? else {
+                    return None;
+                };
+                out.insert(key, value_at(value, depth + 1)?);
+            }
+            return Some(Value::Dictionary(out));
+        }
+        if let Some(class) = objc::class::lookup(c"NSDate")
+            && crate::base::is_kind_of(object, class)
+        {
+            let sel = objc::sel::get("timeIntervalSinceReferenceDate");
+            // SAFETY: `-timeIntervalSinceReferenceDate` is `double (id, SEL)`.
+            let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> f64 =
+                std::mem::transmute(objc::msg::entry());
+            return Some(Value::Date(f(object as Id, sel)));
+        }
+    }
+    None
+}
+
 fn release_each(objects: &[CFTypeRef]) {
     for object in objects {
         // SAFETY: each is an object this module made and owns a reference to.

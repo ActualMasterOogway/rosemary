@@ -317,6 +317,16 @@ mod xml {
                     }
                 }
                 "string" => push(Value::String(unescape(body)), &mut stack, &mut keys),
+                "string/" => push(Value::String(String::new()), &mut stack, &mut keys),
+                "dict/" => push(Value::Dictionary(BTreeMap::new()), &mut stack, &mut keys),
+                "array/" => push(Value::Array(Vec::new()), &mut stack, &mut keys),
+                "data" => push(Value::Data(base64_decode(body)), &mut stack, &mut keys),
+                "data/" => push(Value::Data(Vec::new()), &mut stack, &mut keys),
+                "date" => push(
+                    Value::Date(parse_date(body.trim()).unwrap_or(0.0)),
+                    &mut stack,
+                    &mut keys,
+                ),
                 "integer" => push(
                     Value::Integer(body.trim().parse().unwrap_or(0)),
                     &mut stack,
@@ -337,12 +347,203 @@ mod xml {
     }
 
     fn unescape(text: &str) -> String {
-        text.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&")
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find('&') {
+            out.push_str(&rest[..at]);
+            rest = &rest[at..];
+            let Some(end) = rest.find(';') else { break };
+            let entity = &rest[1..end];
+            let decoded = match entity {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "amp" => Some('&'),
+                _ => entity.strip_prefix('#').and_then(|n| {
+                    match n.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => n.parse().ok(),
+                    }
+                    .and_then(char::from_u32)
+                }),
+            };
+            match decoded {
+                Some(c) => {
+                    out.push(c);
+                    rest = &rest[end + 1..];
+                }
+                None => {
+                    out.push('&');
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
+
+    /// `2001-01-01T00:00:00Z`, as seconds since that instant.
+    pub(super) fn parse_date(text: &str) -> Option<f64> {
+        let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
+        let mut d = date.split('-').map(|n| n.parse::<i64>().ok());
+        let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+        let mut t = time.split(':').map(|n| n.parse::<f64>().ok());
+        let (h, min, sec) = (t.next()??, t.next()??, t.next()??);
+        // Days from civil, the standard proleptic Gregorian algorithm.
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe - 719468;
+        // 2001-01-01 is 11323 days after the Unix epoch.
+        Some((days - 11323) as f64 * 86400.0 + h * 3600.0 + min * 60.0 + sec)
+    }
+
+    fn base64_decode(text: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len() / 4 * 3);
+        let (mut buffer, mut bits) = (0u32, 0);
+        for byte in text.bytes() {
+            let sextet = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => continue,
+            };
+            buffer = (buffer << 6) | sextet as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buffer >> bits) as u8);
+                buffer &= (1 << bits) - 1;
+            }
+        }
+        out
+    }
+}
+
+/// The XML spelling of `value`, which is what Apple's own tools read and what
+/// `defaults read` shows. Dictionary keys come out sorted.
+pub fn write_xml(value: &Value) -> Vec<u8> {
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n",
+    );
+    write_value(&mut out, value, 0);
+    out.push_str("</plist>\n");
+    out.into_bytes()
+}
+
+fn escape(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            // XML 1.0 cannot carry most control characters at all.
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
+            c => out.push(c),
+        }
+    }
+}
+
+fn write_value(out: &mut String, value: &Value, depth: usize) {
+    let pad = "\t".repeat(depth);
+    out.push_str(&pad);
+    match value {
+        Value::Bool(true) => out.push_str("<true/>\n"),
+        Value::Bool(false) => out.push_str("<false/>\n"),
+        Value::Integer(v) => out.push_str(&format!("<integer>{v}</integer>\n")),
+        Value::Uid(v) => out.push_str(&format!("<integer>{v}</integer>\n")),
+        Value::Real(v) if v.is_nan() => out.push_str("<real>nan</real>\n"),
+        Value::Real(v) if v.is_infinite() => out.push_str(match *v > 0.0 {
+            true => "<real>+infinity</real>\n",
+            false => "<real>-infinity</real>\n",
+        }),
+        Value::Real(v) => out.push_str(&format!("<real>{v:?}</real>\n")),
+        Value::String(text) => {
+            out.push_str("<string>");
+            escape(text, out);
+            out.push_str("</string>\n");
+        }
+        Value::Data(bytes) => {
+            out.push_str("<data>");
+            out.push_str(&base64_encode(bytes));
+            out.push_str("</data>\n");
+        }
+        Value::Date(interval) => {
+            out.push_str(&format!("<date>{}</date>\n", format_date(*interval)))
+        }
+        Value::Array(items) if items.is_empty() => out.push_str("<array/>\n"),
+        Value::Array(items) => {
+            out.push_str("<array>\n");
+            for item in items {
+                write_value(out, item, depth + 1);
+            }
+            out.push_str(&pad);
+            out.push_str("</array>\n");
+        }
+        Value::Dictionary(entries) if entries.is_empty() => out.push_str("<dict/>\n"),
+        Value::Dictionary(entries) => {
+            out.push_str("<dict>\n");
+            for (key, item) in entries {
+                out.push_str(&pad);
+                out.push_str("\t<key>");
+                escape(key, out);
+                out.push_str("</key>\n");
+                write_value(out, item, depth + 1);
+            }
+            out.push_str(&pad);
+            out.push_str("</dict>\n");
+        }
+        // Not property list values; written as an empty string rather than
+        // producing a document nothing can read.
+        Value::Null | Value::Unsupported(_) => out.push_str("<string></string>\n"),
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            match i <= chunk.len() {
+                true => out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char),
+                false => out.push('='),
+            }
+        }
+    }
+    out
+}
+
+fn format_date(interval: f64) -> String {
+    let total = interval.floor();
+    let seconds = total.rem_euclid(86400.0) as i64;
+    // Days since 1970-01-01, then civil-from-days.
+    let days = (total / 86400.0).floor() as i64 + 11323;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60
+    )
 }
 
 #[cfg(test)]
@@ -419,6 +620,30 @@ mod tests {
         let value = parse(&out).expect("a binary plist");
         assert_eq!(value.get("a"), Some(&Value::Integer(1)));
         assert_eq!(value.get("b").and_then(Value::as_str), Some("two"));
+    }
+
+    #[test]
+    fn written_xml_reads_back_the_same_value() {
+        let mut inner = BTreeMap::new();
+        inner.insert("t".to_owned(), Value::Bool(true));
+        let mut root = BTreeMap::new();
+        root.insert("s".to_owned(), Value::String("a<b>&\"c\"".into()));
+        root.insert("i".to_owned(), Value::Integer(-7));
+        root.insert("r".to_owned(), Value::Real(1.5));
+        root.insert("d".to_owned(), Value::Data(vec![0, 1, 2, 3, 254]));
+        root.insert("when".to_owned(), Value::Date(86400.0 * 365.0 + 61.0));
+        root.insert("a".to_owned(), Value::Array(vec![Value::Integer(1)]));
+        root.insert("empty".to_owned(), Value::Dictionary(BTreeMap::new()));
+        root.insert("none".to_owned(), Value::Array(Vec::new()));
+        root.insert("nested".to_owned(), Value::Dictionary(inner));
+        let value = Value::Dictionary(root);
+        assert_eq!(parse(&write_xml(&value)).expect("readable"), value);
+    }
+
+    #[test]
+    fn a_date_is_written_in_iso_8601() {
+        assert_eq!(format_date(0.0), "2001-01-01T00:00:00Z");
+        assert_eq!(xml::parse_date("2001-01-02T00:00:01Z"), Some(86401.0));
     }
 
     #[test]

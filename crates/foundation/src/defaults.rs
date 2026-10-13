@@ -1,22 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use corefoundation::base::CFTypeRef;
+use corefoundation::plist::Value;
+use corefoundation::preferences::{self, GLOBAL};
 use objc::object::Id;
 use objc::sel::Sel;
 
 use crate::define::{class_methods, methods};
 
-static VALUES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
-static LOADED: std::sync::Once = std::sync::Once::new();
-
-fn values() -> std::sync::MutexGuard<'static, BTreeMap<String, String>> {
-    LOADED.call_once(|| {
-        *VALUES.lock().unwrap_or_else(|e| e.into_inner()) = load();
-    });
-    VALUES.lock().unwrap_or_else(|e| e.into_inner())
-}
+// `NSUserDefaults`, over the per-domain plists in
+// `corefoundation::preferences`.
+//
+// An application's standard defaults are its bundle identifier's domain, a
+// suite is the domain of that name, and every lookup falls through the
+// argument domain, the application's domain, the added suites, `NSGlobalDomain`
+// and finally what was registered - the order Apple documents.
 
 /// Consume key/value pairs after argv[0]. Later occurrences override earlier ones.
 fn parse_arguments(arguments: &[std::ffi::OsString]) -> BTreeMap<String, String> {
@@ -39,31 +39,133 @@ fn argument_values() -> BTreeMap<String, String> {
     parse_arguments(&crate::processinfo::guest_arguments())
 }
 
-/// # Safety
-///
-/// `receiver` is one of our defaults objects; `key` is null or an NSString.
+/// What the running program files its preferences under: its bundle's
+/// identifier, or the executable's name for a program that is not in a bundle.
+fn application_identifier() -> Option<String> {
+    if let Some(identifier) = crate::bundle::main().and_then(|layout| layout.identifier()) {
+        return Some(identifier.to_owned());
+    }
+    let arguments = crate::processinfo::guest_arguments();
+    let executable = std::path::Path::new(arguments.first()?).file_name()?;
+    Some(executable.to_string_lossy().into_owned())
+}
+
 /// The suites `-addSuiteNamed:` put in each defaults object's search list,
 /// searched after its own domain, in the order they were added.
 static ADDED_SUITES: Mutex<BTreeMap<usize, Vec<String>>> = Mutex::new(BTreeMap::new());
 
-unsafe fn value_for_key(receiver: Id, key: Id) -> Option<String> {
-    let key = unsafe { key_text(key) }?;
-    if key == corefoundation::preferences::INTERFACE_STYLE {
-        return corefoundation::preferences::interface_style().map(str::to_owned);
+/// What each object's `-registerDefaults:` supplied. Volatile, and per object,
+/// as Apple's registration domain is: it is never written to a plist.
+static REGISTERED: Mutex<BTreeMap<usize, BTreeMap<String, Value>>> = Mutex::new(BTreeMap::new());
+
+/// `-setVolatileDomain:forName:`'s domains, other than the argument domain.
+static VOLATILE: Mutex<BTreeMap<String, BTreeMap<String, Value>>> = Mutex::new(BTreeMap::new());
+
+fn locked<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The key space `receiver` writes to and reads first.
+///
+/// # Safety
+///
+/// `receiver` must be null or an `NSUserDefaults` this module made.
+unsafe fn domain(receiver: Id) -> String {
+    let name = match receiver.is_null() {
+        true => None,
+        // SAFETY: a leaked `String` this module made, or null.
+        false => unsafe { (*(receiver as *const Defaults)).suite.as_ref() }.cloned(),
+    };
+    let name = match name {
+        Some(name) => preferences::canonical(&name),
+        None => preferences::current_application(),
+    };
+    migrate(&name);
+    name
+}
+
+/// The old flat store, `key\tvalue` per line. Suites were kept apart in it by a
+/// `"<suite>\x01"` prefix; an unprefixed key belonged to every application.
+fn legacy_path() -> PathBuf {
+    crate::host_home_directory().join("Library/Preferences/rosemary-defaults.tsv")
+}
+
+/// Carry what the flat store held into `domain`'s own plist, once.
+///
+/// Only when the domain has no plist yet, so a later launch never resurrects a
+/// key the program has since removed. The flat file is left alone: other
+/// applications may not have been launched since it was written, and it is
+/// theirs to import.
+fn migrate(domain: &str) {
+    static DONE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    if domain == GLOBAL
+        || !locked(&DONE)
+            .get_or_insert_with(Default::default)
+            .insert(domain.to_owned())
+        || preferences::exists(domain)
+    {
+        return;
     }
-    argument_values().remove(&key).or_else(|| {
-        let values = values();
-        values
-            .get(&format!("{}{key}", unsafe { prefix(receiver) }))
-            .or_else(|| {
-                let suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
-                suites
-                    .get(&(receiver as usize))?
-                    .iter()
-                    .find_map(|suite| values.get(&format!("{suite}\u{1}{key}")))
-            })
-            .cloned()
-    })
+    let Ok(text) = std::fs::read_to_string(legacy_path()) else {
+        return;
+    };
+    let standard = domain == preferences::current_application();
+    let prefix = format!("{domain}\u{1}");
+    let imported: BTreeMap<String, Value> = text
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter_map(|(key, value)| {
+            let key = match key.strip_prefix(&prefix) {
+                Some(key) => key,
+                None if standard && !key.contains('\u{1}') => key,
+                None => return None,
+            };
+            (key != corefoundation::preferences::INTERFACE_STYLE)
+                .then(|| (key.to_owned(), Value::String(value.to_owned())))
+        })
+        .collect();
+    if !imported.is_empty() {
+        preferences::replace(domain, imported);
+    }
+}
+
+/// The value `key` has for `receiver`, searching in Apple's order.
+///
+/// # Safety
+///
+/// `receiver` is an `NSUserDefaults` this module made.
+unsafe fn lookup(receiver: Id, key: &str) -> Option<Value> {
+    if key == corefoundation::preferences::INTERFACE_STYLE {
+        return corefoundation::preferences::interface_style().map(|s| Value::String(s.to_owned()));
+    }
+    if let Some(argument) = argument_values().remove(key) {
+        return Some(Value::String(argument));
+    }
+    // SAFETY: the caller's guarantee.
+    let own = unsafe { domain(receiver) };
+    if let Some(value) = preferences::value(&own, key) {
+        return Some(value);
+    }
+    let suites = locked(&ADDED_SUITES).get(&(receiver as usize)).cloned();
+    for suite in suites.into_iter().flatten() {
+        let suite = preferences::canonical(&suite);
+        migrate(&suite);
+        if let Some(value) = preferences::value(&suite, key) {
+            return Some(value);
+        }
+    }
+    if own != GLOBAL
+        && let Some(value) = preferences::value(GLOBAL, key)
+    {
+        return Some(value);
+    }
+    if let Some(value) = locked(&VOLATILE).values().find_map(|d| d.get(key)) {
+        return Some(value.clone());
+    }
+    locked(&REGISTERED)
+        .get(&(receiver as usize))
+        .and_then(|d| d.get(key))
+        .cloned()
 }
 
 unsafe extern "C" fn add_suite_named(receiver: Id, _sel: Sel, name: Id) {
@@ -71,7 +173,7 @@ unsafe extern "C" fn add_suite_named(receiver: Id, _sel: Sel, name: Id) {
     let Some(name) = (unsafe { key_text(name) }) else {
         return;
     };
-    let mut suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut suites = locked(&ADDED_SUITES);
     let list = suites.entry(receiver as usize).or_default();
     if !list.contains(&name) {
         list.push(name);
@@ -83,44 +185,9 @@ unsafe extern "C" fn remove_suite_named(receiver: Id, _sel: Sel, name: Id) {
     let Some(name) = (unsafe { key_text(name) }) else {
         return;
     };
-    let mut suites = ADDED_SUITES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(list) = suites.get_mut(&(receiver as usize)) {
+    if let Some(list) = locked(&ADDED_SUITES).get_mut(&(receiver as usize)) {
         list.retain(|suite| *suite != name);
     }
-}
-
-/// Under the directory macOS keeps preferences in, so a second launch finds
-/// what the first one wrote.
-fn store_path() -> PathBuf {
-    crate::host_home_directory().join("Library/Preferences/rosemary-defaults.tsv")
-}
-
-/// Tab-separated `key\tvalue`. A key or a value containing a tab or a newline
-/// is not written and not read: escaping would make the file unreadable by
-/// anything else, and no caller in this tree has stored one.
-fn load() -> BTreeMap<String, String> {
-    let Ok(text) = std::fs::read_to_string(store_path()) else {
-        return BTreeMap::new();
-    };
-    text.lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
-}
-
-fn save(values: &BTreeMap<String, String>) {
-    let mut text = String::new();
-    for (key, value) in values {
-        if key.contains(['\t', '\n']) || value.contains(['\t', '\n']) {
-            continue;
-        }
-        text.push_str(&format!("{key}\t{value}\n"));
-    }
-    let path = store_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, text);
 }
 
 /// An `NSUserDefaults`. The suite name is a leaked `String` rather than an
@@ -132,41 +199,7 @@ struct Defaults {
     suite: *mut String,
 }
 
-/// The prefix every key of `receiver` carries.
-///
-/// A suite is a **separate** key space on macOS - `-initWithSuiteName:` is how
-/// an app reads the defaults of an app group rather than its own - so a flat
-/// store has to keep them apart or one suite's `"enabled"` is another's. The
-/// separator is a byte no key contains, so no prefixed key can collide with an
-/// unprefixed one.
-///
-/// # Safety
-///
-/// `receiver` must be null or an `NSUserDefaults` this module made.
-unsafe fn prefix(receiver: Id) -> String {
-    if receiver.is_null() {
-        return String::new();
-    }
-    let suite = unsafe { (*(receiver as *const Defaults)).suite };
-    if suite.is_null() {
-        return String::new();
-    }
-    // SAFETY: a leaked `String` this module made.
-    format!("{}\u{1}", unsafe { &*suite })
-}
-
-/// The stored key `key` names when `receiver` asks for it.
-///
-/// # Safety
-///
-/// `receiver` is an `NSUserDefaults` this module made; `key` is null or an
-/// `NSString`.
-unsafe fn scoped(receiver: Id, key: Id) -> Option<String> {
-    let key = unsafe { key_text(key) }?;
-    Some(format!("{}{key}", unsafe { prefix(receiver) }))
-}
-
-/// `-initWithSuiteName:`, which opens another key space through the same store.
+/// `-initWithSuiteName:`, which opens another domain through the same store.
 ///
 /// A nil name is `+standardUserDefaults`'s own space, which is Apple's
 /// behaviour and what a caller passing a nil group identifier means.
@@ -216,132 +249,183 @@ unsafe fn key_text(key: Id) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// `-objectForKey:`, which answers a string.
-///
-/// A string for everything, including what was stored as a number: a caller
-/// that wants a number asks `-integerForKey:` or `-boolForKey:`, and one that
-/// asks for the object and then sends it `-intValue` gets the right answer from
-/// an `NSString` too.
-unsafe extern "C" fn object_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
-    // SAFETY: an `NSUserDefaults` this module made, and null or an `NSString`.
-    let Some(value) = (unsafe { value_for_key(receiver, key) }) else {
+/// `value` as an autoreleased object, or nil.
+fn autoreleased(value: Option<Value>) -> Id {
+    let Some(object) = value.and_then(|v| corefoundation::propertylist::object_from_value(&v))
+    else {
         return std::ptr::null_mut();
     };
-    let string = crate::string::from_str(&value);
-    // SAFETY: a fresh object.
-    unsafe { corefoundation::api::CFAutorelease(string as CFTypeRef) as Id }
+    // SAFETY: a fresh object this call owns.
+    unsafe { corefoundation::api::CFAutorelease(object) as Id }
 }
 
-unsafe extern "C" fn set_object_for_key(receiver: Id, _sel: Sel, value: Id, key: Id) {
-    // SAFETY: as [`object_for_key`].
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return;
-    };
-    let mut values = values();
-    // Apple's `-setObject:nil forKey:` is a removal, not a store of nil.
-    match value.is_null() {
-        true => {
-            values.remove(&key);
-        }
-        false => {
-            // SAFETY: whatever the caller stored, read as a string - which is
-            // what `-description` would give for a number or a boolean too.
-            let text = unsafe { crate::string::bytes(value) };
-            values.insert(key, String::from_utf8_lossy(&text).into_owned());
-        }
-    }
-    save(&values);
-}
-
-unsafe extern "C" fn remove_object_for_key(receiver: Id, _sel: Sel, key: Id) {
-    // SAFETY: as [`object_for_key`].
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return;
-    };
-    let mut values = values();
-    values.remove(&key);
-    save(&values);
-}
-
-/// The stored value as a number, or zero.
-///
-/// `"YES"` and `"true"` count as one, because `-setBool:forKey:` stores the
-/// boolean's description and a later `-integerForKey:` on the same key has to
-/// agree with the `-boolForKey:` that would read it.
-fn number_for(receiver: Id, key: Id) -> i64 {
-    // SAFETY: as [`object_for_key`].
-    let Some(value) = (unsafe { value_for_key(receiver, key) }) else {
-        return 0;
-    };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "yes" | "true" => 1,
-        "no" | "false" => 0,
-        other => other.parse().unwrap_or(0),
+/// What `value` says as text, for the getters that coerce.
+fn text_of(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Integer(v) => Some(v.to_string()),
+        Value::Real(v) => Some(v.to_string()),
+        Value::Bool(v) => Some(u8::from(*v).to_string()),
+        _ => None,
     }
 }
 
-unsafe extern "C" fn bool_for_key(receiver: Id, _sel: Sel, key: Id) -> u8 {
-    u8::from(number_for(receiver, key) != 0)
+/// `value` as a number: a boolean is one or zero, and `"YES"` and `"true"`
+/// count as one, because a string-typed value written by an older build must
+/// still read the way `-boolForKey:` would have read it.
+fn number_of(value: &Value) -> Option<f64> {
+    match value {
+        Value::Bool(v) => Some(f64::from(u8::from(*v))),
+        Value::Integer(v) => Some(*v as f64),
+        Value::Real(v) => Some(*v),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "yes" | "true" => Some(1.0),
+            "no" | "false" => Some(0.0),
+            other => other.parse().ok(),
+        },
+        _ => None,
+    }
 }
 
-unsafe extern "C" fn integer_for_key(receiver: Id, _sel: Sel, key: Id) -> i64 {
-    number_for(receiver, key)
+/// `-objectForKey:`.
+unsafe extern "C" fn object_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    // SAFETY: an `NSUserDefaults` this module made, and null or an `NSString`.
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return std::ptr::null_mut();
+    };
+    autoreleased(unsafe { lookup(receiver, &key) })
 }
 
-unsafe extern "C" fn double_for_key(receiver: Id, _sel: Sel, key: Id) -> f64 {
+/// `-stringForKey:`, which coerces a number to its text as Apple's does.
+unsafe extern "C" fn string_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
     // SAFETY: as [`object_for_key`].
-    unsafe { value_for_key(receiver, key) }
-        .as_deref()
-        .and_then(|v| v.trim().parse().ok())
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return std::ptr::null_mut();
+    };
+    let text = unsafe { lookup(receiver, &key) }.as_ref().and_then(text_of);
+    autoreleased(text.map(Value::String))
+}
+
+/// `-arrayForKey:`, which is nil for a value of any other type.
+unsafe extern "C" fn array_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    typed(receiver, key, |v| matches!(v, Value::Array(_)))
+}
+
+unsafe extern "C" fn dictionary_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    typed(receiver, key, |v| matches!(v, Value::Dictionary(_)))
+}
+
+unsafe extern "C" fn data_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    typed(receiver, key, |v| matches!(v, Value::Data(_)))
+}
+
+unsafe extern "C" fn string_array_for_key(receiver: Id, _sel: Sel, key: Id) -> Id {
+    typed(receiver, key, |v| match v {
+        Value::Array(items) => items.iter().all(|i| matches!(i, Value::String(_))),
+        _ => false,
+    })
+}
+
+fn typed(receiver: Id, key: Id, accept: impl Fn(&Value) -> bool) -> Id {
+    // SAFETY: as [`object_for_key`].
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return std::ptr::null_mut();
+    };
+    autoreleased(unsafe { lookup(receiver, &key) }.filter(accept))
+}
+
+fn number_for(receiver: Id, key: Id) -> f64 {
+    // SAFETY: as [`object_for_key`].
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return 0.0;
+    };
+    unsafe { lookup(receiver, &key) }
+        .as_ref()
+        .and_then(number_of)
         .unwrap_or(0.0)
 }
 
+unsafe extern "C" fn bool_for_key(receiver: Id, _sel: Sel, key: Id) -> u8 {
+    u8::from(number_for(receiver, key) != 0.0)
+}
+
+unsafe extern "C" fn integer_for_key(receiver: Id, _sel: Sel, key: Id) -> i64 {
+    // SAFETY: as [`object_for_key`].
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return 0;
+    };
+    // An integer is read as one, so a value past 2^53 is not rounded.
+    match unsafe { lookup(receiver, &key) } {
+        Some(Value::Integer(v)) => v,
+        Some(Value::String(text)) if text.trim().parse::<i64>().is_ok() => {
+            text.trim().parse().unwrap_or(0)
+        }
+        other => other.as_ref().and_then(number_of).unwrap_or(0.0) as i64,
+    }
+}
+
+unsafe extern "C" fn double_for_key(receiver: Id, _sel: Sel, key: Id) -> f64 {
+    number_for(receiver, key)
+}
+
+unsafe extern "C" fn float_for_key(receiver: Id, _sel: Sel, key: Id) -> f32 {
+    number_for(receiver, key) as f32
+}
+
+/// Write `value` to the receiver's own domain, or remove the key for `None`.
+fn store(receiver: Id, key: Id, value: Option<Value>) {
+    // SAFETY: as [`object_for_key`].
+    let Some(key) = (unsafe { key_text(key) }) else {
+        return;
+    };
+    let domain = unsafe { domain(receiver) };
+    preferences::set_value(&domain, &key, value);
+}
+
+unsafe extern "C" fn set_object_for_key(receiver: Id, _sel: Sel, value: Id, key: Id) {
+    // Apple's `-setObject:nil forKey:` is a removal, not a store of nil.
+    if value.is_null() {
+        return store(receiver, key, None);
+    }
+    // SAFETY: whatever the caller stored.
+    match unsafe { corefoundation::propertylist::value_of(value as CFTypeRef) } {
+        Some(value) => store(receiver, key, Some(value)),
+        None => {
+            // SAFETY: null or an `NSString`.
+            let name = unsafe { key_text(key) }.unwrap_or_default();
+            eprintln!(
+                "NSUserDefaults: {name:?} was not set: the value is not a property list type"
+            );
+        }
+    }
+}
+
+unsafe extern "C" fn remove_object_for_key(receiver: Id, _sel: Sel, key: Id) {
+    store(receiver, key, None);
+}
+
 unsafe extern "C" fn set_bool_for_key(receiver: Id, _sel: Sel, value: u8, key: Id) {
-    store(
-        receiver,
-        key,
-        match value != 0 {
-            true => "YES",
-            false => "NO",
-        },
-    );
+    store(receiver, key, Some(Value::Bool(value != 0)));
 }
 
 unsafe extern "C" fn set_integer_for_key(receiver: Id, _sel: Sel, value: i64, key: Id) {
-    store(receiver, key, &value.to_string());
+    store(receiver, key, Some(Value::Integer(value)));
 }
 
 unsafe extern "C" fn set_double_for_key(receiver: Id, _sel: Sel, value: f64, key: Id) {
-    store(receiver, key, &value.to_string());
+    store(receiver, key, Some(Value::Real(value)));
 }
 
-fn store(receiver: Id, key: Id, value: &str) {
-    // SAFETY: as [`object_for_key`].
-    let Some(key) = (unsafe { scoped(receiver, key) }) else {
-        return;
-    };
-    let mut values = values();
-    values.insert(key, value.to_string());
-    save(&values);
+unsafe extern "C" fn set_float_for_key(receiver: Id, _sel: Sel, value: f32, key: Id) {
+    store(receiver, key, Some(Value::Real(f64::from(value))));
 }
 
-/// `-stringForKey:` is `-objectForKey:` here, because everything is stored as
-/// one.
-unsafe extern "C" fn string_for_key(receiver: Id, sel: Sel, key: Id) -> Id {
-    // SAFETY: the same arguments.
-    unsafe { object_for_key(receiver, sel, key) }
-}
-
-/// This string-backed defaults store has no values whose persisted type is an
-/// array, a dictionary or data, so each of those getters answers nil.
-unsafe extern "C" fn string_array_for_key(_receiver: Id, _sel: Sel, _key: Id) -> Id {
-    std::ptr::null_mut()
-}
-
-/// `-synchronize`, which has already happened: every write goes to disk as it
-/// is made, so there is nothing deferred to flush. `YES`, because that is what
-/// a caller checks and it is true.
-unsafe extern "C" fn synchronize(_receiver: Id, _sel: Sel) -> u8 {
+/// `-synchronize`: every write is already in its file, so this picks up what
+/// another process wrote. `YES`, because that is what a caller checks.
+unsafe extern "C" fn synchronize(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: an `NSUserDefaults` this module made.
+    let domain = unsafe { domain(receiver) };
+    corefoundation::preferences::contents(&domain);
     1
 }
 
@@ -353,111 +437,167 @@ unsafe extern "C" fn synchronize(_receiver: Id, _sel: Sel) -> u8 {
 /// change by changing its own registration.
 unsafe extern "C" fn register_defaults(receiver: Id, _sel: Sel, registration: Id) {
     // SAFETY: null or an `NSDictionary` this tree made.
-    let Some(dictionary) =
-        (unsafe { corefoundation::collections::dictionary(registration as CFTypeRef) })
+    let Some(Value::Dictionary(entries)) =
+        (unsafe { corefoundation::propertylist::value_of(registration as CFTypeRef) })
     else {
         return;
     };
-    let mut values = values();
-    for (key, value) in dictionary.entries.iter() {
-        // SAFETY: the dictionary's own keys and values.
-        let (Some(key), value) = (unsafe { key_text(*key as Id) }, unsafe {
-            crate::string::bytes(*value as Id)
-        }) else {
-            continue;
-        };
-        // SAFETY: an `NSUserDefaults` this module made.
-        values
-            .entry(format!("{}{key}", unsafe { prefix(receiver) }))
-            .or_insert_with(|| String::from_utf8_lossy(&value).into_owned());
-    }
+    locked(&REGISTERED)
+        .entry(receiver as usize)
+        .or_default()
+        .extend(entries);
 }
 
 /// An empty dictionary, autoreleased.
 fn empty_dictionary() -> Id {
-    let dictionary = corefoundation::collections::new_dictionary(
-        &[],
-        corefoundation::callbacks::Policy::from_key_callbacks(),
-        corefoundation::callbacks::Policy::from_type_callbacks(),
-        false,
-    );
-    // SAFETY: a fresh dictionary this call owns.
-    unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
+    autoreleased(Some(Value::Dictionary(BTreeMap::new())))
 }
 
-/// The argument domain is volatile and never enters the persistent store.
+fn dictionary_of(values: BTreeMap<String, Value>) -> Id {
+    autoreleased(Some(Value::Dictionary(values)))
+}
+
+/// The argument domain is volatile and never enters a plist.
 unsafe extern "C" fn volatile_domain_for_name(_receiver: Id, _sel: Sel, name: Id) -> Id {
     // SAFETY: the domain name is null or an NSString.
-    if unsafe { key_text(name) }.as_deref() == Some("NSArgumentDomain") {
-        dictionary_from_values(&argument_values())
-    } else {
-        empty_dictionary()
+    let Some(name) = (unsafe { key_text(name) }) else {
+        return empty_dictionary();
+    };
+    if name == "NSArgumentDomain" {
+        let values = argument_values()
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect();
+        return dictionary_of(values);
+    }
+    match locked(&VOLATILE).get(&name) {
+        Some(values) => dictionary_of(values.clone()),
+        None => empty_dictionary(),
     }
 }
 
-/// Expose the system preference in the global persistent domain.
+/// The domain as it is on disk, with the system's own preference for the
+/// global one.
 unsafe extern "C" fn domain_for_name(_receiver: Id, _sel: Sel, name: Id) -> Id {
-    let mut domain = BTreeMap::new();
-    if unsafe { key_text(name) }.as_deref() == Some("NSGlobalDomain") {
-        add_interface_style(&mut domain);
+    // SAFETY: the domain name is null or an NSString.
+    let Some(name) = (unsafe { key_text(name) }) else {
+        return empty_dictionary();
+    };
+    let domain = preferences::canonical(&name);
+    migrate(&domain);
+    let mut values = preferences::contents(&domain);
+    if domain == GLOBAL {
+        add_interface_style(&mut values);
     }
-    dictionary_from_values(&domain)
+    dictionary_of(values)
 }
 
-/// `-dictionaryRepresentation`, which is every key this store has.
-unsafe extern "C" fn dictionary_representation(_receiver: Id, _sel: Sel) -> Id {
-    let mut domain = values().clone();
-    add_interface_style(&mut domain);
-    dictionary_from_values(&domain)
+/// `-dictionaryRepresentation`: what a lookup could find, with the nearer
+/// domain winning.
+unsafe extern "C" fn dictionary_representation(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSUserDefaults` this module made.
+    let own = unsafe { domain(receiver) };
+    let mut merged = BTreeMap::new();
+    if let Some(registered) = locked(&REGISTERED).get(&(receiver as usize)) {
+        merged.extend(registered.clone());
+    }
+    for values in locked(&VOLATILE).values() {
+        merged.extend(values.clone());
+    }
+    merged.extend(preferences::contents(GLOBAL));
+    let suites = locked(&ADDED_SUITES).get(&(receiver as usize)).cloned();
+    for suite in suites.into_iter().flatten().rev() {
+        let suite = preferences::canonical(&suite);
+        migrate(&suite);
+        merged.extend(preferences::contents(&suite));
+    }
+    if own != GLOBAL {
+        merged.extend(preferences::contents(&own));
+    }
+    for (key, value) in argument_values() {
+        merged.insert(key, Value::String(value));
+    }
+    add_interface_style(&mut merged);
+    dictionary_of(merged)
 }
 
-fn add_interface_style(values: &mut BTreeMap<String, String>) {
+fn add_interface_style(values: &mut BTreeMap<String, Value>) {
     values.remove(corefoundation::preferences::INTERFACE_STYLE);
     if let Some(style) = corefoundation::preferences::interface_style() {
         values.insert(
             corefoundation::preferences::INTERFACE_STYLE.to_owned(),
-            style.to_owned(),
+            Value::String(style.to_owned()),
         );
     }
 }
 
-fn dictionary_from_values(values: &BTreeMap<String, String>) -> Id {
-    let pairs: Vec<(CFTypeRef, CFTypeRef)> = values
-        .iter()
-        .map(|(key, value)| {
-            (
-                crate::string::from_str(key) as CFTypeRef,
-                crate::string::from_str(value) as CFTypeRef,
-            )
-        })
-        .collect();
-    let dictionary = corefoundation::collections::new_dictionary(
-        &pairs,
-        corefoundation::callbacks::Policy::from_key_callbacks(),
-        corefoundation::callbacks::Policy::from_type_callbacks(),
-        false,
-    );
-    for (key, value) in pairs {
-        // SAFETY: the dictionary retained both; these are this call's own
-        // references.
-        unsafe {
-            corefoundation::api::CFRelease(key);
-            corefoundation::api::CFRelease(value);
-        }
-    }
-    // SAFETY: a fresh dictionary this call owns.
-    unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
+/// `-setPersistentDomain:forName:`, which makes the domain's plist exactly that
+/// dictionary.
+unsafe extern "C" fn set_persistent_domain(_receiver: Id, _sel: Sel, domain: Id, name: Id) {
+    // SAFETY: null or an `NSDictionary` and an `NSString`.
+    let (Some(name), Some(Value::Dictionary(values))) = (unsafe { key_text(name) }, unsafe {
+        corefoundation::propertylist::value_of(domain as CFTypeRef)
+    }) else {
+        return;
+    };
+    let domain = preferences::canonical(&name);
+    migrate(&domain);
+    preferences::replace(&domain, values);
 }
 
-/// `-setVolatileDomain:forName:`, `-setPersistentDomain:forName:` and
-/// `-removePersistentDomainForName:`.
-///
-/// Domain mutation is not implemented; the argument domain comes from guest argv.
-unsafe extern "C" fn set_domain(_receiver: Id, _sel: Sel, _domain: Id, _name: Id) {}
+unsafe extern "C" fn remove_persistent_domain(_receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: null or an `NSString`.
+    let Some(name) = (unsafe { key_text(name) }) else {
+        return;
+    };
+    let domain = preferences::canonical(&name);
+    // Migrated first so the flat store cannot bring it back on a later read.
+    migrate(&domain);
+    preferences::replace(&domain, BTreeMap::new());
+}
 
-unsafe extern "C" fn remove_domain(_receiver: Id, _sel: Sel, _name: Id) {}
+unsafe extern "C" fn set_volatile_domain(_receiver: Id, _sel: Sel, domain: Id, name: Id) {
+    // SAFETY: null or an `NSDictionary` and an `NSString`.
+    let (Some(name), Some(Value::Dictionary(values))) = (unsafe { key_text(name) }, unsafe {
+        corefoundation::propertylist::value_of(domain as CFTypeRef)
+    }) else {
+        return;
+    };
+    // The argument domain is the process's own argv and is not replaceable.
+    if name != "NSArgumentDomain" {
+        locked(&VOLATILE).insert(name, values);
+    }
+}
+
+unsafe extern "C" fn remove_volatile_domain(_receiver: Id, _sel: Sel, name: Id) {
+    // SAFETY: null or an `NSString`.
+    if let Some(name) = unsafe { key_text(name) } {
+        locked(&VOLATILE).remove(&name);
+    }
+}
+
+/// `-persistentDomainNames`: the plists under the preferences directory.
+unsafe extern "C" fn persistent_domain_names(_receiver: Id, _sel: Sel) -> Id {
+    let directory = preferences::path_of("x").parent().map(PathBuf::from);
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(directory.unwrap_or_default())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if let Some(name) = file.strip_suffix(".plist") {
+            names.push(Value::String(match name {
+                GLOBAL => "NSGlobalDomain".to_owned(),
+                other => other.to_owned(),
+            }));
+        }
+    }
+    autoreleased(Some(Value::Array(names)))
+}
 
 pub(crate) fn install() {
+    corefoundation::preferences::set_application_provider(application_identifier);
     let class =
         corefoundation::base::register(c"NSUserDefaults", None, size_of::<Defaults>(), false);
     class_methods!(class, {
@@ -469,17 +609,19 @@ pub(crate) fn install() {
         "valueForKeyPath:" => object_for_key, c"@24@0:8@16";
         "stringForKey:" => string_for_key, c"@24@0:8@16";
         "stringArrayForKey:" => string_array_for_key, c"@24@0:8@16";
-        "arrayForKey:" => string_array_for_key, c"@24@0:8@16";
-        "dictionaryForKey:" => string_array_for_key, c"@24@0:8@16";
-        "dataForKey:" => string_array_for_key, c"@24@0:8@16";
+        "arrayForKey:" => array_for_key, c"@24@0:8@16";
+        "dictionaryForKey:" => dictionary_for_key, c"@24@0:8@16";
+        "dataForKey:" => data_for_key, c"@24@0:8@16";
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
         "boolForKey:" => bool_for_key, c"c24@0:8@16";
         "integerForKey:" => integer_for_key, c"q24@0:8@16";
         "doubleForKey:" => double_for_key, c"d24@0:8@16";
+        "floatForKey:" => float_for_key, c"f24@0:8@16";
         "setBool:forKey:" => set_bool_for_key, c"v28@0:8c16@20";
         "setInteger:forKey:" => set_integer_for_key, c"v32@0:8q16@24";
         "setDouble:forKey:" => set_double_for_key, c"v32@0:8d16@24";
+        "setFloat:forKey:" => set_float_for_key, c"v28@0:8f16@20";
         "synchronize" => synchronize, c"c16@0:8";
         "registerDefaults:" => register_defaults, c"v24@0:8@16";
         "initWithSuiteName:" => init_with_suite_name, c"@24@0:8@16";
@@ -487,33 +629,44 @@ pub(crate) fn install() {
         "removeSuiteNamed:" => remove_suite_named, c"v24@0:8@16";
         "volatileDomainForName:" => volatile_domain_for_name, c"@24@0:8@16";
         "persistentDomainForName:" => domain_for_name, c"@24@0:8@16";
+        "persistentDomainNames" => persistent_domain_names, c"@16@0:8";
         "dictionaryRepresentation" => dictionary_representation, c"@16@0:8";
-        "setVolatileDomain:forName:" => set_domain, c"v32@0:8@16@24";
-        "setPersistentDomain:forName:" => set_domain, c"v32@0:8@16@24";
-        "removePersistentDomainForName:" => remove_domain, c"v24@0:8@16";
-        "removeVolatileDomainForName:" => remove_domain, c"v24@0:8@16";
+        "setVolatileDomain:forName:" => set_volatile_domain, c"v32@0:8@16@24";
+        "setPersistentDomain:forName:" => set_persistent_domain, c"v32@0:8@16@24";
+        "removePersistentDomainForName:" => remove_persistent_domain, c"v24@0:8@16";
+        "removeVolatileDomainForName:" => remove_volatile_domain, c"v24@0:8@16";
     });
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    /// `-setBool:` then `-integerForKey:` has to agree, which is the whole
-    /// reason the value is stored as text and read by conversion.
     #[test]
-    fn a_boolean_reads_back_as_a_number() {
-        assert_eq!(convert("YES"), 1);
-        assert_eq!(convert("true"), 1);
-        assert_eq!(convert("NO"), 0);
-        assert_eq!(convert("42"), 42);
-        assert_eq!(convert("not a number"), 0);
+    fn a_string_boolean_reads_as_a_number() {
+        assert_eq!(number_of(&Value::String("YES".into())), Some(1.0));
+        assert_eq!(number_of(&Value::String("true".into())), Some(1.0));
+        assert_eq!(number_of(&Value::String("NO".into())), Some(0.0));
+        assert_eq!(number_of(&Value::String("42".into())), Some(42.0));
+        assert_eq!(number_of(&Value::String("not a number".into())), None);
+        assert_eq!(number_of(&Value::Bool(true)), Some(1.0));
     }
 
-    fn convert(stored: &str) -> i64 {
-        match stored.trim().to_ascii_lowercase().as_str() {
-            "yes" | "true" => 1,
-            "no" | "false" => 0,
-            other => other.parse().unwrap_or(0),
-        }
+    #[test]
+    fn a_number_reads_as_text() {
+        assert_eq!(text_of(&Value::Integer(7)).as_deref(), Some("7"));
+        assert_eq!(text_of(&Value::Bool(false)).as_deref(), Some("0"));
+        assert_eq!(text_of(&Value::Array(Vec::new())), None);
+    }
+
+    #[test]
+    fn arguments_after_the_executable_become_values() {
+        let args: Vec<std::ffi::OsString> = ["/Guest", "-a", "1", "positional", "-a", "2"]
+            .map(Into::into)
+            .into();
+        assert_eq!(
+            parse_arguments(&args).get("a").map(String::as_str),
+            Some("2")
+        );
     }
 }

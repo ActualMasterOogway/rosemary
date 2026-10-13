@@ -1,9 +1,6 @@
 // The C spellings are the interface, as they are in `api`.
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use crate::base::CFTypeRef;
 
 pub const INTERFACE_STYLE: &str = "AppleInterfaceStyle";
@@ -17,18 +14,208 @@ pub fn interface_style() -> Option<&'static str> {
     (sdl3::video::system_theme() == sdl3::video::SystemTheme::Dark).then_some("Dark")
 }
 
-/// One domain's keys, each holding a retained object as an address.
-///
-/// Keyed by text rather than by object, because a caller builds the key string
-/// afresh on each call and two equal strings are two objects. The value is an
-/// address rather than a `CFTypeRef` so the table can be a `static`: a raw
-/// pointer is not `Send`, and what is stored here is owned by this module for
-/// the life of the process rather than shared with a thread.
-type Domain = HashMap<String, usize>;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime};
 
-fn store() -> &'static Mutex<HashMap<String, Domain>> {
-    static STORE: std::sync::OnceLock<Mutex<HashMap<String, Domain>>> = std::sync::OnceLock::new();
+use crate::plist::Value;
+
+/// Where one process's preferences live, and what they are: a plist per
+/// domain, under `~/Library/Preferences`, which is what `defaults`, `plutil`
+/// and a program reading its own file all expect.
+///
+/// Every domain is its own file, so two applications' `"enabled"` are two
+/// keys. `NSGlobalDomain` is `.GlobalPreferences.plist` and is the one domain
+/// every application is also searched against.
+pub const GLOBAL: &str = ".GlobalPreferences";
+
+/// How often a domain's file is looked at again for a change another process
+/// made. There is no `cfprefsd` to push one.
+const RECHECK: std::time::Duration = std::time::Duration::from_millis(250);
+
+type ApplicationProvider = fn() -> Option<String>;
+
+static APPLICATION: OnceLock<ApplicationProvider> = OnceLock::new();
+static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// How `kCFPreferencesCurrentApplication` is named: the main bundle's
+/// identifier, which only Foundation can read. Set once; later calls are
+/// ignored.
+pub fn set_application_provider(provider: ApplicationProvider) {
+    let _ = APPLICATION.set(provider);
+}
+
+/// Keep the plists in `directory` instead of `~/Library/Preferences`, for a
+/// test or an embedder that must not touch the user's own.
+pub fn set_directory(directory: PathBuf) {
+    let _ = DIRECTORY.set(directory);
+}
+
+/// The identifier the running program files its preferences under.
+pub fn current_application() -> String {
+    APPLICATION
+        .get()
+        .and_then(|provider| provider())
+        .unwrap_or_else(|| "rosemary".to_owned())
+}
+
+/// The stored name of `domain`: the three global spellings are one, and the
+/// current-application constant is the running program.
+pub fn canonical(domain: &str) -> String {
+    match domain {
+        ANY | "NSGlobalDomain" | GLOBAL | "kCFPreferencesAnyApplication" => GLOBAL.to_owned(),
+        "kCFPreferencesCurrentApplication" => current_application(),
+        other => other.to_owned(),
+    }
+}
+
+/// The host file for a canonical domain. An absolute path names a plist
+/// directly, as it does for Apple's `CFPreferences`.
+pub fn path_of(domain: &str) -> PathBuf {
+    if domain.starts_with('/') {
+        let base = domain.strip_suffix(".plist").unwrap_or(domain);
+        return prefix::ns::host_path(&format!("{base}.plist"));
+    }
+    // A name never climbs out of the preferences directory.
+    let name = domain.replace('/', "_");
+    match DIRECTORY.get() {
+        Some(directory) => directory.join(format!("{name}.plist")),
+        None => prefix::ns::host_path(&format!(
+            "{}/Library/Preferences/{name}.plist",
+            prefix::ns::home()
+        )),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    length: u64,
+}
+
+fn stamp(path: &std::path::Path) -> Option<Stamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(Stamp {
+        modified: metadata.modified().ok()?,
+        length: metadata.len(),
+    })
+}
+
+struct Loaded {
+    values: BTreeMap<String, Value>,
+    stamp: Option<Stamp>,
+    checked: Option<Instant>,
+}
+
+fn read_file(path: &std::path::Path) -> BTreeMap<String, Value> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    match crate::plist::parse(&bytes) {
+        Ok(Value::Dictionary(values)) => values,
+        // A file that is not a dictionary is not a preferences file; it is
+        // left as it is until something writes the domain.
+        _ => BTreeMap::new(),
+    }
+}
+
+impl Loaded {
+    fn refresh(&mut self, path: &std::path::Path, force: bool) {
+        let due = self.checked.is_none_or(|at| at.elapsed() >= RECHECK);
+        if !force && !due {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        let now = stamp(path);
+        if now != self.stamp || self.stamp.is_none() {
+            self.values = read_file(path);
+            self.stamp = now;
+        }
+    }
+}
+
+fn store() -> &'static std::sync::Mutex<HashMap<String, Loaded>> {
+    static STORE: OnceLock<std::sync::Mutex<HashMap<String, Loaded>>> = OnceLock::new();
     STORE.get_or_init(Default::default)
+}
+
+fn with_loaded<R>(domain: &str, force: bool, f: impl FnOnce(&mut Loaded, &PathBuf) -> R) -> R {
+    let domain = canonical(domain);
+    let path = path_of(&domain);
+    let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
+    let loaded = store.entry(domain).or_insert_with(|| Loaded {
+        values: BTreeMap::new(),
+        stamp: None,
+        checked: None,
+    });
+    loaded.refresh(&path, force);
+    f(loaded, &path)
+}
+
+/// Write the domain through a temporary file and a rename, so a reader never
+/// sees half a plist and a crash leaves the old one.
+fn persist(loaded: &mut Loaded, path: &std::path::Path) {
+    if loaded.values.is_empty() && loaded.stamp.is_none() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let bytes = crate::plist::write_xml(&Value::Dictionary(loaded.values.clone()));
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    if std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, path).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    loaded.stamp = stamp(path);
+    loaded.checked = Some(Instant::now());
+}
+
+/// The value `key` holds in exactly `domain`.
+pub fn value(domain: &str, key: &str) -> Option<Value> {
+    with_loaded(domain, false, |loaded, _| loaded.values.get(key).cloned())
+}
+
+/// Store `value` under `key` in `domain`, or remove the key for `None`. The
+/// file is up to date when this returns.
+pub fn set_value(domain: &str, key: &str, value: Option<Value>) {
+    with_loaded(domain, true, |loaded, path| {
+        let changed = match value {
+            Some(value) => loaded.values.insert(key.to_owned(), value.clone()) != Some(value),
+            None => loaded.values.remove(key).is_some(),
+        };
+        if changed {
+            persist(loaded, path);
+        }
+    });
+}
+
+/// Every key `domain` holds, with its value.
+pub fn contents(domain: &str) -> BTreeMap<String, Value> {
+    with_loaded(domain, false, |loaded, _| loaded.values.clone())
+}
+
+/// Make `domain` hold exactly `values`; an empty map removes the file.
+pub fn replace(domain: &str, values: BTreeMap<String, Value>) {
+    with_loaded(domain, true, |loaded, path| {
+        if values.is_empty() {
+            let _ = std::fs::remove_file(path);
+            loaded.values.clear();
+            loaded.stamp = None;
+            return;
+        }
+        loaded.values = values;
+        // A file that was not there is written, rather than skipped as empty.
+        persist(loaded, path);
+    });
+}
+
+/// Whether a plist for `domain` has been written, by this process or another.
+pub fn exists(domain: &str) -> bool {
+    path_of(&canonical(domain)).exists()
 }
 
 /// The text of a `CFStringRef` argument, or `None` for one that is not a string.
@@ -53,7 +240,14 @@ unsafe fn text(value: CFTypeRef) -> Option<String> {
 ///
 /// `application` is null or a `CFStringRef`.
 unsafe fn domain_of(application: CFTypeRef) -> String {
-    unsafe { text(application) }.unwrap_or_else(|| ANY.to_string())
+    canonical(&unsafe { text(application) }.unwrap_or_else(|| ANY.to_string()))
+}
+
+/// The retained object for `value`, or null.
+fn object_of(value: Option<Value>) -> CFTypeRef {
+    value
+        .and_then(|v| crate::propertylist::object_from_value(&v))
+        .unwrap_or(std::ptr::null())
 }
 
 /// The value Apple's CoreFoundation gives `kCFPreferencesAnyApplication`,
@@ -117,7 +311,8 @@ pub fn data_symbols() -> Vec<(String, u64)> {
 /// `CFPropertyListRef CFPreferencesCopyAppValue(CFStringRef, CFStringRef)`
 ///
 /// Copy, so the caller owns a reference - which is what the name says and what
-/// its `CFRelease` expects.
+/// its `CFRelease` expects. The application's own domain is searched first and
+/// the global one after it, as Apple's is.
 ///
 /// # Safety
 ///
@@ -134,18 +329,17 @@ pub unsafe extern "C" fn CFPreferencesCopyAppValue(
             crate::string::from_bytes(value.as_bytes(), false)
         });
     }
-    let store = store().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(value) = store.get(&domain).and_then(|d| d.get(&key)).copied() else {
-        return std::ptr::null();
-    };
-    let value = value as CFTypeRef;
-    // SAFETY: an object this module owns a reference to.
-    unsafe { crate::api::CFRetain(value) }
+    let found = value(&domain, &key).or_else(|| match domain == GLOBAL {
+        true => None,
+        false => value(GLOBAL, &key),
+    });
+    object_of(found)
 }
 
 /// `void CFPreferencesSetAppValue(CFStringRef, CFPropertyListRef, CFStringRef)`
 ///
 /// A null value removes the key, which is how a program clears a setting.
+/// Something a property list cannot hold is refused by name and not stored.
 ///
 /// # Safety
 ///
@@ -158,24 +352,25 @@ pub unsafe extern "C" fn CFPreferencesSetAppValue(
     let (Some(key), domain) = (unsafe { text(key) }, unsafe { domain_of(application) }) else {
         return;
     };
-    let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
-    let domain = store.entry(domain).or_default();
-    if let Some(previous) = domain.remove(&key) {
-        // SAFETY: a reference this module took when it stored the value.
-        unsafe { crate::api::CFRelease(previous as CFTypeRef) };
+    if value.is_null() {
+        set_value(&domain, &key, None);
+        return;
     }
-    if !value.is_null() {
-        // SAFETY: the caller's object, which this store keeps a reference to
-        // for as long as the key holds it.
-        domain.insert(key, unsafe { crate::api::CFRetain(value) } as usize);
+    // SAFETY: the caller's object.
+    match unsafe { crate::propertylist::value_of(value) } {
+        Some(value) => set_value(&domain, &key, Some(value)),
+        None => eprintln!(
+            "CFPreferences: {key:?} in {domain:?} was not set: the value is not a property \
+             list type"
+        ),
     }
 }
 
 /// `CFPropertyListRef CFPreferencesCopyValue(CFStringRef key, CFStringRef
 /// applicationID, CFStringRef userName, CFStringRef hostName)`
 ///
-/// The user and host arguments are ignored: this store is one process's, so
-/// every domain in it is already "current user, current host".
+/// Exactly the named domain, with no fall back to the global one. The user and
+/// host arguments are ignored: this store is one user's, on one host.
 ///
 /// # Safety
 ///
@@ -186,7 +381,15 @@ pub unsafe extern "C" fn CFPreferencesCopyValue(
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) -> CFTypeRef {
-    unsafe { CFPreferencesCopyAppValue(key, application) }
+    let (Some(key), domain) = (unsafe { text(key) }, unsafe { domain_of(application) }) else {
+        return std::ptr::null();
+    };
+    if key == INTERFACE_STYLE && domain == GLOBAL {
+        return interface_style().map_or(std::ptr::null(), |value| {
+            crate::string::from_bytes(value.as_bytes(), false)
+        });
+    }
+    object_of(value(&domain, &key))
 }
 
 /// `void CFPreferencesSetValue(CFStringRef, CFPropertyListRef, CFStringRef,
@@ -277,20 +480,11 @@ pub unsafe extern "C" fn CFPreferencesCopyKeyList(
     _host: CFTypeRef,
 ) -> CFTypeRef {
     let domain = unsafe { domain_of(application) };
-    let store = store().lock().unwrap_or_else(|e| e.into_inner());
-    let mut names: Vec<String> = store
-        .get(&domain)
-        .into_iter()
-        .flat_map(|d| d.keys())
+    let mut names: Vec<String> = contents(&domain)
+        .into_keys()
         .filter(|k| k.as_str() != INTERFACE_STYLE)
-        .cloned()
         .collect();
-    drop(store);
-    if matches!(
-        domain.as_str(),
-        ANY | "NSGlobalDomain" | ".GlobalPreferences"
-    ) && interface_style().is_some()
-    {
+    if domain == GLOBAL && interface_style().is_some() {
         names.push(INTERFACE_STYLE.to_owned());
     }
     if names.is_empty() {
@@ -391,20 +585,22 @@ pub unsafe extern "C" fn CFPreferencesSetMultiple(
 
 /// `Boolean CFPreferencesAppSynchronize(CFStringRef)`
 ///
-/// True, because there is nothing to flush: the store *is* the value every
-/// later read sees. A false here is "the write did not land", which is not the
-/// case and which callers treat as a failure of whatever they were configuring.
-pub extern "C" fn CFPreferencesAppSynchronize(_application: CFTypeRef) -> u8 {
+/// Every write is already on disk. What there is to do is pick up what another
+/// process wrote since, so the next read is not up to a recheck interval old.
+pub extern "C" fn CFPreferencesAppSynchronize(application: CFTypeRef) -> u8 {
+    // SAFETY: null or a string object, per the declared signature.
+    let domain = unsafe { domain_of(application) };
+    with_loaded(&domain, true, |_, _| ());
     1
 }
 
 /// `Boolean CFPreferencesSynchronize(CFStringRef, CFStringRef, CFStringRef)`
 pub extern "C" fn CFPreferencesSynchronize(
-    _application: CFTypeRef,
+    application: CFTypeRef,
     _user: CFTypeRef,
     _host: CFTypeRef,
 ) -> u8 {
-    1
+    CFPreferencesAppSynchronize(application)
 }
 
 exports::exports! {
@@ -426,6 +622,15 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let directory =
+                std::env::temp_dir().join(format!("rosemary-cfprefs-{}", std::process::id()));
+            set_directory(directory);
+        });
+    }
 
     fn string(text: &str) -> CFTypeRef {
         crate::string::from_bytes(text.as_bytes(), false)
@@ -450,6 +655,7 @@ mod tests {
     /// reads on a Mac it has never run on - and the case that has to work.
     #[test]
     fn an_unset_key_is_absent_rather_than_false() {
+        scratch();
         let (key, app) = (string("RosemaryNeverSet"), string("com.example.absent"));
         let mut exists = 1u8;
         // SAFETY: two strings this test made, and a live `Boolean`.
@@ -470,6 +676,7 @@ mod tests {
     /// in another.
     #[test]
     fn a_value_reads_back_in_its_own_domain() {
+        scratch();
         let key = string("RosemaryEnabled");
         let (mine, theirs) = (string("com.example.mine"), string("com.example.theirs"));
         let value = crate::collections::new_number(crate::collections::Number::Integer(1));
@@ -493,5 +700,46 @@ mod tests {
             assert!(CFPreferencesCopyAppValue(key, mine).is_null());
             crate::api::CFRelease(value);
         }
+    }
+
+    /// The point of a plist per domain: what one application wrote is a file
+    /// of its own, which a fresh read of the disk finds again, and which the
+    /// global domain does not shadow.
+    #[test]
+    fn a_domain_is_a_plist_of_its_own() {
+        scratch();
+        let domain = "com.example.persisted";
+        set_value(domain, "Name", Some(Value::String("rose".into())));
+        set_value(domain, "Count", Some(Value::Integer(3)));
+        set_value(GLOBAL, "Shared", Some(Value::Bool(true)));
+        let file = path_of(domain);
+        let on_disk =
+            crate::plist::parse(&std::fs::read(&file).expect("a plist")).expect("readable");
+        assert_eq!(on_disk.get("Name"), Some(&Value::String("rose".into())));
+        assert_eq!(on_disk.get("Shared"), None);
+        let app = string(domain);
+        // SAFETY: a string this test made.
+        unsafe {
+            let shared = CFPreferencesCopyAppValue(string("Shared"), app);
+            assert!(!shared.is_null(), "the global domain is searched after");
+            let other =
+                CFPreferencesCopyValue(string("Shared"), app, std::ptr::null(), std::ptr::null());
+            assert!(other.is_null(), "CopyValue names one domain exactly");
+        }
+    }
+
+    /// A second process writing the file is seen by this one.
+    #[test]
+    fn a_change_made_elsewhere_is_picked_up() {
+        scratch();
+        let domain = "com.example.elsewhere";
+        set_value(domain, "Key", Some(Value::Integer(1)));
+        let mut changed = BTreeMap::new();
+        changed.insert("Key".to_owned(), Value::Integer(2));
+        let bytes = crate::plist::write_xml(&Value::Dictionary(changed));
+        std::fs::write(path_of(domain), bytes).unwrap();
+        let app = string(domain);
+        CFPreferencesAppSynchronize(app);
+        assert_eq!(value(domain, "Key"), Some(Value::Integer(2)));
     }
 }

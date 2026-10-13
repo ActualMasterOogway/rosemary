@@ -20,7 +20,7 @@ pub mod foreign;
 mod fsevents;
 pub mod plist;
 pub mod preferences;
-mod propertylist;
+pub mod propertylist;
 pub mod runloop;
 mod send;
 mod socket;
