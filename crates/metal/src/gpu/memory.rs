@@ -1,7 +1,19 @@
 use super::*;
 
+/// Every Metal buffer can be bound or copied any way, so every one is made
+/// with every use.
+pub(super) const BUFFER_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
+    vk::BufferUsageFlags::STORAGE_BUFFER.as_raw()
+        | vk::BufferUsageFlags::UNIFORM_BUFFER.as_raw()
+        | vk::BufferUsageFlags::VERTEX_BUFFER.as_raw()
+        | vk::BufferUsageFlags::INDEX_BUFFER.as_raw()
+        | vk::BufferUsageFlags::INDIRECT_BUFFER.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_SRC.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_DST.as_raw(),
+);
+
 impl Gpu {
-    fn memory_type(&self, bits: u32, wanted: vk::MemoryPropertyFlags) -> Option<u32> {
+    pub(super) fn memory_type(&self, bits: u32, wanted: vk::MemoryPropertyFlags) -> Option<u32> {
         (0..self.memory.memory_type_count).find(|index| {
             bits & (1 << index) != 0
                 && self.memory.memory_types[*index as usize]
@@ -60,16 +72,9 @@ impl Gpu {
         zeroed: bool,
         private: bool,
     ) -> Result<GpuBuffer, String> {
-        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::UNIFORM_BUFFER
-            | vk::BufferUsageFlags::VERTEX_BUFFER
-            | vk::BufferUsageFlags::INDEX_BUFFER
-            | vk::BufferUsageFlags::INDIRECT_BUFFER
-            | vk::BufferUsageFlags::TRANSFER_SRC
-            | vk::BufferUsageFlags::TRANSFER_DST;
         let info = vk::BufferCreateInfo::default()
             .size(length.max(4))
-            .usage(usage)
+            .usage(BUFFER_USAGE)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: a well-formed create info on this live device.
         let buffer = unsafe { self.device.create_buffer(&info, None) }
@@ -209,16 +214,20 @@ impl Gpu {
     pub fn heap_report(&self) -> Option<String> {
         let shared = self.buffers.get().map_or((0, 0, 0), Heap::usage);
         let private = self.private_buffers.get().map_or((0, 0, 0), Heap::usage);
-        if shared.0 + private.0 == 0 {
+        let imported = self
+            .host_imported
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if shared.0 + private.0 == 0 && imported == 0 {
             return None;
         }
         let usage = |(blocks, bytes, free): (usize, u64, u64)| {
             format!("{blocks}/{}MiB/{}MiB", bytes >> 20, free >> 20)
         };
         Some(format!(
-            "shared_heap(blocks/held/free)={} private_heap={}",
+            "shared_heap(blocks/held/free)={} private_heap={} host_imported={}MiB",
             usage(shared),
             usage(private),
+            imported >> 20,
         ))
     }
 

@@ -38,11 +38,11 @@ pub(super) unsafe extern "C" fn set_buffer<const STAGE: usize>(
         BufferBinding::default()
     } else {
         // SAFETY: only a buffer of this crate's is ever bound.
-        let inner = &unsafe { object::body::<Buffer>(buffer) }.inner;
+        let buffer = unsafe { object::body::<Buffer>(buffer) };
         BufferBinding {
-            buffer: inner.buffer,
+            buffer: buffer.device_buffer(),
             offset,
-            end: inner.length,
+            end: buffer.inner.length,
             range: vk::WHOLE_SIZE,
             uploaded: false,
         }

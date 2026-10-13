@@ -1,6 +1,7 @@
 mod deferred;
 mod format;
 mod guard;
+mod host;
 mod memory;
 mod pools;
 mod submit;
@@ -20,6 +21,7 @@ pub use format::{
     srgb_twin, texel_size,
 };
 pub(crate) use guard::{Guard, GuardedVec};
+pub use host::HostPages;
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
 
@@ -154,6 +156,11 @@ pub struct Gpu {
     /// Sampling Linux dma-bufs, where the device can import them. `None`
     /// is a device whose windows are only ever given pixels.
     pub(crate) dmabuf: Option<DmabufImport>,
+    /// Importing host memory, where the device can: large shared buffers are
+    /// then lazily committed pages, as Metal's are. See `host`.
+    host_import: Option<host::HostImport>,
+    /// Bytes of host pages imported, for `ROSEMARY_METAL_STATS`.
+    host_imported: std::sync::atomic::AtomicU64,
 }
 
 /// What importing a dma-buf as an image takes.
@@ -610,6 +617,10 @@ impl Gpu {
                 enabled.push(ash::ext::queue_family_foreign::NAME.as_ptr());
             }
         }
+        let host_import = has(ash::ext::external_memory_host::NAME);
+        if host_import {
+            enabled.push(ash::ext::external_memory_host::NAME.as_ptr());
+        }
         let render_node = has(ash::ext::physical_device_drm::NAME)
             .then(|| {
                 let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
@@ -659,6 +670,9 @@ impl Gpu {
             foreign,
             render_node,
         });
+        let host_import = host_import
+            .then(|| host::HostImport::new(instance, physical, &device))
+            .flatten();
         let push_descriptor_api =
             pushes.then(|| ash::khr::push_descriptor::Device::new(instance, &device));
         let max_push_descriptors = if pushes {
@@ -716,6 +730,8 @@ impl Gpu {
             swapchain_maintenance1,
             depth_stencil_resolve,
             dmabuf,
+            host_import,
+            host_imported: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
