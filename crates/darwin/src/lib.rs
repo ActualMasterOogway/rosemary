@@ -97,6 +97,7 @@ pub mod stdlib;
 pub mod strict;
 pub mod string;
 pub mod sysctl;
+pub mod sysdir;
 pub mod sysinfo;
 #[cfg(not(target_os = "macos"))]
 pub mod termios;
@@ -329,6 +330,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     fortify::MODULE,
     env::MODULE,
     humanize::MODULE,
+    sysdir::MODULE,
     signal::entry::MODULE,
     mach::MODULE,
     fs::MODULE,
