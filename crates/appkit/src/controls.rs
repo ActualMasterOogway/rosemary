@@ -494,6 +494,7 @@ mod slot {
     pub const SHOWS_ALTERNATE: usize = 19;
     /// `-contentTintColor`, retained.
     pub const TINT_COLOR: usize = 20;
+    pub const BACKGROUND_STYLE: usize = 21;
     pub const BUTTON_OBJECTS: [usize; 8] = [
         TINT_COLOR,
         IMAGE,
@@ -515,7 +516,7 @@ mod slot {
     pub const KNOB_PROPORTION: usize = 1;
 }
 
-const ROW: usize = 21;
+const ROW: usize = 22;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -1211,6 +1212,14 @@ unsafe extern "C" fn button_type(receiver: Id, _sel: Sel) -> usize {
     read(buttons(), receiver, slot::BUTTON_TYPE)
 }
 
+unsafe extern "C" fn button_set_background_style(receiver: Id, _sel: Sel, value: isize) {
+    write(buttons(), receiver, slot::BACKGROUND_STYLE, value as usize);
+}
+
+unsafe extern "C" fn button_background_style(receiver: Id, _sel: Sel) -> isize {
+    read(buttons(), receiver, slot::BACKGROUND_STYLE) as isize
+}
+
 unsafe extern "C" fn button_set_state(receiver: Id, _sel: Sel, value: isize) {
     write(buttons(), receiver, slot::BUTTON_STATE, value as usize);
     crate::backing::needs_display(receiver);
@@ -1770,6 +1779,12 @@ pub(crate) fn install() {
         "labelWithString:" => label_with_string, c"@24@0:8@16";
     });
 
+    let class = objc::class::lookup(c"NSButtonCell").expect("declared before its methods");
+    methods!(class, {
+        "setBackgroundStyle:" => button_set_background_style, c"v24@0:8q16";
+        "backgroundStyle" => button_background_style, c"q16@0:8";
+    });
+
     let class = objc::class::lookup(c"NSScroller").expect("declared before its methods");
     class_methods!(class, {
         "scrollerWidth" => scroller_width, c"d16@0:8";
@@ -1806,6 +1821,35 @@ mod tests {
         let stored = unsafe { button_title(button, objc::sel::get("title")) };
         assert_eq!(unsafe { foundation::string::bytes(stored) }, b"Install");
         objc::arc::release(button);
+    }
+
+    #[test]
+    fn button_cells_keep_button_type_and_background_style() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSButtonCell").expect("NSButtonCell");
+        let cell = objc::object::create_instance(class, 0);
+        let setter = objc::sel::get("setBackgroundStyle:");
+        let getter = objc::sel::get("backgroundStyle");
+        let setter_method = class.method(setter).expect("background-style setter");
+        let getter_method = class.method(getter).expect("background-style getter");
+        // SAFETY: each installed method owns a NUL-terminated type encoding.
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(setter_method.types()) },
+            c"v24@0:8q16"
+        );
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(getter_method.types()) },
+            c"q16@0:8"
+        );
+        // SAFETY: the selectors use the signatures asserted above.
+        unsafe {
+            let set: unsafe extern "C" fn(Id, Sel, isize) = std::mem::transmute(objc::msg::entry());
+            let get: unsafe extern "C" fn(Id, Sel) -> isize =
+                std::mem::transmute(objc::msg::entry());
+            set(cell, setter, -1);
+            assert_eq!(get(cell, getter), -1);
+        }
+        objc::arc::release(cell);
     }
 
     #[test]
