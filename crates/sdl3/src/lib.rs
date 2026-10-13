@@ -1415,7 +1415,7 @@ mod tests {
 /// thin is [`Event`](video::Event), which is decoded here: `SDL_Event` is a
 /// union whose members are this crate's business to know and nobody else's.
 pub mod video {
-    use std::ffi::CString;
+    use std::{ffi::CString, sync::LazyLock};
 
     use super::*;
 
@@ -2839,9 +2839,28 @@ pub mod video {
         }
     }
 
+    fn refresh_rate_override() -> Option<f32> {
+        static RATE: LazyLock<Option<f32>> = LazyLock::new(|| {
+            let value = std::env::var("ROSEMARY_SCREEN_REFRESH_RATE").ok()?;
+            match value.trim().parse::<f32>() {
+                Ok(rate) if rate.is_finite() && rate > 0.0 => Some(rate),
+                _ => {
+                    eprintln!("rosemary: invalid ROSEMARY_SCREEN_REFRESH_RATE {value} - ignoring.");
+                    None
+                }
+            }
+        });
+        *RATE
+    }
+
     /// The desktop mode's refresh rate in hertz, or `None` when SDL has no
     /// mode for the display - which is every host with no video subsystem.
+    ///
+    /// `ROSEMARY_SCREEN_REFRESH_RATE` replaces it for every display.
     pub fn display_refresh_rate(display: u32) -> Option<f32> {
+        if let Some(rate) = refresh_rate_override() {
+            return Some(rate);
+        }
         let f = api()?.SDL_GetDesktopDisplayMode?;
         // SAFETY: a display id; the mode belongs to SDL and outlives the read.
         let mode = unsafe { f(display) };
