@@ -81,6 +81,7 @@ rosemary server --stop         # ask this prefix's server to exit
 | `ROSEMARY_GLIBC` | `auto` | (packaged builds) Which glibc the launcher runs Rosemary on: `host`, `bundled`, or `auto`, which uses the host's when it defines every symbol version the bundle's libraries need and the bundled one otherwise. |
 | `ROSEMARY_EXE` | (set by the launcher) | The path that starts another copy of Rosemary. Under the bundled glibc the kernel reports the bundled dynamic loader as this process's executable, so the runtime re-launches itself (`rosemary server`, a guest spawning a Mach-O) through this instead. |
 | `ROSEMARY_METAL_PRESENTATION_MODE` | unset | Set the presentation mode used by Vulkan in Rosemary's Metal translation. Valid values are `immediate`, `fifo`, `fifo_relaxed`, and `mailbox`. |
+| `ROSEMARY_SCREEN_REFRESH_RATE` | unset | Hertz that guests are told the display refreshes at, in place of the host's mode: `NSScreen`/`UIScreen` `maximumFramesPerSecond` and the refresh-interval properties. |
 
 ## Prefixes
 
