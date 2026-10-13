@@ -20,6 +20,23 @@ pub fn run_initializers(exec: &dyn Execution) -> Result<usize, VmError> {
     Ok(ran)
 }
 
+/// Store dyld's two entry points into each image's `__DATA,__dyld` section, as
+/// the loader did before the program's first instruction; `crt1` of that era
+/// calls through them.
+fn fill_dyld_sections(exec: &dyn Execution) {
+    use darwin::bsd::{dyld_func_lookup, dyld_lazy_bind_helper};
+    for addr in exec.report().images.iter().filter_map(|i| i.dyld_data) {
+        let slot = addr as usize as *mut u64;
+        // SAFETY: the section is part of a mapped, writable `__DATA` segment of
+        // this process, and nothing of the guest has run yet.
+        unsafe {
+            slot.write_unaligned(dyld_lazy_bind_helper as usize as u64);
+            slot.add(1)
+                .write_unaligned(dyld_func_lookup as usize as u64);
+        }
+    }
+}
+
 /// Run initializers and then the entry point, returning `main`'s status.
 pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     // Before anything the program can fault in, which is everything below. The
@@ -42,6 +59,7 @@ pub fn run(exec: &dyn Execution) -> Result<i32, VmError> {
     // process reaches its first initializer with a clean one, so the guest gets
     // a clean one - after this line every write to it is the guest's own.
     crate::thread::clear_errno();
+    fill_dyld_sections(exec);
     run_initializers(exec)?;
     let status = exec.enter_main()?;
     // `exit(main(...))`, as dyld's start does: the main thread's thread-local

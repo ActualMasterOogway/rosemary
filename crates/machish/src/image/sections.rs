@@ -106,6 +106,13 @@ impl<'a> Section<'a> {
             && (self.seg_name == "__DATA" || self.seg_name == "__DATA_CONST")
     }
 
+    /// `__DATA,__dyld`: two pointers - the lazy binding helper and
+    /// `_dyld_func_lookup` - that pre-10.6 dyld stores into the image before
+    /// its first instruction, and that `crt1` calls through.
+    pub fn is_dyld_data(&self) -> bool {
+        self.seg_name == "__DATA" && self.sect_name == "__dyld"
+    }
+
     /// `__mod_term_func`: destructors, run at unload.
     pub fn is_mod_term(&self) -> bool {
         self.section_type() == constants::S_MOD_TERM_FUNC_POINTERS

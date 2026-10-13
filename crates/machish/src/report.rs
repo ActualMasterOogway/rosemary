@@ -100,6 +100,9 @@ pub struct ImageReport {
     /// acted on. Empty for the overwhelming majority of images, which declare no
     /// such section at all.
     pub interpositions: Vec<Interposition>,
+    /// Slid VA of the `__DATA,__dyld` section, which the loader is expected to
+    /// fill in; see [`Section::is_dyld_data`](crate::image::Section::is_dyld_data).
+    pub dyld_data: Option<Word>,
     /// Thread-local descriptors, enumerated and not otherwise honoured.
     pub thread_locals: Vec<ThreadLocalDescriptor>,
     /// Slid `__thread_bss_init_func` pointers in section order. The runtime

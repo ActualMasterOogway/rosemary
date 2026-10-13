@@ -19,7 +19,7 @@ impl<S: MachSpec> Extension<S> for InitializersExtension {
     fn claims(&self, obj: &MachObject<'_, S>) -> bool {
         obj.sections
             .iter()
-            .any(|s| s.is_initializers() || s.is_mod_term())
+            .any(|s| s.is_initializers() || s.is_mod_term() || s.is_dyld_data())
     }
 
     fn observe(
@@ -31,6 +31,11 @@ impl<S: MachSpec> Extension<S> for InitializersExtension {
     ) -> Result<()> {
         report.initializers = collect_initializers(obj, mem, slide)?;
         report.terminators = collect_terminators(obj, mem, slide)?;
+        report.dyld_data = obj
+            .sections
+            .iter()
+            .find(|s| s.is_dyld_data())
+            .map(|s| s.addr.wrapping_add(slide));
         Ok(())
     }
 }

@@ -387,18 +387,51 @@ pub unsafe extern "C" fn csops(
 /// always does here.
 pub extern "C" fn cthread_init() {}
 
-/// `void _cthread_init_routine(void)`
+/// `void (*_cthread_init_routine)(void)`
 ///
-/// The hook [`cthread_init`] runs from; nothing to do for the same reason.
-pub extern "C" fn cthread_init_routine() {}
+/// A data symbol: the Csu `crt1` start stub reads it and calls it when it is
+/// non-null. No cthreads package is left to initialise, so it stays null.
+static CTHREAD_INIT_ROUTINE: usize = 0;
 
-/// `int mach_init_routine(void)`
+/// `int (*mach_init_routine)(void)`
 ///
-/// The hook `mach_init` calls to set up the task's Mach ports. They are made
-/// when the runtime starts, so there is nothing left to initialise;
-/// `KERN_SUCCESS` is what a repeated initialisation answers.
-pub extern "C" fn mach_init_routine() -> c_int {
-    0
+/// Another `crt1` hook read as data and called when non-null. The task's Mach
+/// ports are made when the runtime starts, so it stays null.
+static MACH_INIT_ROUTINE: usize = 0;
+
+/// `bool _dyld_func_lookup(const char *name, void **address)`
+///
+/// What `crt1` of the pre-10.6 era calls through the `__DATA,__dyld` section to
+/// find dyld's private entry points. Initializers and terminators are run by
+/// this runtime, so the two it asks for are no-ops; any other name is answered
+/// as dyld answers an unknown one, with a null address.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated and `address` is writable.
+pub unsafe extern "C" fn dyld_func_lookup(name: *const c_char, address: *mut *const ()) -> c_int {
+    extern "C" fn nothing() {}
+    if name.is_null() || address.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's obligation.
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    let found: *const () = match name {
+        b"__dyld_make_delayed_module_initializer_calls" | b"__dyld_mod_term_funcs" => {
+            nothing as extern "C" fn() as *const ()
+        }
+        _ => std::ptr::null(),
+    };
+    // SAFETY: the caller's obligation.
+    unsafe { address.write(found) };
+    c_int::from(!found.is_null())
+}
+
+/// The lazy binding helper slot of `__DATA,__dyld`. Every import is bound
+/// eagerly, so a call here means a stub was reached unbound.
+pub extern "C" fn dyld_lazy_bind_helper() {
+    eprintln!("rosemary: lazy binding helper reached; imports are bound eagerly");
+    std::process::abort();
 }
 
 /// `void __keymgr_dwarf2_register_sections(void)`
@@ -416,8 +449,6 @@ exports::exports! {
         "sigsetjmp" => sigsetjmp,
         "csops" => csops,
         "_cthread_init" => cthread_init,
-        "_cthread_init_routine" => cthread_init_routine,
-        "mach_init_routine" => mach_init_routine,
         "__keymgr_dwarf2_register_sections" => keymgr_dwarf2_register_sections,
         "__atomic_load" => atomic_load,
         "__atomic_store" => atomic_store,
@@ -432,6 +463,11 @@ exports::exports! {
         "reallocf" => reallocf,
         "strtonum" => strtonum,
         "sys_icache_invalidate" => sys_icache_invalidate,
+    }
+    // Data keys keep Mach-O's leading underscore, unlike function keys.
+    data {
+        "__cthread_init_routine" => &raw const CTHREAD_INIT_ROUTINE as usize as u64,
+        "_mach_init_routine" => &raw const MACH_INIT_ROUTINE as usize as u64,
     }
 }
 
@@ -457,6 +493,27 @@ mod tests {
         assert_eq!(rc, 0);
         assert!(buf.0[..DARWIN].iter().any(|b| *b != 0xaa));
         assert!(buf.0[DARWIN..].iter().all(|b| *b == 0xaa));
+    }
+
+    #[test]
+    fn crt1_init_hooks_resolve_as_null_data() {
+        use machish::fixups::{LibraryRef, SymbolRef};
+        use machish::resolve::{SymbolKind, SymbolProvider, SyntheticDylib};
+
+        let mut lib = SyntheticDylib::new("<test>");
+        provide(&mut lib);
+        for name in ["__cthread_init_routine", "_mach_init_routine"] {
+            let sym = lib
+                .resolve(&SymbolRef {
+                    name,
+                    library: LibraryRef::Flat,
+                    weak_import: false,
+                })
+                .unwrap_or_else(|| panic!("{name} resolves"));
+            assert_eq!(sym.kind, SymbolKind::Data, "{name}");
+            // SAFETY: the address of a live static word.
+            assert_eq!(unsafe { *(sym.addr as *const usize) }, 0, "{name}");
+        }
     }
 
     #[test]

@@ -381,6 +381,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 rebases: outcome.rebases,
                 initializers: Vec::new(),
                 terminators: Vec::new(),
+                dyld_data: None,
                 interpositions: Vec::new(),
                 thread_locals: Vec::new(),
                 tlv_init_funcs: Vec::new(),
