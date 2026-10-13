@@ -102,6 +102,23 @@ unsafe extern "C" fn system_font_size(_class: Id, _sel: Sel) -> f64 {
     13.0
 }
 
+/// `+[NSFont systemFontSizeForControlSize:]`, in points.
+///
+/// The legacy small and mini controls have their own metrics; regular and
+/// unhandled sizes use the standard system font size.
+unsafe extern "C" fn system_font_size_for_control_size(
+    class: Id,
+    sel: Sel,
+    control_size: usize,
+) -> f64 {
+    match control_size {
+        1 => 11.0,
+        2 => 9.0,
+        // SAFETY: the class-method receiver and selector have the same types.
+        _ => unsafe { system_font_size(class, sel) },
+    }
+}
+
 unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
     if font.is_null() {
         return std::ptr::null_mut();
@@ -159,6 +176,7 @@ pub(crate) fn install() {
         "monospacedSystemFontOfSize:weight:" => monospaced_system_font_of_size, c"@32@0:8d16d24";
         "userFixedPitchFontOfSize:" => user_fixed_pitch_font_of_size, c"@24@0:8d16";
         "systemFontSize" => system_font_size, c"d16@0:8";
+        "systemFontSizeForControlSize:" => system_font_size_for_control_size, c"d24@0:8Q16";
     });
 
     let class = objc::class::lookup(c"NSFontManager").expect("declared before its methods");
@@ -205,6 +223,38 @@ mod tests {
         unsafe {
             corefoundation::api::CFRelease(family.cast());
             corefoundation::api::CFRelease(face.cast());
+        }
+    }
+
+    #[test]
+    fn system_font_size_for_control_size_uses_the_class_message_abi() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSFont").unwrap();
+        let selector = objc::sel::get("systemFontSizeForControlSize:");
+        let method = class
+            .metaclass()
+            .method(selector)
+            .expect("NSFont must implement +systemFontSizeForControlSize:");
+        // SAFETY: the registered method owns its NUL-terminated type encoding.
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(method.types()) },
+            c"d24@0:8Q16"
+        );
+        let receiver = objc::class::ptr(class).cast();
+        // SAFETY: these are the installed class-method signatures. Dispatching
+        // through objc_msgSend also checks the unsigned NSControlSize argument
+        // and floating-point return ABI used by a guest application.
+        unsafe {
+            let size: unsafe extern "C" fn(Id, Sel, usize) -> f64 =
+                std::mem::transmute(objc::msg::entry());
+            let standard: unsafe extern "C" fn(Id, Sel) -> f64 =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(size(receiver, selector, 0), 13.0);
+            assert_eq!(size(receiver, selector, 1), 11.0);
+            assert_eq!(size(receiver, selector, 2), 9.0);
+            let fallback = standard(receiver, objc::sel::get("systemFontSize"));
+            assert_eq!(size(receiver, selector, 99), fallback);
+            assert_eq!(size(receiver, selector, usize::MAX), fallback);
         }
     }
 }
