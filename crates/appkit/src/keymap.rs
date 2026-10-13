@@ -265,7 +265,6 @@ pub fn modifiers(sdl_modifiers: u16) -> u64 {
         (keymod::ALT, flags::OPTION),
         (keymod::GUI, flags::COMMAND),
         (keymod::CAPS, flags::CAPS_LOCK),
-        (keymod::NUM, flags::NUMERIC_PAD),
         (keymod::LCTRL, flags::DEVICE_LCTL),
         (keymod::RCTRL, flags::DEVICE_RCTL),
         (keymod::LSHIFT, flags::DEVICE_LSHIFT),
@@ -422,6 +421,11 @@ mod tests {
             flags::CONTROL | flags::OPTION | flags::DEVICE_LCTL | flags::DEVICE_LALT
         );
         assert_eq!(modifiers(keymod::NONE), 0);
+    }
+
+    #[test]
+    fn num_lock_is_not_the_numeric_keypad_modifier() {
+        assert_eq!(modifiers(keymod::NUM), 0);
     }
 
     #[test]
