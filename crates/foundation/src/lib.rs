@@ -481,6 +481,31 @@ mod tests {
         }
     }
 
+    /// `-indexOfObject:` finds the first equal element, and says `NSNotFound`
+    /// for one that is not there.
+    #[test]
+    fn index_of_object_finds_the_first_match() {
+        bootstrap();
+        // SAFETY: each prototype is the one its selector declares.
+        unsafe {
+            let send0: unsafe extern "C" fn(Id, Sel) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let send1: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            let index_of: unsafe extern "C" fn(Id, Sel, Id) -> usize =
+                std::mem::transmute(objc::msg::entry());
+
+            let array = send0(class(c"NSMutableArray"), objc::sel::get("array"));
+            let (a, b, c) = (class(c"NSNumber"), class(c"NSArray"), class(c"NSSet"));
+            for element in [a, b, a] {
+                send1(array, objc::sel::get("addObject:"), element);
+            }
+            let sel = objc::sel::get("indexOfObject:");
+            assert_eq!(index_of(array, sel, a), 0);
+            assert_eq!(index_of(array, sel, b), 1);
+            assert_eq!(index_of(array, sel, c), isize::MAX as usize);
+        }
+    }
+
     /// An enumerator hands out each element once, in order - or back to front
     /// for the reverse one - and then nil; `-allObjects` takes what is left.
     #[test]

@@ -1158,6 +1158,19 @@ unsafe extern "C" fn contains_object(receiver: Id, _sel: Sel, object: Id) -> boo
         .any(|v| a.policy.equal(*v, object as CFTypeRef))
 }
 
+/// `-indexOfObject:`: the first index whose element is equal to `object`, or
+/// `NSNotFound`.
+unsafe extern "C" fn index_of_object(receiver: Id, _sel: Sel, object: Id) -> usize {
+    // SAFETY: an array.
+    let Some(a) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return NOT_FOUND;
+    };
+    a.values
+        .iter()
+        .position(|v| a.policy.equal(*v, object as CFTypeRef))
+        .unwrap_or(NOT_FOUND)
+}
+
 unsafe extern "C" fn new_array(_class: Id, _sel: Sel) -> Id {
     collections::new_array(&[], Policy::from_type_callbacks(), true) as Id
 }
@@ -2205,6 +2218,7 @@ pub(crate) fn install() {
         "subarrayWithRange:" => subarray_with_range, c"@32@0:8{_NSRange=QQ}16";
         "objectAtIndexedSubscript:" => object_at_index, c"@24@0:8Q16";
         "containsObject:" => contains_object, c"B24@0:8@16";
+        "indexOfObject:" => index_of_object, c"Q24@0:8@16";
         "firstObject" => first_object, c"@16@0:8";
         "lastObject" => last_object, c"@16@0:8";
         "componentsJoinedByString:" => components_joined_by_string, c"@24@0:8@16";
