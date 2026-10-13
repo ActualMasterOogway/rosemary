@@ -1175,6 +1175,9 @@ mod tests {
 /// `CGError CGWarpMouseCursorPosition(CGPoint)` - move the pointer, in global
 /// screen coordinates.
 ///
+/// No event is posted, but the jump is not lost either: the next motion event's
+/// deltas include it (see `event::note_warp_delta`).
+///
 /// SDL treats an in-window warp during relative mode as virtual, so the first
 /// warp to a target momentarily releases relative mode and moves the physical
 /// desktop cursor, as CoreGraphics promises. Repeated warps to that same target
@@ -1183,6 +1186,7 @@ mod tests {
 /// `kCGErrorSuccess` is `0`.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
+    let asked = point;
     let point = (point.x as f32, point.y as f32);
     // An edge hold is not the guest's relative mode: the warp is a plain one.
     end_edge_hold();
@@ -1193,6 +1197,17 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
         .unwrap_or((0, 0));
     let local = local_warp_point(point, origin);
     let from = crate::event::pointer_position();
+    // Measured from the cursor the guest is told about: the frozen point when
+    // it is disassociated, which a repeated warp to one target leaves exactly
+    // where it was, and otherwise the answer the window system gives.
+    let moved = match mouse_is_associated() {
+        true => {
+            let at = crate::cgevent::global_pointer();
+            (asked.x - at.x, asked.y - at.y)
+        }
+        false => (f64::from(local.0 - from.0), f64::from(local.1 - from.1)),
+    };
+    crate::event::note_warp_delta(moved.0, moved.1);
     crate::event::warp_pointer(local.0, local.1);
 
     let relative: Vec<_> = windows
@@ -1300,6 +1315,10 @@ fn forget_relative_warp() {
 /// unavailable rather than running without capture.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32 {
+    // The cursor stops where it is, which is what the guest is told from here.
+    if connected == 0 && mouse_is_associated() {
+        crate::event::settle_pointer();
+    }
     ASSOCIATED.store(connected != 0, std::sync::atomic::Ordering::Release);
     apply_mouse_association();
     0
