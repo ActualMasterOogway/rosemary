@@ -362,6 +362,10 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
 
 /// Destroy an SDL window, telling everything keyed on it first.
 fn destroy_sdl_window(sdl: sdl3::Window) {
+    OPENGL_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|window| *window != sdl as usize);
     crate::backing::forget_window(sdl);
     crate::decor::destroyed(sdl);
     for hook in DESTROY_HOOKS
@@ -765,9 +769,20 @@ enum Api {
 /// of its own, which means a second GL context that SDL leaves current - after
 /// which every call the guest makes lands in a context where none of its
 /// objects exist.
+///
+/// Asked of the windows remade for the guest's GL, not of `SDL_WINDOW_OPENGL`:
+/// SDL sets that flag itself when the window surface it builds is drawn by a
+/// GL renderer (Wayland's is), and the store must still be presented there.
 pub fn draws_with_opengl(sdl: sdl3::Window) -> bool {
-    !sdl.is_null() && sdl3::video::window_flags(sdl) & sdl3::video::flags::OPENGL != 0
+    !sdl.is_null()
+        && OPENGL_WINDOWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(sdl as usize))
 }
+
+/// SDL windows made for [`Api::OpenGl`], by address.
+static OPENGL_WINDOWS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 /// Rebuild `receiver`'s SDL window as an OpenGL one, keeping the `NSWindow`.
 ///
@@ -783,7 +798,7 @@ pub fn rebuild_for_opengl(receiver: Id) -> bool {
     if window.sdl.is_null() {
         return false;
     }
-    if sdl3::video::window_flags(window.sdl) & sdl3::video::flags::OPENGL != 0 {
+    if draws_with_opengl(window.sdl) {
         return true;
     }
     let want = presentation(window);
@@ -851,6 +866,12 @@ fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
         crate::icon::apply(new);
     }
     window.sdl = new;
+    if api == Api::OpenGl {
+        OPENGL_WINDOWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(new as usize);
+    }
     {
         let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
         for entry in windows.iter_mut() {
@@ -1347,7 +1368,7 @@ fn order_front(receiver: Id, make_key: bool) {
     if want != presentation_of_sdl(window.sdl)
         && !(want != Presentation::Toplevel && popup_parent(receiver).is_null())
     {
-        let api = match sdl3::video::window_flags(window.sdl) & sdl3::video::flags::OPENGL != 0 {
+        let api = match draws_with_opengl(window.sdl) {
             true => Api::OpenGl,
             false => Api::Undecided,
         };

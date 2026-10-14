@@ -2007,6 +2007,11 @@ pub mod video {
     ///
     /// The calling thread's GL context is kept; see [`keep_gl_context`].
     pub fn present_window(window: Window, body: impl FnOnce(&Presentation) -> bool) -> bool {
+        // A window's store and a Metal layer read back for it present from
+        // different threads, and the GL context behind a renderer's surface
+        // can be current on only one of them at a time.
+        static PRESENTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _presenting = PRESENTING.lock().unwrap_or_else(|e| e.into_inner());
         keep_gl_context(|| present_window_surface(window, body))
     }
 

@@ -513,6 +513,11 @@ fn present_inner(drawable: Id) {
         .as_ref()
         .map(|frame| frame.window)
         .or_else(|| appkit::window::sdl_windows().first().copied());
+    // Where the layer sits, so that the chrome and the rest of the store the
+    // window surface already shows are not painted over.
+    let placement = frame.as_ref().map_or((0, 0, u32::MAX, u32::MAX), |frame| {
+        (frame.x, frame.y, frame.width, frame.height)
+    });
 
     let width = texture.image.width;
     let height = texture.image.height;
@@ -590,8 +595,18 @@ fn present_inner(drawable: Id) {
         crate::stats::frame();
         dump_frame(pixels, width, height, texture.image.format);
         crate::stats::timed(crate::stats::Counter::BlitMicros, || {
-            blit_to_window(pixels, width, height, texture.image.format, window)
+            blit_to_window(
+                pixels,
+                width,
+                height,
+                texture.image.format,
+                window,
+                placement,
+            )
         });
+        if let Some(frame) = frame.as_ref() {
+            appkit::backing::layer_drew_on_surface(frame.window, described.layer as usize);
+        }
     }
 }
 
@@ -661,6 +676,7 @@ fn blit_to_window(
     height: u32,
     format: vk::Format,
     window: Option<sdl3::Window>,
+    (left, top, frame_width, frame_height): (i32, i32, u32, u32),
 ) {
     let swap_red_and_blue =
         format == vk::Format::R8G8B8A8_UNORM || format == vk::Format::R8G8B8A8_SRGB;
@@ -671,30 +687,44 @@ fn blit_to_window(
     // a Mac's content never shows the guest's.
     let opaque = sdl3::video::window_flags(window) & sdl3::video::flags::TRANSPARENT != 0;
     sdl3::video::present_window(window, |surface| {
-        let rows = height.min(surface.height.max(0) as u32);
-        let columns = width.min(surface.width.max(0) as u32) as usize;
-        for row in 0..rows {
-            let source = (row * width * 4) as usize;
-            let Some(from) = pixels.get(source..source + columns * 4) else {
+        let (left, top) = (i64::from(left), i64::from(top));
+        let visible = |start: i64, length: u32, limit: i32| {
+            let first = (-start).max(0);
+            let last = i64::from(length).min(i64::from(limit.max(0)) - start);
+            (first < last).then_some((first as usize, last as usize))
+        };
+        let Some((first_row, rows)) = visible(top, height.min(frame_height), surface.height) else {
+            return false;
+        };
+        let Some((first_column, columns)) = visible(left, width.min(frame_width), surface.width)
+        else {
+            return false;
+        };
+        let count = columns - first_column;
+        for row in first_row..rows {
+            let source = (row * width as usize + first_column) * 4;
+            let Some(from) = pixels.get(source..source + count * 4) else {
                 continue;
             };
+            let target = (top + row as i64) as usize * surface.pitch as usize
+                + (left + first_column as i64) as usize * 4;
             // SAFETY: SDL reported `pitch` bytes for each of `height` rows, and
-            // every write below stays inside row `row`.
-            let to = unsafe { surface.pixels.add(row as usize * surface.pitch as usize) };
+            // `visible` kept every write below inside the surface's row.
+            let to = unsafe { surface.pixels.add(target) };
             if !swap_red_and_blue {
-                // SAFETY: `columns * 4` bytes, from a slice of that length into
-                // a row which is at least `width * 4` bytes wide.
-                unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to, columns * 4) };
+                // SAFETY: `count * 4` bytes, from a slice of that length into
+                // the visible part of the row.
+                unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to, count * 4) };
                 if opaque {
-                    for column in 0..columns {
-                        // SAFETY: `column` is below `columns`, inside this row.
+                    for column in 0..count {
+                        // SAFETY: `column` is below `count`, inside this row.
                         unsafe { to.add(column * 4 + 3).write(0xff) };
                     }
                 }
                 continue;
             }
             for (column, texel) in from.as_chunks::<4>().0.iter().enumerate() {
-                // SAFETY: `column` is below `columns`, inside this row.
+                // SAFETY: `column` is below `count`, inside this row.
                 unsafe {
                     let out = to.add(column * 4);
                     out.write(texel[2]);
@@ -704,7 +734,7 @@ fn blit_to_window(
                 }
             }
         }
-        rows > 0 && columns > 0
+        true
     });
 }
 

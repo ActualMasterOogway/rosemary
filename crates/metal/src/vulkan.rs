@@ -343,10 +343,23 @@ fn load_entry() -> Result<(Entry, Option<CString>), String> {
         Err("no Vulkan library found; install MoltenVK with `brew install molten-vk` or set ROSEMARY_VULKAN_LIBRARY".into())
     }
     #[cfg(not(target_os = "macos"))]
-    // SAFETY: the entry and its library remain owned by the process-wide state.
-    unsafe { Entry::load() }
-        .map(|entry| (entry, None))
-        .map_err(|error| format!("the Vulkan loader could not be opened: {error}"))
+    {
+        // The name goes to SDL too: left to itself SDL opens the loader it was
+        // built with, which in a bundle can be a store path to another copy
+        // that knows nothing of this instance and finds no surface functions.
+        // Opening the same soname again hands back the copy loaded here.
+        let mut failures = Vec::new();
+        for name in ["libvulkan.so.1", "libvulkan.so"] {
+            match load_library(std::ffi::OsStr::new(name)) {
+                Ok((entry, library)) => return Ok((entry, Some(library))),
+                Err(reason) => failures.push(reason),
+            }
+        }
+        Err(format!(
+            "the Vulkan loader could not be opened: {}",
+            failures.join("; ")
+        ))
+    }
 }
 
 fn load_library(path: &std::ffi::OsStr) -> Result<(Entry, CString), String> {

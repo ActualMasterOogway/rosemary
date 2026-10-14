@@ -694,8 +694,7 @@ fn ensure(receiver: Id, sent: &str) -> sdl3::Window {
     // Whether a GL window or context is about to be made, which is when SDL's
     // global attributes are read - and so when they have to be this format's.
     let creating = context.sdl.is_null()
-        || (!sdl_window.is_null()
-            && sdl3::video::window_flags(sdl_window) & sdl3::video::flags::OPENGL == 0);
+        || (!sdl_window.is_null() && !crate::window::draws_with_opengl(sdl_window));
     static CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = creating.then(|| CREATION.lock().unwrap_or_else(|e| e.into_inner()));
     let core = creating && apply(context.format);

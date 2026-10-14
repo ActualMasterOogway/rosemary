@@ -736,6 +736,28 @@ pub fn forget_window(sdl: sdl3::Window) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|(window, _)| *window != sdl as usize);
+    SURFACE_LAYERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(window, _)| *window != sdl as usize);
+}
+
+/// Layers that have written their frames into a window's SDL surface
+/// themselves, as `(window, layer)`.
+static SURFACE_LAYERS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// Record that `layer` has drawn its frame into `sdl`'s window surface, which
+/// the store's own presents through that surface then leave alone.
+///
+/// A layer's first frame there can land before the window's layout settles,
+/// over rows that are now the chrome's, so the store is presented again then.
+pub fn layer_drew_on_surface(sdl: sdl3::Window, layer: usize) {
+    let mut layers = SURFACE_LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+    if !layers.contains(&(sdl as usize, layer)) {
+        layers.push((sdl as usize, layer));
+        drop(layers);
+        present_again(sdl);
+    }
 }
 
 /// Forget a view that is being deallocated, so no pump draws freed memory.
@@ -1406,19 +1428,39 @@ fn present_dirty() {
         }
         let transparent = sdl3::video::window_flags(window) & sdl3::video::flags::TRANSPARENT != 0;
         let chrome = crate::decor::pixels(window).filter(|_| transparent);
+        // A layer that draws into the surface itself keeps its last frame
+        // there; the store holds only background where it is.
+        let kept: Vec<Rect> = {
+            let layers = SURFACE_LAYERS.lock().unwrap_or_else(|e| e.into_inner());
+            holes
+                .iter()
+                .filter(|hole| layers.contains(&(window as usize, hole.layer)))
+                .map(|hole| hole.rect)
+                .collect()
+        };
         sdl3::video::present_window(window, |surface| {
             let rows = store.height.min(surface.height.max(0) as u32) as usize;
             let columns = store.width.min(surface.width.max(0) as u32) as usize;
-            for row in 0..rows {
-                let from = row * store.width as usize * 4;
-                // SAFETY: SDL reported `pitch` bytes per row for `height` rows.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        store.pixels[from..from + columns * 4].as_ptr(),
-                        surface.pixels.add(row * surface.pitch as usize),
-                        columns * 4,
-                    )
-                };
+            let shown = Rect {
+                x: 0,
+                y: 0,
+                width: columns as i64,
+                height: rows as i64,
+            };
+            for piece in shown.subtract(&kept) {
+                let (left, width) = (piece.x as usize, piece.width as usize);
+                for row in piece.y as usize..(piece.y + piece.height) as usize {
+                    let from = (row * store.width as usize + left) * 4;
+                    // SAFETY: SDL reported `pitch` bytes per row for `height`
+                    // rows, and the piece lies inside `rows` by `columns`.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            store.pixels[from..from + width * 4].as_ptr(),
+                            surface.pixels.add(row * surface.pitch as usize + left * 4),
+                            width * 4,
+                        )
+                    };
+                }
             }
             if transparent && rows > 0 && columns > 0 {
                 // SAFETY: SDL reported `pitch` bytes per row for `height` rows.
