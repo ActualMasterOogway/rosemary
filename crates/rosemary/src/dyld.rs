@@ -51,6 +51,8 @@ pub struct Image {
     unloading: AtomicBool,
     /// The loaded images this one bound against, each holding a reference for it.
     dependencies: Vec<&'static Image>,
+    /// The dylibs mapped with it, which a later `dlopen` shares.
+    linked: Vec<LinkedImage>,
 }
 
 impl Image {
@@ -103,12 +105,15 @@ struct MappedImage {
 /// walk behind a mutex.
 static MAPPED: OnceLock<Vec<MappedImage>> = OnceLock::new();
 
-/// One image the *program's own* link loaded, as something a later `dlopen` can
-/// bind against.
-struct ProgramImage {
+/// One image a link mapped beside its root - the program's dependencies, or a
+/// `dlopen`ed image's - as something a later `dlopen` can bind against.
+struct LinkedImage {
     /// The install name or path the loader knew it by - `@rpath/QtCore.framework/
     /// Versions/5/QtCore` for a framework inside a bundle.
     name: String,
+    /// The file it was read from, which is what is re-read: an install name
+    /// can be a path on the machine that built it.
+    path: String,
     slide: u64,
     /// Parsed from the file on first use, and `None` if it cannot be: the image
     /// is already mapped, so re-reading it is pure cost and only a `dlopen` ever
@@ -116,45 +121,36 @@ struct ProgramImage {
     exports: OnceLock<Option<ExportTable>>,
 }
 
-/// The images the program was linked against, for a later `dlopen` to resolve
-/// against.
-///
-/// Set once, before the program runs. See [`ProgramImages`].
-static PROGRAM_IMAGES: OnceLock<Vec<ProgramImage>> = OnceLock::new();
-
-/// Everything the *executable* was linked against, as a symbol provider.
-///
-/// The gap this closes: [`MainExports`] answers for the executable and
-/// [`LoadedImages`] for images the guest `dlopen`ed, and **neither** answers for
-/// the dylibs the executable itself pulled in. So a plugin loaded at runtime
-/// could not bind to the framework it is a plugin *for* - Qt's Cocoa plugin had
-/// fourteen hundred unresolved imports, every one of them a symbol QtCore and
-/// QtGui were already exporting from memory a few pages away.
-///
-/// Matched by leaf name like [`LoadedImages`], and for the same reason: one side
-/// spells it `@rpath/QtCore.framework/Versions/5/QtCore` and the other holds
-/// whatever path the file was opened from.
-struct ProgramImages;
-
-impl ProgramImages {
-    /// The recorded images whose leaf name matches a two-level reference, or all
-    /// of them for a flat one.
-    fn matching<'a>(named: Option<&'a str>) -> impl Iterator<Item = &'static ProgramImage> + 'a {
-        PROGRAM_IMAGES
-            .get()
-            .map(|v| v.as_slice())
-            .unwrap_or_default()
+impl LinkedImage {
+    /// Every image of `report` but its root.
+    fn of(report: &LinkReport) -> Vec<LinkedImage> {
+        let root = report.root().map(|r| r.name.as_str());
+        report
+            .images
             .iter()
-            .filter(move |image| named.is_none_or(|n| n == leaf(&image.name)))
+            .filter(|i| Some(i.name.as_str()) != root)
+            .map(|i| LinkedImage {
+                name: i.name.clone(),
+                path: i.path.clone(),
+                slide: i.slide,
+                exports: OnceLock::new(),
+            })
+            .collect()
     }
 
-    /// `image`'s export table, parsed from disk on first use.
-    fn exports(image: &'static ProgramImage) -> Option<&'static ExportTable> {
-        image
-            .exports
+    /// Matched by leaf name like [`LoadedImages`], and for the same reason: one
+    /// side spells it `@rpath/QtCore.framework/Versions/5/QtCore` and the other
+    /// holds whatever path the file was opened from.
+    fn answers_to(&self, wanted: &str) -> bool {
+        leaf(&self.name) == wanted || leaf(&self.path) == wanted
+    }
+
+    fn exports(&self) -> Option<&ExportTable> {
+        self.exports
             .get_or_init(|| {
-                let path = resolve_path(&image.name)?;
-                let bytes = std::fs::read(&path).ok()?;
+                let bytes = std::fs::read(&self.path)
+                    .ok()
+                    .or_else(|| std::fs::read(resolve_path(&self.name)?).ok())?;
                 match crate::exec::active()?.engine() {
                     crate::exec::Engine::Native => ExportTable::parse(
                         &MachObject::parse_any(&bytes, crate::exec::native::HOST_SPEC).ok()?,
@@ -167,6 +163,52 @@ impl ProgramImages {
             })
             .as_ref()
     }
+
+    fn resolve(&self, name: &str) -> Option<machish::resolve::Resolved> {
+        let export = self.exports()?.get(name)?;
+        // A re-export has no address of its own; see [`MainExports`].
+        let addr = export.address(self.slide)?;
+        Some(machish::resolve::Resolved {
+            addr,
+            kind: match export.kind {
+                machish::exports::ExportKind::ThreadLocal => {
+                    machish::resolve::SymbolKind::ThreadLocal
+                }
+                _ => machish::resolve::SymbolKind::Function,
+            },
+            tag: 0,
+        })
+    }
+}
+
+/// The images the program's own link loaded, as recorded by
+/// [`register_mapped_images`]: every image of that link but the executable, which
+/// [`MainExports`] answers for.
+///
+/// Set once, before the program runs. See [`ProgramImages`].
+static PROGRAM_IMAGES: OnceLock<Vec<LinkedImage>> = OnceLock::new();
+
+/// Everything the *executable* was linked against, as a symbol provider.
+///
+/// The gap this closes: [`MainExports`] answers for the executable and
+/// [`LoadedImages`] for images the guest `dlopen`ed, and **neither** answers for
+/// the dylibs the executable itself pulled in. So a plugin loaded at runtime
+/// could not bind to the framework it is a plugin *for* - Qt's Cocoa plugin had
+/// fourteen hundred unresolved imports, every one of them a symbol QtCore and
+/// QtGui were already exporting from memory a few pages away.
+struct ProgramImages;
+
+impl ProgramImages {
+    /// The recorded images whose leaf name matches a two-level reference, or all
+    /// of them for a flat one.
+    fn matching<'a>(named: Option<&'a str>) -> impl Iterator<Item = &'static LinkedImage> + 'a {
+        PROGRAM_IMAGES
+            .get()
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(move |image| named.is_none_or(|n| image.answers_to(n)))
+    }
 }
 
 impl machish::resolve::SymbolProvider for ProgramImages {
@@ -174,28 +216,16 @@ impl machish::resolve::SymbolProvider for ProgramImages {
         Self::matching(Some(leaf(install_name))).next().is_some()
     }
 
+    /// Already mapped, so a plugin's dependency on it is met by this copy and
+    /// not a second one with globals of its own - but only if it can be bound
+    /// to at all.
+    fn stands_for(&self, install_name: &str) -> bool {
+        Self::matching(Some(leaf(install_name))).any(|image| image.exports().is_some())
+    }
+
     fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
         let named = sym.library.install_name().map(leaf);
-        for image in Self::matching(named) {
-            let Some(export) = Self::exports(image).and_then(|t| t.get(sym.name)) else {
-                continue;
-            };
-            // A re-export has no address of its own; see [`MainExports`].
-            let Some(addr) = export.address(image.slide) else {
-                continue;
-            };
-            return Some(machish::resolve::Resolved {
-                addr,
-                kind: match export.kind {
-                    machish::exports::ExportKind::ThreadLocal => {
-                        machish::resolve::SymbolKind::ThreadLocal
-                    }
-                    _ => machish::resolve::SymbolKind::Function,
-                },
-                tag: 0,
-            });
-        }
-        None
+        Self::matching(named).find_map(|image| image.resolve(sym.name))
     }
 }
 
@@ -218,19 +248,7 @@ pub fn register_mapped_images(report: &LinkReport) {
     // The same images as something a later `dlopen` can bind against. The root
     // is left out: it is [`MainExports`]' job, which knows the path it was
     // launched from and answers `@executable_path` as well.
-    let root = report.root().map(|r| r.name.as_str());
-    let _ = PROGRAM_IMAGES.set(
-        report
-            .images
-            .iter()
-            .filter(|i| Some(i.name.as_str()) != root)
-            .map(|i| ProgramImage {
-                name: i.name.clone(),
-                slide: i.slide,
-                exports: OnceLock::new(),
-            })
-            .collect(),
-    );
+    let _ = PROGRAM_IMAGES.set(LinkedImage::of(report));
 }
 
 /// The main executable's export table, parsed once, on first use.
@@ -292,10 +310,34 @@ fn leaf(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
+impl LoadedImages {
+    /// The live image that is, or carried in, a library of leaf name `wanted`.
+    fn holding(wanted: &str) -> Option<&'static Image> {
+        find(|i| {
+            let held = leaf(&i.path) == wanted || i.linked.iter().any(|l| l.answers_to(wanted));
+            (held && !i.unloading.load(Ordering::Acquire)).then_some(i)
+        })
+    }
+}
+
 impl machish::resolve::SymbolProvider for LoadedImages {
     fn provides(&self, install_name: &str) -> bool {
+        Self::holding(leaf(install_name)).is_some()
+    }
+
+    /// A library an earlier `dlopen` mapped - itself or as a dependency - is
+    /// shared by the next image that needs it, as dyld shares it: a second copy
+    /// would have globals of its own, and SDL initialised in one would be
+    /// uninitialised in the other.
+    fn stands_for(&self, install_name: &str) -> bool {
         let wanted = leaf(install_name);
-        find(|i| (leaf(&i.path) == wanted).then_some(())).is_some()
+        Self::holding(wanted).is_some_and(|image| {
+            leaf(&image.path) == wanted
+                || image
+                    .linked
+                    .iter()
+                    .any(|l| l.answers_to(wanted) && l.exports().is_some())
+        })
     }
 
     fn resolve(&self, sym: &machish::fixups::SymbolRef<'_>) -> Option<machish::resolve::Resolved> {
@@ -304,28 +346,39 @@ impl machish::resolve::SymbolProvider for LoadedImages {
         // library through to here.
         let named = sym.library.install_name().map(leaf);
         find(|image| {
-            if named.is_some_and(|n| n != leaf(&image.path))
-                || image.unloading.load(Ordering::Acquire)
-            {
+            if image.unloading.load(Ordering::Acquire) {
                 return None;
             }
-            let export = image.exports.get(sym.name)?;
-            // A re-export has no address of its own; see [`MainExports`].
-            let addr = export.address(image.slide)?;
+            let own = named
+                .is_none_or(|n| n == leaf(&image.path))
+                .then(|| image.exports.get(sym.name))
+                .flatten()
+                // A re-export has no address of its own; see [`MainExports`].
+                .and_then(|export| Some((export.address(image.slide)?, export.kind)))
+                .map(|(addr, kind)| machish::resolve::Resolved {
+                    addr,
+                    kind: match kind {
+                        machish::exports::ExportKind::ThreadLocal => {
+                            machish::resolve::SymbolKind::ThreadLocal
+                        }
+                        _ => machish::resolve::SymbolKind::Function,
+                    },
+                    tag: 0,
+                });
+            // Then what it carried, which unloads with it and so is bound
+            // through it.
+            let found = own.or_else(|| {
+                image
+                    .linked
+                    .iter()
+                    .filter(|l| named.is_none_or(|n| l.answers_to(n)))
+                    .find_map(|l| l.resolve(sym.name))
+            })?;
             let mut bound = self.bound.lock().unwrap_or_else(|e| e.into_inner());
             if !bound.iter().any(|b| std::ptr::eq(*b, image)) {
                 bound.push(image);
             }
-            Some(machish::resolve::Resolved {
-                addr,
-                kind: match export.kind {
-                    machish::exports::ExportKind::ThreadLocal => {
-                        machish::resolve::SymbolKind::ThreadLocal
-                    }
-                    _ => machish::resolve::SymbolKind::Function,
-                },
-                tag: 0,
-            })
+            Some(found)
         })
     }
 }
@@ -814,7 +867,12 @@ fn open_with<S: MachSpec + 'static>(
     // the executable.
     extra.push(&program as &dyn machish::resolve::SymbolProvider);
     extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
-    let mut report = Loader::new(spec)
+    let mut loader = Loader::new(spec);
+    // `@executable_path` is the program's directory, not the plugin's.
+    if let Some((executable, _)) = EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        loader.executable_path(executable);
+    }
+    let mut report = loader
         .link_with(
             bytes,
             resolved,
@@ -887,6 +945,7 @@ fn open_with<S: MachSpec + 'static>(
         .map(|(base, bytes)| (base, bytes.len()))
         .collect();
     let pinned = never_unloadable(&report);
+    let linked = LinkedImage::of(&report);
     let dependencies = loaded.bound.into_inner().unwrap_or_else(|e| e.into_inner());
     // The `Image` itself is leaked even once unloaded: readers search the
     // published view without a lock, so one may still hold it.
@@ -905,6 +964,7 @@ fn open_with<S: MachSpec + 'static>(
         pinned: AtomicBool::new(pinned),
         unloading: AtomicBool::new(false),
         dependencies,
+        linked,
     }));
 
     // Published *before* the initializers run: an initializer is guest code in
