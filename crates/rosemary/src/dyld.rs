@@ -540,6 +540,15 @@ static MAIN_HEADER: AtomicU64 = AtomicU64::new(0);
 /// Record the main executable's mach header address.
 pub fn set_executable_header(va: u64) {
     MAIN_HEADER.store(va, Ordering::Release);
+    // SAFETY: the header and its load commands are mapped readable at `va`,
+    // which the host addresses as the guest does.
+    let header = unsafe {
+        let sizeofcmds = std::ptr::read_unaligned((va as usize + 20) as *const u32);
+        std::slice::from_raw_parts(va as usize as *const u8, 32 + sizeofcmds as usize)
+    };
+    if let Some(version) = machish::image::sdk_version(header) {
+        darwin::images::set_program_sdk(version);
+    }
 }
 
 /// Record where the guest executable came from, and where it landed.

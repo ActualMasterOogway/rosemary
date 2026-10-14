@@ -27,6 +27,25 @@ pub struct Loader {
 
 static LOADER: OnceLock<Loader> = OnceLock::new();
 
+/// The main program's SDK version, `xxxx.yy.zz` in nibbles; zero for unknown.
+static PROGRAM_SDK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Record the SDK the main program was linked against, as its load commands
+/// say.
+pub fn set_program_sdk(version: u32) {
+    PROGRAM_SDK.store(version, std::sync::atomic::Ordering::Release);
+}
+
+/// The SDK the main program was linked against, as
+/// `dyld_get_program_sdk_version` answers it, or `None` when the runtime did
+/// not find one - a unit test, or a program whose linker wrote none.
+pub fn program_sdk() -> Option<u32> {
+    match PROGRAM_SDK.load(std::sync::atomic::Ordering::Acquire) {
+        0 => None,
+        version => Some(version),
+    }
+}
+
 /// Install the runtime's answers. The first call wins.
 pub fn install(loader: Loader) {
     let _ = LOADER.set(loader);

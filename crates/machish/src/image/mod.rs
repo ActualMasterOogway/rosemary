@@ -3,6 +3,7 @@ mod entry;
 mod functions;
 mod object;
 mod sections;
+mod sdk;
 mod segments;
 mod symbols;
 mod unwind;
@@ -14,6 +15,7 @@ pub use commands::{
 pub use entry::EntryPoint;
 pub use functions::{function_ranges, function_starts};
 pub use object::MachObject;
+pub use sdk::sdk_version;
 pub use sections::Section;
 pub use segments::{MappedImage, PageConflict, Segment, map_segments, protect_segments};
 pub use symbols::{Nlist, SymbolTable};

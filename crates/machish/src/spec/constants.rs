@@ -68,6 +68,7 @@ pub const LC_FUNCTION_STARTS: u32 = 0x26;
 pub const LC_DATA_IN_CODE: u32 = 0x29;
 pub const LC_SOURCE_VERSION: u32 = 0x2a;
 pub const LC_BUILD_VERSION: u32 = 0x32;
+pub const LC_VERSION_MIN_MACOSX: u32 = 0x24;
 
 pub const LC_RPATH: u32 = 0x1c | LC_REQ_DYLD;
 pub const LC_LOAD_WEAK_DYLIB: u32 = 0x18 | LC_REQ_DYLD;
