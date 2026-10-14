@@ -14,6 +14,10 @@ pub struct Conf {
     /// Variables to set unless the caller already did, as `(name, value)`
     /// with `@ROOT@` standing for the bundle root.
     pub default_env: Vec<(String, String)>,
+    /// Variables to set, unless the caller already did, to the first of
+    /// several host files that exists: `default_path.NAME=/a|/b`. For
+    /// configuration each distribution keeps in its own place.
+    pub default_path: Vec<(String, Vec<String>)>,
 }
 
 impl Conf {
@@ -35,6 +39,10 @@ impl Conf {
                 conf.required_glibc = Version::parse(value);
             } else if let Some(name) = key.strip_prefix("default_env.") {
                 conf.default_env.push((name.to_string(), value.to_string()));
+            } else if let Some(name) = key.strip_prefix("default_path.") {
+                let candidates = value.split('|').map(str::trim).filter(|c| !c.is_empty());
+                conf.default_path
+                    .push((name.to_string(), candidates.map(String::from).collect()));
             }
         }
         conf
@@ -53,6 +61,15 @@ mod tests {
         assert_eq!(
             conf.default_env,
             [("A".to_string(), "@ROOT@/x".to_string())]
+        );
+    }
+
+    #[test]
+    fn reads_candidate_paths_in_order() {
+        let conf = Conf::parse("default_path.F=/a | /b|\n");
+        assert_eq!(
+            conf.default_path,
+            [("F".to_string(), vec!["/a".to_string(), "/b".to_string()])]
         );
     }
 

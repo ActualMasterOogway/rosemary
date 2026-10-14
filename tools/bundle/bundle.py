@@ -15,6 +15,11 @@ the host, or vendored. Vendored files are copied to `lib/`, their RUNPATH
 rewritten to `$ORIGIN`, so no Nix store path is needed at run time. A report,
 `share/doc/rosemary/SOURCES.yaml`, says where every file came from.
 
+Executables can be vendored too (`executables`), such as WebKitGTK's helper
+processes: they get the host's loader as their interpreter and a RUNPATH that
+reaches `lib/`. Libraries that are loaded by path, not soname, such as GIO
+modules, go where `extra_libraries` says.
+
 Usage: bundle.py --config CONFIG.json --out TREE
 """
 
@@ -237,6 +242,8 @@ class Bundler:
         self.cfg, self.out = cfg, out
         self.policy = cfg["policy"]
         self.libs = {}
+        # Every name a vendored library answers to -> its real path.
+        self.by_name = {}
         self.queue = []
         self.host = defaultdict(set)
         self.glibc_names = defaultdict(set)
@@ -244,6 +251,10 @@ class Bundler:
         self.errors = []
         self.requirements = []
         self.needs = {}
+        # Real path -> absolute DT_NEEDED entries to replace with their basename.
+        self.absolute_needed = defaultdict(set)
+        # Real path -> destination directory, for `executables`.
+        self.executables = {}
 
     def classify(self, name):
         if matches(name, self.policy["glibc"]):
@@ -263,6 +274,12 @@ class Bundler:
         return None
 
     def want(self, name, elf, wanted_by, hard):
+        target = None
+        if os.path.isabs(name):
+            # nixpkgs links the odd library by its store path. The copy is
+            # found by its file name instead.
+            self.absolute_needed[os.path.realpath(elf.path)].add(name)
+            target, name = name, os.path.basename(name)
         kind = self.classify(name)
         wanting = self.libs.get(os.path.realpath(elf.path))
         if kind == "host" and hard and wanting and wanting.dest == "lib-fallback":
@@ -282,7 +299,11 @@ class Bundler:
                     "or move the name to policy.fallback"
                 )
             return
-        found = self.resolve(name, elf)
+        found = target if target and os.path.exists(target) else None
+        # A name already vendored is that library, even where this one's own
+        # RUNPATH would find another build of it (or none): the loader will
+        # only ever see the one in the bundle.
+        found = found or self.by_name.get(name) or self.resolve(name, elf)
         if not found:
             if kind == "fallback":
                 self.host[name].add(wanted_by)
@@ -293,6 +314,9 @@ class Bundler:
             return
         real = os.path.realpath(found)
         dest = "lib-fallback" if kind == "fallback" else "lib"
+        real = self.by_name.get(os.path.basename(real), real)
+        self.by_name.setdefault(name, real)
+        self.by_name.setdefault(os.path.basename(real), real)
         lib = self.libs.get(real)
         if lib is None:
             lib = self.libs[real] = Lib(real, dest)
@@ -317,12 +341,16 @@ class Bundler:
     def discover(self):
         binary = self.cfg["binary"]
         self.visit(binary, "rosemary")
-        for extra in self.cfg.get("extra_roots", []):
-            real = os.path.realpath(extra)
+        for extra in self.cfg.get("extra_libraries", []):
+            real = os.path.realpath(extra["path"])
             if real not in self.libs:
-                self.libs[real] = Lib(real)
-                self.libs[real].how.add("extra root")
+                self.libs[real] = Lib(real, extra.get("dest", "lib"))
+                self.libs[real].how.add("extra library")
                 self.queue.append(real)
+        for extra in self.cfg.get("executables", []):
+            real = os.path.realpath(extra["path"])
+            self.executables[real] = extra["dest"]
+            self.visit(real, os.path.basename(real))
         # Names the code builds at run time, so no scan can see them.
         probe = Elf(binary)
         for name in self.cfg.get("extra_sonames", []):
@@ -356,12 +384,16 @@ class Bundler:
             if elf.valid:
                 self.requirements.append(needs)
                 self.needs[f"{lib.dest}/{base}"] = needs
-                # Fallbacks may need what is vendored in lib/.
-                rpath = "$ORIGIN" if lib.dest == "lib" else "$ORIGIN:$ORIGIN/../lib"
-                self.patchelf("--set-rpath", rpath, dest)
-                # Shared objects have no interpreter; an executable that got
-                # in here would need one, so say so rather than ship it.
-                if elf.interpreter:
+                self.patchelf("--set-rpath", self.rpath_for(lib.dest), dest)
+                self.replace_absolute_needed(real, dest)
+                for added in self.cfg.get("add_needed", {}).get(elf.soname or base, []):
+                    # Ahead of everything else it needs, so its symbols come
+                    # first in this library's lookup scope.
+                    self.patchelf("--add-needed", added, dest)
+                # An executable that got in here would need an interpreter,
+                # so say so rather than ship it. A library with one of its
+                # own (libcap prints its version) still has a soname.
+                if elf.interpreter and not elf.soname:
                     self.errors.append(f"{real} is an executable")
             for alias in sorted(lib.aliases):
                 link = os.path.join(lib_dir, alias)
@@ -375,6 +407,47 @@ class Bundler:
                 "needs_glibc": fmt_version(needs),
                 "found_by": sorted(lib.how),
                 "wanted_by": sorted(lib.wanted_by),
+            }
+        return files
+
+    def rpath_for(self, dest):
+        """`$ORIGIN`, then the way from `dest` to `lib/` if that is elsewhere."""
+        if dest == "lib":
+            return "$ORIGIN"
+        return "$ORIGIN:$ORIGIN/" + os.path.relpath("lib", dest)
+
+    def replace_absolute_needed(self, real, dest):
+        for name in sorted(self.absolute_needed.get(real, ())):
+            self.patchelf("--replace-needed", name, os.path.basename(name), dest)
+
+    def install_executables(self):
+        files = {}
+        for real, dest_dir in sorted(self.executables.items()):
+            out_dir = os.path.join(self.out, dest_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            base = os.path.basename(real)
+            dest = os.path.join(out_dir, base)
+            shutil.copyfile(real, dest)
+            os.chmod(dest, 0o755)
+            original = sha256(real)
+            elf = Elf(dest)
+            needs = elf.glibc_requirement()
+            self.requirements.append(needs)
+            self.needs[f"{dest_dir}/{base}"] = needs
+            self.patchelf(
+                "--set-interpreter", self.cfg["interpreter"],
+                "--set-rpath", "$ORIGIN/" + os.path.relpath("lib", dest_dir),
+                dest,
+            )
+            self.replace_absolute_needed(real, dest)
+            files[real] = {
+                "path": f"{dest_dir}/{base}",
+                "symlinks": [],
+                "original_sha256": original,
+                "sha256": sha256(dest),
+                "needs_glibc": fmt_version(needs),
+                "found_by": ["executable"],
+                "wanted_by": [],
             }
         return files
 
@@ -422,6 +495,9 @@ class Bundler:
         for d in ("lib", "lib-fallback"):
             if os.path.isdir(os.path.join(self.out, d)):
                 paths += [os.path.join(self.out, d, n) for n in sorted(os.listdir(os.path.join(self.out, d)))]
+        paths += [os.path.join(self.out, lib.dest, os.path.basename(real)) for real, lib in self.libs.items()
+                  if lib.dest not in ("lib", "lib-fallback")]
+        paths += [os.path.join(self.out, d, os.path.basename(real)) for real, d in self.executables.items()]
         for path in paths:
             if not os.path.isfile(path) or os.path.islink(path):
                 continue
@@ -429,7 +505,9 @@ class Bundler:
             if not elf.valid:
                 continue
             for name in elf.needed:
-                if name not in have and self.classify(name) in ("vendor", "fallback"):
+                if os.path.isabs(name):
+                    self.errors.append(f"{os.path.relpath(path, self.out)} needs {name} by path")
+                elif name not in have and self.classify(name) in ("vendor", "fallback"):
                     self.errors.append(f"{os.path.relpath(path, self.out)} needs {name}, which is not in the bundle")
             for ref in (p for p in elf.rpath if p.startswith(STORE)):
                 self.errors.append(f"{os.path.relpath(path, self.out)} still has RUNPATH {ref}")
@@ -554,6 +632,7 @@ def main():
     b = Bundler(cfg, args.out)
     b.discover()
     files = b.install_libs()
+    files.update(b.install_executables())
     glibc_files = b.install_glibc()
     b.verify()
     b.needs["libexec/rosemary"] = Elf(cfg["binary"]).glibc_requirement()
@@ -562,6 +641,7 @@ def main():
     conf = [f"# generated by tools/bundle/bundle.py"]
     if required:
         conf.append(f"required_glibc={required[0]}.{required[1]}")
+    conf += cfg.get("conf", [])
     existing = os.path.join(args.out, "share/rosemary/bundle.conf")
     if os.path.exists(existing):
         conf = [open(existing).read().rstrip("\n")] + conf

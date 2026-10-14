@@ -25,7 +25,14 @@
     # package's closure, and a minimal install may not either.
     "libwayland-egl.so*" "libX11.so*" "libXext.so*" "libXcursor.so*" "libXi.so*"
     "libXfixes.so*" "libXrandr.so*" "libXrender.so*" "libXss.so*" "libXtst.so*"
-  ];
+  ] ++ (if withWebkit then [
+    # WebKitGTK and GTK link these rather than opening them, so a copy has to
+    # be there for hosts without them; the host's still comes first.
+    "libgbm.so*" "libdrm.so*" "libsystemd.so*" "libudev.so*" "libdbus-1.so*"
+    "libxcb*.so*" "libX11-xcb.so*" "libXinerama.so*"
+    # Flite, WebKit's speech synthesizer, links PulseAudio.
+    "libpulse.so*" "libpulse-simple.so*"
+  ] else [ ]);
 
   # Tied to the host's hardware, drivers, sound servers or window system, so a
   # copy from Nix would only get in the way of the host's own. GL and Vulkan in

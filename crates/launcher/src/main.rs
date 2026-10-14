@@ -197,6 +197,13 @@ fn prepare_environment(layout: &Layout, conf: &Conf, exe: &Path, mode: Mode) {
                 env::set_var(name, expand(value, &layout.root));
             }
         }
+        for (name, candidates) in &conf.default_path {
+            if env::var_os(name).is_none()
+                && let Some(found) = first_existing(candidates)
+            {
+                env::set_var(name, found);
+            }
+        }
         if mode == Mode::Bundled {
             // The bundled glibc looks for its converters in the store path it
             // was built at.
@@ -238,6 +245,13 @@ fn library_path(layout: &Layout, original: Option<&OsStr>, mode: Mode) -> OsStri
         fresh
     });
     env::join_paths(dirs).unwrap_or_default()
+}
+
+fn first_existing(candidates: &[String]) -> Option<&str> {
+    candidates
+        .iter()
+        .map(String::as_str)
+        .find(|candidate| Path::new(candidate).exists())
 }
 
 fn expand(value: &str, root: &Path) -> OsString {
@@ -379,6 +393,17 @@ mod tests {
         };
         assert_eq!(choose(&layout(&dir), &conf).0, Mode::Host);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn picks_the_first_candidate_that_exists() {
+        let candidates = [
+            "/nonexistent/a".to_string(),
+            "/".to_string(),
+            "/proc".to_string(),
+        ];
+        assert_eq!(first_existing(&candidates), Some("/"));
+        assert_eq!(first_existing(&candidates[..1]), None);
     }
 
     #[test]
