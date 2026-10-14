@@ -1298,6 +1298,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a static table.
     sig!("GetMacOSStatusCommentString", P, I32),
     sig!("GetMacOSStatusErrorString", P, I32),
+    // The Resource Manager, which never has a file open; see
+    // `coreservices::resources`.
+    sig!("GetResource", P, U32, I16),
+    sig!("Get1Resource", P, U32, I16),
+    sig!("ResError", I16),
+    sig!("ReleaseResource", V, P),
+    sig!("HLock", V, P),
+    sig!("HUnlock", V, P),
+    sig!("TickCount", U32),
     // The two keyboard low-memory globals, both `UInt8 (*)(void)` and both an
     // ordinary function on a 64-bit system: `LMGetKbdType` is what still backs
     // `UCKeyTranslate`'s keyboard-type argument, and `LMGetKbdLast` is the ADB

@@ -7,9 +7,11 @@
 pub mod events;
 pub mod files;
 pub mod process;
+pub mod resources;
 
 exports::group! {
     events,
     files,
     process,
+    resources,
 }
