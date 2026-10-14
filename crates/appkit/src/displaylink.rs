@@ -176,11 +176,14 @@ fn unschedule(object: Id) -> bool {
 
 /// A rate change takes effect on the next call, as it does for Apple's.
 fn reschedule(object: Id) {
+    // The run loop holds a reference to `object` while scheduled. Retain
+    // across the removal so that a link whose only reference is the run
+    // loop's is not deallocated before being re-scheduled.
+    objc::arc::retain(object);
     if unschedule(object) {
-        // The run loop's retain was dropped above; `object` is alive here
-        // because the caller holds a reference.
         schedule(object);
     }
+    objc::arc::release(object);
 }
 
 /// The display a link follows: a screen's own, and for a view or window the
@@ -485,5 +488,46 @@ mod tests {
             "fired after invalidate"
         );
         objc::arc::release(link);
+    }
+
+    #[test]
+    fn reschedule_does_not_deallocate_when_only_held_by_runloop() {
+        crate::bootstrap();
+        let target_class = corefoundation::base::register(
+            c"DisplayLinkRescheduleTarget",
+            None,
+            size_of::<usize>(),
+            false,
+        );
+        let selector = objc::sel::get("tick:");
+        target_class.replace_method(selector, tick as *const c_void, c"v24@0:8@16");
+        let target = unsafe { corefoundation::base::allocate::<usize>(target_class) } as Id;
+
+        let screen = match crate::screen::screen_object(c"UIScreen", 0) {
+            s if !s.is_null() => s,
+            _ => return,
+        };
+        let make = objc::sel::get("displayLinkWithTarget:selector:");
+        let method = unsafe { objc::object::class_of(screen) }
+            .and_then(|c| c.method(make))
+            .unwrap();
+        let f: unsafe extern "C" fn(Id, Sel, Id, Sel) -> Id =
+            unsafe { std::mem::transmute(method.implementation()) };
+        let link = unsafe { f(screen, make, target, selector) };
+
+        schedule(link);
+        // Release the initial allocation reference so that only the run loop retains it:
+        objc::arc::release(link);
+
+        let set_fps = objc::sel::get("setPreferredFramesPerSecond:");
+        let method = unsafe { objc::object::class_of(link) }
+            .and_then(|c| c.method(set_fps))
+            .unwrap();
+        let f: unsafe extern "C" fn(Id, Sel, isize) =
+            unsafe { std::mem::transmute(method.implementation()) };
+        unsafe { f(link, set_fps, 30) };
+
+        assert!(!link_of(link).timer.is_null());
+        send(link, "invalidate");
     }
 }
