@@ -30,9 +30,9 @@ fn fill_dyld_sections(exec: &dyn Execution) {
         // SAFETY: the section is part of a mapped, writable `__DATA` segment of
         // this process, and nothing of the guest has run yet.
         unsafe {
-            slot.write_unaligned(dyld_lazy_bind_helper as usize as u64);
+            slot.write_unaligned(dyld_lazy_bind_helper as *const () as usize as u64);
             slot.add(1)
-                .write_unaligned(dyld_func_lookup as usize as u64);
+                .write_unaligned(dyld_func_lookup as *const () as usize as u64);
         }
     }
 }
