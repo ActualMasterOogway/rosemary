@@ -365,9 +365,13 @@ unsafe extern "C" fn masks_to_bounds(receiver: Id, _sel: Sel) -> u8 {
     })
 }
 
+pub(crate) fn set_masks(layer: Id, masks: bool) {
+    with_node(layer, |node| node.masks_to_bounds = masks);
+    changed(layer);
+}
+
 unsafe extern "C" fn set_masks_to_bounds(receiver: Id, _sel: Sel, value: u8) {
-    with_node(receiver, |node| node.masks_to_bounds = value != 0);
-    changed(receiver);
+    set_masks(receiver, value != 0);
 }
 
 unsafe extern "C" fn is_hidden(receiver: Id, _sel: Sel) -> u8 {

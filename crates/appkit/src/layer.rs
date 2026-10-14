@@ -133,6 +133,12 @@ pub(crate) fn set_bounds_of(layer: Id, bounds: NSRect) {
     }
 }
 
+pub(crate) fn set_masks_to_bounds_of(layer: Id, masks: bool) {
+    if is_layer(layer) {
+        crate::coreanimation::set_masks(layer, masks);
+    }
+}
+
 /// A layer's `-contentsScale`, one for something that is not a layer.
 pub(crate) fn contents_scale_of(layer: Id) -> f64 {
     match is_layer(layer) {

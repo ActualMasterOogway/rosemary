@@ -57,6 +57,7 @@ pub struct View {
 /// set with `-setLayer:`.
 const WANTS_LAYER: usize = 1;
 const BACKING_LAYER: usize = 2;
+const CLIPS_TO_BOUNDS: usize = 4;
 const PLACEMENT_SHIFT: u32 = 8;
 
 /// The bits of [`View::posts`].
@@ -331,6 +332,9 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
         crate::layer::set_view(previous, std::ptr::null_mut());
         crate::layer::set_view(layer, receiver);
     }
+    if view.layer_backing & CLIPS_TO_BOUNDS != 0 && !layer.is_null() {
+        crate::layer::set_masks_to_bounds_of(layer, true);
+    }
     objc::arc::release(previous);
 }
 
@@ -426,6 +430,30 @@ unsafe extern "C" fn set_layer_contents_placement(receiver: Id, _sel: Sel, place
     if view.layer_backing & BACKING_LAYER != 0 {
         crate::layer::set_contents_gravity_for_placement(view.layer, placement);
     }
+}
+
+/// `-[NSView setClipsToBounds:]`.
+///
+/// Sets whether the view confines its drawing and that of its subviews to its
+/// bounds. If the view is layer-backed, setting this sets the backing layer's
+/// `masksToBounds`.
+unsafe extern "C" fn set_clips_to_bounds(receiver: Id, _sel: Sel, clips: u8) {
+    let view = view_of(receiver);
+    if clips != 0 {
+        view.layer_backing |= CLIPS_TO_BOUNDS;
+    } else {
+        view.layer_backing &= !CLIPS_TO_BOUNDS;
+    }
+    let layer = view.layer;
+    if !layer.is_null() {
+        crate::layer::set_masks_to_bounds_of(layer, clips != 0);
+    }
+}
+
+/// `-[NSView clipsToBounds]`.
+unsafe extern "C" fn clips_to_bounds(receiver: Id, _sel: Sel) -> u8 {
+    let view = view_of(receiver);
+    u8::from(view.layer_backing & CLIPS_TO_BOUNDS != 0)
 }
 
 /// Whether `view` is layer-backed: it asked for a layer and has one.
@@ -1958,6 +1986,8 @@ pub(crate) fn install() {
         "wantsLayer" => wants_layer, c"c16@0:8";
         "setAllowedTouchTypes:" => set_allowed_touch_types, c"v24@0:8Q16";
         "allowedTouchTypes" => allowed_touch_types, c"Q16@0:8";
+        "setClipsToBounds:" => set_clips_to_bounds, c"v20@0:8c16";
+        "clipsToBounds" => clips_to_bounds, c"c16@0:8";
     });
 }
 
@@ -2448,5 +2478,29 @@ mod tests {
         assert!(unsafe { presentation_frame(orphan) }.is_none());
         // SAFETY: null is one of the values this accepts.
         assert!(unsafe { presentation_frame(std::ptr::null_mut()) }.is_none());
+    }
+
+    #[test]
+    fn clips_to_bounds_round_trips_and_syncs_to_layer() {
+        let view = view(rect(0.0, 0.0, 10.0, 10.0));
+        let set_clips = objc::sel::get("setClipsToBounds:");
+        let get_clips = objc::sel::get("clipsToBounds");
+        let sel_wants_layer = objc::sel::get("setWantsLayer:");
+        unsafe {
+            assert_eq!(clips_to_bounds(view, get_clips), 0);
+            set_clips_to_bounds(view, set_clips, 1);
+            assert_eq!(clips_to_bounds(view, get_clips), 1);
+            set_wants_layer(view, sel_wants_layer, 1);
+            let layer = view_of(view).layer;
+            assert!(!layer.is_null());
+            let get_masks = objc::sel::get("masksToBounds");
+            let f: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
+            assert_eq!(f(layer, get_masks), 1);
+
+            set_clips_to_bounds(view, set_clips, 0);
+            assert_eq!(clips_to_bounds(view, get_clips), 0);
+            assert_eq!(f(layer, get_masks), 0);
+        }
+        objc::arc::release(view);
     }
 }
