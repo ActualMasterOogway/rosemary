@@ -5,10 +5,7 @@ fn imp(receiver: Id, selector: &str) -> (usize, Sel) {
     let sel = objc::sel::get(selector);
     // SAFETY: callers supply live objects.
     let class = unsafe { objc::object::class_of(receiver) }.expect("an object");
-    (
-        objc::class::method_implementation(class, sel) as usize,
-        sel,
-    )
+    (objc::class::method_implementation(class, sel) as usize, sel)
 }
 
 unsafe fn object(receiver: Id, selector: &str, a: Id) -> Id {
