@@ -1351,6 +1351,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("OSSpinLockLock", V, P),
     sig!("OSSpinLockTry", BOOL, P),
     sig!("OSSpinLockUnlock", V, P),
+    // `os_unfair_lock` is likewise a bare `uint32_t` the guest owns and the
+    // host operates on in place; `options` is an `os_unfair_lock_options_t`.
+    sig!("os_unfair_lock_lock", V, P),
+    sig!("os_unfair_lock_lock_with_options", V, P, U32),
+    sig!("os_unfair_lock_trylock", BOOL, P),
+    sig!("os_unfair_lock_unlock", V, P),
+    sig!("os_unfair_lock_assert_owner", V, P),
+    sig!("os_unfair_lock_assert_not_owner", V, P),
     // Filed after the `OSAtomic` family because lowercase `p` sorts above `S`,
     // which is now a reader's convenience rather than a correctness condition -
     // [`index`] finds it wherever it is.

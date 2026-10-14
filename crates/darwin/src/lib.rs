@@ -104,6 +104,7 @@ pub mod termios;
 pub mod tls;
 pub mod translation;
 pub mod ulock;
+mod unfair_lock;
 #[cfg(not(target_os = "macos"))]
 pub mod utmpx;
 pub mod uuid;
@@ -337,6 +338,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     fcntl::entry::MODULE,
     stackprobe::MODULE,
     atomics::MODULE,
+    unfair_lock::MODULE,
     fortify::MODULE,
     env::MODULE,
     humanize::MODULE,
