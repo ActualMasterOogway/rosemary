@@ -762,6 +762,218 @@ unsafe extern "C" fn no_ubiquity_container(_receiver: Id, _sel: Sel, _identifier
     std::ptr::null_mut()
 }
 
+/// `-contentsAtPath:`: the file's bytes as `NSData`, or nil when it cannot be
+/// read - which is also what Apple answers for a directory.
+unsafe extern "C" fn contents_at_path(_receiver: Id, _sel: Sel, path: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return std::ptr::null_mut();
+    };
+    let data = corefoundation::collections::new_data(bytes);
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(data) as Id }
+}
+
+/// `-contentsEqualAtPath:andPath:`: two files with the same bytes, or two
+/// directories whose entries are pairwise equal. Anything unreadable is unequal.
+unsafe extern "C" fn contents_equal(_receiver: Id, _sel: Sel, first: Id, second: Id) -> u8 {
+    // SAFETY: each is an `NSString`, or nil.
+    let (Some(a), Some(b)) = (unsafe { path_of(first) }, unsafe { path_of(second) }) else {
+        return 0;
+    };
+    paths_equal(&a, &b) as u8
+}
+
+fn paths_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    match (ma.is_dir(), mb.is_dir()) {
+        (false, false) => {
+            ma.len() == mb.len()
+                && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+        }
+        (true, true) => {
+            let (Some(na), Some(nb)) = (directory_names(a), directory_names(b)) else {
+                return false;
+            };
+            na == nb && na.iter().all(|n| paths_equal(&a.join(n), &b.join(n)))
+        }
+        _ => false,
+    }
+}
+
+/// `-isDeletableFileAtPath:`: the item exists and its parent can be written.
+unsafe extern "C" fn is_deletable(_receiver: Id, _sel: Sel, path: Id) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return 0;
+    };
+    if std::fs::symlink_metadata(&path).is_err() {
+        return 0;
+    }
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let Ok(parent) = std::ffi::CString::new(parent.into_os_string().into_encoded_bytes()) else {
+        return 0;
+    };
+    // SAFETY: a NUL-terminated path that outlives the call.
+    u8::from(unsafe { libc::access(parent.as_ptr(), libc::W_OK) } == 0)
+}
+
+/// Every descendant of `root`, depth first, as paths relative to it.
+fn subpaths(root: &std::path::Path) -> Option<Vec<String>> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        for name in directory_names(dir).unwrap_or_default() {
+            let relative = match prefix.is_empty() {
+                true => name.clone(),
+                false => format!("{prefix}/{name}"),
+            };
+            out.push(relative.clone());
+            let child = dir.join(&name);
+            // A symlink to a directory is listed but not entered, which is how
+            // Apple avoids cycles.
+            let is_real_dir = std::fs::symlink_metadata(&child).is_ok_and(|m| m.is_dir());
+            if is_real_dir {
+                walk(&child, &relative, out);
+            }
+        }
+    }
+    directory_names(root)?;
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    Some(out)
+}
+
+fn string_array(strings: &[String]) -> Id {
+    let objects: Vec<CFTypeRef> = strings
+        .iter()
+        .map(|s| corefoundation::string::from_bytes(s.as_bytes(), false))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for object in objects {
+        // SAFETY: a string made above, which the array has retained.
+        unsafe { corefoundation::api::CFRelease(object) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
+/// `-subpathsOfDirectoryAtPath:error:`.
+unsafe extern "C" fn subpaths_of_directory(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: an `NSString`, or nil.
+    match (unsafe { path_of(path) }).and_then(|p| subpaths(&p)) {
+        Some(list) => string_array(&list),
+        None => {
+            if !error.is_null() {
+                // SAFETY: writable, checked above. 260 is NSFileReadNoSuchFileError.
+                unsafe {
+                    *error =
+                        crate::error::make("NSCocoaErrorDomain", 260, "The folder doesn't exist.")
+                };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `-subpathsAtPath:`, the older spelling, which has no error slot.
+unsafe extern "C" fn subpaths_at_path(_receiver: Id, _sel: Sel, path: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    match (unsafe { path_of(path) }).and_then(|p| subpaths(&p)) {
+        Some(list) => string_array(&list),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-displayNameAtPath:`: the last component, since there is no Finder
+/// localization to apply.
+unsafe extern "C" fn display_name(_receiver: Id, _sel: Sel, path: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let text = String::from_utf8_lossy(&unsafe { crate::string::bytes(path) }).into_owned();
+    let trimmed = text.trim_end_matches('/');
+    let name = match trimmed.rsplit('/').next() {
+        Some(n) if !n.is_empty() => n,
+        _ => "/",
+    };
+    crate::string::from_str(name)
+}
+
+/// `-destinationOfSymbolicLinkAtPath:error:`.
+unsafe extern "C" fn destination_of_symlink(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    error: *mut Id,
+) -> Id {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: an `NSString`, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return std::ptr::null_mut();
+    };
+    match std::fs::read_link(path) {
+        Ok(target) => crate::string::from_str(&target.to_string_lossy()),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// `-createSymbolicLinkAtPath:withDestinationPath:error:`. The destination is
+/// stored as the guest wrote it; it is only translated when something follows it.
+unsafe extern "C" fn create_symlink(
+    _receiver: Id,
+    _sel: Sel,
+    path: Id,
+    destination: Id,
+    error: *mut Id,
+) -> u8 {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: each is an `NSString`, or nil.
+    let Some(path) = (unsafe { path_of(path) }) else {
+        return 0;
+    };
+    let Ok(target) = String::from_utf8(unsafe { crate::string::bytes(destination) }) else {
+        return 0;
+    };
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, path).is_ok() as u8
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, target);
+        0
+    }
+}
+
+/// `-linkItemAtPath:toPath:error:`: a hard link.
+unsafe extern "C" fn link_item(_receiver: Id, _sel: Sel, from: Id, to: Id, error: *mut Id) -> u8 {
+    // SAFETY: null or writable.
+    unsafe { no_error(error) };
+    // SAFETY: each is an `NSString`, or nil.
+    let (Some(from), Some(to)) = (unsafe { path_of(from) }, unsafe { path_of(to) }) else {
+        return 0;
+    };
+    std::fs::hard_link(from, to).is_ok() as u8
+}
+
 pub(crate) fn install() {
     let class =
         corefoundation::base::register(c"NSFileManager", None, std::mem::size_of::<usize>(), false);
@@ -780,6 +992,17 @@ pub(crate) fn install() {
         "contentsOfDirectoryAtPath:error:" => contents_of_directory, c"@32@0:8@16^@24";
         "contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:"
             => contents_of_directory_at_url, c"@48@0:8@16@24Q32^@40";
+        "contentsAtPath:" => contents_at_path, c"@24@0:8@16";
+        "contentsEqualAtPath:andPath:" => contents_equal, c"B32@0:8@16@24";
+        "isDeletableFileAtPath:" => is_deletable, c"B24@0:8@16";
+        "subpathsOfDirectoryAtPath:error:" => subpaths_of_directory, c"@32@0:8@16^@24";
+        "subpathsAtPath:" => subpaths_at_path, c"@24@0:8@16";
+        "displayNameAtPath:" => display_name, c"@24@0:8@16";
+        "destinationOfSymbolicLinkAtPath:error:"
+            => destination_of_symlink, c"@32@0:8@16^@24";
+        "createSymbolicLinkAtPath:withDestinationPath:error:"
+            => create_symlink, c"B40@0:8@16@24^@32";
+        "linkItemAtPath:toPath:error:" => link_item, c"B40@0:8@16@24^@32";
         "attributesOfItemAtPath:error:" => attributes_of_item, c"@32@0:8@16^@24";
         "attributesOfFileSystemForPath:error:" => attributes_of_file_system, c"@32@0:8@16^@24";
         "isWritableFileAtPath:" => is_writable, c"B24@0:8@16";
@@ -955,6 +1178,75 @@ mod tests {
                 0
             );
         }
+    }
+
+    /// `-contentsAtPath:` and the selectors an app pairs it with.
+    #[test]
+    fn contents_at_path_reads_and_relatives_agree() {
+        let manager = manager();
+        let root = std::env::temp_dir().join(format!("rosemary-fc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"hello").unwrap();
+        std::fs::write(root.join("b.txt"), b"hello").unwrap();
+        std::fs::write(root.join("c.txt"), b"world").unwrap();
+        std::fs::write(root.join("d/sub/f"), b"x").unwrap();
+        let s = |name: &str| crate::string::from_str(&root.join(name).to_string_lossy());
+        let sel = objc::sel::get;
+        let null = std::ptr::null_mut();
+
+        // SAFETY: each prototype is the one its selector declares.
+        unsafe {
+            let data = contents_at_path(manager, sel("contentsAtPath:"), s("a.txt"));
+            let bytes = corefoundation::collections::data(data as CFTypeRef).unwrap();
+            assert_eq!(bytes.as_slice(), b"hello");
+            assert!(contents_at_path(manager, sel("contentsAtPath:"), s("nope")).is_null());
+            assert!(contents_at_path(manager, sel("contentsAtPath:"), s("d")).is_null());
+            assert!(contents_at_path(manager, sel("contentsAtPath:"), null).is_null());
+
+            let eq = |a, b| contents_equal(manager, sel("contentsEqualAtPath:andPath:"), a, b);
+            assert_eq!(eq(s("a.txt"), s("b.txt")), 1);
+            assert_eq!(eq(s("a.txt"), s("c.txt")), 0);
+            assert_eq!(eq(s("a.txt"), s("d")), 0);
+            assert_eq!(eq(s("a.txt"), s("missing")), 0);
+
+            assert_eq!(
+                is_deletable(manager, sel("isDeletableFileAtPath:"), s("a.txt")),
+                1
+            );
+            assert_eq!(
+                is_deletable(manager, sel("isDeletableFileAtPath:"), s("missing")),
+                0
+            );
+
+            let list = subpaths_at_path(manager, sel("subpathsAtPath:"), s("d"));
+            let count = corefoundation::api::CFArrayGetCount(list as CFTypeRef);
+            assert_eq!(count, 2, "sub and sub/f");
+            let list = subpaths_of_directory(manager, sel("x"), s("missing"), null as *mut Id);
+            assert!(list.is_null());
+
+            assert_eq!(
+                create_symlink(
+                    manager,
+                    sel("x"),
+                    s("ln"),
+                    crate::string::from_str("a.txt"),
+                    null as *mut Id,
+                ),
+                1
+            );
+            let target = destination_of_symlink(manager, sel("x"), s("ln"), null as *mut Id);
+            assert_eq!(crate::string::bytes(target), b"a.txt");
+            assert_eq!(
+                link_item(manager, sel("x"), s("a.txt"), s("hard"), null as *mut Id),
+                1
+            );
+            assert_eq!(std::fs::read(root.join("hard")).unwrap(), b"hello");
+
+            let name = display_name(manager, sel("displayNameAtPath:"), s("a.txt"));
+            assert_eq!(crate::string::bytes(name), b"a.txt");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// One manager, which is what `+defaultManager` promises.
