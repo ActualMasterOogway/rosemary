@@ -545,9 +545,24 @@ unsafe extern "C" fn init_view_with_frame(
     // dynamic dispatch through a guest subclass's own initializer.
     let receiver =
         unsafe { crate::view::init_with_frame(receiver, objc::sel::get("initWithFrame:"), frame) };
-    let view = gl_view_of(receiver);
-    view.format = objc::arc::retain(format);
+    gl_view_of(receiver).format = objc::arc::retain(format);
+    make_view_context(receiver);
+    receiver
+}
 
+/// Make the context `view` owns from its pixel format, pointed back at the view.
+///
+/// A nil format is the default one, which is what AppKit builds a context from
+/// when a view was never given a format.
+fn make_view_context(view: Id) {
+    let mut format = gl_view_of(view).format;
+    if format.is_null() {
+        // SAFETY: a class method of the class declared for this purpose.
+        format = unsafe {
+            default_pixel_format(std::ptr::null_mut(), objc::sel::get("defaultPixelFormat"))
+        };
+        gl_view_of(view).format = format;
+    }
     let class = objc::class::lookup(c"NSOpenGLContext").expect("NSOpenGLContext is declared");
     let context = objc::object::create_instance(class, 0);
     // SAFETY: a fresh context and the initializer's declared arguments.
@@ -559,10 +574,70 @@ unsafe extern "C" fn init_view_with_frame(
             std::ptr::null_mut(),
         )
     };
-    // SAFETY: the context and view this initializer just established.
-    unsafe { set_view(context, objc::sel::get("setView:"), receiver) };
-    view.context = context;
-    receiver
+    // SAFETY: the context and view this call just established.
+    unsafe { set_view(context, objc::sel::get("setView:"), view) };
+    gl_view_of(view).context = context;
+}
+
+/// `+[NSOpenGLView defaultPixelFormat]`: double buffered, 24-bit colour and a
+/// 16-bit depth buffer, as the class reference describes it. Autoreleased.
+unsafe extern "C" fn default_pixel_format(_receiver: Id, _sel: Sel) -> Id {
+    static DEFAULT: [u32; 6] = [
+        attribute::DOUBLE_BUFFER,
+        attribute::COLOR_SIZE,
+        24,
+        attribute::DEPTH_SIZE,
+        16,
+        0,
+    ];
+    let class = objc::class::lookup(c"NSOpenGLPixelFormat").expect("NSOpenGLPixelFormat");
+    let object = objc::object::create_instance(class, 0);
+    // SAFETY: `-initWithAttributes:` takes a zero-terminated list.
+    let object = unsafe {
+        init_with_attributes(
+            object,
+            objc::sel::get("initWithAttributes:"),
+            DEFAULT.as_ptr(),
+        )
+    };
+    objc::arc::autorelease(object)
+}
+
+/// `-[NSOpenGLView setPixelFormat:]`.
+///
+/// Per the class reference this sets the format the view's context is made
+/// from; it does not rebuild a context that exists. A context nothing has made
+/// current yet has no SDL state tied to the old format, so it takes the new one
+/// in place. After that the program must `-clearGLContext` and ask again, as
+/// AppKit requires.
+unsafe extern "C" fn set_view_pixel_format(receiver: Id, _sel: Sel, format: Id) {
+    let view = gl_view_of(receiver);
+    if view.format == format {
+        return;
+    }
+    let old = view.format;
+    view.format = objc::arc::retain(format);
+    if !view.context.is_null() {
+        let context = context_of(view.context);
+        if context.sdl.is_null() && context.format == old {
+            objc::arc::release(context.format);
+            context.format = objc::arc::retain(format);
+        }
+    }
+    objc::arc::release(old);
+}
+
+/// `-[NSOpenGLView clearGLContext]`: detach and let go of the context. The
+/// next `-openGLContext` makes a new one from the view's pixel format.
+unsafe extern "C" fn clear_gl_context(receiver: Id, _sel: Sel) {
+    let view = gl_view_of(receiver);
+    let context = std::mem::replace(&mut view.context, std::ptr::null_mut());
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: a context this crate made.
+    unsafe { clear_drawable(context, objc::sel::get("clearDrawable")) };
+    objc::arc::release(context);
 }
 
 unsafe extern "C" fn view_pixel_format(receiver: Id, _sel: Sel) -> Id {
@@ -570,6 +645,9 @@ unsafe extern "C" fn view_pixel_format(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn open_gl_context(receiver: Id, _sel: Sel) -> Id {
+    if gl_view_of(receiver).context.is_null() {
+        make_view_context(receiver);
+    }
     gl_view_of(receiver).context
 }
 
@@ -1797,7 +1875,12 @@ pub(crate) fn install() {
     });
 
     let view = objc::class::lookup(c"NSOpenGLView").expect("declared before its methods");
+    class_methods!(view, {
+        "defaultPixelFormat" => default_pixel_format, c"@16@0:8";
+    });
     methods!(view, {
+        "setPixelFormat:" => set_view_pixel_format, c"v24@0:8@16";
+        "clearGLContext" => clear_gl_context, c"v16@0:8";
         "initWithFrame:pixelFormat:" => init_view_with_frame,
             c"@56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "pixelFormat" => view_pixel_format, c"@16@0:8";
@@ -2339,6 +2422,103 @@ mod tests {
             .unwrap();
         worker.join().unwrap();
         unsafe { assert_eq!(CGLUnlockContext(handle), kCGLBadContext) };
+    }
+
+    fn new_format(attributes: &[u32]) -> Id {
+        let class = objc::class::lookup(c"NSOpenGLPixelFormat").expect("NSOpenGLPixelFormat");
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: a zero-terminated list.
+        unsafe {
+            init_with_attributes(
+                object,
+                objc::sel::get("initWithAttributes:"),
+                attributes.as_ptr(),
+            )
+        }
+    }
+
+    fn new_view(format: Id) -> Id {
+        let class = objc::class::lookup(c"NSOpenGLView").expect("NSOpenGLView");
+        let object = objc::object::create_instance(class, 0);
+        let frame = NSRect::default();
+        // SAFETY: the initializer's declared arguments.
+        unsafe {
+            init_view_with_frame(
+                object,
+                objc::sel::get("initWithFrame:pixelFormat:"),
+                frame,
+                format,
+            )
+        }
+    }
+
+    #[test]
+    fn set_pixel_format_replaces_the_views_format() {
+        crate::bootstrap();
+        let first = new_format(&[attribute::DOUBLE_BUFFER, 0]);
+        let second = new_format(&[attribute::DEPTH_SIZE, 24, 0]);
+        let view = new_view(first);
+        // SAFETY: the declared signatures.
+        unsafe {
+            assert_eq!(
+                view_pixel_format(view, objc::sel::get("pixelFormat")),
+                first
+            );
+            set_view_pixel_format(view, objc::sel::get("setPixelFormat:"), second);
+            assert_eq!(
+                view_pixel_format(view, objc::sel::get("pixelFormat")),
+                second
+            );
+        }
+    }
+
+    #[test]
+    fn set_pixel_format_reaches_a_context_not_yet_made_current() {
+        crate::bootstrap();
+        let first = new_format(&[attribute::DOUBLE_BUFFER, 0]);
+        let second = new_format(&[attribute::DEPTH_SIZE, 24, 0]);
+        let view = new_view(first);
+        // SAFETY: the declared signatures.
+        unsafe { set_view_pixel_format(view, objc::sel::get("setPixelFormat:"), second) };
+        assert_eq!(context_of(gl_view_of(view).context).format, second);
+    }
+
+    #[test]
+    fn clear_gl_context_makes_the_next_context_from_the_new_format() {
+        crate::bootstrap();
+        let first = new_format(&[attribute::DOUBLE_BUFFER, 0]);
+        let second = new_format(&[attribute::DEPTH_SIZE, 24, 0]);
+        let view = new_view(first);
+        // SAFETY: the declared signatures.
+        unsafe {
+            clear_gl_context(view, objc::sel::get("clearGLContext"));
+            assert!(gl_view_of(view).context.is_null());
+            set_view_pixel_format(view, objc::sel::get("setPixelFormat:"), second);
+            let context = open_gl_context(view, objc::sel::get("openGLContext"));
+            assert!(!context.is_null());
+            assert_eq!(context_of(context).format, second);
+            assert_eq!(context_of(context).view, view);
+        }
+    }
+
+    #[test]
+    fn a_view_without_a_format_gets_the_default_one() {
+        crate::bootstrap();
+        let view = new_view(std::ptr::null_mut());
+        let format = gl_view_of(view).format;
+        assert!(!format.is_null());
+        // SAFETY: the list this runtime made.
+        let list = unsafe { &*format_of(format).attributes };
+        assert_eq!(
+            list.as_slice(),
+            &[
+                attribute::DOUBLE_BUFFER,
+                attribute::COLOR_SIZE,
+                24,
+                attribute::DEPTH_SIZE,
+                16
+            ]
+        );
     }
 
     #[test]
