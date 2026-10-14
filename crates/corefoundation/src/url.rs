@@ -17,9 +17,42 @@ pub struct Contents {
     pub text: String,
     /// The same text as a stable, borrowed `CFStringRef` for `CFURLGetString`.
     string: CFTypeRef,
+    /// The relative reference this URL was made from, when it has a base.
+    /// `text` stays the resolved absolute URL so every reader sees one form.
+    pub relative: Option<String>,
+    /// The retained base URL of a relative URL, or null.
+    base: CFTypeRef,
+    /// For a file reference URL (`file:///.file/id=...`): the file URL of the
+    /// file it names, which is where `path` and `file_path` read from.
+    pub reference_target: Option<String>,
 }
 
 impl Contents {
+    /// The decoded path of a bare reference such as `notes/a%20b?x`.
+    pub fn probe_path(text: &str) -> String {
+        Contents::bare(text).path()
+    }
+
+    fn bare(text: &str) -> Contents {
+        Contents {
+            text: text.to_string(),
+            string: std::ptr::null(),
+            relative: None,
+            base: std::ptr::null(),
+            reference_target: None,
+        }
+    }
+
+    /// The base URL object of a relative URL, borrowed.
+    pub fn base(&self) -> CFTypeRef {
+        self.base
+    }
+
+    /// The scheme of arbitrary text, as [`Contents::scheme`] reads it.
+    pub fn probe(text: &str) -> String {
+        Contents::bare(text).scheme()
+    }
+
     /// The scheme, lowercased, or empty for text that has none.
     ///
     /// Cut at the first `:`, and only when everything before it could be a
@@ -125,6 +158,9 @@ impl Contents {
     /// The path component, decoded: everything after the authority and before
     /// the query or fragment.
     pub fn path(&self) -> String {
+        if let Some(target) = &self.reference_target {
+            return Contents::bare(target).path();
+        }
         // Escaped separators and NUL stay literal, as in Foundation, rather
         // than naming a different directory or truncating a C path.
         percent_decode(trim_trailing_slash(self.encoded_path()), b"/\0")
@@ -235,6 +271,9 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: objc::sel::Sel) {
         if !(*body).contents.is_null() {
             let contents = Box::from_raw((*body).contents);
             objc::arc::release(contents.string as Id);
+            if !contents.base.is_null() {
+                objc::arc::release(contents.base as Id);
+            }
             drop(contents);
             (*body).contents = std::ptr::null_mut();
         }
@@ -251,12 +290,48 @@ pub fn new(text: &str) -> CFTypeRef {
         return std::ptr::null();
     }
     let contents = Contents {
-        text: text.to_string(),
         string: crate::string::from_bytes(text.as_bytes(), false),
+        ..Contents::bare(text)
     };
     // SAFETY: a live instance whose second word is ours to fill in.
     unsafe { (*body).contents = Box::into_raw(Box::new(contents)) };
     body as CFTypeRef
+}
+
+/// A URL made from `relative` against `base`, whose resolved form is
+/// `absolute`. The base is retained; null makes a plain URL.
+pub fn new_relative(absolute: &str, relative: &str, base: CFTypeRef) -> CFTypeRef {
+    let url = new(absolute);
+    // SAFETY: `url` is a URL `new` just made, with live contents.
+    unsafe {
+        if let Some(body) = (url as *mut Body).as_mut()
+            && let Some(contents) = body.contents.as_mut()
+            && !base.is_null()
+        {
+            contents.relative = Some(relative.to_string());
+            contents.base = crate::api::CFRetain(base);
+        }
+    }
+    url
+}
+
+/// A file reference URL naming the file at `target` (a file URL's text).
+pub fn new_file_reference(id: &str, target: &str) -> CFTypeRef {
+    let url = new(&format!("file:///.file/id={id}"));
+    // SAFETY: `url` is a URL `new` just made, with live contents.
+    unsafe {
+        if let Some(body) = (url as *mut Body).as_mut()
+            && let Some(contents) = body.contents.as_mut()
+        {
+            contents.reference_target = Some(target.to_string());
+        }
+    }
+    url
+}
+
+/// A path spelled for a URL: reserved bytes percent-escaped.
+pub fn encode_path(path: &str) -> String {
+    percent_encode(path)
 }
 
 impl Contents {

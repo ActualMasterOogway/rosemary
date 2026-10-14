@@ -46,6 +46,10 @@ unsafe fn make_file_url(path: Id, directory: Option<bool>) -> Id {
     let Ok(path) = std::str::from_utf8(&bytes) else {
         return std::ptr::null_mut();
     };
+    make_file_url_str(path, directory)
+}
+
+fn make_file_url_str(path: &str, directory: Option<bool>) -> Id {
     let path = if std::path::Path::new(path).is_absolute() {
         path.to_string()
     } else {
@@ -92,35 +96,69 @@ unsafe extern "C" fn init_file_url_with_path_is_directory(
     url
 }
 
-/// `+fileURLWithPath:relativeToURL:`.
+/// A file URL for `path`, kept relative to `base` when `path` is relative.
 ///
 /// The base is where a *relative* path is measured from and is ignored for an
 /// absolute one, which is the rule for every one of Apple's relative-URL
-/// constructors.
-unsafe extern "C" fn file_url_with_path_relative_to_url(
-    class: Id,
-    sel: Sel,
-    path: Id,
-    base: Id,
-) -> Id {
+/// constructors. Owned by the caller.
+unsafe fn make_relative_file_url(path: Id, directory: Option<bool>, base: Id) -> Id {
     // SAFETY: an `NSString`, or nil.
     let bytes = unsafe { crate::string::bytes(path) };
     let Ok(path) = std::str::from_utf8(&bytes) else {
         return std::ptr::null_mut();
     };
     // SAFETY: null or an `NSURL`.
-    let base = unsafe { corefoundation::url::as_url(base as corefoundation::base::CFTypeRef) }
+    let base_path = unsafe { corefoundation::url::as_url(base as corefoundation::base::CFTypeRef) }
         .map(|u| u.path())
         .filter(|p| !p.is_empty());
-    let resolved = match base {
-        Some(base) if !path.starts_with('/') => format!("{}/{path}", base.trim_end_matches('/')),
-        _ => path.to_string(),
+    let Some(base_path) = base_path.filter(|_| !path.starts_with('/')) else {
+        return make_file_url_str(path, directory);
     };
-    let resolved = crate::string::from_str(&resolved);
-    // SAFETY: `+fileURLWithPath:` is this module's own, called with the class it
-    // was installed on and a string this call just made.
-    let url = unsafe { file_url_with_path(class, sel, resolved) };
-    objc::arc::release(resolved);
+    let joined = format!("{}/{path}", base_path.trim_end_matches('/'));
+    let absolute = make_file_url_str(&joined, directory);
+    // SAFETY: a URL this function just made.
+    let Some(text) = (unsafe { text_of(absolute) }) else {
+        return absolute;
+    };
+    let mut relative = corefoundation::url::encode_path(path.trim_end_matches('/'));
+    if text.ends_with('/') {
+        relative.push('/');
+    }
+    objc::arc::release(absolute);
+    corefoundation::url::new_relative(&text, &relative, base as corefoundation::base::CFTypeRef)
+        as Id
+}
+
+/// `+fileURLWithPath:relativeToURL:` and the `isDirectory:` form.
+unsafe extern "C" fn file_url_with_path_relative_to_url(
+    _class: Id,
+    _sel: Sel,
+    path: Id,
+    base: Id,
+) -> Id {
+    objc::arc::autorelease(unsafe { make_relative_file_url(path, None, base) })
+}
+
+unsafe extern "C" fn init_file_url_with_path_relative_to_url(
+    receiver: Id,
+    _sel: Sel,
+    path: Id,
+    base: Id,
+) -> Id {
+    let url = unsafe { make_relative_file_url(path, None, base) };
+    objc::arc::release(receiver);
+    url
+}
+
+unsafe extern "C" fn init_file_url_with_path_is_directory_relative_to_url(
+    receiver: Id,
+    _sel: Sel,
+    path: Id,
+    directory: u8,
+    base: Id,
+) -> Id {
+    let url = unsafe { make_relative_file_url(path, Some(directory != 0), base) };
+    objc::arc::release(receiver);
     url
 }
 
@@ -158,7 +196,14 @@ accessor!(resource_specifier, |u| Some(if u.scheme().is_empty() {
 }));
 
 unsafe extern "C" fn absolute_url(receiver: Id, _sel: Sel) -> Id {
-    objc::arc::autorelease(objc::arc::retain(receiver))
+    // SAFETY: the receiver is an `NSURL`.
+    match unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) } {
+        // A relative URL's absolute form has no base of its own.
+        Some(u) if u.relative.is_some() => {
+            objc::arc::autorelease(corefoundation::url::new(&u.text) as Id)
+        }
+        _ => objc::arc::autorelease(objc::arc::retain(receiver)),
+    }
 }
 
 unsafe extern "C" fn port(receiver: Id, _sel: Sel) -> Id {
@@ -693,6 +738,243 @@ unsafe extern "C" fn set_resource_value(
     1
 }
 
+/// Resolve `reference` against an absolute `base` (RFC 3986 section 5.2).
+///
+/// URLs in this runtime are stored already resolved, so a "relative" URL is
+/// resolved at construction and `-baseURL` is always nil.
+fn resolve_reference(base: &corefoundation::url::Contents, reference: &str) -> String {
+    let has_scheme = {
+        let probe = corefoundation::url::Contents::probe(reference);
+        !probe.is_empty()
+    };
+    if has_scheme {
+        return reference.to_string();
+    }
+    let text = base.text.split('#').next().unwrap_or_default();
+    let scheme = base.scheme();
+    let authority_end = {
+        // Everything before the path: "scheme://authority".
+        let path_start = base.encoded_path().as_ptr() as usize - base.text.as_ptr() as usize;
+        path_start.min(text.len())
+    };
+    let prefix = &text[..authority_end];
+    if reference.is_empty() {
+        return text.to_string();
+    }
+    if let Some(rest) = reference.strip_prefix("//") {
+        return format!("{scheme}://{rest}");
+    }
+    if reference.starts_with('#') {
+        return format!("{text}{reference}");
+    }
+    if reference.starts_with('?') {
+        let end = prefix.len() + base.encoded_path().len();
+        return format!("{}{reference}", &text[..end]);
+    }
+    let (path_part, suffix) = match reference.find(['?', '#']) {
+        Some(i) => reference.split_at(i),
+        None => (reference, ""),
+    };
+    let merged = if path_part.starts_with('/') {
+        path_part.to_string()
+    } else {
+        let base_path = base.encoded_path();
+        let dir = base_path.rfind('/').map_or("", |i| &base_path[..=i]);
+        let dir = if dir.is_empty() && base.authority().is_some() {
+            "/"
+        } else {
+            dir
+        };
+        format!("{dir}{path_part}")
+    };
+    let keeps_slash = merged.ends_with('/') || merged.ends_with("/.") || merged.ends_with("/..");
+    let mut normalized = standardized_file_path(&merged);
+    if keeps_slash && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+    format!("{prefix}{normalized}{suffix}")
+}
+
+unsafe fn make_url_relative_to(text: Id, base: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let bytes = unsafe { crate::string::bytes(text) };
+    let Ok(reference) = std::str::from_utf8(&bytes) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: null or an `NSURL`.
+    match unsafe { corefoundation::url::as_url(base as corefoundation::base::CFTypeRef) } {
+        Some(contents) => corefoundation::url::new_relative(
+            &resolve_reference(contents, reference),
+            reference,
+            base as corefoundation::base::CFTypeRef,
+        ) as Id,
+        None => unsafe { make_url_with_string(text) },
+    }
+}
+
+/// `+URLWithString:relativeToURL:`.
+unsafe extern "C" fn url_with_string_relative_to_url(
+    _class: Id,
+    _sel: Sel,
+    text: Id,
+    base: Id,
+) -> Id {
+    objc::arc::autorelease(unsafe { make_url_relative_to(text, base) })
+}
+
+unsafe extern "C" fn init_with_string_relative_to_url(
+    receiver: Id,
+    _sel: Sel,
+    text: Id,
+    base: Id,
+) -> Id {
+    let url = unsafe { make_url_relative_to(text, base) };
+    objc::arc::release(receiver);
+    url
+}
+
+/// `+fileURLWithPath:isDirectory:relativeToURL:`.
+unsafe extern "C" fn file_url_with_path_is_directory_relative_to_url(
+    _class: Id,
+    _sel: Sel,
+    path: Id,
+    directory: u8,
+    base: Id,
+) -> Id {
+    objc::arc::autorelease(unsafe { make_relative_file_url(path, Some(directory != 0), base) })
+}
+
+/// `-relativePath`: the path of the reference this URL was made from, or the
+/// whole path when it has no base.
+unsafe extern "C" fn relative_path(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let relative =
+        unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
+            .and_then(|u| u.relative.clone());
+    match relative {
+        Some(text) => {
+            let path = corefoundation::url::Contents::probe_path(&text);
+            autoreleased(&path)
+        }
+        None => unsafe { path(receiver, sel) },
+    }
+}
+
+/// `-relativeString`: the reference as written, or the whole URL.
+unsafe extern "C" fn relative_string(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let relative =
+        unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
+            .and_then(|u| u.relative.clone());
+    match relative {
+        Some(text) => autoreleased(&text),
+        None => unsafe { absolute_string(receiver, sel) },
+    }
+}
+
+/// `-baseURL`: the URL a relative one was resolved against, else nil.
+unsafe extern "C" fn base_url(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let base = unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
+        .map_or(std::ptr::null(), |u| u.base());
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    objc::arc::autorelease(objc::arc::retain(base as Id))
+}
+
+/// `-description`: `relative -- base` for a relative URL.
+unsafe extern "C" fn url_description(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let parts = unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
+        .and_then(|u| {
+            let base = unsafe { corefoundation::url::as_url(u.base()) }?;
+            Some(format!("{} -- {}", u.relative.as_deref()?, base.text))
+        });
+    match parts {
+        Some(text) => autoreleased(&text),
+        None => unsafe { absolute_string(receiver, sel) },
+    }
+}
+
+/// `-standardizedURL`, which is `-URLByStandardizingPath` for file URLs.
+unsafe extern "C" fn standardized_url(receiver: Id, sel: Sel) -> Id {
+    unsafe { url_by_standardizing_path(receiver, sel) }
+}
+
+/// `-filePathURL`: the path form of a file URL, which for a file reference URL
+/// is the URL of the file it names; nil for any other scheme.
+unsafe extern "C" fn file_path_url(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let Some(url) =
+        (unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) })
+    else {
+        return std::ptr::null_mut();
+    };
+    match &url.reference_target {
+        Some(target) => objc::arc::autorelease(corefoundation::url::new(target) as Id),
+        None if url.is_file_url() => objc::arc::autorelease(objc::arc::retain(receiver)),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `-isFileReferenceURL`.
+unsafe extern "C" fn is_file_reference_url(receiver: Id, _sel: Sel) -> u8 {
+    // SAFETY: the receiver is an `NSURL`.
+    let is_reference =
+        unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) }
+            .is_some_and(|u| u.reference_target.is_some());
+    u8::from(is_reference)
+}
+
+/// `-fileReferenceURL`: `file:///.file/id=<device>.<inode>`, which keeps naming
+/// the file across renames. nil when the file does not exist or the URL is not
+/// a file URL, as Apple answers.
+unsafe extern "C" fn file_reference_url(receiver: Id, _sel: Sel) -> Id {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: the receiver is an `NSURL`.
+    let Some(url) =
+        (unsafe { corefoundation::url::as_url(receiver as corefoundation::base::CFTypeRef) })
+    else {
+        return std::ptr::null_mut();
+    };
+    if url.reference_target.is_some() {
+        return objc::arc::autorelease(objc::arc::retain(receiver));
+    }
+    let Some(path) = url.file_path() else {
+        return std::ptr::null_mut();
+    };
+    let Ok(meta) = std::fs::metadata(prefix::ns::existing_host_path(&path)) else {
+        return std::ptr::null_mut();
+    };
+    let target = corefoundation::url::new_file_url(&path, meta.is_dir());
+    // SAFETY: a URL this call just made.
+    let target_text = unsafe { text_of(target as Id) }.unwrap_or_default();
+    objc::arc::release(target as Id);
+    let id = format!("{}.{}", meta.dev(), meta.ino());
+    objc::arc::autorelease(corefoundation::url::new_file_reference(&id, &target_text) as Id)
+}
+
+/// `-URLByResolvingSymlinksInPath`: symlinks are resolved when the path exists;
+/// otherwise the path is standardized lexically, as Apple does.
+unsafe extern "C" fn url_by_resolving_symlinks_in_path(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: the receiver is an `NSURL`.
+    let Some(path) = (unsafe { file_path_of(receiver) }) else {
+        return objc::arc::autorelease(objc::arc::retain(receiver));
+    };
+    let host = prefix::ns::existing_host_path(&path);
+    match std::fs::canonicalize(&host)
+        .ok()
+        .and_then(|resolved| prefix::ns::to_guest(&resolved))
+    {
+        Some(guest) => {
+            let guest = guest.to_string_lossy().into_owned();
+            autoreleased_file_url(&guest, host.is_dir())
+        }
+        None => unsafe { url_by_standardizing_path(receiver, sel) },
+    }
+}
+
 pub(crate) fn install() {
     let class = corefoundation::url::class();
     // On `NSURL` rather than on the concrete class, so `+URLWithString:` reaches
@@ -704,9 +986,17 @@ pub(crate) fn install() {
         "fileURLWithPath:isDirectory:" => file_url_with_path_is_directory, c"@28@0:8@16c24";
         "fileURLWithPath:relativeToURL:" => file_url_with_path_relative_to_url,
             c"@32@0:8@16@24";
+        "fileURLWithPath:isDirectory:relativeToURL:"
+            => file_url_with_path_is_directory_relative_to_url, c"@36@0:8@16c24@28";
+        "URLWithString:relativeToURL:" => url_with_string_relative_to_url, c"@32@0:8@16@24";
     });
     methods!(abstract_class, {
         "initWithString:" => init_with_string, c"@24@0:8@16";
+        "initWithString:relativeToURL:" => init_with_string_relative_to_url, c"@32@0:8@16@24";
+        "initFileURLWithPath:relativeToURL:" => init_file_url_with_path_relative_to_url,
+            c"@32@0:8@16@24";
+        "initFileURLWithPath:isDirectory:relativeToURL:"
+            => init_file_url_with_path_is_directory_relative_to_url, c"@36@0:8@16c24@28";
         "initFileURLWithPath:" => init_file_url_with_path, c"@24@0:8@16";
         "initFileURLWithPath:isDirectory:" => init_file_url_with_path_is_directory, c"@28@0:8@16c24";
     });
@@ -715,8 +1005,16 @@ pub(crate) fn install() {
         "copyWithZone:" => url_copy_with_zone, c"@24@0:8^v16";
         "absoluteString" => absolute_string, c"@16@0:8";
         "absoluteURL" => absolute_url, c"@16@0:8";
-        "description" => absolute_string, c"@16@0:8";
+        "description" => url_description, c"@16@0:8";
         "path" => path, c"@16@0:8";
+        "relativePath" => relative_path, c"@16@0:8";
+        "relativeString" => relative_string, c"@16@0:8";
+        "baseURL" => base_url, c"@16@0:8";
+        "standardizedURL" => standardized_url, c"@16@0:8";
+        "filePathURL" => file_path_url, c"@16@0:8";
+        "fileReferenceURL" => file_reference_url, c"@16@0:8";
+        "isFileReferenceURL" => is_file_reference_url, c"c16@0:8";
+        "URLByResolvingSymlinksInPath" => url_by_resolving_symlinks_in_path, c"@16@0:8";
         "scheme" => scheme, c"@16@0:8";
         "host" => host, c"@16@0:8";
         "user" => user, c"@16@0:8";

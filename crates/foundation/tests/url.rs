@@ -303,3 +303,174 @@ fn initializers_return_owned_concrete_urls() {
         objc::arc::release(directory);
     }
 }
+
+unsafe fn url_from(text: &str) -> Id {
+    unsafe {
+        let class = objc::class::ptr(objc::class::lookup(c"NSURL").unwrap()) as Id;
+        let text = foundation::string::from_str(text);
+        let (call, sel) =
+            implementation::<unsafe extern "C" fn(Id, Sel, Id) -> Id>(class, "URLWithString:");
+        let url = call(class, sel, text);
+        objc::arc::release(text);
+        url
+    }
+}
+
+unsafe fn relative_to(text: &str, base: Id) -> Id {
+    unsafe {
+        let class = objc::class::ptr(objc::class::lookup(c"NSURL").unwrap()) as Id;
+        let text = foundation::string::from_str(text);
+        let (call, sel) = implementation::<unsafe extern "C" fn(Id, Sel, Id, Id) -> Id>(
+            class,
+            "URLWithString:relativeToURL:",
+        );
+        let url = call(class, sel, text, base);
+        objc::arc::release(text);
+        url
+    }
+}
+
+#[test]
+fn relative_path_and_base_url_describe_a_resolved_url() {
+    let _pool = Pool::new();
+    unsafe {
+        let url = url_from("https://example.test/a/b%20c?q=1#f");
+        assert_eq!(string(url, "relativePath"), "/a/b c");
+        assert_eq!(
+            string(url, "relativeString"),
+            "https://example.test/a/b%20c?q=1#f"
+        );
+        assert!(object(url, "baseURL").is_null());
+        assert_eq!(integer(url, "isFileReferenceURL") & 0xff, 0);
+        assert!(object(url, "filePathURL").is_null());
+    }
+}
+
+#[test]
+fn string_relative_to_url_resolves_per_rfc_3986() {
+    let _pool = Pool::new();
+    unsafe {
+        let base = url_from("http://a.test/b/c/d;p?q");
+        for (reference, expected) in [
+            ("g", "http://a.test/b/c/g"),
+            ("./g", "http://a.test/b/c/g"),
+            ("g/", "http://a.test/b/c/g/"),
+            ("/g", "http://a.test/g"),
+            ("//h.test/g", "http://h.test/g"),
+            ("?y", "http://a.test/b/c/d;p?y"),
+            ("g?y#s", "http://a.test/b/c/g?y#s"),
+            ("#s", "http://a.test/b/c/d;p?q#s"),
+            (".", "http://a.test/b/c/"),
+            ("..", "http://a.test/b/"),
+            ("../g", "http://a.test/b/g"),
+            ("../../../g", "http://a.test/g"),
+            ("https://x.test/y", "https://x.test/y"),
+        ] {
+            let url = relative_to(reference, base);
+            assert_eq!(string(url, "absoluteString"), expected, "{reference}");
+            assert_eq!(string(url, "relativeString"), reference);
+            assert_eq!(object(url, "baseURL"), base, "{reference}");
+            let absolute = object(url, "absoluteURL");
+            assert!(object(absolute, "baseURL").is_null());
+            assert_eq!(string(absolute, "relativeString"), expected);
+        }
+    }
+}
+
+#[test]
+fn file_url_relative_to_url_keeps_directory_and_resolves_path() {
+    let _pool = Pool::new();
+    unsafe {
+        let base = url_from("file:///Users/me/Documents/");
+        let url = relative_to("notes/todo.txt", base);
+        assert_eq!(string(url, "relativePath"), "notes/todo.txt");
+        assert_eq!(string(url, "path"), "/Users/me/Documents/notes/todo.txt");
+        assert!(!object(url, "filePathURL").is_null());
+        let url = relative_to("../x", base);
+        assert_eq!(string(url, "path"), "/Users/me/x");
+        let standardized = object(relative_to("a/./b", base), "standardizedURL");
+        assert_eq!(string(standardized, "path"), "/Users/me/Documents/a/b");
+    }
+}
+
+#[test]
+fn relative_url_keeps_its_reference_and_base() {
+    let _pool = Pool::new();
+    unsafe {
+        let base = url_from("file:///Users/me/Documents/");
+        let url = relative_to("notes/a%20b.txt?x=1", base);
+        assert_eq!(string(url, "relativePath"), "notes/a b.txt");
+        assert_eq!(string(url, "relativeString"), "notes/a%20b.txt?x=1");
+        assert_eq!(string(url, "path"), "/Users/me/Documents/notes/a b.txt");
+        assert_eq!(
+            string(url, "description"),
+            "notes/a%20b.txt?x=1 -- file:///Users/me/Documents/"
+        );
+        assert_eq!(object(url, "baseURL"), base);
+    }
+}
+
+#[test]
+fn file_url_relative_to_url_records_base_and_init_forms_match() {
+    let _pool = Pool::new();
+    unsafe {
+        let class = objc::class::ptr(objc::class::lookup(c"NSURL").unwrap()) as Id;
+        let base = url_from("file:///Users/me/");
+        let path = foundation::string::from_str("a b/c");
+        let allocated = object(class, "alloc");
+        let (call, sel) = implementation::<unsafe extern "C" fn(Id, Sel, Id, Id) -> Id>(
+            allocated,
+            "initFileURLWithPath:relativeToURL:",
+        );
+        let url = call(allocated, sel, path, base);
+        assert_eq!(string(url, "relativePath"), "a b/c");
+        assert_eq!(string(url, "relativeString"), "a%20b/c");
+        assert_eq!(string(url, "absoluteString"), "file:///Users/me/a%20b/c");
+        assert_eq!(object(url, "baseURL"), base);
+
+        let allocated = object(class, "alloc");
+        let (call, sel) = implementation::<unsafe extern "C" fn(Id, Sel, Id, u8, Id) -> Id>(
+            allocated,
+            "initFileURLWithPath:isDirectory:relativeToURL:",
+        );
+        let dir = call(allocated, sel, path, 1, base);
+        assert_eq!(string(dir, "absoluteString"), "file:///Users/me/a%20b/c/");
+        assert_eq!(string(dir, "relativeString"), "a%20b/c/");
+
+        let absolute = foundation::string::from_str("/etc/hosts");
+        let allocated = object(class, "alloc");
+        let (call, sel) = implementation::<unsafe extern "C" fn(Id, Sel, Id, Id) -> Id>(
+            allocated,
+            "initFileURLWithPath:relativeToURL:",
+        );
+        let url = call(allocated, sel, absolute, base);
+        assert_eq!(string(url, "path"), "/etc/hosts");
+        assert!(object(url, "baseURL").is_null());
+    }
+}
+
+#[test]
+fn file_reference_urls_name_the_file_and_convert_back() {
+    let _pool = Pool::new();
+    unsafe {
+        let dir = std::env::temp_dir().join(format!("rosemary-ref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let text = format!("file://{}", file.display());
+        let url = url_from(&text);
+        let reference = object(url, "fileReferenceURL");
+        assert!(!reference.is_null());
+        assert_eq!(integer(reference, "isFileReferenceURL") & 0xff, 1);
+        assert!(string(reference, "absoluteString").starts_with("file:///.file/id="));
+        assert_eq!(string(reference, "path"), file.display().to_string());
+        let back = object(reference, "filePathURL");
+        assert_eq!(string(back, "absoluteString"), text);
+        assert_eq!(integer(back, "isFileReferenceURL") & 0xff, 0);
+        // A missing file and a non-file URL have no reference URL.
+        let missing = url_from(&format!("file://{}/missing", dir.display()));
+        assert!(object(missing, "fileReferenceURL").is_null());
+        assert!(object(url_from("https://example.test/"), "fileReferenceURL").is_null());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
