@@ -102,28 +102,33 @@ fn class_name_of(receiver: Id) -> &'static std::ffi::CStr {
     }
 }
 
+/// Which of the two classes a class-method constructor receiver names.
+fn class_name_for(receiver: Id) -> &'static std::ffi::CStr {
+    if std::ptr::eq(
+        receiver.cast::<objc::class::Class>(),
+        class(c"NSMutableIndexSet"),
+    ) {
+        c"NSMutableIndexSet"
+    } else {
+        c"NSIndexSet"
+    }
+}
+
 unsafe extern "C" fn index_set(class: Id, _sel: Sel) -> Id {
-    let object = objc::object::create_instance(
-        unsafe { objc::class::from_ptr(class as *const objc::class::Class).expect("a class") },
-        0,
-    );
-    objc::arc::autorelease(object)
+    make(class_name_for(class), Ranges::new())
 }
 
-unsafe extern "C" fn index_set_with_index(class: Id, sel: Sel, index: usize) -> Id {
-    // SAFETY: the same class.
-    let set = unsafe { index_set(class, sel) };
-    put(set, vec![(index, index.saturating_add(1))]);
-    set
+unsafe extern "C" fn index_set_with_index(class: Id, _sel: Sel, index: usize) -> Id {
+    make(
+        class_name_for(class),
+        vec![(index, index.saturating_add(1))],
+    )
 }
 
-unsafe extern "C" fn index_set_with_range(class: Id, sel: Sel, range: NSRange) -> Id {
-    // SAFETY: the same class.
-    let set = unsafe { index_set(class, sel) };
+unsafe extern "C" fn index_set_with_range(class: Id, _sel: Sel, range: NSRange) -> Id {
     let mut ranges = Ranges::new();
     add_range(&mut ranges, range.location, range_end(range));
-    put(set, ranges);
-    set
+    make(class_name_for(class), ranges)
 }
 
 unsafe extern "C" fn init_with_index(receiver: Id, _sel: Sel, index: usize) -> Id {
@@ -151,10 +156,12 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
+/// `-copy`: an immutable set is its own copy; a mutable one is snapshotted.
 unsafe extern "C" fn copy_with_zone(receiver: Id, _sel: Sel, _zone: *mut std::ffi::c_void) -> Id {
-    let copy = objc::object::create_instance(class(c"NSIndexSet"), 0);
-    put(copy, get(receiver));
-    copy
+    if class_name_of(receiver) == c"NSIndexSet" {
+        return objc::arc::retain(receiver);
+    }
+    objc::arc::retain(make(c"NSIndexSet", get(receiver)))
 }
 
 unsafe extern "C" fn mutable_copy_with_zone(
@@ -162,9 +169,7 @@ unsafe extern "C" fn mutable_copy_with_zone(
     _sel: Sel,
     _zone: *mut std::ffi::c_void,
 ) -> Id {
-    let copy = objc::object::create_instance(class(c"NSMutableIndexSet"), 0);
-    put(copy, get(receiver));
-    copy
+    objc::arc::retain(make(c"NSMutableIndexSet", get(receiver)))
 }
 
 unsafe extern "C" fn count(receiver: Id, _sel: Sel) -> usize {
