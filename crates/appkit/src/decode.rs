@@ -137,6 +137,10 @@ pub(crate) fn build(builder: &mut dyn Builder, uid: Uid, class_name: &str) -> Op
         "NSTableColumn" => table_column(builder, uid),
         "NSScroller" => scroller(builder, uid),
         "NSTextField" => text_field(builder, uid),
+        "NSMatrix" => matrix(builder, uid),
+        "NSTabView" => tab_view(builder, uid),
+        "NSTabViewItem" => tab_view_item(builder, uid),
+        "NSTableHeaderView" => view(builder, uid, "NSTableHeaderView"),
         _ => None,
     }
 }
@@ -164,6 +168,10 @@ pub(crate) const DECODED: &[&str] = &[
     "NSTableColumn",
     "NSScroller",
     "NSTextField",
+    "NSMatrix",
+    "NSTabView",
+    "NSTabViewItem",
+    "NSTableHeaderView",
 ];
 
 /// A boolean field, which an archive writes as a boolean or as an integer.
@@ -400,6 +408,14 @@ fn table_details(builder: &mut dyn Builder, uid: Uid, view: Id) {
         // SAFETY: `-setBackgroundColor:` takes one colour.
         unsafe { send_object(view, "setBackgroundColor:", color) };
     }
+    // The header names its table too; the link is made from this side only,
+    // so building either one never needs the other half-built.
+    if let Some(header) = builder.archive().field_object(uid, "NSHeaderView")
+        && let Some(header) = builder.object_at(header)
+    {
+        // SAFETY: `-setHeaderView:` takes one view.
+        unsafe { send_object(view, "setHeaderView:", header) };
+    }
     if let Some(list) = builder.archive().field_object(uid, "NSTableColumns") {
         for entry in builder.archive().array(list) {
             if let Some(column) = builder.object_at(entry) {
@@ -433,6 +449,16 @@ fn table_column(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
             (flags & cell_flags::ALIGNMENT_MASK) >> cell_flags::ALIGNMENT_SHIFT
         });
     crate::table::set_archived_column(column, width, font, alignment as isize);
+    if let Some(title) = builder
+        .archive()
+        .field_object(uid, "NSHeaderCell")
+        .and_then(|cell| text(builder, cell, "NSContents"))
+    {
+        let title = foundation::string::from_str(title);
+        // SAFETY: `-setTitle:` takes one string.
+        unsafe { send_object(column, "setTitle:", title) };
+        objc::arc::release(title);
+    }
     Some(column)
 }
 
@@ -610,9 +636,14 @@ fn button(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
     let view = view(builder, uid, "NSButton")?;
     let cell = builder.archive().field_object(uid, "NSCell");
     control(builder, uid, cell, view);
-    let Some(cell) = cell else {
-        return Some(view);
-    };
+    if let Some(cell) = cell {
+        button_cell(builder, cell, view);
+    }
+    Some(view)
+}
+
+/// What an `NSButtonCell` holds, given to the button that shows it.
+fn button_cell(builder: &mut dyn Builder, cell: Uid, view: Id) {
     for (key, selector) in [
         ("NSContents", "setTitle:"),
         ("NSAlternateContents", "setAlternateTitle:"),
@@ -634,11 +665,16 @@ fn button(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
     ] {
         if let Some(image) = builder.archive().field_object(cell, key)
             && !builder.archive().is_kind_of(image, "NSFont")
+            && !builder.archive().is_kind_of(image, "NSButtonImageSource")
             && let Some(image) = builder.object_at(image)
         {
             // SAFETY: both setters take one object.
             unsafe { send_object(view, selector, image) };
         }
+    }
+    if let Some(kind) = check_kind(builder, cell) {
+        // SAFETY: `-setButtonType:` takes one `NSButtonType`.
+        unsafe { send_integer(view, "setButtonType:", kind) };
     }
     if let Some(flags) = word(builder, cell, "NSButtonFlags") {
         // SAFETY: both setters take one `BOOL`.
@@ -667,7 +703,138 @@ fn button(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
         // SAFETY: `-setState:` takes one `NSInteger`.
         unsafe { send_integer(view, "setState:", 1) };
     }
+}
+
+/// `NSMatrixFlags`, the high bits of the 32-bit word.
+mod matrix_flags {
+    pub const HIGHLIGHT: i64 = 0x8000_0000;
+    pub const RADIO: i64 = 0x4000_0000;
+    pub const LIST: i64 = 0x2000_0000;
+    pub const ALLOWS_EMPTY_SELECTION: i64 = 0x1000_0000;
+}
+
+/// `NSMatrix`: a view, its grid, and a button for each of its cells.
+fn matrix(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    use crate::matrix::mode;
+    let view = view(builder, uid, "NSMatrix")?;
+    control(builder, uid, None, view);
+    let button_for = |builder: &mut dyn Builder, cell: Uid| {
+        let button = crate::matrix::new_cell(std::ptr::null_mut());
+        control(builder, cell, Some(cell), button);
+        if word(builder, cell, "NSCellFlags").is_some_and(|f| f & cell_flags::DISABLED != 0) {
+            // SAFETY: `-setEnabled:` takes one `BOOL`.
+            unsafe { send_flag(button, "setEnabled:", false) };
+        }
+        button_cell(builder, cell, button);
+        button
+    };
+    let cells: Vec<Id> = match builder.archive().field_object(uid, "NSCells") {
+        Some(list) => builder
+            .archive()
+            .array(list)
+            .into_iter()
+            .map(|cell| button_for(builder, cell))
+            .collect(),
+        None => Vec::new(),
+    };
+    let prototype = match builder.archive().field_object(uid, "NSProtoCell") {
+        Some(cell) => button_for(builder, cell),
+        None => std::ptr::null_mut(),
+    };
+    let flags = word(builder, uid, "NSMatrixFlags").unwrap_or(0);
+    let mode = match flags {
+        f if f & matrix_flags::RADIO != 0 => mode::RADIO,
+        f if f & matrix_flags::LIST != 0 => mode::LIST,
+        f if f & matrix_flags::HIGHLIGHT != 0 => mode::HIGHLIGHT,
+        _ => mode::TRACK,
+    };
+    let index = |key: &str| integer(builder, uid, key).and_then(|v| usize::try_from(v).ok());
+    let selected = index("NSSelectedRow").zip(index("NSSelectedCol"));
+    let count = |key: &str| index(key).unwrap_or(0);
+    crate::matrix::set_archived(
+        view,
+        crate::matrix::Archived {
+            rows: count("NSNumRows"),
+            columns: count("NSNumCols"),
+            cell_size: text(builder, uid, "NSCellSize").and_then(size),
+            spacing: text(builder, uid, "NSIntercellSpacing").and_then(size),
+            mode,
+            allows_empty_selection: flags & matrix_flags::ALLOWS_EMPTY_SELECTION != 0,
+            cells,
+            prototype,
+            selected,
+        },
+    );
     Some(view)
+}
+
+/// `NSTabView`: a view, its items, and which one is shown.
+fn tab_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let view = view(builder, uid, "NSTabView")?;
+    if let Some(font) = builder.archive().field_object(uid, "NSFont")
+        && let Some(font) = builder.object_at(font)
+    {
+        // SAFETY: `-setFont:` takes one object.
+        unsafe { send_object(view, "setFont:", font) };
+    }
+    let entries = builder
+        .archive()
+        .field_object(uid, "NSTabViewItems")
+        .map(|list| builder.archive().array(list))
+        .unwrap_or_default();
+    let selected = builder.archive().field_object(uid, "NSSelectedTabViewItem");
+    let selected = entries.iter().position(|entry| Some(*entry) == selected);
+    let items: Vec<Id> = entries
+        .into_iter()
+        .filter_map(|entry| builder.object_at(entry))
+        .collect();
+    // The low bits of `NSTvFlags` are the `NSTabViewType`.
+    let kind = word(builder, uid, "NSTvFlags").unwrap_or(0) & 0x7;
+    crate::tab::set_archived(view, items, selected, kind as usize);
+    Some(view)
+}
+
+/// `NSTabViewItem`: a label, an identifier and the view it shows. Its
+/// `NSTabView` is the tab view that holds it, which sets that itself.
+fn tab_view_item(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
+    let Some(item) = allocate("NSTabViewItem") else {
+        builder.note_missing("NSTabViewItem");
+        return None;
+    };
+    if let Some(label) = text(builder, uid, "NSLabel") {
+        let label = foundation::string::from_str(label);
+        // SAFETY: `-setLabel:` takes one string.
+        unsafe { send_object(item, "setLabel:", label) };
+        objc::arc::release(label);
+    }
+    for (key, selector) in [("NSIdentifier", "setIdentifier:"), ("NSView", "setView:")] {
+        if let Some(entry) = builder.archive().field_object(uid, key)
+            && let Some(object) = builder.object_at(entry)
+        {
+            // SAFETY: both setters take one object.
+            unsafe { send_object(item, selector, object) };
+        }
+    }
+    Some(item)
+}
+
+/// The `NSButtonType` a check box or radio button cell was archived as.
+///
+/// Interface Builder records neither as a type: it gives the cell the system
+/// artwork by name, as an `NSButtonImageSource`, which is the look and the
+/// behaviour both.
+fn check_kind(builder: &dyn Builder, cell: Uid) -> Option<usize> {
+    ["NSNormalImage", "NSAlternateImage"].iter().find_map(|key| {
+        let source = builder.archive().field_object(cell, key)?;
+        if !builder.archive().is_kind_of(source, "NSButtonImageSource") {
+            return None;
+        }
+        match text(builder, source, "NSImageName")? {
+            "NSSwitch" => Some(crate::controls::button_type::SWITCH),
+            "NSRadioButton" => Some(crate::controls::button_type::RADIO),
+            _ => None,
+        }
+    })
 }
 
 /// `NSPopUpButton`: a view, its cell's menu, and which item is selected.
@@ -846,6 +1013,25 @@ fn box_view(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
         {
             // SAFETY: both setters take one object.
             unsafe { send_object(view, selector, color) };
+        }
+    }
+    if let Some(position) = integer(builder, uid, "NSTitlePosition") {
+        // SAFETY: `-setTitlePosition:` takes one `NSTitlePosition`.
+        unsafe { send_integer(view, "setTitlePosition:", position as usize) };
+    }
+    if let Some(cell) = builder.archive().field_object(uid, "NSTitleCell") {
+        if let Some(title) = text(builder, cell, "NSContents") {
+            let title = foundation::string::from_str(title);
+            // SAFETY: `-setTitle:` takes one string.
+            unsafe { send_object(view, "setTitle:", title) };
+            objc::arc::release(title);
+        }
+        if let Some(font) = builder.archive().field_object(cell, "NSSupport")
+            && builder.archive().is_kind_of(font, "NSFont")
+            && let Some(font) = builder.object_at(font)
+        {
+            // SAFETY: `-setTitleFont:` takes one font.
+            unsafe { send_object(view, "setTitleFont:", font) };
         }
     }
     if let Some(width) = real(builder, uid, "NSBorderWidth2") {

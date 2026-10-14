@@ -91,10 +91,13 @@ pub(crate) fn has_stacks() -> bool {
 /// Drop a view that is going away, as a stack or as something arranged in one.
 pub(crate) fn forget(object: Id) {
     crate::cell::forget(object);
+    crate::matrix::forget(object);
+    crate::tab::forget(object);
     crate::popup::forget(object);
     crate::scroll::forget(object);
     crate::segmented::forget(object);
     crate::table::forget(object);
+    crate::table::forget_header(object);
     let mut table = stacks().lock().unwrap_or_else(|e| e.into_inner());
     table.remove(&(object as usize));
     for stack in table.values_mut() {
@@ -458,7 +461,11 @@ mod slot {
     pub const MARGIN_HEIGHT: usize = 6;
     /// Unretained: the content view is one of the box's subviews.
     pub const CONTENT_VIEW: usize = 7;
-    pub const BOX_OBJECTS: [usize; 2] = [FILL_COLOR, BORDER_COLOR];
+    pub const BOX_TITLE: usize = 8;
+    /// `NSTitlePosition`, plus one so that zero is "never set".
+    pub const TITLE_POSITION: usize = 9;
+    pub const BOX_TITLE_FONT: usize = 10;
+    pub const BOX_OBJECTS: [usize; 4] = [FILL_COLOR, BORDER_COLOR, BOX_TITLE, BOX_TITLE_FONT];
 
     pub const INDETERMINATE: usize = 0;
     pub const STYLE: usize = 1;
@@ -658,10 +665,13 @@ const BOX_CUSTOM: usize = 4;
 /// its width inside them. Other box types keep their earlier look, which here
 /// is nothing drawn.
 unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
-    if read(boxes(), receiver, slot::BOX_TYPE) != BOX_CUSTOM
-        || read(boxes(), receiver, slot::TRANSPARENT) != 0
-    {
+    if read(boxes(), receiver, slot::TRANSPARENT) != 0 {
         return;
+    }
+    match read(boxes(), receiver, slot::BOX_TYPE) {
+        BOX_CUSTOM => {}
+        BOX_SEPARATOR => return draw_separator(receiver),
+        _ => return draw_group_box(receiver),
     }
     let bounds = view::bounds_of(receiver);
     let fill = |color: Id, rect: NSRect| {
@@ -698,6 +708,171 @@ unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
             edge(origin.x + size.width - width, origin.y, width, size.height),
         );
     }
+}
+
+const BOX_SEPARATOR: usize = 2;
+
+/// `NSTitlePosition`: none, then above, at and below the top, then the same
+/// three at the bottom.
+const NO_TITLE: usize = 0;
+const AT_TOP: usize = 2;
+const ABOVE_BOTTOM: usize = 4;
+
+unsafe extern "C" fn box_set_title(receiver: Id, _sel: Sel, value: Id) {
+    write_object(boxes(), receiver, slot::BOX_TITLE, value);
+    crate::backing::needs_display(receiver);
+}
+
+/// `-title`: the empty string for a box with none.
+unsafe extern "C" fn box_title(receiver: Id, _sel: Sel) -> Id {
+    match read(boxes(), receiver, slot::BOX_TITLE) as Id {
+        title if title.is_null() => empty_string(),
+        title => title,
+    }
+}
+
+unsafe extern "C" fn box_set_title_position(receiver: Id, _sel: Sel, value: usize) {
+    write(boxes(), receiver, slot::TITLE_POSITION, value + 1);
+    crate::backing::needs_display(receiver);
+}
+
+/// `-titlePosition`, `NSAtTop` until set, as AppKit's default is.
+unsafe extern "C" fn box_title_position(receiver: Id, _sel: Sel) -> usize {
+    match read(boxes(), receiver, slot::TITLE_POSITION) {
+        0 => AT_TOP,
+        stored => stored - 1,
+    }
+}
+
+unsafe extern "C" fn box_set_title_font(receiver: Id, _sel: Sel, value: Id) {
+    write_object(boxes(), receiver, slot::BOX_TITLE_FONT, value);
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn box_title_font(receiver: Id, _sel: Sel) -> Id {
+    read(boxes(), receiver, slot::BOX_TITLE_FONT) as Id
+}
+
+/// A one-point line across the box's longer side.
+fn draw_separator(receiver: Id) {
+    let bounds = view::bounds_of(receiver);
+    let NSRect { origin, size } = bounds;
+    let line = match size.width >= size.height {
+        true => NSRect {
+            origin: NSPoint {
+                x: origin.x,
+                y: origin.y + ((size.height - 1.0) / 2.0).floor(),
+            },
+            size: NSSize {
+                width: size.width,
+                height: 1.0,
+            },
+        },
+        false => NSRect {
+            origin: NSPoint {
+                x: origin.x + ((size.width - 1.0) / 2.0).floor(),
+                y: origin.y,
+            },
+            size: NSSize {
+                width: 1.0,
+                height: size.height,
+            },
+        },
+    };
+    draw_pixels(receiver, |canvas, top_left| {
+        let x = (line.origin.x - top_left.x) as f32;
+        let y = (top_left.y - line.origin.y - line.size.height) as f32;
+        canvas.fill_rect(
+            chrome::Rect::new(x, y, line.size.width as f32, line.size.height as f32),
+            chrome::Color::rgba(0, 0, 0, 0.15),
+        );
+    });
+}
+
+/// A titled group: the title, and a lightly filled, rounded frame around the
+/// rest.
+///
+/// FIXME (ACCURACY): a box with no title set draws none, where AppKit's says
+/// "Title" until a program changes it.
+fn draw_group_box(receiver: Id) {
+    let title = read(boxes(), receiver, slot::BOX_TITLE) as Id;
+    // SAFETY: a string this box retained, or nil.
+    let title = String::from_utf8_lossy(&unsafe { foundation::string::bytes(title) }).into_owned();
+    // SAFETY: the same box.
+    let position = unsafe { box_title_position(receiver, objc::sel::get("titlePosition")) };
+    let font = match title.is_empty() || position == NO_TITLE {
+        true => None,
+        false => crate::label::chrome_font(read(boxes(), receiver, slot::BOX_TITLE_FONT) as Id),
+    };
+    let title_height = font
+        .as_ref()
+        .map_or(0.0, |(_, size)| (*size as f32 + 3.0).ceil());
+    let at_bottom = position >= ABOVE_BOTTOM;
+    let size = view::bounds_of(receiver).size;
+    draw_pixels(receiver, |canvas, _| {
+        let (w, h) = (size.width as f32, size.height as f32);
+        let frame = match at_bottom {
+            false => chrome::Rect::new(0.5, title_height + 0.5, w - 1.0, h - title_height - 1.0),
+            true => chrome::Rect::new(0.5, 0.5, w - 1.0, h - title_height - 1.0),
+        };
+        if frame.width > 0.0 && frame.height > 0.0 {
+            canvas.fill_rounded_rect(frame, 4.0, chrome::Color::rgba(0, 0, 0, 0.05));
+            canvas.stroke_rounded_rect(frame, 4.0, 1.0, chrome::Color::rgba(0, 0, 0, 0.12));
+        }
+        if let Some((font, size)) = &font {
+            let size = *size as f32;
+            let line = font.truncate(&title, size, (w - 8.0).max(0.0));
+            let top = match at_bottom {
+                false => 0.0,
+                true => h - title_height,
+            };
+            let baseline = font.centered_baseline(size, top, title_height);
+            canvas.draw_text(
+                &line,
+                font,
+                size,
+                chrome::Point::new(4.0, baseline),
+                chrome::Color::rgba(0, 0, 0, 0.85),
+            );
+        }
+    });
+}
+
+/// Draw into a canvas the size of the view's bounds, top row first, and put it
+/// over what the view shows. `paint` is given the bounds' top-left corner in
+/// the view's own coordinates.
+fn draw_pixels(receiver: Id, paint: impl FnOnce(&mut chrome::Canvas, NSPoint)) {
+    let bounds = view::bounds_of(receiver);
+    let density = crate::backing::focus_density();
+    let width = (bounds.size.width * density).ceil() as usize;
+    let height = (bounds.size.height * density).ceil() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut pixels = vec![0u8; width * height * 4];
+    let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
+    paint(
+        &mut canvas,
+        NSPoint {
+            x: bounds.origin.x,
+            y: bounds.origin.y + bounds.size.height,
+        },
+    );
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        bounds.size,
+        bounds,
+        NSRect {
+            origin: NSPoint::default(),
+            size: bounds.size,
+        },
+        // Source-over.
+        2,
+        1.0,
+        true,
+    );
 }
 
 unsafe extern "C" fn indicator_set_indeterminate(receiver: Id, _sel: Sel, value: u8) {
@@ -816,6 +991,12 @@ unsafe extern "C" fn button_is_highlighted(receiver: Id, _sel: Sel) -> u8 {
 /// and a program that wants a bezel draws its own.
 unsafe extern "C" fn button_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     if read(buttons(), receiver, slot::BUTTON_TRANSPARENT) != 0 {
+        return;
+    }
+    if let kind @ (button_type::SWITCH | button_type::RADIO) =
+        read(buttons(), receiver, slot::BUTTON_TYPE)
+    {
+        draw_check(receiver, kind == button_type::RADIO);
         return;
     }
     draw_bezel_and_title(receiver);
@@ -940,6 +1121,111 @@ fn draw_bezel_and_title(receiver: Id) {
         1.0,
         true,
     );
+}
+
+/// A check box or radio button: its box, its mark and its title beside it.
+///
+/// FIXME (ACCURACY): drawn in the light theme's colours with the system font,
+/// whatever font the button names, like the toolkit's own check box.
+fn draw_check(receiver: Id, radio: bool) {
+    use chrome::View;
+    let bounds = view::bounds_of(receiver);
+    let density = crate::backing::focus_density();
+    let width = (bounds.size.width * density).ceil() as usize;
+    let height = (bounds.size.height * density).ceil() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut pixels = vec![0u8; width * height * 4];
+    let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
+    let theme = chrome::Theme::light();
+    let check = chrome::checkbox::Checkbox {
+        title: button_text(receiver),
+        state: match read(buttons(), receiver, slot::BUTTON_STATE) as isize {
+            0 => chrome::menu::State::Off,
+            -1 => chrome::menu::State::Mixed,
+            _ => chrome::menu::State::On,
+        },
+        enabled: read(buttons(), receiver, slot::DISABLED) == 0,
+        pressed: read(buttons(), receiver, slot::HIGHLIGHTED) != 0,
+        radio,
+    };
+    let rect = chrome::Rect::new(
+        1.0,
+        0.0,
+        (bounds.size.width as f32 - 1.0).max(0.0),
+        bounds.size.height as f32,
+    );
+    let layout = check.layout(rect, &theme);
+    check.paint(&mut canvas, &layout, &theme);
+    crate::backing::draw_image(
+        &pixels,
+        width,
+        height,
+        bounds.size,
+        bounds,
+        NSRect {
+            origin: NSPoint::default(),
+            size: bounds.size,
+        },
+        // Source-over.
+        2,
+        1.0,
+        true,
+    );
+}
+
+/// `NSButtonType`, for the kinds whose clicks change their state.
+pub(crate) mod button_type {
+    pub const PUSH_ON_PUSH_OFF: usize = 1;
+    pub const TOGGLE: usize = 2;
+    pub const SWITCH: usize = 3;
+    pub const RADIO: usize = 4;
+    pub const ON_OFF: usize = 6;
+}
+
+/// What a click does to a button's state before its action is sent: a radio
+/// button turns on and turns off the radio buttons beside it that share its
+/// action, as AppKit groups them; a toggling kind flips; the rest keep theirs.
+fn advance_state(receiver: Id) {
+    let kind = read(buttons(), receiver, slot::BUTTON_TYPE);
+    match kind {
+        button_type::RADIO => {
+            let action = read(buttons(), receiver, slot::ACTION);
+            // SAFETY: a view of this crate's.
+            let parent = unsafe { view::superview_of(receiver) };
+            for sibling in view::subviews_of(parent) {
+                if sibling != receiver
+                    && is_button(sibling)
+                    && read(buttons(), sibling, slot::BUTTON_TYPE) == button_type::RADIO
+                    && read(buttons(), sibling, slot::ACTION) == action
+                    && read(buttons(), sibling, slot::BUTTON_STATE) != 0
+                {
+                    write(buttons(), sibling, slot::BUTTON_STATE, 0);
+                    crate::backing::needs_display(sibling);
+                }
+            }
+            write(buttons(), receiver, slot::BUTTON_STATE, 1);
+        }
+        button_type::PUSH_ON_PUSH_OFF
+        | button_type::TOGGLE
+        | button_type::SWITCH
+        | button_type::ON_OFF => {
+            let on = read(buttons(), receiver, slot::BUTTON_STATE) != 0;
+            write(buttons(), receiver, slot::BUTTON_STATE, usize::from(!on));
+        }
+        _ => return,
+    }
+    crate::backing::needs_display(receiver);
+}
+
+fn is_button(object: Id) -> bool {
+    let Some(button) = objc::class::lookup(c"NSButton") else {
+        return false;
+    };
+    // SAFETY: a view this crate's tree holds.
+    unsafe { objc::object::class_of(object) }
+        .is_some_and(|class| class.chain().any(|c| std::ptr::eq(c, button)))
 }
 
 /// The font the title is drawn in: the attributed title's, which a program
@@ -1131,6 +1417,10 @@ unsafe extern "C" fn button_perform_key_equivalent(receiver: Id, _sel: Sel, even
 
 /// `-performClick:`: the action, as a click would send it.
 unsafe extern "C" fn button_perform_click(receiver: Id, _sel: Sel, _sender: Id) {
+    if read(buttons(), receiver, slot::DISABLED) != 0 {
+        return;
+    }
+    advance_state(receiver);
     send_button_action(receiver);
 }
 
@@ -1147,6 +1437,10 @@ unsafe extern "C" fn button_mouse_up(receiver: Id, _sel: Sel, _event: Id) {
         return;
     }
     set_highlighted(receiver, false);
+    if read(buttons(), receiver, slot::DISABLED) != 0 {
+        return;
+    }
+    advance_state(receiver);
     send_button_action(receiver);
 }
 
@@ -1191,6 +1485,7 @@ unsafe extern "C" fn button_image(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn button_set_title(receiver: Id, _sel: Sel, value: Id) {
     write_object(buttons(), receiver, slot::TITLE, value);
+    crate::backing::needs_display(receiver);
 }
 
 unsafe extern "C" fn button_title(receiver: Id, _sel: Sel) -> Id {
@@ -1684,6 +1979,12 @@ pub(crate) fn install() {
         "setContentViewMargins:" => box_set_content_view_margins, c"v32@0:8{CGSize=dd}16";
         "contentViewMargins" => box_content_view_margins, c"{CGSize=dd}16@0:8";
         "borderWidth" => box_border_width, c"d16@0:8";
+        "setTitle:" => box_set_title, c"v24@0:8@16";
+        "title" => box_title, c"@16@0:8";
+        "setTitlePosition:" => box_set_title_position, c"v24@0:8Q16";
+        "titlePosition" => box_title_position, c"Q16@0:8";
+        "setTitleFont:" => box_set_title_font, c"v24@0:8@16";
+        "titleFont" => box_title_font, c"@16@0:8";
         "drawRect:" => box_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
     });
 

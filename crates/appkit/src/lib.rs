@@ -46,6 +46,7 @@ pub mod keymap;
 mod label;
 pub mod layer;
 mod layout;
+mod matrix;
 pub mod menu;
 pub mod metadata;
 pub mod monitor;
@@ -63,6 +64,7 @@ pub mod screen;
 pub mod script;
 mod scroll;
 mod segmented;
+mod tab;
 mod table;
 pub mod text;
 pub mod textinput;
@@ -109,6 +111,8 @@ pub fn bootstrap() {
         popup::install();
         scroll::install();
         segmented::install();
+        matrix::install();
+        tab::install();
         table::install();
         view_animation::install();
         // Last of the controls: a cell forwards what its control implements.

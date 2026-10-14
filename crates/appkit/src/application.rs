@@ -925,7 +925,7 @@ unsafe extern "C" fn effective_appearance(receiver: Id, sel: Sel) -> Id {
     if !own.is_null() {
         return own;
     }
-    crate::appearance::system()
+    crate::appearance::for_program()
 }
 
 pub(crate) fn install() {
@@ -1164,14 +1164,14 @@ mod tests {
     }
 
     #[test]
-    fn effective_appearance_follows_the_system() {
+    fn effective_appearance_is_the_programs_default() {
         crate::bootstrap();
         let class = objc::class::lookup(c"NSApplication").expect("NSApplication");
         let app = objc::object::create_instance(class, 0);
         let appearance =
             unsafe { effective_appearance(app, objc::sel::get("effectiveAppearance")) };
         let name = unsafe { crate::appearance::name(appearance, objc::sel::get("name")) };
-        assert_eq!(appearance, crate::appearance::system());
+        assert_eq!(appearance, crate::appearance::for_program());
         assert!(!name.is_null());
     }
 

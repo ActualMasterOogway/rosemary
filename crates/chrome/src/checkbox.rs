@@ -1,4 +1,5 @@
-//! A labelled check box with the same three states as a menu item.
+//! A labelled check box with the same three states as a menu item, or a
+//! radio button, which is the same control with a round box.
 
 use crate::geometry::{Point, Rect};
 use crate::menu::State;
@@ -13,6 +14,8 @@ pub struct Checkbox {
     pub state: State,
     pub enabled: bool,
     pub pressed: bool,
+    /// Round, with a dot for on, as one of a group of exclusive choices.
+    pub radio: bool,
 }
 
 impl Default for Checkbox {
@@ -22,6 +25,7 @@ impl Default for Checkbox {
             state: State::Off,
             enabled: true,
             pressed: false,
+            radio: false,
         }
     }
 }
@@ -103,12 +107,17 @@ impl View for Checkbox {
             border = border.with_alpha(border.a * 0.45);
             mark = mark.with_alpha(mark.a * 0.45);
         }
-        canvas.fill_rounded_rect(layout.box_rect, RADIUS, fill);
-        canvas.stroke_rounded_rect(layout.box_rect, RADIUS, 1.0 / canvas.scale(), border);
+        let radius = match self.radio {
+            true => layout.box_rect.width / 2.0,
+            false => RADIUS,
+        };
+        canvas.fill_rounded_rect(layout.box_rect, radius, fill);
+        canvas.stroke_rounded_rect(layout.box_rect, radius, 1.0 / canvas.scale(), border);
 
         let c = layout.box_rect.center();
         match self.state {
             State::Off => {}
+            State::On if self.radio => canvas.fill_circle(c, 3.0, mark),
             State::On => {
                 canvas.stroke_line(
                     Point::new(c.x - 4.0, c.y),
@@ -204,5 +213,27 @@ mod tests {
         assert_ne!(off, on);
         assert_ne!(on, mixed);
         assert_ne!(off, mixed);
+    }
+
+    #[test]
+    fn a_radio_button_is_drawn_round() {
+        let theme = Theme::light();
+        let square = Checkbox::default();
+        let round = Checkbox {
+            radio: true,
+            ..Checkbox::default()
+        };
+        let layout = square.layout(Rect::new(0.0, 0.0, 20.0, 20.0), &theme);
+        let render = |checkbox: &Checkbox| {
+            let mut pixels = vec![0; 20 * 20 * 4];
+            let mut canvas = Canvas::new(&mut pixels, 20, 20, 20 * 4, 1.0);
+            checkbox.paint(&mut canvas, &layout, &theme);
+            pixels
+        };
+        let corner = |pixels: &[u8]| {
+            let (x, y) = (layout.box_rect.x as usize, layout.box_rect.y as usize + 1);
+            pixels[(y * 20 + x + 1) * 4 + 3]
+        };
+        assert!(corner(&render(&square)) > corner(&render(&round)));
     }
 }

@@ -1468,6 +1468,7 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
     objc::arc::release(subview);
     // SAFETY: a view this crate made, now in a window.
     unsafe { update_tracking_areas(subview) };
+    crate::backing::needs_display_in_tree(subview, 0);
     crate::layout::solve();
 }
 

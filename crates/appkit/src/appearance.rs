@@ -55,6 +55,35 @@ pub fn aqua() -> Id {
     named(AQUA)
 }
 
+/// What a program that sets no appearance of its own is given: Aqua when it
+/// was built before Dark Mode existed, or asks for Aqua in its `Info.plist`,
+/// as AppKit decides; the system's otherwise.
+pub fn for_program() -> Id {
+    match requires_aqua(
+        darwin::images::program_sdk(),
+        foundation::bundle::main().and_then(|b| b.info.get("NSRequiresAquaSystemAppearance")),
+    ) {
+        true => aqua(),
+        false => system(),
+    }
+}
+
+/// The 10.14 SDK, the first that knew Dark Mode.
+const DARK_MODE_SDK: u32 = 0x000A_0E00;
+
+fn requires_aqua(sdk: Option<u32>, key: Option<&foundation::plist::Value>) -> bool {
+    let asked = match key {
+        Some(foundation::plist::Value::Bool(value)) => *value,
+        Some(other) => other
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| other.as_str().map(|text| matches!(text, "YES" | "true" | "1")))
+            .unwrap_or(false),
+        None => false,
+    };
+    asked || sdk.is_some_and(|sdk| sdk < DARK_MODE_SDK)
+}
+
 /// The host preference is live; named appearance objects keep their own names.
 pub fn system() -> Id {
     named(
@@ -202,6 +231,16 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_built_before_dark_mode_or_asking_for_aqua_requires_it() {
+        use foundation::plist::Value;
+        assert!(requires_aqua(Some(0x000A_0D00), None));
+        assert!(!requires_aqua(Some(0x000A_0E00), None));
+        assert!(!requires_aqua(None, None));
+        assert!(requires_aqua(Some(0x000B_0000), Some(&Value::Bool(true))));
+        assert!(!requires_aqua(Some(0x000B_0000), Some(&Value::Bool(false))));
+    }
 
     #[test]
     fn named_appearances_are_stable_and_match_independently_of_the_system() {

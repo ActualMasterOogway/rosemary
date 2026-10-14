@@ -711,8 +711,9 @@ pub(crate) fn window_needs_display(window: Id) -> bool {
 }
 
 /// Mark a view and everything under it, as a window that has nothing valid
-/// to show needs.
-fn needs_display_in_tree(view: Id, depth: usize) {
+/// to show needs, and as a subtree moved into a window does: none of it has
+/// been drawn there.
+pub(crate) fn needs_display_in_tree(view: Id, depth: usize) {
     if view.is_null() || depth > 64 {
         return;
     }
