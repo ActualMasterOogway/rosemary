@@ -230,6 +230,84 @@ unsafe extern "C" fn device_description(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(dictionary) as Id }
 }
 
+/// `-localizedName`: the name the host gives the display, such as `DP-1`.
+///
+/// Never nil, as AppKit's is not: a program puts it straight into a menu, and a
+/// host that names no display is described by what it is rather than by a
+/// string this runtime made up for a specific machine.
+unsafe extern "C" fn localized_name(receiver: Id, _sel: Sel) -> Id {
+    let name = sdl3::video::display_name(display_of(receiver))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Display".to_owned());
+    // SAFETY: a fresh string, which autorelease takes over.
+    unsafe { corefoundation::api::CFAutorelease(foundation::string::from_str(&name) as _) as Id }
+}
+
+/// `-safeAreaInsets` and the two `auxiliaryTop*Area` rectangles describe a
+/// camera housing. No display here has one, which AppKit reports as zeros.
+unsafe extern "C" fn safe_area_insets(_receiver: Id, _sel: Sel) -> crate::controls::NSEdgeInsets {
+    crate::controls::NSEdgeInsets::default()
+}
+
+unsafe extern "C" fn zero_rect(_receiver: Id, _sel: Sel) -> NSRect {
+    NSRect::default()
+}
+
+/// `+screensHaveSeparateSpaces`: whether each display has its own Spaces. The
+/// host's displays are one desktop to SDL.
+unsafe extern "C" fn screens_have_separate_spaces(_class: Id, _sel: Sel) -> u8 {
+    0
+}
+
+/// `-userSpaceScaleFactor`: points to pixels, which is the backing factor here
+/// because nothing scales user space apart from it.
+unsafe extern "C" fn user_space_scale_factor(receiver: Id, sel: Sel) -> CGFloat {
+    // SAFETY: `-backingScaleFactor` is `CGFloat (id, SEL)`.
+    unsafe { backing_scale_factor(receiver, sel) }
+}
+
+/// The three extended-dynamic-range limits. The display is SDR, so 1.0; the
+/// reference limit is 0.0 because AppKit documents that for a screen without a
+/// reference mode.
+unsafe extern "C" fn edr_limit(_receiver: Id, _sel: Sel) -> CGFloat {
+    1.0
+}
+
+unsafe extern "C" fn edr_reference_limit(_receiver: Id, _sel: Sel) -> CGFloat {
+    0.0
+}
+
+fn scale_rect(rect: NSRect, factor: f64) -> NSRect {
+    NSRect {
+        origin: foundation::geometry::NSPoint {
+            x: rect.origin.x * factor,
+            y: rect.origin.y * factor,
+        },
+        size: foundation::geometry::NSSize {
+            width: rect.size.width * factor,
+            height: rect.size.height * factor,
+        },
+    }
+}
+
+unsafe extern "C" fn convert_rect_to_backing(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    // SAFETY: `-backingScaleFactor` is `CGFloat (id, SEL)`.
+    scale_rect(rect, unsafe { backing_scale_factor(receiver, sel) })
+}
+
+unsafe extern "C" fn convert_rect_from_backing(receiver: Id, sel: Sel, rect: NSRect) -> NSRect {
+    // SAFETY: as above.
+    let factor = unsafe { backing_scale_factor(receiver, sel) };
+    scale_rect(rect, if factor > 0.0 { 1.0 / factor } else { 1.0 })
+}
+
+/// `-supportedWindowDepths`: a zero-terminated array, of the one depth
+/// [`depth`] reports.
+unsafe extern "C" fn supported_window_depths(_receiver: Id, _sel: Sel) -> *const i32 {
+    static DEPTHS: [i32; 2] = [WINDOW_DEPTH_24_BIT_RGB, 0];
+    DEPTHS.as_ptr()
+}
+
 /// `-[NSScreen depth]`, an `NSWindowDepth`.
 ///
 /// An `NSWindowDepth` is not a bit count: it is an opaque value a caller passes to
@@ -1076,6 +1154,7 @@ pub(crate) fn install() {
         "mainScreen" => main_screen, c"@16@0:8";
         "deepestScreen" => deepest_screen, c"@16@0:8";
         "screens" => screens, c"@16@0:8";
+        "screensHaveSeparateSpaces" => screens_have_separate_spaces, c"B16@0:8";
     });
     methods!(class, {
         "frame" => frame, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
@@ -1088,6 +1167,17 @@ pub(crate) fn install() {
         "depth" => depth, c"i16@0:8";
         "colorSpace" => color_space, c"@16@0:8";
         "deviceDescription" => device_description, c"@16@0:8";
+        "localizedName" => localized_name, c"@16@0:8";
+        "safeAreaInsets" => safe_area_insets, c"{NSEdgeInsets=dddd}16@0:8";
+        "auxiliaryTopLeftArea" => zero_rect, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
+        "auxiliaryTopRightArea" => zero_rect, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
+        "userSpaceScaleFactor" => user_space_scale_factor, c"d16@0:8";
+        "maximumExtendedDynamicRangeColorComponentValue" => edr_limit, c"d16@0:8";
+        "maximumPotentialExtendedDynamicRangeColorComponentValue" => edr_limit, c"d16@0:8";
+        "maximumReferenceExtendedDynamicRangeColorComponentValue" => edr_reference_limit, c"d16@0:8";
+        "convertRectToBacking:" => convert_rect_to_backing, c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "convertRectFromBacking:" => convert_rect_from_backing, c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "supportedWindowDepths" => supported_window_depths, c"^i16@0:8";
     });
 }
 
@@ -1143,6 +1233,88 @@ mod tests {
         let rect = unsafe { frame(screen, objc::sel::get("frame")) };
         assert_eq!(rect.size.width, bounds.w as f64);
         assert_eq!(rect.size.height, bounds.h as f64);
+    }
+
+    /// Calls the registered `NSScreen` method `name` with only `(self, _cmd)`.
+    fn screen_method<R>(screen: Id, name: &str) -> R {
+        let class = objc::class::lookup(c"NSScreen").unwrap();
+        let selector = objc::sel::get(name);
+        let method = class.method(selector).expect("method is registered");
+        // SAFETY: the caller names the method's real return type.
+        let call: unsafe extern "C" fn(Id, Sel) -> R =
+            unsafe { std::mem::transmute(method.implementation()) };
+        unsafe { call(screen, selector) }
+    }
+
+    #[test]
+    fn a_screen_has_a_nonempty_localized_name() {
+        crate::bootstrap();
+        let name: Id = screen_method(screen_for(0), "localizedName");
+        assert!(!name.is_null());
+        assert!(!unsafe { foundation::string::bytes(name) }.is_empty());
+    }
+
+    #[test]
+    fn a_screen_without_a_camera_housing_has_no_safe_area_inset() {
+        crate::bootstrap();
+        let screen = screen_for(0);
+        let insets: crate::controls::NSEdgeInsets = screen_method(screen, "safeAreaInsets");
+        assert_eq!(insets, crate::controls::NSEdgeInsets::default());
+        for name in ["auxiliaryTopLeftArea", "auxiliaryTopRightArea"] {
+            let rect: NSRect = screen_method(screen, name);
+            assert_eq!(rect, NSRect::default());
+        }
+    }
+
+    #[test]
+    fn extended_dynamic_range_limits_describe_an_sdr_display() {
+        crate::bootstrap();
+        let screen = screen_for(0);
+        let limit = |n| screen_method::<f64>(screen, n);
+        assert_eq!(limit("maximumExtendedDynamicRangeColorComponentValue"), 1.0);
+        assert_eq!(
+            limit("maximumPotentialExtendedDynamicRangeColorComponentValue"),
+            1.0
+        );
+        assert_eq!(
+            limit("maximumReferenceExtendedDynamicRangeColorComponentValue"),
+            0.0
+        );
+    }
+
+    #[test]
+    fn backing_conversion_round_trips_through_the_scale_factor() {
+        crate::bootstrap();
+        let screen = screen_for(0);
+        let rect = NSRect {
+            origin: foundation::geometry::NSPoint { x: 3.0, y: 5.0 },
+            size: foundation::geometry::NSSize {
+                width: 40.0,
+                height: 20.0,
+            },
+        };
+        let scale: f64 = screen_method(screen, "userSpaceScaleFactor");
+        // SAFETY: the conversions are `NSRect (id, SEL, NSRect)`.
+        let there =
+            unsafe { convert_rect_to_backing(screen, objc::sel::get("backingScaleFactor"), rect) };
+        assert_eq!(there.size.width, 40.0 * scale);
+        let back = unsafe {
+            convert_rect_from_backing(screen, objc::sel::get("backingScaleFactor"), there)
+        };
+        assert!((back.size.width - 40.0).abs() < 1e-9);
+        assert!((back.origin.y - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn supported_window_depths_end_in_zero() {
+        crate::bootstrap();
+        let depths: *const i32 = screen_method(screen_for(0), "supportedWindowDepths");
+        let depth: i32 = screen_method(screen_for(0), "depth");
+        // SAFETY: a two-element static array.
+        unsafe {
+            assert_eq!(*depths, depth);
+            assert_eq!(*depths.add(1), 0);
+        }
     }
 
     #[test]
