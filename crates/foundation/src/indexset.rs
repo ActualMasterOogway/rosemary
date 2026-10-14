@@ -104,7 +104,7 @@ fn class_name_of(receiver: Id) -> &'static std::ffi::CStr {
 
 unsafe extern "C" fn index_set(class: Id, _sel: Sel) -> Id {
     let object = objc::object::create_instance(
-        objc::class::from_ptr(class as *const objc::class::Class).expect("a class"),
+        unsafe { objc::class::from_ptr(class as *const objc::class::Class).expect("a class") },
         0,
     );
     objc::arc::autorelease(object)
