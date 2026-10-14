@@ -396,22 +396,50 @@ fn unrendered_conversion() {
     }
 }
 
-unsafe extern "C" fn string_with_format(_class: Id, _sel: Sel, format: Id) -> Id {
+fn is_mutable_receiver(receiver: Id) -> bool {
+    if receiver.is_null() {
+        return false;
+    }
+    // SAFETY: `receiver` is a live object or class.
+    let Some(class) = (unsafe { objc::object::class_of(receiver) }) else {
+        return false;
+    };
+    class.name_str() == "NSMutableString"
+        || class.chain().any(|ancestor| ancestor.name_str() == "NSMutableString")
+}
+
+unsafe extern "C" fn string_with_format(class: Id, _sel: Sel, format: Id) -> Id {
     // SAFETY: the format is an `NSString` or nil.
     let rendered = unescape_rendered(&unsafe { bytes(format) });
-    let s = corefoundation::string::from_bytes(&rendered, false);
+    let s = match is_mutable_receiver(class) {
+        true => {
+            let mutable = corefoundation::string::new_mutable();
+            // SAFETY: a fresh mutable string.
+            unsafe { corefoundation::string::set_bytes(mutable, &rendered) };
+            mutable
+        }
+        false => corefoundation::string::from_bytes(&rendered, false),
+    };
     // SAFETY: a fresh object.
     unsafe { api::CFAutorelease(s) as Id }
 }
 
-unsafe extern "C" fn init_with_format(receiver: Id, sel: Sel, format: Id) -> Id {
+unsafe extern "C" fn init_with_format(receiver: Id, _sel: Sel, format: Id) -> Id {
     // SAFETY: the allocated shell is released and the built string returned,
     // which is what every `-init...` in this crate does.
-    unsafe {
-        objc::arc::release(receiver);
-        let rendered = string_with_format(std::ptr::null_mut(), sel, format);
-        objc::arc::retain(rendered)
-    }
+    let is_mutable = is_mutable_receiver(receiver);
+    objc::arc::release(receiver);
+    let rendered = unescape_rendered(&unsafe { bytes(format) });
+    let s = match is_mutable {
+        true => {
+            let mutable = corefoundation::string::new_mutable();
+            // SAFETY: a fresh mutable string.
+            unsafe { corefoundation::string::set_bytes(mutable, &rendered) };
+            mutable
+        }
+        false => corefoundation::string::from_bytes(&rendered, false),
+    };
+    s as Id
 }
 
 unsafe extern "C" fn empty_string(_class: Id, _sel: Sel) -> Id {
@@ -655,6 +683,11 @@ unsafe extern "C" fn mutable_string_with_capacity(_class: Id, _sel: Sel, _capaci
 unsafe extern "C" fn init_mutable(receiver: Id, _sel: Sel) -> Id {
     // The allocated shell is released and a mutable string returned, which is
     // what every `-init...` in this crate does.
+    objc::arc::release(receiver);
+    corefoundation::string::new_mutable() as Id
+}
+
+unsafe extern "C" fn init_mutable_with_capacity(receiver: Id, _sel: Sel, _capacity: usize) -> Id {
     objc::arc::release(receiver);
     corefoundation::string::new_mutable() as Id
 }
@@ -1562,22 +1595,21 @@ unsafe extern "C" fn string_with_string(_class: Id, _sel: Sel, other: Id) -> Id 
 }
 
 unsafe extern "C" fn mutable_string_with_string(_class: Id, _sel: Sel, other: Id) -> Id {
-    // SAFETY: the argument is an NSString or nil.
-    let Some(source) = (unsafe { corefoundation::string::as_string(other as CFTypeRef) }) else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: the new object belongs to the autorelease pool.
-    unsafe { api::CFAutorelease(corefoundation::string::new_mutable_copy(source)) as Id }
+    let bytes = unsafe { bytes(other) };
+    let s = corefoundation::string::new_mutable();
+    // SAFETY: a fresh mutable string.
+    unsafe { corefoundation::string::set_bytes(s, &bytes) };
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
 }
 
 unsafe extern "C" fn init_mutable_with_string(receiver: Id, _sel: Sel, other: Id) -> Id {
-    // SAFETY: the argument is an NSString or nil.
-    let source = unsafe { corefoundation::string::as_string(other as CFTypeRef) };
-    let replacement = source
-        .map(corefoundation::string::new_mutable_copy)
-        .unwrap_or(std::ptr::null()) as Id;
+    let bytes = unsafe { bytes(other) };
+    let replacement = corefoundation::string::new_mutable();
+    // SAFETY: a fresh mutable string.
+    unsafe { corefoundation::string::set_bytes(replacement, &bytes) };
     objc::arc::release(receiver);
-    replacement
+    replacement as Id
 }
 
 pub(crate) fn install() {
@@ -1665,6 +1697,7 @@ pub(crate) fn install() {
             c"Q48@0:8@16@24Q32{_NSRange=QQ}40";
         "setString:" => set_string, c"v24@0:8@16";
         "init" => init_mutable, c"@16@0:8";
+        "initWithCapacity:" => init_mutable_with_capacity, c"@24@0:8Q16";
         "initWithString:" => init_mutable_with_string, c"@24@0:8@16";
     });
     class_methods!(mutable, {
