@@ -260,7 +260,7 @@ fn index_set_members(set: Id) -> Vec<isize> {
         let get_next: unsafe extern "C" fn(Id, Sel, usize) -> usize =
             std::mem::transmute(objc::msg::entry());
         let mut index = get_first(set, first);
-        while index != usize::MAX && index <= isize::MAX as usize && rows.len() < 1 << 20 {
+        while index < isize::MAX as usize && rows.len() < 1 << 20 {
             rows.push(index as isize);
             index = get_next(set, next, index);
         }
@@ -278,6 +278,24 @@ unsafe extern "C" fn select_row_indexes(receiver: Id, _sel: Sel, set: Id, extend
         t.selected.sort_unstable();
         t.selected.dedup();
     });
+}
+
+unsafe extern "C" fn selected_row_indexes(receiver: Id, _sel: Sel) -> Id {
+    let class = objc::class::lookup(c"NSMutableIndexSet").expect("declared by Foundation");
+    let index_set = objc::sel::get("indexSet");
+    let add = objc::sel::get("addIndex:");
+    // SAFETY: `+indexSet` is `id (Class, SEL)`, `-addIndex:` is
+    // `void (id, SEL, NSUInteger)`.
+    unsafe {
+        let make: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        let set = make(objc::class::ptr(class) as Id, index_set);
+        let add_index: unsafe extern "C" fn(Id, Sel, usize) =
+            std::mem::transmute(objc::msg::entry());
+        for row in table(receiver).selected {
+            add_index(set, add, row as usize);
+        }
+        set
+    }
 }
 
 unsafe extern "C" fn deselect_all(receiver: Id, _sel: Sel, _sender: Id) {
@@ -430,6 +448,7 @@ pub(crate) fn install() {
         "numberOfSelectedRows" => number_of_selected_rows, c"q16@0:8";
         "isRowSelected:" => is_row_selected, c"c24@0:8q16";
         "selectRowIndexes:byExtendingSelection:" => select_row_indexes, c"v28@0:8@16c24";
+        "selectedRowIndexes" => selected_row_indexes, c"@16@0:8";
         "deselectAll:" => deselect_all, c"v24@0:8@16";
         "deselectRow:" => deselect_row, c"v24@0:8q16";
         "setTarget:" => ignored, c"v24@0:8@16";

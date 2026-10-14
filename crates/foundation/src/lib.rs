@@ -24,6 +24,7 @@ pub mod filehandle;
 pub mod filemanager;
 pub mod formatter;
 pub mod geometry;
+mod indexset;
 pub mod json;
 pub mod kvc;
 pub mod kvo;
@@ -61,6 +62,7 @@ pub fn bootstrap() {
         corefoundation::bootstrap();
         string::install();
         characterset::install();
+        indexset::install();
         attributed_string::install();
         collections::install();
         decimal::install();
@@ -240,6 +242,8 @@ pub const CLASSES: &[&str] = &[
     "NSAttributedString",
     "NSMutableAttributedString",
     "NSCharacterSet",
+    "NSIndexSet",
+    "NSMutableIndexSet",
     "NSURLComponents",
     "NSHTTPCookie",
     "NSHTTPCookieStorage",
