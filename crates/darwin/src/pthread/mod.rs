@@ -427,6 +427,12 @@ pub unsafe extern "C" fn kill(thread: u64, signal: u64) -> i32 {
     err::from_host(unsafe { libc::pthread_kill(thread_of(thread), host) })
 }
 
+/// FIXME (ACCURACY): are we missing cancellation points anywhere?
+/// are host cancellation points accurate to Darwin?
+pub unsafe extern "C" fn cancel(thread: u64) -> i32 {
+    err::from_host(unsafe { libc::pthread_cancel(thread_of(thread)) })
+}
+
 /// `void *pthread_get_stackaddr_np(pthread_t)` - the **highest** address of the
 /// thread's stack, which is where a stack that grows down begins.
 ///
@@ -1155,6 +1161,7 @@ exports::exports! {
         "pthread_create" => create,
         "pthread_detach" => detach,
         "pthread_kill" => kill,
+        "pthread_cancel" => cancel,
         "pthread_get_stackaddr_np" => get_stackaddr_np,
         "pthread_get_stacksize_np" => get_stacksize_np,
         "pthread_setname_np" => setname_np,
