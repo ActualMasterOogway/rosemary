@@ -55,6 +55,9 @@ pub struct Loader<S: MachSpec> {
     policy: LoadPolicy,
     extensions: ExtensionSet<S>,
     inserted: Vec<String>,
+    /// What `@executable_path` expands against, when the root is not the
+    /// executable - a `dlopen`ed image. `None` means the root itself.
+    executable: Option<String>,
 }
 
 /// An image's bytes plus where they came from, owned for the link's duration.
@@ -90,6 +93,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             policy: LoadPolicy::default(),
             extensions: ExtensionSet::defaults(),
             inserted: Vec::new(),
+            executable: None,
         }
     }
 
@@ -99,6 +103,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             policy,
             extensions: ExtensionSet::defaults(),
             inserted: Vec::new(),
+            executable: None,
         }
     }
 
@@ -109,12 +114,20 @@ impl<S: MachSpec + 'static> Loader<S> {
             policy: LoadPolicy::default(),
             extensions: ExtensionSet::empty(),
             inserted: Vec::new(),
+            executable: None,
         }
     }
 
     /// The extension set, to add to or replace.
     pub fn extensions_mut(&mut self) -> &mut ExtensionSet<S> {
         &mut self.extensions
+    }
+
+    /// Expand `@executable_path` against `path` rather than the root, as dyld
+    /// does for every image loaded after the program started.
+    pub fn executable_path(&mut self, path: String) -> &mut Self {
+        self.executable = Some(path);
+        self
     }
 
     pub fn insert_libraries(&mut self, libraries: Vec<String>) -> &mut Self {
@@ -218,7 +231,7 @@ impl<S: MachSpec + 'static> Loader<S> {
 
             for (install_name, kind) in deps {
                 let ctx = PathContext {
-                    executable: Some(root_path),
+                    executable: Some(self.executable.as_deref().unwrap_or(root_path)),
                     loader: Some(&loader_path),
                     rpaths: &rpaths,
                 };
@@ -382,6 +395,7 @@ impl<S: MachSpec + 'static> Loader<S> {
 
             let mut image_report = ImageReport {
                 name: m.obj.install_name().unwrap_or(&m.path).to_string(),
+                path: m.path.clone(),
                 base: m.base,
                 slide: m.slide,
                 encoding,

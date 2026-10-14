@@ -348,3 +348,68 @@ fn a_shim_can_take_priority_over_a_bundled_dylib() {
         "the shim should have won over the host"
     );
 }
+
+/// A bundle whose only load command is `LC_LOAD_DYLIB install_name`.
+fn bundle_depending_on(install_name: &str) -> Vec<u8> {
+    use machish::spec::constants::{
+        CPU_TYPE_X86_64, LC_LOAD_DYLIB, MACH_HEADER_64_SIZE, MH_BUNDLE, MH_MAGIC_64,
+    };
+    // `dylib_command`: cmd, cmdsize, name offset, timestamp, two versions.
+    let mut cmd = Vec::new();
+    cmd.extend_from_slice(&LC_LOAD_DYLIB.to_le_bytes());
+    cmd.extend_from_slice(&0u32.to_le_bytes());
+    cmd.extend_from_slice(&24u32.to_le_bytes());
+    cmd.resize(24, 0);
+    cmd.extend_from_slice(install_name.as_bytes());
+    cmd.push(0);
+    cmd.resize(cmd.len().next_multiple_of(8), 0);
+    let size = cmd.len() as u32;
+    cmd[4..8].copy_from_slice(&size.to_le_bytes());
+
+    let mut v = Vec::new();
+    for word in [
+        MH_MAGIC_64,
+        CPU_TYPE_X86_64 as u32,
+        3,
+        MH_BUNDLE,
+        1,
+        size,
+        0,
+        0,
+    ] {
+        v.extend_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(v.len(), MACH_HEADER_64_SIZE);
+    v.extend_from_slice(&cmd);
+    v
+}
+
+/// Remembers every candidate it was asked for, and supplies nothing.
+#[derive(Default)]
+struct Recording(Vec<String>);
+
+impl machish::namespace::DylibSource for Recording {
+    fn fetch(
+        &mut self,
+        request: &machish::namespace::DylibRequest<'_>,
+    ) -> machish::Result<Option<machish::namespace::FetchedDylib>> {
+        self.0.extend(request.candidates.iter().cloned());
+        Ok(None)
+    }
+}
+
+/// A plugin loaded after startup names the program's directory with
+/// `@executable_path`, not its own: Python extension modules in a subdirectory
+/// find the program's bundled SDL that way.
+#[test]
+fn a_loaded_bundle_expands_executable_path_against_the_program() {
+    let bytes = bundle_depending_on("@executable_path/libSDL2.dylib");
+    let mut mem = BufferSpace::new(0x1_0000_0000);
+    let mut source = Recording::default();
+    let mut loader = Loader::new(X86_64);
+    loader.executable_path("/app/MacOS/game".to_string());
+    // The link itself may refuse a bundle with no segments; the request it
+    // made on the way is what is under test.
+    let _ = loader.link_with(&bytes, "/app/MacOS/Lib/mod.so", &mut mem, &mut source, &[]);
+    assert_eq!(source.0, ["/app/MacOS/libSDL2.dylib"]);
+}

@@ -79,6 +79,10 @@ pub struct Interposition {
 pub struct ImageReport {
     /// The image's install name, or its path, for diagnostics.
     pub name: String,
+    /// Where the image was actually read from. Differs from `name` when the
+    /// install name is a path on the build machine, which a reader that wants
+    /// the file again cannot open.
+    pub path: String,
     pub base: Word,
     pub slide: Word,
     /// Which fixup encoding the image used, from
