@@ -22,10 +22,6 @@ impl Scalar {
     };
     pub const FLOAT: Scalar = Scalar::Float { bits: 32 };
 
-    pub fn is_float(self) -> bool {
-        matches!(self, Scalar::Float { .. })
-    }
-
     pub fn is_integer(self) -> bool {
         matches!(self, Scalar::Int { .. })
     }
@@ -79,10 +75,6 @@ impl Ty {
         } else {
             Ty::Vector(scalar, lanes)
         }
-    }
-
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, Ty::Scalar(_) | Ty::Vector(..))
     }
 }
 

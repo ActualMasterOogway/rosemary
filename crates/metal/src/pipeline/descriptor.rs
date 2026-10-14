@@ -233,7 +233,3 @@ pub(super) unsafe extern "C" fn set_color_value(receiver: Id, sel: Sel, value: u
         _ => (),
     }
 }
-
-pub(super) unsafe extern "C" fn identity(receiver: Id, _sel: Sel) -> Id {
-    receiver
-}
