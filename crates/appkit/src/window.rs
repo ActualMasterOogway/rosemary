@@ -2253,6 +2253,10 @@ unsafe extern "C" fn ignored_size(_receiver: Id, _sel: Sel, _size: NSSize) {}
 
 unsafe extern "C" fn ignored_integer(_receiver: Id, _sel: Sel, _value: isize) {}
 
+unsafe extern "C" fn yes(_receiver: Id, _sel: Sel) -> u8 {
+    1
+}
+
 unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
     0
 }
@@ -2440,6 +2444,7 @@ pub(crate) fn install() {
         "styleMask" => style_mask, c"Q16@0:8";
         "setStyleMask:" => set_style_mask, c"v24@0:8Q16";
         "setReleasedWhenClosed:" => ignored_flag, c"v20@0:8c16";
+        "isOpaque" => yes, c"c16@0:8";
         "setOpaque:" => ignored_flag, c"v20@0:8c16";
         "setHidesOnDeactivate:" => ignored_flag, c"v20@0:8c16";
         "setRestorable:" => ignored_flag, c"v20@0:8c16";

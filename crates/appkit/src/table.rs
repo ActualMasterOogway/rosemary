@@ -1,7 +1,7 @@
 //! `NSTableView` and `NSTableColumn`, as a read-only list a data source
 //! fills: rows of each column's value, drawn in its font and alignment.
 //!
-//! FIXME (ACCURACY): no selection, editing, headers or grid are drawn, and a
+//! FIXME (ACCURACY): selection is tracked but not drawn; no editing, headers or grid are drawn, and a
 //! table that does not fit its clip view shows the rows `-scrollRowToVisible:`
 //! last asked for rather than scrolling.
 
@@ -28,6 +28,8 @@ struct Table {
     background: usize,
     /// The row last asked to be visible.
     visible_row: Option<isize>,
+    /// Selected rows, ascending.
+    selected: Vec<isize>,
 }
 
 #[derive(Clone, Default)]
@@ -227,8 +229,63 @@ unsafe extern "C" fn scroll_row_to_visible(receiver: Id, _sel: Sel, row: isize) 
     update_table(receiver, |t| t.visible_row = Some(row));
 }
 
-unsafe extern "C" fn selected_row(_receiver: Id, _sel: Sel) -> isize {
-    -1
+unsafe extern "C" fn selected_row(receiver: Id, _sel: Sel) -> isize {
+    table(receiver).selected.last().copied().unwrap_or(-1)
+}
+
+unsafe extern "C" fn number_of_selected_rows(receiver: Id, _sel: Sel) -> isize {
+    table(receiver).selected.len() as isize
+}
+
+unsafe extern "C" fn is_row_selected(receiver: Id, _sel: Sel, row: isize) -> u8 {
+    table(receiver).selected.contains(&row) as u8
+}
+
+/// The members of an `NSIndexSet`, walked with `-firstIndex` and
+/// `-indexGreaterThanIndex:`.
+fn index_set_members(set: Id) -> Vec<isize> {
+    let mut rows = Vec::new();
+    if set.is_null() {
+        return rows;
+    }
+    let first = objc::sel::get("firstIndex");
+    let next = objc::sel::get("indexGreaterThanIndex:");
+    if !responds(set, first) || !responds(set, next) {
+        return rows;
+    }
+    // SAFETY: `NSUInteger (id, SEL)` and `NSUInteger (id, SEL, NSUInteger)`.
+    unsafe {
+        let get_first: unsafe extern "C" fn(Id, Sel) -> usize =
+            std::mem::transmute(objc::msg::entry());
+        let get_next: unsafe extern "C" fn(Id, Sel, usize) -> usize =
+            std::mem::transmute(objc::msg::entry());
+        let mut index = get_first(set, first);
+        while index != usize::MAX && index <= isize::MAX as usize && rows.len() < 1 << 20 {
+            rows.push(index as isize);
+            index = get_next(set, next, index);
+        }
+    }
+    rows
+}
+
+unsafe extern "C" fn select_row_indexes(receiver: Id, _sel: Sel, set: Id, extend: u8) {
+    let rows = index_set_members(set);
+    update_table(receiver, |t| {
+        if extend == 0 {
+            t.selected.clear();
+        }
+        t.selected.extend(rows);
+        t.selected.sort_unstable();
+        t.selected.dedup();
+    });
+}
+
+unsafe extern "C" fn deselect_all(receiver: Id, _sel: Sel, _sender: Id) {
+    update_table(receiver, |t| t.selected.clear());
+}
+
+unsafe extern "C" fn deselect_row(receiver: Id, _sel: Sel, row: isize) {
+    update_table(receiver, |t| t.selected.retain(|r| *r != row));
 }
 
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel, _argument: Id) {}
@@ -370,7 +427,11 @@ pub(crate) fn install() {
         "noteNumberOfRowsChanged" => reload_data, c"v16@0:8";
         "scrollRowToVisible:" => scroll_row_to_visible, c"v24@0:8q16";
         "selectedRow" => selected_row, c"q16@0:8";
-        "deselectAll:" => ignored, c"v24@0:8@16";
+        "numberOfSelectedRows" => number_of_selected_rows, c"q16@0:8";
+        "isRowSelected:" => is_row_selected, c"c24@0:8q16";
+        "selectRowIndexes:byExtendingSelection:" => select_row_indexes, c"v28@0:8@16c24";
+        "deselectAll:" => deselect_all, c"v24@0:8@16";
+        "deselectRow:" => deselect_row, c"v24@0:8q16";
         "setTarget:" => ignored, c"v24@0:8@16";
         "setDoubleAction:" => ignored, c"v24@0:8:16";
         "drawRect:" => draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
