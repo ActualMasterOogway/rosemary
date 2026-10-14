@@ -33,6 +33,12 @@ pub struct Window {
     minimum: NSSize,
     maximum: NSSize,
     fullscreen: usize,
+    /// The full-screen state the guest was last told of through
+    /// `-windowDidEnterFullScreen:` or `-windowDidExitFullScreen:`. Kept apart
+    /// from [`Window::fullscreen`], which follows requests at once, because the
+    /// compositor answers later and a program that counts its own transitions
+    /// by these notifications must hear of every one.
+    reported_fullscreen: usize,
     miniaturized: usize,
     /// `-representedFilename`, an owned `NSString` or null for the empty
     /// string AppKit answers before one is set.
@@ -112,6 +118,9 @@ mod style {
     pub const CLOSABLE: usize = 1 << 1;
     pub const MINIATURIZABLE: usize = 1 << 2;
     pub const RESIZABLE: usize = 1 << 3;
+    /// `NSWindowStyleMaskFullScreen`, which AppKit sets and clears itself;
+    /// see `style_mask`.
+    pub const FULL_SCREEN: usize = 1 << 14;
 }
 
 /// The `NSWindowLevel`s that say what a window is *for*.
@@ -1780,12 +1789,22 @@ unsafe extern "C" fn level(receiver: Id, _sel: Sel) -> isize {
     window_of(receiver).level
 }
 
+/// `-styleMask`, with the full-screen bit AppKit adds for the length of a
+/// full-screen session. Programs ask for that bit rather than keeping their own
+/// flag, and one that finds it clear will not leave full screen.
 unsafe extern "C" fn style_mask(receiver: Id, _sel: Sel) -> usize {
-    window_of(receiver).style_mask
+    let window = window_of(receiver);
+    match window.fullscreen != 0 {
+        true => window.style_mask | style::FULL_SCREEN,
+        false => window.style_mask,
+    }
 }
 
 unsafe extern "C" fn set_style_mask(receiver: Id, _sel: Sel, mask: usize) {
     let window = window_of(receiver);
+    // A program that edits the mask it read back hands the full-screen bit
+    // along with it; that bit is the window's state, not a style to keep.
+    let mask = mask & !style::FULL_SCREEN;
     if window.style_mask != mask {
         trace!("{receiver:p} style {:#x} -> {mask:#x}", window.style_mask);
     }
@@ -2022,6 +2041,15 @@ unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
     let wanted = window.fullscreen == 0;
     if sdl3::video::set_window_fullscreen(window.sdl, wanted) {
         window.fullscreen = wanted as usize;
+        // The matching "did" is posted from the event pump once the
+        // compositor has made the change; see `window_state_changed`.
+        crate::event::post_for(
+            receiver,
+            match wanted {
+                true => WILL_ENTER_FULL_SCREEN,
+                false => WILL_EXIT_FULL_SCREEN,
+            },
+        );
     }
 }
 
@@ -2105,8 +2133,12 @@ pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
     }
     let flags = sdl3::video::window_flags(window.sdl);
     let fullscreen = flags & sdl3::video::flags::FULLSCREEN != 0;
-    let entered = fullscreen != (window.fullscreen != 0);
+    // Against what the guest was told, not what was asked: `-toggleFullScreen:`
+    // records its request before the compositor acts on it, and comparing with
+    // that would swallow the notification for every change the guest made.
+    let entered = fullscreen != (window.reported_fullscreen != 0);
     window.fullscreen = fullscreen as usize;
+    window.reported_fullscreen = fullscreen as usize;
     let minimized = flags & sdl3::video::flags::MINIMIZED != 0;
     let changed = minimized != (window.miniaturized != 0);
     window.miniaturized = minimized as usize;
@@ -2549,6 +2581,33 @@ mod tests {
         }
         assert_eq!(Presentation::Toplevel.popup_flags(), None);
 
+        objc::arc::release(window);
+    }
+
+    /// The full-screen bit is the window's state: reported while full screen,
+    /// and not kept as a style when a program writes back the mask it read.
+    #[test]
+    fn style_mask_reports_full_screen_without_keeping_it() {
+        crate::bootstrap();
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        let get = objc::sel::get("styleMask");
+        let set = objc::sel::get("setStyleMask:");
+        let titled = style::TITLED | style::RESIZABLE;
+        // SAFETY: `-styleMask` is `NSUInteger (id, SEL)` and `-setStyleMask:`
+        // its setter, on a window this test made.
+        unsafe {
+            set_style_mask(window, set, titled);
+            assert_eq!(style_mask(window, get), titled);
+
+            window_of(window).fullscreen = 1;
+            let reported = style_mask(window, get);
+            assert_eq!(reported, titled | style::FULL_SCREEN);
+            set_style_mask(window, set, reported);
+
+            window_of(window).fullscreen = 0;
+            assert_eq!(style_mask(window, get), titled);
+        }
         objc::arc::release(window);
     }
 
