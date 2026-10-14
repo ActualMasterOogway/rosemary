@@ -1963,6 +1963,23 @@ unsafe extern "C" fn unsigned_short_value(receiver: Id, _sel: Sel) -> u16 {
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as u16)
 }
 
+/// `-objCType`: the encoding of the canonical type the number was made with,
+/// `c` for a boolean, which is a `kCFNumberCharType` here.
+unsafe extern "C" fn obj_c_type(receiver: Id, _sel: Sel) -> *const std::ffi::c_char {
+    use corefoundation::collections::number_type as t;
+    // SAFETY: a number.
+    let encoding: &'static std::ffi::CStr =
+        match unsafe { corefoundation::collections::number_value(receiver as CFTypeRef) } {
+            Some((_, t::SINT8 | t::CHAR)) => c"c",
+            Some((_, t::SINT16 | t::SHORT)) => c"s",
+            Some((_, t::SINT32 | t::INT)) => c"i",
+            Some((_, t::FLOAT32 | t::FLOAT)) => c"f",
+            Some((_, t::FLOAT64 | t::DOUBLE | t::CGFLOAT)) => c"d",
+            _ => c"q",
+        };
+    encoding.as_ptr()
+}
+
 unsafe extern "C" fn char_value(receiver: Id, _sel: Sel) -> i8 {
     // SAFETY: a number.
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as i8)
@@ -2409,6 +2426,7 @@ pub(crate) fn install() {
         "shortValue" => short_value, c"s16@0:8";
         "unsignedShortValue" => unsigned_short_value, c"S16@0:8";
         "charValue" => char_value, c"c16@0:8";
+        "objCType" => obj_c_type, c"r*16@0:8";
         "unsignedCharValue" => unsigned_char_value, c"C16@0:8";
         "doubleValue" => double_value, c"d16@0:8";
         "floatValue" => float_value, c"f16@0:8";
