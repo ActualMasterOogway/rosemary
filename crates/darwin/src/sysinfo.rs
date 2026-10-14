@@ -415,13 +415,15 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
     const PARAM_ERROR: i16 = -50;
     /// `gestaltUndefSelectorErr`.
     const UNDEFINED_SELECTOR: i16 = -5551;
+    /// `gestaltIntel`.
+    const GESTALT_INTEL: i32 = 10;
 
     if response.is_null() {
         return PARAM_ERROR;
     }
     let (major, minor, patch) = crate::sysctl::macos_version();
-    let bcd = |n: i32| ((n / 10) << 4) | (n % 10);
     let value = match &selector.to_be_bytes() {
+        // Plain integers, not BCD: 10.4.17 answers 10, 4 and 17.
         b"sys1" => major,
         b"sys2" => minor,
         b"sys3" => patch,
@@ -430,16 +432,16 @@ unsafe extern "C" fn gestalt(selector: u32, response: *mut i32) -> i16 {
         // read 11.0 as older than 10.9, and a runtime that reported the true
         // number would reintroduce the bug the cap exists for.
         b"sysv" => 0x1039,
+        // `gestaltSysArchitecture`. Only Intel has a constant; Python 2's
+        // `platform.mac_ver` fails outright when this selector does.
+        b"sysa" => match crate::sysctl::guest_arch() {
+            crate::sysctl::GuestArch::X86_64 => GESTALT_INTEL,
+            crate::sysctl::GuestArch::Arm64 => return UNDEFINED_SELECTOR,
+        },
         _ => return UNDEFINED_SELECTOR,
     };
     // SAFETY: the caller states `response` is writable.
-    unsafe {
-        *response = if selector.to_be_bytes() == *b"sysv" {
-            value
-        } else {
-            bcd(value)
-        }
-    };
+    unsafe { *response = value };
     0
 }
 
@@ -573,6 +575,39 @@ mod tests {
         };
         let end = bytes.iter().position(|b| *b == 0).unwrap_or(SYS_NAMELEN);
         String::from_utf8_lossy(&bytes[..end]).into_owned()
+    }
+
+    /// The component selectors are plain integers - Python 2's `platform`
+    /// formats them with `%i` - while `sysv` stays the capped BCD word.
+    #[test]
+    fn gestalt_version_components_are_decimal() {
+        let ask = |selector: &[u8; 4]| {
+            let mut out = 0;
+            // SAFETY: `out` is a writable `SInt32`.
+            assert_eq!(
+                unsafe { gestalt(u32::from_be_bytes(*selector), &mut out) },
+                0
+            );
+            out
+        };
+        let (major, minor, patch) = crate::sysctl::macos_version();
+        assert_eq!(
+            (ask(b"sys1"), ask(b"sys2"), ask(b"sys3")),
+            (major, minor, patch)
+        );
+        assert_eq!(ask(b"sysv"), 0x1039);
+    }
+
+    #[test]
+    fn gestalt_names_an_intel_guest() {
+        let _arch = lock_guest_arch(GuestArch::X86_64);
+        let mut out = 0;
+        // SAFETY: `out` is a writable `SInt32`.
+        assert_eq!(
+            unsafe { gestalt(u32::from_be_bytes(*b"sysa"), &mut out) },
+            0
+        );
+        assert_eq!(out, 10);
     }
 
     fn called() -> Utsname {
