@@ -1325,6 +1325,105 @@ unsafe extern "C" fn path_components(receiver: Id, _sel: Sel) -> Id {
     unsafe { api::CFAutorelease(array) as Id }
 }
 
+/// Join `components` as `+pathWithComponents:` does: a leading `/` component
+/// makes the path absolute, a trailing one leaves a trailing slash, and a
+/// separator is never doubled where a component already ends in one.
+fn join_path_components(components: &[Vec<u8>]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    for (index, component) in components.iter().enumerate() {
+        if component.is_empty() {
+            continue;
+        }
+        if component == b"/" {
+            if out.last() != Some(&b'/') && (index == 0 || index + 1 == components.len()) {
+                out.push(b'/');
+            }
+            continue;
+        }
+        if !out.is_empty() && out.last() != Some(&b'/') {
+            out.push(b'/');
+        }
+        out.extend_from_slice(component);
+    }
+    out
+}
+
+/// `+pathWithComponents:`, the inverse of `-pathComponents`.
+unsafe extern "C" fn path_with_components(_class: Id, _sel: Sel, components: Id) -> Id {
+    // SAFETY: an `NSArray` of `NSString`s, or nil.
+    let parts: Vec<Vec<u8>> = match unsafe { corefoundation::collections::array(components.cast()) }
+    {
+        // SAFETY: each element is an `NSString`.
+        Some(array) => array
+            .values
+            .iter()
+            .map(|part| unsafe { bytes(*part as Id) })
+            .collect(),
+        None => Vec::new(),
+    };
+    let s = corefoundation::string::from_bytes(&join_path_components(&parts), false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
+/// `-stringsByAppendingPaths:`: the receiver with each path appended in turn.
+unsafe extern "C" fn strings_by_appending_paths(receiver: Id, _sel: Sel, paths: Id) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let base = unsafe { bytes(receiver) };
+    // SAFETY: an `NSArray` of `NSString`s, or nil.
+    let tails: Vec<Vec<u8>> = match unsafe { corefoundation::collections::array(paths.cast()) } {
+        // SAFETY: each element is an `NSString`.
+        Some(array) => array
+            .values
+            .iter()
+            .map(|part| unsafe { bytes(*part as Id) })
+            .collect(),
+        None => Vec::new(),
+    };
+    let pieces: Vec<corefoundation::base::CFTypeRef> = tails
+        .iter()
+        .map(|tail| {
+            let mut whole = base.clone();
+            if !whole.is_empty() && whole.last() != Some(&b'/') {
+                whole.push(b'/');
+            }
+            whole.extend_from_slice(tail);
+            corefoundation::string::from_bytes(&whole, false)
+        })
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &pieces,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for piece in pieces {
+        // SAFETY: a string this function made, which the array retained.
+        unsafe { api::CFRelease(piece) };
+    }
+    // SAFETY: a fresh array.
+    unsafe { api::CFAutorelease(array) as Id }
+}
+
+/// `-stringByAbbreviatingWithTildeInPath`: the home directory, as a whole
+/// component, becomes `~`. `/Users/ab` is not under `/Users/a`.
+unsafe extern "C" fn abbreviate_tilde(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: an `NSString`, or nil.
+    let whole = unsafe { bytes(receiver) };
+    let home = crate::home_directory().into_bytes();
+    let home = home.strip_suffix(b"/").unwrap_or(&home);
+    let abbreviated = match whole.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest[0] == b'/') => {
+            let mut out = vec![b'~'];
+            out.extend_from_slice(rest);
+            out
+        }
+        _ => whole,
+    };
+    let s = corefoundation::string::from_bytes(&abbreviated, false);
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(s) as Id }
+}
+
 /// `-componentsSeparatedByCharactersInSet:`: split at every member, so two
 /// members in a row give an empty piece between them, as on macOS.
 unsafe extern "C" fn components_separated_by_characters(receiver: Id, _sel: Sel, set: Id) -> Id {
@@ -1535,6 +1634,8 @@ pub(crate) fn install() {
         "stringByDeletingPathExtension" => delete_path_extension, c"@16@0:8";
         "stringByAppendingPathExtension:" => append_path_extension, c"@24@0:8@16";
         "isAbsolutePath" => is_absolute_path, c"B16@0:8";
+        "stringsByAppendingPaths:" => strings_by_appending_paths, c"@24@0:8@16";
+        "stringByAbbreviatingWithTildeInPath" => abbreviate_tilde, c"@16@0:8";
         "stringByExpandingTildeInPath" => expand_tilde, c"@16@0:8";
         "stringByStandardizingPath" => standardize_path, c"@16@0:8";
         "stringByResolvingSymlinksInPath" => standardize_path, c"@16@0:8";
@@ -1585,6 +1686,7 @@ pub(crate) fn install() {
         "localizedStringWithFormat:" => string_with_format, c"@24@0:8@16";
         "stringWithString:" => string_with_string, c"@24@0:8@16";
         "stringWithCharacters:length:" => string_with_characters, c"@32@0:8^S16Q24";
+        "pathWithComponents:" => path_with_components, c"@24@0:8@16";
     });
     methods!(class, {
         "initWithString:" => string_with_string, c"@24@0:8@16";
@@ -1599,6 +1701,26 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_path_components_as_apple_does() {
+        let join = |parts: &[&str]| {
+            let parts: Vec<Vec<u8>> = parts.iter().map(|p| p.as_bytes().to_vec()).collect();
+            String::from_utf8(join_path_components(&parts)).unwrap()
+        };
+        assert_eq!(join(&["/", "tmp", "a"]), "/tmp/a");
+        assert_eq!(join(&["tmp", "a", "/"]), "tmp/a/");
+        assert_eq!(join(&["/"]), "/");
+        assert_eq!(join(&[]), "");
+        assert_eq!(join(&["a", "", "b"]), "a/b");
+        for path in ["/tmp/scratch", "tmp/scratch/", "/"] {
+            let parts: Vec<Vec<u8>> = path_components_of(path)
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect();
+            assert_eq!(join_path_components(&parts), path.as_bytes());
+        }
+    }
 
     #[test]
     fn path_components_keep_the_root_and_a_trailing_slash() {
