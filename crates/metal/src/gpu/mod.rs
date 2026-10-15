@@ -141,6 +141,9 @@ pub struct Gpu {
     /// robustness2 does not permit a null standalone sampler descriptor.
     /// This neutral sampler keeps an otherwise-null resource table valid.
     pub(crate) null_sampler: vk::Sampler,
+    /// The samplers shaders describe themselves, made once per description and
+    /// kept, like `null_sampler`, for the life of the device.
+    pub(crate) inline_samplers: Mutex<HashMap<metal_translate::ir::InlineSampler, vk::Sampler>>,
     /// `VK_KHR_swapchain`'s device functions, where the device has it. `None`
     /// is a device which cannot present at all, and presentation falls back
     /// to reading the frame back and blitting it through SDL's window
@@ -726,6 +729,7 @@ impl Gpu {
             max_vertex_attribute_divisor,
             divisor_non_zero_first_instance,
             null_sampler,
+            inline_samplers: Mutex::new(HashMap::new()),
             swapchain_api,
             swapchain_maintenance1,
             depth_stencil_resolve,

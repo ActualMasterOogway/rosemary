@@ -4,6 +4,7 @@ pub(crate) unsafe extern "C" fn close(fd: i32) -> i32 {
     let rc = unsafe { libc::close(fd) };
     if rc == 0 || crate::errno::get() == libc::EBADF {
         super::sockopt::forget(fd);
+        crate::attrlist::forget(fd);
     }
     rc
 }
@@ -22,6 +23,10 @@ unsafe extern "C" fn dup(fd: i32) -> i32 {
 pub(crate) unsafe extern "C" fn dup2(from: i32, to: i32) -> i32 {
     // SAFETY: two integer descriptors; the call touches no caller memory.
     let copied = unsafe { libc::dup2(from, to) };
+    if copied >= 0 && from != to {
+        // `to` now names another file, so a listing of the old one is stale.
+        crate::attrlist::forget(to);
+    }
     if copied >= 0 {
         super::sockopt::inherit_sigpipe_suppression(from, copied);
     }

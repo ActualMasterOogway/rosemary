@@ -99,6 +99,7 @@ impl Emitter {
                     Type::Texture(texture) => texture.sampled_image(),
                     _ => false,
                 },
+                inline_sampler: resource.inline_sampler,
             });
         }
         Ok(reflected)

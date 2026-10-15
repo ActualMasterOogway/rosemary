@@ -557,6 +557,7 @@ impl MetadataResource {
             access: self.access,
             ty: parameter.ty.clone(),
             name: self.name,
+            inline_sampler: None,
         })
     }
 }

@@ -647,6 +647,102 @@ fn source_msl_threadgroup_atomics_reach_workgroup_and_buffer_memory() {
     assert_eq!(body_instructions(&module, Op::AtomicSMax).len(), 1);
 }
 
+/// Unity's blit to the drawable, which describes its sampler in the source.
+const UNITY_BLIT: &str = "#include <metal_stdlib>\n\
+    using namespace metal;\n\
+    struct AppData { float4 in_pos [[attribute(0)]]; };\n\
+    struct VProgOutput { float4 out_pos [[position]]; float2 texcoord; };\n\
+    struct FShaderOutput { half4 frag_data [[color(0)]]; };\n\
+    vertex VProgOutput vprog(AppData input [[stage_in]])\n\
+    {\n\
+        VProgOutput out = { float4(input.in_pos.xy, 0, 1), input.in_pos.zw };\n\
+        return out;\n\
+    }\n\
+    constexpr sampler blit_tex_sampler(address::clamp_to_edge, filter::linear);\n\
+    fragment FShaderOutput fshader(VProgOutput input [[stage_in]], texture2d<half> tex [[texture(0)]])\n\
+    {\n\
+        FShaderOutput out = { tex.sample(blit_tex_sampler, input.texcoord) };\n\
+        return out;\n\
+    }\0";
+
+#[test]
+fn source_msl_a_file_scope_constexpr_sampler_becomes_an_inline_sampler() {
+    let target = TargetProfile {
+        shader_float16: true,
+        ..TargetProfile::vulkan_1_3()
+    };
+    let library = translate_msl(UNITY_BLIT, &target).unwrap();
+    let fragment = library
+        .entries
+        .iter()
+        .find(|entry| entry.name == "fshader")
+        .expect("the fragment function");
+    let sampler = fragment
+        .resources
+        .iter()
+        .find(|resource| resource.kind == ResourceKind::Sampler)
+        .expect("the inline sampler is a sampler binding");
+    assert_eq!(
+        sampler.metal_index,
+        metal_translate::ir::INLINE_SAMPLER_BASE
+    );
+    let inline = sampler.inline_sampler.expect("described by the shader");
+    assert_eq!(
+        (inline.min_filter, inline.mag_filter, inline.mip_filter),
+        (1, 1, 0)
+    );
+    assert_eq!(inline.address, [0; 3]);
+    assert!(inline.normalized_coordinates);
+    // The vertex function never sees it, and takes no binding for it.
+    let vertex = library.entries.iter().find(|e| e.name == "vprog").unwrap();
+    assert!(vertex.resources.iter().all(|r| r.inline_sampler.is_none()));
+}
+
+#[test]
+fn source_msl_a_local_constexpr_sampler_reads_every_argument() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct Varyings { float4 pos [[position]]; float2 uv; };\n\
+        fragment float4 shade(Varyings input [[stage_in]],\n\
+            texture2d<float> tex [[ texture(0) ]])\n\
+        {\n\
+            constexpr sampler s(s_address::repeat, t_address::mirrored_repeat,\n\
+                min_filter::linear, mip_filter::linear, max_anisotropy(8),\n\
+                lod_clamp(0.5, 4.0), border_color::opaque_white);\n\
+            return tex.sample(s, input.uv);\n\
+        }\0";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    let inline = library.entries[0]
+        .resources
+        .iter()
+        .find_map(|resource| resource.inline_sampler)
+        .expect("an inline sampler");
+    assert_eq!(inline.address, [2, 3, 0]);
+    assert_eq!(
+        (inline.min_filter, inline.mag_filter, inline.mip_filter),
+        (1, 0, 2)
+    );
+    assert_eq!(inline.max_anisotropy, 8);
+    assert_eq!(f32::from_bits(inline.lod_min_clamp), 0.5);
+    assert_eq!(f32::from_bits(inline.lod_max_clamp), 4.0);
+    assert_eq!(inline.border_color, 2);
+}
+
+#[test]
+fn source_msl_rejects_an_unknown_constexpr_sampler_argument() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        constexpr sampler s(address::clamp_to_edge, reduction::minimum);\n\
+        fragment float4 f(float4 pos [[position]], texture2d<float> t [[texture(0)]])\n\
+        { return t.sample(s, pos.xy); }\0";
+    let error = parse_msl(source).unwrap_err();
+    assert!(
+        error.diagnostics[0].message.contains("reduction::minimum"),
+        "{}",
+        error.diagnostics[0].message
+    );
+}
+
 #[test]
 fn source_msl_a_half_texture_samples_through_a_32_bit_image() {
     let source = "#include <metal_stdlib>\n\
@@ -777,6 +873,7 @@ fn emits_a_writable_3d_texture_descriptor_in_its_metal_namespace() {
                 access: Access::Write,
                 ty: texture,
                 name: Some("output".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1123,6 +1220,7 @@ fn a_module_constant_table_becomes_a_private_variable() {
                 access: Access::Write,
                 ty: buffer,
                 name: Some("output".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1247,6 +1345,7 @@ fn a_local_variable_is_declared_in_the_entry_block() {
                 access: Access::Write,
                 ty: buffer,
                 name: Some("output".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1316,6 +1415,7 @@ fn buffer_kernel(values: Vec<Type>, instructions: Vec<Instruction>) -> Module {
                 access: Access::ReadWrite,
                 ty: buffer,
                 name: Some("counters".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1360,6 +1460,7 @@ fn typed_buffer_kernel(element: Type, values: Vec<Type>, instructions: Vec<Instr
                 access: Access::ReadWrite,
                 ty: buffer,
                 name: Some("values".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1736,6 +1837,7 @@ fn a_constant_address_space_pointer_phi_keeps_its_buffer_storage_class() {
                 access: Access::Read,
                 ty: buffer,
                 name: Some("input".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -1912,6 +2014,7 @@ fn a_signed_texture_is_read_through_a_signed_image_type() {
                 access: Access::Read,
                 ty: texture,
                 name: Some("ids".to_string()),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -2128,6 +2231,7 @@ fn sample_with_offset(offset: Operand) -> (rspirv::dr::Module, Vec<rspirv::dr::O
                     access: Access::Sample,
                     ty: texture,
                     name: Some("source".to_string()),
+                    inline_sampler: None,
                 },
                 Resource {
                     argument: 1,
@@ -2137,6 +2241,7 @@ fn sample_with_offset(offset: Operand) -> (rspirv::dr::Module, Vec<rspirv::dr::O
                     access: Access::Read,
                     ty: Type::Sampler,
                     name: Some("linear".to_string()),
+                    inline_sampler: None,
                 },
             ],
             inputs: Vec::new(),

@@ -19,6 +19,8 @@ mod flag {
     pub const HAS_COPY_DISPOSE: i32 = 1 << 25;
     /// The block is in `__DATA` and copying it is a no-op.
     pub const IS_GLOBAL: i32 = 1 << 28;
+    /// The block returns a struct through a hidden first argument.
+    pub const USE_STRET: i32 = 1 << 29;
 }
 
 /// `Block_byref`'s flags word, which shares the low bits with the above.
@@ -216,6 +218,20 @@ pub fn copy(block: Id) -> Id {
     }
     crate::debug::validate(copied as Id, "_Block_copy helper");
     copied as Id
+}
+
+#[cfg(test)]
+pub(crate) const USE_STRET_FLAG: i32 = flag::USE_STRET;
+
+/// Whether `block` returns a struct through a hidden first argument, which on
+/// x86-64 moves every other argument along by one register.
+///
+/// # Safety
+///
+/// `block` must be a block literal.
+pub(crate) unsafe fn uses_stret(block: Id) -> bool {
+    // SAFETY: the header is the first three words of every block.
+    unsafe { (*(block as *const Block)).flags.load(Ordering::Relaxed) & flag::USE_STRET != 0 }
 }
 
 /// `void _Block_release(const void *block)`.

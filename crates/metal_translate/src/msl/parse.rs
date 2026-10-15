@@ -11,6 +11,8 @@ pub(super) fn parse(tokens: &[Token]) -> Result<Program> {
         tokens,
         at: 0,
         program: Program::default(),
+        file_samplers: Vec::new(),
+        local_samplers: Vec::new(),
     };
     parser.program()?;
     Ok(parser.program)
@@ -20,6 +22,11 @@ struct Parser<'a> {
     tokens: &'a [Token],
     at: usize,
     program: Program,
+    /// File-scope `constexpr sampler`s declared so far, by name, each an index
+    /// into [`Program::inline_samplers`].
+    file_samplers: Vec<(String, usize)>,
+    /// Those declared in the function being parsed.
+    local_samplers: Vec<(String, usize, usize)>,
 }
 
 type Result<T> = std::result::Result<T, TranslateError>;
@@ -174,13 +181,62 @@ impl Parser<'_> {
         let space = self.skip_qualifiers();
         let ty = self.ty()?;
         let name = self.ident()?;
+        if ty == Ty::Sampler && self.is_punct("(") {
+            if stage.is_some() {
+                return Err(syntax_error(line, "a stage function returning a sampler"));
+            }
+            let sampler = self.inline_sampler()?;
+            self.expect(";")?;
+            self.file_samplers.push((name, sampler));
+            return Ok(());
+        }
         if self.is_punct("(") {
-            let params = self.parameters()?;
+            let mut params = self.parameters()?;
             if self.eat(";") {
                 // A prototype; the definition follows.
                 return Ok(());
             }
+            self.local_samplers.clear();
             let body = self.block()?;
+            let locals = std::mem::take(&mut self.local_samplers);
+            match stage {
+                // The stage takes each sampler it can see as a resource the
+                // runtime binds, named as the source names the sampler.
+                Some(_) => {
+                    let visible = self.file_samplers.iter().map(|(n, i)| (n, *i, line));
+                    let locals = locals.iter().map(|(n, i, line)| (n, *i, *line));
+                    for (name, index, line) in visible.chain(locals) {
+                        params.push(Param {
+                            ty: Ty::Sampler,
+                            name: name.clone(),
+                            space: None,
+                            indirection: Indirection::Value,
+                            attributes: vec![Attribute {
+                                name: INLINE_SAMPLER.to_string(),
+                                args: vec![Expr {
+                                    kind: ExprKind::Int {
+                                        value: index as u64,
+                                        unsigned: true,
+                                    },
+                                    line,
+                                }],
+                                line,
+                            }],
+                            line,
+                        });
+                    }
+                }
+                // A helper would need the sampler passed in, which nothing
+                // here does yet.
+                None => {
+                    if let Some((_, _, line)) = locals.first() {
+                        return Err(syntax_error(
+                            *line,
+                            "a constexpr sampler outside a stage function",
+                        ));
+                    }
+                }
+            }
             self.program.functions.push(FunctionDef {
                 stage,
                 ret: ty,
@@ -633,6 +689,15 @@ impl Parser<'_> {
         if self.at_type() {
             let mark = self.at;
             let ty = self.ty()?;
+            if ty == Ty::Sampler
+                && matches!(self.peek(), Some(Kind::Ident(_)))
+                && matches!(self.peek_at(1), Some(Kind::Punct("(")))
+            {
+                let name = self.ident()?;
+                let sampler = self.inline_sampler()?;
+                self.local_samplers.push((name, sampler, line));
+                return Ok(());
+            }
             if matches!(self.peek(), Some(Kind::Ident(_))) {
                 if space == Some(Space::Threadgroup) {
                     loop {
@@ -683,6 +748,79 @@ impl Parser<'_> {
         self.at = start;
         out.push(Stmt::Expr(self.expression()?));
         Ok(())
+    }
+
+    /// The `(...)` of a `constexpr sampler`, recorded in the program; answers
+    /// its index there.
+    fn inline_sampler(&mut self) -> Result<usize> {
+        let mut sampler = crate::ir::InlineSampler::default();
+        self.expect("(")?;
+        while !self.eat(")") {
+            let line = self.line();
+            let key = self.ident()?;
+            if self.eat("::") {
+                let value = self.ident()?;
+                inline_sampler_value(&mut sampler, &key, &value).ok_or_else(|| {
+                    syntax_error(
+                        line,
+                        format!("unsupported constexpr sampler argument {key}::{value}"),
+                    )
+                })?;
+            } else {
+                let mut numbers = Vec::new();
+                self.expect("(")?;
+                while !self.eat(")") {
+                    numbers.push(match self.peek() {
+                        Some(Kind::Int { value, .. }) => *value as f64,
+                        Some(Kind::Float { value, .. }) => *value,
+                        _ => return Err(self.error("a constexpr sampler argument must be a literal")),
+                    });
+                    self.at += 1;
+                    if !self.eat(",") {
+                        self.expect(")")?;
+                        break;
+                    }
+                }
+                match (key.as_str(), numbers.as_slice()) {
+                    ("max_anisotropy", [n]) if (1.0..=16.0).contains(n) => {
+                        sampler.max_anisotropy = *n as u8;
+                    }
+                    ("lod_clamp", [min, max]) => {
+                        sampler.lod_min_clamp = (*min as f32).to_bits();
+                        sampler.lod_max_clamp = (*max as f32).to_bits();
+                    }
+                    _ => {
+                        return Err(syntax_error(
+                            line,
+                            format!("unsupported constexpr sampler argument {key}(...)"),
+                        ));
+                    }
+                }
+            }
+            if !self.eat(",") {
+                self.expect(")")?;
+                break;
+            }
+        }
+        let line = self.line();
+        if !sampler.normalized_coordinates {
+            // What Vulkan allows unnormalized coordinates with, which is also
+            // what Metal documents for `coord::pixel`.
+            let clamped = sampler.address.iter().all(|&a| a == 0 || a == 5);
+            if !clamped
+                || sampler.mip_filter != 0
+                || sampler.min_filter != sampler.mag_filter
+                || sampler.max_anisotropy != 1
+                || sampler.compare_function != 0
+            {
+                return Err(syntax_error(
+                    line,
+                    "a coord::pixel sampler with a mode Vulkan's unnormalized coordinates lack",
+                ));
+            }
+        }
+        self.program.inline_samplers.push(sampler);
+        Ok(self.program.inline_samplers.len() - 1)
     }
 
     fn arguments(&mut self) -> Result<Vec<Expr>> {
@@ -1066,4 +1204,78 @@ fn texture_dimension(word: &str) -> Option<(TextureDimension, bool, bool, bool)>
         _ => return None,
     };
     Some((dimension, array, multisampled, depth))
+}
+
+/// Apply one `key::value` argument of a `constexpr sampler`, in the values of
+/// the `MTLSampler*` enumerations. `None` for anything not understood.
+fn inline_sampler_value(
+    sampler: &mut crate::ir::InlineSampler,
+    key: &str,
+    value: &str,
+) -> Option<()> {
+    let filter = || match value {
+        "nearest" => Some(0),
+        "linear" => Some(1),
+        _ => None,
+    };
+    let address = || match value {
+        "clamp_to_edge" => Some(0),
+        "repeat" => Some(2),
+        "mirrored_repeat" => Some(3),
+        "clamp_to_zero" => Some(4),
+        "clamp_to_border" => Some(5),
+        _ => None,
+    };
+    match key {
+        "coord" => {
+            sampler.normalized_coordinates = match value {
+                "normalized" => true,
+                "pixel" => false,
+                _ => return None,
+            }
+        }
+        "filter" => {
+            sampler.min_filter = filter()?;
+            sampler.mag_filter = sampler.min_filter;
+        }
+        "min_filter" => sampler.min_filter = filter()?,
+        "mag_filter" => sampler.mag_filter = filter()?,
+        "mip_filter" => {
+            sampler.mip_filter = match value {
+                "none" => 0,
+                "nearest" => 1,
+                "linear" => 2,
+                _ => return None,
+            }
+        }
+        "address" => sampler.address = [address()?; 3],
+        "s_address" => sampler.address[0] = address()?,
+        "t_address" => sampler.address[1] = address()?,
+        "r_address" => sampler.address[2] = address()?,
+        "border_color" => {
+            sampler.border_color = match value {
+                "transparent_black" => 0,
+                "opaque_black" => 1,
+                "opaque_white" => 2,
+                _ => return None,
+            }
+        }
+        // `never` is left out: the runtime reads 0 as no comparison, and a
+        // comparison that always fails is not that.
+        "compare_func" => {
+            sampler.compare_function = match value {
+                "none" => 0,
+                "less" => 1,
+                "equal" => 2,
+                "less_equal" => 3,
+                "greater" => 4,
+                "not_equal" => 5,
+                "greater_equal" => 6,
+                "always" => 7,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+    Some(())
 }
