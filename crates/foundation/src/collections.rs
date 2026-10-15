@@ -1369,6 +1369,239 @@ unsafe extern "C" fn dictionary_remove_all_objects(receiver: Id, _sel: Sel) {
     }
 }
 
+/// A snapshot of `other`'s pairs, for the methods that read one dictionary
+/// while writing another.
+///
+/// Taken whole first because the two can be the same object, and a retain or
+/// release callback can run guest code that reads the dictionary again.
+/// `None` for nil, which Apple's methods treat as an empty argument.
+fn entries_of(other: Id, what: &str) -> Option<Vec<(CFTypeRef, CFTypeRef)>> {
+    if other.is_null() {
+        return None;
+    }
+    // SAFETY: a dictionary if it is one of ours.
+    match unsafe { collections::dictionary(other as CFTypeRef) } {
+        Some(d) => Some(d.entries.clone()),
+        None => objc::fail!("{what}: the argument is not a dictionary"),
+    }
+}
+
+/// `-addEntriesFromDictionary:`: every pair of the argument is set, replacing
+/// the value of a key already present and keeping the receiver's key object.
+unsafe extern "C" fn add_entries_from_dictionary(receiver: Id, _sel: Sel, other: Id) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "addEntriesFromDictionary:");
+    }
+    let Some(entries) = entries_of(other, "-[NSMutableDictionary addEntriesFromDictionary:]")
+    else {
+        return;
+    };
+    for (key, value) in entries {
+        d.set(key, value);
+    }
+}
+
+/// `-setDictionary:`: the receiver's pairs become the argument's.
+unsafe extern "C" fn set_dictionary(receiver: Id, _sel: Sel, other: Id) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "setDictionary:");
+    }
+    let entries = entries_of(other, "-[NSMutableDictionary setDictionary:]").unwrap_or_default();
+    // Retained before the old pairs go, since the argument may be the receiver
+    // or share its objects.
+    let (keys, values) = (d.keys, d.values);
+    let fresh: Vec<_> = entries
+        .into_iter()
+        .map(|(k, v)| (keys.retain(k), values.retain(v)))
+        .collect();
+    for (key, value) in std::mem::replace(&mut d.entries, fresh) {
+        keys.release(key);
+        values.release(value);
+    }
+}
+
+/// `-removeObjectsForKeys:`: keys not present are ignored.
+unsafe extern "C" fn remove_objects_for_keys(receiver: Id, _sel: Sel, keys: Id) {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !d.mutable {
+        immutable("NSDictionary", "removeObjectsForKeys:");
+    }
+    if keys.is_null() {
+        return;
+    }
+    // SAFETY: an array if it is one of ours.
+    let Some(array) = (unsafe { collections::array(keys as CFTypeRef) }) else {
+        objc::fail!("-[NSMutableDictionary removeObjectsForKeys:]: the argument is not an array");
+    };
+    let doomed = array.values.clone();
+    for key in doomed {
+        if let Some(at) = d.position(key) {
+            let (k, v) = d.entries.remove(at);
+            d.keys.release(k);
+            d.values.release(v);
+        }
+    }
+}
+
+/// `+dictionaryWithDictionary:`, mutable when sent to `NSMutableDictionary`.
+unsafe extern "C" fn dictionary_with_dictionary(class: Id, _sel: Sel, other: Id) -> Id {
+    let entries =
+        entries_of(other, "+[NSDictionary dictionaryWithDictionary:]").unwrap_or_default();
+    let dictionary = collections::new_dictionary(
+        &entries,
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        mutable_receiver(class, c"NSMutableDictionary"),
+    );
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(dictionary) as Id }
+}
+
+/// `-initWithDictionary:`.
+unsafe extern "C" fn dictionary_init_with_dictionary(receiver: Id, sel: Sel, other: Id) -> Id {
+    let class = class_of_placeholder(receiver);
+    objc::arc::release(receiver);
+    // SAFETY: forwarded; the answer is autoreleased and the caller owns an init.
+    objc::arc::retain(unsafe { dictionary_with_dictionary(class, sel, other) })
+}
+
+/// `+dictionaryWithObjects:forKeys:`, the two-array spelling.
+unsafe extern "C" fn dictionary_with_objects_for_keys(
+    class: Id,
+    _sel: Sel,
+    objects: Id,
+    keys: Id,
+) -> Id {
+    if objects.is_null() || keys.is_null() {
+        objc::fail!("+[NSDictionary dictionaryWithObjects:forKeys:]: a nil array");
+    }
+    // SAFETY: arrays if they are ours.
+    let (Some(o), Some(k)) = (unsafe {
+        (
+            collections::array(objects as CFTypeRef),
+            collections::array(keys as CFTypeRef),
+        )
+    }) else {
+        objc::fail!("+[NSDictionary dictionaryWithObjects:forKeys:]: the arguments are not arrays");
+    };
+    if o.values.len() != k.values.len() {
+        objc::fail!(
+            "+[NSDictionary dictionaryWithObjects:forKeys:]: count of objects ({}) differs from count of keys ({})",
+            o.values.len(),
+            k.values.len()
+        );
+    }
+    let pairs: Vec<_> = k
+        .values
+        .iter()
+        .copied()
+        .zip(o.values.iter().copied())
+        .collect();
+    let dictionary = collections::new_dictionary(
+        &pairs,
+        Policy::from_key_callbacks(),
+        Policy::from_type_callbacks(),
+        mutable_receiver(class, c"NSMutableDictionary"),
+    );
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(dictionary) as Id }
+}
+
+/// `-allKeysForObject:`: every key whose value is equal to the argument.
+unsafe extern "C" fn all_keys_for_object(receiver: Id, _sel: Sel, object: Id) -> Id {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let keys: Vec<CFTypeRef> = d
+        .entries
+        .iter()
+        .filter(|(_, v)| d.values.equal(*v, object as CFTypeRef))
+        .map(|(k, _)| *k)
+        .collect();
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &keys,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+/// `-objectsForKeys:notFoundMarker:`: one value per key, the marker for a key
+/// that is missing.
+unsafe extern "C" fn objects_for_keys_not_found_marker(
+    receiver: Id,
+    _sel: Sel,
+    keys: Id,
+    marker: Id,
+) -> Id {
+    // SAFETY: a dictionary.
+    let Some(d) = (unsafe { collections::dictionary(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: an array if it is one of ours.
+    let Some(keys) = (unsafe { collections::array(keys as CFTypeRef) }) else {
+        objc::fail!("-[NSDictionary objectsForKeys:notFoundMarker:]: the keys are not an array");
+    };
+    let values: Vec<CFTypeRef> = keys
+        .values
+        .iter()
+        .map(|key| match d.position(*key) {
+            Some(at) => d.entries[at].1,
+            None => marker as CFTypeRef,
+        })
+        .collect();
+    // SAFETY: a fresh object holding live ones.
+    unsafe {
+        api::CFAutorelease(collections::new_array(
+            &values,
+            Policy::from_type_callbacks(),
+            false,
+        )) as Id
+    }
+}
+
+/// `-isEqualToDictionary:`: the same keys, each with an equal value.
+unsafe extern "C" fn is_equal_to_dictionary(receiver: Id, _sel: Sel, other: Id) -> bool {
+    // SAFETY: dictionaries if they are ours.
+    let (Some(a), Some(b)) = (
+        unsafe { collections::dictionary(receiver as CFTypeRef) },
+        unsafe { collections::dictionary(other as CFTypeRef) },
+    ) else {
+        return false;
+    };
+    a.entries.len() == b.entries.len()
+        && a.entries.iter().all(|(k, v)| {
+            b.position(*k)
+                .is_some_and(|at| a.values.equal(*v, b.entries[at].1))
+        })
+}
+
+/// `-keyEnumerator`: a snapshot, so the dictionary may change under it.
+unsafe extern "C" fn key_enumerator(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    unsafe { new_array_enumerator(all_keys(receiver, sel), false) }
+}
+
+/// `-objectEnumerator` of a dictionary: the values.
+unsafe extern "C" fn dictionary_object_enumerator(receiver: Id, sel: Sel) -> Id {
+    // SAFETY: a dictionary.
+    unsafe { new_array_enumerator(all_values(receiver, sel), false) }
+}
+
 /// `-allKeys`, which is an `NSArray` of the keys in insertion order.
 unsafe extern "C" fn all_keys(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a dictionary.
@@ -1990,6 +2223,64 @@ unsafe extern "C" fn unsigned_char_value(receiver: Id, _sel: Sel) -> u8 {
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64() as u8)
 }
 
+/// Whether two numbers hold the same value: exactly, for two integers, so
+/// that values past 2^53 are not folded onto their neighbours.
+fn numbers_equal(a: collections::Number, b: collections::Number) -> bool {
+    use collections::Number::Integer;
+    match (a, b) {
+        (Integer(x), Integer(y)) => x == y,
+        _ => a.as_f64() == b.as_f64(),
+    }
+}
+
+/// `-isEqualToNumber:` and `-isEqual:`; a non-number is never equal.
+unsafe extern "C" fn number_is_equal(receiver: Id, _sel: Sel, other: Id) -> bool {
+    if receiver == other {
+        return true;
+    }
+    // SAFETY: numbers if they are ours or the compiler's constants.
+    let (Some(a), Some(b)) = (
+        unsafe { collections::number(receiver as CFTypeRef) },
+        unsafe { collections::number(other as CFTypeRef) },
+    ) else {
+        return false;
+    };
+    numbers_equal(a, b)
+}
+
+/// `-hash`, equal for numbers `-isEqual:` calls equal: an integral float
+/// hashes as the integer.
+unsafe extern "C" fn number_hash(receiver: Id, _sel: Sel) -> usize {
+    // SAFETY: a number.
+    let Some(n) = (unsafe { collections::number(receiver as CFTypeRef) }) else {
+        return receiver as usize;
+    };
+    match n {
+        collections::Number::Float(f) if f.fract() != 0.0 || !f.is_finite() => f.to_bits() as usize,
+        n => n.as_i64() as usize,
+    }
+}
+
+/// `-compare:`: `NSOrderedAscending` is -1, `NSOrderedDescending` is 1.
+unsafe extern "C" fn number_compare(receiver: Id, _sel: Sel, other: Id) -> isize {
+    // SAFETY: numbers if they are ours or the compiler's constants.
+    let (Some(a), Some(b)) = (
+        unsafe { collections::number(receiver as CFTypeRef) },
+        unsafe { collections::number(other as CFTypeRef) },
+    ) else {
+        objc::fail!("-[NSNumber compare:]: the argument is not a number");
+    };
+    use collections::Number::Integer;
+    let order = match (a, b) {
+        (Integer(x), Integer(y)) => x.cmp(&y),
+        _ => a
+            .as_f64()
+            .partial_cmp(&b.as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal),
+    };
+    order as isize
+}
+
 unsafe extern "C" fn integer_value(receiver: Id, _sel: Sel) -> i64 {
     // SAFETY: a number.
     unsafe { collections::number(receiver as CFTypeRef) }.map_or(0, |n| n.as_i64())
@@ -2314,18 +2605,26 @@ pub(crate) fn install() {
         "mutableCopy" => dictionary_mutable_copy, c"@16@0:8";
         "mutableCopyWithZone:" => dictionary_mutable_copy_with_zone, c"@24@0:8^v16";
         "valueForKey:" => dictionary_value_for_key, c"@24@0:8@16";
+        "allKeysForObject:" => all_keys_for_object, c"@24@0:8@16";
+        "objectsForKeys:notFoundMarker:" => objects_for_keys_not_found_marker, c"@32@0:8@16@24";
+        "isEqualToDictionary:" => is_equal_to_dictionary, c"B24@0:8@16";
+        "keyEnumerator" => key_enumerator, c"@16@0:8";
+        "objectEnumerator" => dictionary_object_enumerator, c"@16@0:8";
         "countByEnumeratingWithState:objects:count:" => dictionary_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
     });
     class_methods!(dictionary_class, {
         "dictionary" => empty_dictionary, c"@16@0:8";
         "dictionaryWithObjects:forKeys:count:" => dictionary_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
         "dictionaryWithObject:forKey:" => dictionary_with_object_for_key, c"@32@0:8@16@24";
+        "dictionaryWithDictionary:" => dictionary_with_dictionary, c"@24@0:8@16";
+        "dictionaryWithObjects:forKeys:" => dictionary_with_objects_for_keys, c"@32@0:8@16@24";
         "dictionaryWithContentsOfFile:" => dictionary_with_contents_of_file, c"@24@0:8@16";
         "dictionaryWithContentsOfURL:" => dictionary_with_contents_of_url, c"@24@0:8@16";
         "dictionaryWithContentsOfURL:error:" => dictionary_with_contents_of_url_error, c"@32@0:8@16^@24";
     });
     methods!(dictionary_class, {
         "initWithObjects:forKeys:count:" => dictionary_init_with_objects_for_keys_count, c"@40@0:8^@16^@24Q32";
+        "initWithDictionary:" => dictionary_init_with_dictionary, c"@24@0:8@16";
         "initWithContentsOfFile:" => dictionary_init_with_contents_of_file, c"@24@0:8@16";
         "initWithContentsOfURL:" => dictionary_init_with_contents_of_url, c"@24@0:8@16";
         "initWithContentsOfURL:error:" => dictionary_init_with_contents_of_url_error, c"@32@0:8@16^@24";
@@ -2338,6 +2637,9 @@ pub(crate) fn install() {
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
         "removeAllObjects" => dictionary_remove_all_objects, c"v16@0:8";
         "setValue:forKey:" => dictionary_set_value_for_key, c"v32@0:8@16@24";
+        "addEntriesFromDictionary:" => add_entries_from_dictionary, c"v24@0:8@16";
+        "setDictionary:" => set_dictionary, c"v24@0:8@16";
+        "removeObjectsForKeys:" => remove_objects_for_keys, c"v24@0:8@16";
     });
     class_methods!(mutable_dictionary, {
         "new" => new_dictionary, c"@16@0:8";
@@ -2416,6 +2718,10 @@ pub(crate) fn install() {
     let number = objc::class::lookup(c"NSNumber").expect("CoreFoundation registered NSNumber");
     methods!(number, {
         "intValue" => int_value, c"i16@0:8";
+        "isEqualToNumber:" => number_is_equal, c"B24@0:8@16";
+        "isEqual:" => number_is_equal, c"B24@0:8@16";
+        "hash" => number_hash, c"Q16@0:8";
+        "compare:" => number_compare, c"q24@0:8@16";
         "integerValue" => integer_value, c"q16@0:8";
         "longValue" => integer_value, c"q16@0:8";
         "longLongValue" => integer_value, c"q16@0:8";
