@@ -3165,6 +3165,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strncpy", P, P, P, U64),
     sig!("strndup", P, P, U64),
     sig!("strnlen", U64, P, U64),
+    sig!("strnstr", P, P, P, U64),
     sig!("strpbrk", P, P, P),
     // `strptime` writes into a guest `struct tm`, which is twelve `int`s and
     // two pointers on both architectures.

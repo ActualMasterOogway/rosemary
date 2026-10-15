@@ -109,8 +109,35 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut c_char, buflen: usize
     unsafe { libc::strerror_r(crate::errno::to_host(errnum), buf, buflen) }
 }
 
+/// `char *strnstr(const char *big, const char *little, size_t len)`
+///
+/// BSD's, which glibc lacks: find `little` in at most the first `len` bytes of
+/// `big`, stopping early at its terminator.
+///
+/// # Safety
+///
+/// Both are NUL-terminated strings, or `big` is readable for `len` bytes.
+pub unsafe extern "C" fn strnstr(
+    big: *const c_char,
+    little: *const c_char,
+    len: usize,
+) -> *mut c_char {
+    let needle = unsafe { std::ffi::CStr::from_ptr(little) }.to_bytes();
+    if needle.is_empty() {
+        return big.cast_mut();
+    }
+    // SAFETY: stops at the terminator or `len`, whichever comes first.
+    let haystack_len = unsafe { libc::strnlen(big, len) };
+    let haystack = unsafe { std::slice::from_raw_parts(big.cast::<u8>(), haystack_len) };
+    match haystack.windows(needle.len()).position(|w| w == needle) {
+        Some(at) => unsafe { big.add(at).cast_mut() },
+        None => std::ptr::null_mut(),
+    }
+}
+
 exports::exports! {
     functions {
+        "strnstr" => strnstr,
         "timingsafe_bcmp" => timingsafe_bcmp,
         "memset_pattern4" => memset_pattern4,
         "memset_pattern8" => memset_pattern8,
@@ -123,6 +150,20 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strnstr_searches_only_the_first_len_bytes() {
+        let big = c"Foo Bar Baz";
+        let found = |little: &std::ffi::CStr, len| {
+            let at = unsafe { strnstr(big.as_ptr(), little.as_ptr(), len) };
+            (!at.is_null()).then(|| at as usize - big.as_ptr() as usize)
+        };
+        assert_eq!(found(c"Bar", 11), Some(4));
+        assert_eq!(found(c"Bar", 7), Some(4));
+        assert_eq!(found(c"Bar", 6), None);
+        assert_eq!(found(c"Baz", 100), Some(8));
+        assert_eq!(found(c"", 0), Some(0));
+    }
 
     #[test]
     fn timingsafe_bcmp_reports_equality_and_difference() {
