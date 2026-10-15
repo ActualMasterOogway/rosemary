@@ -8,6 +8,7 @@ pub mod block;
 pub mod census;
 pub mod class;
 pub mod debug;
+pub mod imp_block;
 pub mod msg;
 mod nsobject;
 pub mod object;
@@ -70,6 +71,9 @@ exports::exports! {
         "method_getTypeEncoding" => api::method_getTypeEncoding,
         "method_getName" => api::method_getName,
         "method_setImplementation" => api::method_setImplementation,
+        "imp_implementationWithBlock" => imp_block::imp_implementationWithBlock,
+        "imp_getBlock" => imp_block::imp_getBlock,
+        "imp_removeBlock" => imp_block::imp_removeBlock,
         "ivar_getOffset" => api::ivar_getOffset,
         "ivar_getName" => api::ivar_getName,
         "class_copyPropertyList" => api::class_copyPropertyList,
