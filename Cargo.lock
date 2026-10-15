@@ -609,6 +609,7 @@ dependencies = [
 name = "coreservices"
 version = "0.2.3"
 dependencies = [
+ "corefoundation",
  "darwin",
  "exports",
  "foundation",
