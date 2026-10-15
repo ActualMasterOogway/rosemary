@@ -1803,6 +1803,51 @@ unsafe extern "C" fn scroller_width_for_control_size(_class: Id, _sel: Sel, size
     }
 }
 
+/// `+[NSScroller scrollerWidthForControlSize:scrollerStyle:]`
+unsafe extern "C" fn scroller_width_for_control_size_scroller_style(
+    _class: Id,
+    _sel: Sel,
+    size: usize,
+    _style: isize,
+) -> f64 {
+    match size {
+        0 => SCROLLER_WIDTH,
+        _ => SMALL_SCROLLER_WIDTH,
+    }
+}
+
+/// `+[NSScroller preferredScrollerStyle]`
+///
+/// `NSScrollerStyleLegacy` (0) or `NSScrollerStyleOverlay` (1).
+/// On Linux with a standard mouse/window manager, legacy scrollers (0) are standard.
+unsafe extern "C" fn scroller_preferred_scroller_style(_receiver: Id, _sel: Sel) -> isize {
+    0 // NSScrollerStyleLegacy
+}
+
+/// `-[NSScroller scrollerStyle]`
+unsafe extern "C" fn scroller_style(_receiver: Id, _sel: Sel) -> isize {
+    0 // NSScrollerStyleLegacy
+}
+
+/// `-[NSScroller setScrollerStyle:]`
+unsafe extern "C" fn scroller_set_style(_receiver: Id, _sel: Sel, _style: isize) {}
+
+/// `-[NSScroller knobStyle]`
+unsafe extern "C" fn scroller_knob_style(_receiver: Id, _sel: Sel) -> isize {
+    0 // NSScrollerKnobStyleDefault
+}
+
+/// `-[NSScroller setKnobStyle:]`
+unsafe extern "C" fn scroller_set_knob_style(_receiver: Id, _sel: Sel, _style: isize) {}
+
+/// `-[NSScroller usableParts]`
+unsafe extern "C" fn scroller_usable_parts(_receiver: Id, _sel: Sel) -> usize {
+    2 // NSAllScrollerParts
+}
+
+/// `-[NSScroller checkSpaceForParts]`
+unsafe extern "C" fn scroller_check_space_for_parts(_receiver: Id, _sel: Sel) {}
+
 /// `-[NSScroller initWithFrame:]`, which is not the inherited one: a scroller
 /// constrains the frame it is given.
 ///
@@ -2090,6 +2135,9 @@ pub(crate) fn install() {
     class_methods!(class, {
         "scrollerWidth" => scroller_width, c"d16@0:8";
         "scrollerWidthForControlSize:" => scroller_width_for_control_size, c"d24@0:8Q16";
+        "scrollerWidthForControlSize:scrollerStyle:" => scroller_width_for_control_size_scroller_style,
+            c"d32@0:8Q16q24";
+        "preferredScrollerStyle" => scroller_preferred_scroller_style, c"q16@0:8";
     });
     methods!(class, {
         "initWithFrame:" => scroller_init_with_frame,
@@ -2102,6 +2150,13 @@ pub(crate) fn install() {
         "knobProportion" => scroller_knob_proportion, c"d16@0:8";
         "rectForPart:" => scroller_rect_for_part,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}24@0:8Q16";
+        "preferredScrollerStyle" => scroller_preferred_scroller_style, c"q16@0:8";
+        "scrollerStyle" => scroller_style, c"q16@0:8";
+        "setScrollerStyle:" => scroller_set_style, c"v24@0:8q16";
+        "knobStyle" => scroller_knob_style, c"q16@0:8";
+        "setKnobStyle:" => scroller_set_knob_style, c"v24@0:8q16";
+        "usableParts" => scroller_usable_parts, c"Q16@0:8";
+        "checkSpaceForParts" => scroller_check_space_for_parts, c"v16@0:8";
     });
 }
 
@@ -2343,6 +2398,42 @@ mod tests {
                 scroller_knob_proportion(object, objc::sel::get("knobProportion")),
                 0.3
             );
+        }
+        forget(object);
+        objc::arc::release(object);
+    }
+
+    #[test]
+    fn scroller_preferred_style_and_width_for_control_size_and_style() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSScroller").expect("NSScroller");
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: live class and scroller instance.
+        unsafe {
+            let class_ptr = std::ptr::null_mut();
+            let style = scroller_preferred_scroller_style(class_ptr, objc::sel::get("preferredScrollerStyle"));
+            assert_eq!(style, 0);
+
+            let inst_style = scroller_preferred_scroller_style(object, objc::sel::get("preferredScrollerStyle"));
+            assert_eq!(inst_style, 0);
+
+            let reg_width = scroller_width_for_control_size_scroller_style(
+                class_ptr,
+                objc::sel::get("scrollerWidthForControlSize:scrollerStyle:"),
+                0,
+                0,
+            );
+            assert_eq!(reg_width, SCROLLER_WIDTH);
+
+            let small_width = scroller_width_for_control_size_scroller_style(
+                class_ptr,
+                objc::sel::get("scrollerWidthForControlSize:scrollerStyle:"),
+                1,
+                0,
+            );
+            assert_eq!(small_width, SMALL_SCROLLER_WIDTH);
+
+            assert_eq!(scroller_usable_parts(object, objc::sel::get("usableParts")), 2);
         }
         forget(object);
         objc::arc::release(object);
