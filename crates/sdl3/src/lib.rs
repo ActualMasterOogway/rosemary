@@ -3252,12 +3252,24 @@ pub mod video {
 pub mod audio {
     use super::*;
 
-    /// `SDL_AudioFormat`. Only the two an `AudioUnit` stream format can name.
+    /// `SDL_AudioFormat`.
     pub mod format {
+        /// `SDL_AUDIO_U8`.
+        pub const U8: u32 = 0x0008;
+        /// `SDL_AUDIO_S8`.
+        pub const S8: u32 = 0x8008;
         /// `SDL_AUDIO_S16LE`.
         pub const S16: u32 = 0x8010;
+        /// `SDL_AUDIO_S16BE`.
+        pub const S16BE: u32 = 0x9010;
+        /// `SDL_AUDIO_S32LE`.
+        pub const S32: u32 = 0x8020;
+        /// `SDL_AUDIO_S32BE`.
+        pub const S32BE: u32 = 0x9020;
         /// `SDL_AUDIO_F32LE`.
         pub const F32: u32 = 0x8120;
+        /// `SDL_AUDIO_F32BE`.
+        pub const F32BE: u32 = 0x9120;
     }
 
     /// `SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK`.
