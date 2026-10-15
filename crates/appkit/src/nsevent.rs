@@ -249,6 +249,27 @@ pub fn kind_of(event: Id) -> u64 {
     unsafe { event_of(event) }.map_or(0, |e| e.kind)
 }
 
+/// The fields an event was built from, or `None` for anything else.
+pub fn fields_of(event: Id) -> Option<Fields> {
+    // SAFETY: null or a live object this runtime allocated.
+    unsafe { event_of(event) }.map(|e| Fields {
+        kind: e.kind,
+        modifiers: e.modifiers,
+        location: e.location,
+        delta: e.delta,
+        window: e.window,
+        characters: e.characters,
+        key_code: e.key_code,
+        button: e.button,
+        clicks: e.clicks,
+        repeat: e.repeat,
+        subtype: e.subtype,
+        data1: e.data1,
+        data2: e.data2,
+        tracking_area: e.tracking_area,
+    })
+}
+
 /// The tracking area an enter, exit or cursor-update event is about, or null.
 pub fn tracking_area_of(event: Id) -> Id {
     // SAFETY: null or a live object this runtime allocated.

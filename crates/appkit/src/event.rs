@@ -392,14 +392,6 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 window,
                 ..Fields::default()
             };
-            // A key equivalent is the menu's, offered before the key reaches
-            // the first responder, as `-[NSApplication sendEvent:]` does.
-            if down
-                && !crate::keymap::is_modifier(scancode)
-                && key_equivalent(object_for(id), fields(object_for(id)), &text)
-            {
-                return;
-            }
             // A modifier is `-flagsChanged:`, not a key down: AppKit has no
             // key-up for one, and a guest that treated it as a key would see
             // shift as a character.
@@ -715,6 +707,19 @@ pub(crate) fn dispatch(window: Id, event: Id) {
         }
         return;
     }
+    // Through the application's `-sendEvent:`, as AppKit delivers every event:
+    // a principal class may override it to see input first, and SDL's Cocoa
+    // backend reads the keyboard there and nowhere else.
+    let app = crate::application::shared();
+    if !app.is_null() {
+        // SAFETY: the shared application is live for the process.
+        unsafe { crate::application::send_event_through(app, event) };
+        return;
+    }
+    send_to_window(window, event);
+}
+
+fn send_to_window(window: Id, event: Id) {
     let sel = objc::sel::get("sendEvent:");
     // SAFETY: `-sendEvent:` is `void (id, SEL, NSEvent *)`, and every window
     // has one - this crate installs the default on `NSWindow`.
@@ -723,6 +728,37 @@ pub(crate) fn dispatch(window: Id, event: Id) {
             std::mem::transmute(objc::msg::entry());
         f(window, sel, event);
     }
+}
+
+/// `-[NSApplication sendEvent:]`: offer a key equivalent, then hand the event
+/// to the window it is in.
+///
+/// An event with no window - an application-defined one a guest posted to wake
+/// itself - has nowhere further to go.
+pub(crate) fn route_from_application(event: Id) {
+    let Some(fields) = nsevent::fields_of(event) else {
+        return;
+    };
+    let window = fields.window;
+    if window.is_null() {
+        return;
+    }
+    // A key equivalent is the menu's, offered before the key reaches the first
+    // responder, and after an override of this method has seen the key.
+    if fields.kind == kind::KEY_DOWN {
+        let text = match fields.characters.is_null() {
+            true => String::new(),
+            // SAFETY: `-characters` is a string this crate made.
+            false => {
+                String::from_utf8_lossy(&unsafe { foundation::string::bytes(fields.characters) })
+                    .into_owned()
+            }
+        };
+        if key_equivalent(window, fields, &text) {
+            return;
+        }
+    }
+    send_to_window(window, event);
 }
 
 /// `-[NSWindow sendEvent:]`: route one event to the responder it belongs to.

@@ -709,15 +709,28 @@ unsafe fn dispatch_posted_events(receiver: Id) {
     let batch = std::mem::take(&mut *posted_events());
     for event in batch {
         let event = event as Id;
-        CURRENT_EVENT.store(event as usize, Ordering::Release);
-        // SAFETY: the caller's obligation; `-sendEvent:` is `void (id, SEL, id)`.
-        unsafe {
-            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
-            f(receiver, objc::sel::get("sendEvent:"), event);
-        }
-        CURRENT_EVENT.store(0, Ordering::Release);
+        // SAFETY: the caller's obligation.
+        unsafe { send_event_through(receiver, event) };
         objc::arc::release(event);
     }
+}
+
+/// Send `event` through the application's dynamic `-sendEvent:`, so a
+/// principal subclass's override sees it, with `-currentEvent` answering it.
+///
+/// # Safety
+///
+/// `receiver` is a live application.
+pub(crate) unsafe fn send_event_through(receiver: Id, event: Id) {
+    // Restored rather than cleared: an override can send another event from
+    // inside this one, and the outer one is current again once it returns.
+    let outer = CURRENT_EVENT.swap(event as usize, Ordering::AcqRel);
+    // SAFETY: the caller's obligation; `-sendEvent:` is `void (id, SEL, id)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("sendEvent:"), event);
+    }
+    CURRENT_EVENT.store(outer, Ordering::Release);
 }
 
 /// `-currentEvent`, the event inside `-sendEvent:`, and nil outside it.
@@ -727,12 +740,12 @@ unsafe extern "C" fn current_event(_receiver: Id, _sel: Sel) -> Id {
 
 /// `-sendEvent:`, the entry point a subclass overrides and then calls up into.
 ///
-/// Nothing to route: there is no responder chain here, and the events a window
-/// acts on reach it from `crate::event` rather than through this. Accepting the
-/// call is still necessary - `QNSApplication` overrides `-sendEvent:` and calls
-/// `super`, so a missing one is an abort on the first event rather than an event
-/// that goes nowhere.
-unsafe extern "C" fn send_event(_receiver: Id, _sel: Sel, _event: Id) {}
+/// Every event passes through here on its way to its window: SDL's
+/// `SDL3Application` handles the keyboard in its override and nowhere else,
+/// and `QNSApplication` filters before calling `super`.
+unsafe extern "C" fn send_event(_receiver: Id, _sel: Sel, event: Id) {
+    crate::event::route_from_application(event);
+}
 
 /// `-hide:`, `-unhide:`, `-unhideWithoutActivation` and `-arrangeInFront:`.
 ///
