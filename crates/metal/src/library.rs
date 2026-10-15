@@ -39,11 +39,13 @@ pub(super) unsafe extern "C" fn new_library_with_data(
     receiver: Id,
     _sel: Sel,
     data: u64,
-    _error: *mut Id,
+    error: *mut Id,
 ) -> Id {
     let Some((bytes, length)) = darwin::dispatch::data::bytes(data) else {
-        report_library_error("newLibraryWithData:error: received non-dispatch data");
-        return std::ptr::null_mut();
+        return fail_library(
+            error,
+            "newLibraryWithData:error: received non-dispatch data",
+        );
     };
     // SAFETY: dispatch reported this range as the data's bytes.
     let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
@@ -51,15 +53,11 @@ pub(super) unsafe extern "C" fn new_library_with_data(
     let target = unsafe { object::body::<Device>(receiver) }.target;
     // SAFETY: the profile belongs to the process-wide adapter list.
     let Some(target) = (unsafe { target.as_ref() }) else {
-        report_library_error("Metal device has no Vulkan target profile");
-        return std::ptr::null_mut();
+        return fail_library(error, "Metal device has no Vulkan target profile");
     };
     let (translated, air, entry_modules) = match translate_metallib(bytes, target) {
         Ok(result) => result,
-        Err(error) => {
-            report_library_error(error);
-            return std::ptr::null_mut();
-        }
+        Err(failure) => return fail_library(error, &failure.to_string()),
     };
     retain_library(receiver, translated, Some(air), entry_modules, Some(target))
 }
