@@ -74,13 +74,6 @@ pub fn retain(object: Id) -> Id {
     object
 }
 
-pub fn make_immortal(object: Id) {
-    if object.is_null() {
-        return;
-    }
-    counts(object).insert(object as usize, usize::MAX / 2);
-}
-
 /// Drop a reference, deallocating at zero.
 ///
 /// Deallocation is `-dealloc` if the class implements it, and a plain `free`

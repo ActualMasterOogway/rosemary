@@ -329,7 +329,10 @@ impl Block {
         let at = self.free.partition_point(|(start, _)| *start < offset);
         debug_assert!(
             (at == 0 || self.free[at - 1].0 + self.free[at - 1].1 <= offset)
-                && self.free.get(at).is_none_or(|(next, _)| offset + size <= *next),
+                && self
+                    .free
+                    .get(at)
+                    .is_none_or(|(next, _)| offset + size <= *next),
             "a Metal heap range was freed twice"
         );
         self.free.insert(at, (offset, size));

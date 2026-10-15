@@ -1,6 +1,6 @@
 #![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 
-mod address;
+pub mod address;
 pub mod allocator;
 pub mod api;
 pub mod arc;
@@ -232,22 +232,6 @@ mod tests {
         let inside = (as_ptr(nsobject) as usize + 8) as *const class::Class;
         assert!(!class::is_known(inside));
         assert!(!class::is_known(std::ptr::null()));
-    }
-
-    #[test]
-    fn an_immortal_object_survives_being_over_released() {
-        bootstrap();
-        let nsobject = class::lookup(c"NSObject").expect("NSObject");
-        let object = object::create_instance(nsobject, 0);
-        arc::make_immortal(object);
-        for _ in 0..1000 {
-            arc::release(object);
-        }
-        assert!(arc::retain_count(object) > 1000);
-        assert!(std::ptr::eq(
-            unsafe { object::class_of(object) }.unwrap(),
-            nsobject
-        ));
     }
 
     #[test]

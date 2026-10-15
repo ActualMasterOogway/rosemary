@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+//! Hashing for maps keyed by an address, shared with the crates above this one.
+
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
+/// Addresses are already unique; they only need their aligned low bits spread.
 #[derive(Default, Clone, Copy)]
 pub struct AddressHasher(u64);
 
@@ -32,6 +35,7 @@ pub fn mix(n: u64) -> u64 {
 }
 
 pub type AddressMap<V> = HashMap<usize, V, BuildHasherDefault<AddressHasher>>;
+pub type AddressSet = HashSet<usize, BuildHasherDefault<AddressHasher>>;
 
 #[cfg(test)]
 mod tests {
