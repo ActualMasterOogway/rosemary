@@ -338,6 +338,11 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_AVMediaTypeVideo", "vide"),
     ("_AVMediaTypeAudio", "soun"),
     ("_AVMediaTypeText", "text"),
+    // Pixel buffer attribute keys, which SDL's camera puts in an AVFoundation
+    // settings dictionary.
+    ("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"),
+    ("_kCVPixelBufferWidthKey", "Width"),
+    ("_kCVPixelBufferHeightKey", "Height"),
 ];
 
 fn media_constants() -> Vec<(String, u64)> {

@@ -553,6 +553,9 @@ pub(crate) fn install() {
         // every drawable is presented in the colour space it was drawn in.
         "setPresentsWithTransaction:" => ignore_flag, c"v20@0:8c16";
         "setColorspace:" => ignore_object, c"v24@0:8^{CGColorSpace=}16";
+        // FIXME (ACCURACY): presentation is SDR only. SDL sets this on every
+        // swapchain, and to YES only for an HDR composition it asked for.
+        "setWantsExtendedDynamicRangeContent:" => ignore_flag, c"v20@0:8c16";
     });
 }
 

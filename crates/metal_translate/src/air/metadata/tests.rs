@@ -280,3 +280,45 @@ fn a_vertex_attribute_spelled_as_a_signed_integer_is_signed() {
         Item::Text("int")
     ]));
 }
+
+/// A varying declared without `[[user(...)]]` is named `generated(...)` by
+/// Metal; it is numbered after the stage's explicit locations and linked by
+/// that name.
+#[test]
+fn numbers_generated_varyings_after_explicit_locations() {
+    let outputs: [&[Item<'_>]; 3] = [
+        &[
+            Item::Text("air.vertex_output"),
+            Item::Text("generated(3texDv2_f)"),
+        ],
+        &[Item::Text("air.vertex_output"), Item::Text("user(locn1)")],
+        &[
+            Item::Text("air.vertex_output"),
+            Item::Text("generated(5colorDv4_f)"),
+        ],
+    ];
+    let mut next = first_generated_location(outputs);
+    let locations: Vec<_> = outputs
+        .iter()
+        .map(|items| match output_binding(items, &mut next).unwrap() {
+            StageBinding::Location { location, .. } => location,
+            other => panic!("not a varying: {other:?}"),
+        })
+        .collect();
+    assert_eq!(locations, [2, 1, 3]);
+    assert_eq!(
+        varying_link_name(outputs[0]).as_deref(),
+        Some("user(generated(3texDv2_f))")
+    );
+    assert_eq!(varying_link_name(outputs[1]), None);
+
+    let input = [Item::Text("generated(3texDv2_f)")];
+    let mut next = first_generated_location([&input[..]]);
+    assert_eq!(
+        input_binding("air.fragment_input", &input, &mut next).unwrap(),
+        StageBinding::Location {
+            location: 0,
+            interpolation: None,
+        }
+    );
+}

@@ -200,14 +200,58 @@ pub(super) fn builtin(tag: &str) -> Option<Builtin> {
     })
 }
 
-pub(super) fn input_binding(tag: &str, rest: &[Item<'_>]) -> Result<StageBinding, TranslateError> {
+/// `generated(...)`: the name Metal gives a varying declared without a
+/// `[[user(...)]]` attribute, from its field name and type. Vertex outputs and
+/// fragment inputs with the same one are linked.
+pub(super) fn generated_varying<'a>(items: &[Item<'a>]) -> Option<&'a str> {
+    items.iter().find_map(|item| match item {
+        Item::Text(text) if text.starts_with("generated(") => Some(*text),
+        _ => None,
+    })
+}
+
+/// The name a varying is linked by across stages: its `user(...)` spelling,
+/// which is what the pipeline matches vertex outputs to fragment inputs with.
+pub(super) fn varying_link_name(items: &[Item<'_>]) -> Option<String> {
+    generated_varying(items).map(|generated| format!("user({generated})"))
+}
+
+/// The location of a varying: its own `user(locnN)`, or for a generated one
+/// the next of those numbered after every explicit location of the stage.
+fn varying_location(items: &[Item<'_>], next_generated: &mut u32) -> Option<u32> {
+    if let Some(location) = user_location(items) {
+        return Some(location);
+    }
+    generated_varying(items)?;
+    let location = *next_generated;
+    *next_generated += 1;
+    Some(location)
+}
+
+/// The first location free for generated varyings, past every explicit one.
+pub(super) fn first_generated_location<'a, 'b: 'a>(
+    descriptors: impl IntoIterator<Item = &'a [Item<'b>]>,
+) -> u32 {
+    descriptors
+        .into_iter()
+        .filter_map(user_location)
+        .map(|location| location + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+pub(super) fn input_binding(
+    tag: &str,
+    rest: &[Item<'_>],
+    next_generated: &mut u32,
+) -> Result<StageBinding, TranslateError> {
     match tag {
         "air.vertex_input" => Ok(StageBinding::Location {
             location: location_index(rest)?,
             interpolation: None,
         }),
         "air.fragment_input" => Ok(StageBinding::Location {
-            location: user_location(rest)
+            location: varying_location(rest, next_generated)
                 .ok_or_else(|| semantic("AIR fragment input has no user location"))?,
             interpolation: interpolation(rest),
         }),
@@ -217,7 +261,10 @@ pub(super) fn input_binding(tag: &str, rest: &[Item<'_>]) -> Result<StageBinding
     }
 }
 
-pub(super) fn output_binding(items: &[Item<'_>]) -> Result<StageBinding, TranslateError> {
+pub(super) fn output_binding(
+    items: &[Item<'_>],
+    next_generated: &mut u32,
+) -> Result<StageBinding, TranslateError> {
     let Some(Item::Text(tag)) = items.first() else {
         return Err(semantic("AIR stage output has no kind"));
     };
@@ -230,7 +277,7 @@ pub(super) fn output_binding(items: &[Item<'_>]) -> Result<StageBinding, Transla
             _ => Err(semantic("AIR render target has no index")),
         },
         "air.vertex_output" => Ok(StageBinding::Location {
-            location: user_location(&items[1..])
+            location: varying_location(&items[1..], next_generated)
                 .ok_or_else(|| semantic("AIR vertex output has no user location"))?,
             interpolation: None,
         }),

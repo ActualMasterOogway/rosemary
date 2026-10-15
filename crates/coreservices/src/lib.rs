@@ -8,10 +8,12 @@ pub mod events;
 pub mod files;
 pub mod process;
 pub mod resources;
+pub mod uti;
 
 exports::group! {
     events,
     files,
     process,
     resources,
+    uti,
 }

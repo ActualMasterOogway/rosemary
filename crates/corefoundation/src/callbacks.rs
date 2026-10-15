@@ -60,6 +60,22 @@ pub static TYPE_KEY_CALLBACKS: KeyCallBacks = KeyCallBacks {
     hash: Some(hash),
 };
 
+unsafe extern "C" fn copy_string(_allocator: *const c_void, value: CFTypeRef) -> CFTypeRef {
+    // SAFETY: `kCFCopyStringDictionaryKeyCallBacks` says the keys are strings.
+    unsafe { crate::api::CFStringCreateCopy(std::ptr::null(), value) }
+}
+
+/// `kCFCopyStringDictionaryKeyCallBacks`: keys are copied rather than retained,
+/// so a mutable string used as a key cannot change under the dictionary.
+pub static COPY_STRING_KEY_CALLBACKS: KeyCallBacks = KeyCallBacks {
+    version: 0,
+    retain: Some(copy_string),
+    release: Some(release),
+    copy_description: None,
+    equal: Some(equal),
+    hash: Some(hash),
+};
+
 /// How a collection treats the things it holds, resolved from the two
 /// structures a caller may or may not have passed.
 #[derive(Clone, Copy)]

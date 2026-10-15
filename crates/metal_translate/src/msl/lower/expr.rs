@@ -30,6 +30,9 @@ impl Lowerer<'_, '_> {
             {
                 self.barrier(name, args, expr.line)
             }
+            // `(void) x;` marks a value as deliberately unused; MojoShader
+            // writes one after every constant it declares.
+            ExprKind::Cast(Ty::Void, operand) => self.effect(operand),
             _ => self.rvalue(expr).map(|_| ()),
         }
     }

@@ -252,6 +252,13 @@ unsafe extern "C" fn string_with_cstring_encoding(
     }
 }
 
+/// `+defaultCStringEncoding`. Apple's answers Mac Roman; this one answers the
+/// encoding [`cf_encoding`] actually reads an unnamed one as, so a program that
+/// asks and then passes the answer back gets the decoding it was told about.
+unsafe extern "C" fn default_cstring_encoding(_class: Id, _sel: Sel) -> usize {
+    ns_encoding::UTF8
+}
+
 /// `+stringWithContentsOfURL:encoding:error:`, for the local file URLs this
 /// runtime can read.
 unsafe extern "C" fn string_with_contents_of_url(
@@ -405,7 +412,9 @@ fn is_mutable_receiver(receiver: Id) -> bool {
         return false;
     };
     class.name_str() == "NSMutableString"
-        || class.chain().any(|ancestor| ancestor.name_str() == "NSMutableString")
+        || class
+            .chain()
+            .any(|ancestor| ancestor.name_str() == "NSMutableString")
 }
 
 unsafe extern "C" fn string_with_format(class: Id, _sel: Sel, format: Id) -> Id {
@@ -1710,6 +1719,7 @@ pub(crate) fn install() {
     class_methods!(class, {
         "stringWithUTF8String:" => string_with_utf8, c"@24@0:8*16";
         "stringWithCString:encoding:" => string_with_cstring_encoding, c"@32@0:8*16Q24";
+        "defaultCStringEncoding" => default_cstring_encoding, c"Q16@0:8";
         "stringWithContentsOfFile:encoding:error:" => string_with_contents_of_file,
             c"@40@0:8@16Q24^@32";
         "stringWithContentsOfURL:encoding:error:" => string_with_contents_of_url,

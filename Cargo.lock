@@ -216,7 +216,9 @@ name = "audiotoolbox"
 version = "0.2.3"
 dependencies = [
  "coreaudio",
+ "darwin",
  "exports",
+ "sdl3",
 ]
 
 [[package]]
@@ -607,6 +609,7 @@ dependencies = [
 name = "coreservices"
 version = "0.2.3"
 dependencies = [
+ "corefoundation",
  "darwin",
  "exports",
  "foundation",

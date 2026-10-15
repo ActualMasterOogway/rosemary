@@ -105,6 +105,29 @@ fn sample_2d(flag: bool, value: f32) -> InstructionKind {
     .expect("the sample is lowered")
 }
 
+/// SDK 14's AIR appends an integer to every sample; a plain one spells it 0.
+#[test]
+fn a_modern_sample_accepts_its_trailing_zero_and_refuses_others() {
+    let sample = |trailing: u32| {
+        air_intrinsic(
+            "air.sample_texture_cube.v4f32",
+            &[
+                Operand::Value(ValueId(0)),
+                Operand::Value(ValueId(1)),
+                Operand::Value(ValueId(2)),
+                Operand::Bool(true),
+                Operand::f32(3.0),
+                Operand::u32(trailing),
+            ],
+        )
+    };
+    let Ok(InstructionKind::TextureSample { lod, bias, .. }) = sample(0) else {
+        panic!("a texture sample");
+    };
+    assert_eq!((lod, bias), (Some(Operand::f32(3.0)), None));
+    assert!(sample(1).is_err());
+}
+
 #[test]
 fn a_false_level_flag_is_a_bias() {
     let InstructionKind::TextureSample { lod, bias, .. } = sample_2d(false, 7.0) else {

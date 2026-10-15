@@ -475,6 +475,20 @@ pub(super) fn air_texture_intrinsic(
                     compare: None,
                 }));
             }
+            // AIR from Metal 3.1 tools appends one more integer to a sample.
+            // Every plain `sample` spells it 0; any other value selects
+            // something this lowering does not know, so it is refused.
+            let rest = match rest {
+                [head @ .., Operand::Integer { value, .. }] => match value {
+                    0 => head,
+                    value => {
+                        return Err(semantic(format!(
+                            "AIR intrinsic air.{operation} has trailing operand {value}, which needs Metal IR lowering"
+                        )));
+                    }
+                },
+                rest => rest,
+            };
             // A gradient sample carries no level-of-detail flag: the
             // derivatives are the level.
             let (lod, bias) = match (gradient.is_some(), rest) {
