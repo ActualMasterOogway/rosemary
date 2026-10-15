@@ -208,6 +208,8 @@ pub struct ResourceBinding {
     /// a storage image. See [`ir::TextureType::sampled_image`]; a buffer or a
     /// sampler leaves it false.
     pub sampled: bool,
+    /// Set for a sampler the shader describes itself, which the runtime binds.
+    pub inline_sampler: Option<crate::ir::InlineSampler>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -188,6 +188,7 @@ fn parse_kernel(
                 access,
                 ty,
                 name: Some(name.to_string()),
+                inline_sampler: None,
             });
         } else {
             return Err(syntax_at(

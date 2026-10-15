@@ -49,6 +49,7 @@ fn library() -> TranslatedLibrary {
                         count: 1,
                         access: Access::ReadWrite,
                         sampled: false,
+                        inline_sampler: None,
                     },
                     ResourceBinding {
                         stage: Stage::Fragment,
@@ -59,6 +60,7 @@ fn library() -> TranslatedLibrary {
                         count: 1,
                         access: Access::Sample,
                         sampled: true,
+                        inline_sampler: None,
                     },
                 ],
                 required: RequiredFeatures {

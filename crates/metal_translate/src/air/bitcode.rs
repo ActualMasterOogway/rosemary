@@ -182,6 +182,7 @@ pub(super) fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, T
                 access,
                 ty: pointer,
                 name: Some(parameter_name),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -298,6 +299,7 @@ fn parse_packed_air(
                 access: resource.access,
                 ty: parameter.ty.clone(),
                 name: resource.name.clone(),
+                inline_sampler: None,
             })
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;

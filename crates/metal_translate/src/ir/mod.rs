@@ -228,7 +228,54 @@ pub struct Resource {
     pub access: Access,
     pub ty: Type,
     pub name: Option<String>,
+    /// A sampler the shader describes itself (`constexpr sampler`), which the
+    /// runtime makes and binds rather than taking one from the encoder.
+    pub inline_sampler: Option<InlineSampler>,
 }
+
+/// A `constexpr sampler`, in the values of the `MTLSampler*` enumerations the
+/// runtime's sampler descriptors already speak.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InlineSampler {
+    /// `MTLSamplerMinMagFilter`.
+    pub min_filter: u8,
+    pub mag_filter: u8,
+    /// `MTLSamplerMipFilter`: 0 is not mipmapped.
+    pub mip_filter: u8,
+    /// `MTLSamplerAddressMode` for s, t and r.
+    pub address: [u8; 3],
+    pub max_anisotropy: u8,
+    /// `MTLCompareFunction`, with 0 meaning no comparison as the runtime reads it.
+    pub compare_function: u8,
+    /// `MTLSamplerBorderColor`.
+    pub border_color: u8,
+    pub normalized_coordinates: bool,
+    /// `f32` bits, so the description can be hashed and compared.
+    pub lod_min_clamp: u32,
+    pub lod_max_clamp: u32,
+}
+
+impl Default for InlineSampler {
+    /// What Metal assumes for every argument a `constexpr sampler` leaves out.
+    fn default() -> Self {
+        Self {
+            min_filter: 0,
+            mag_filter: 0,
+            mip_filter: 0,
+            address: [0; 3],
+            max_anisotropy: 1,
+            compare_function: 0,
+            border_color: 0,
+            normalized_coordinates: true,
+            lod_min_clamp: 0f32.to_bits(),
+            lod_max_clamp: f32::MAX.to_bits(),
+        }
+    }
+}
+
+/// The Metal sampler index an entry point's `n`th inline sampler takes: past
+/// every index an encoder can bind, so the two never share a binding.
+pub const INLINE_SAMPLER_BASE: u32 = 128;
 
 /// How a fragment stage input is interpolated across a primitive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

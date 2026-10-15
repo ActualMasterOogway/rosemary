@@ -241,4 +241,10 @@ pub(super) struct Program {
     pub structs: Vec<StructDef>,
     pub globals: Vec<Global>,
     pub functions: Vec<FunctionDef>,
+    /// Every `constexpr sampler`, which an entry point that can see one takes
+    /// as a hidden `[[__inline_sampler(n)]]` parameter indexing this list.
+    pub inline_samplers: Vec<crate::ir::InlineSampler>,
 }
+
+/// The attribute that marks a hidden parameter as an inline sampler.
+pub(super) const INLINE_SAMPLER: &str = "__inline_sampler";

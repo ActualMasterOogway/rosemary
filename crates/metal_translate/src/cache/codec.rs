@@ -20,6 +20,7 @@ pub(super) fn encode(key: &[u8; 32], library: &TranslatedLibrary) -> Vec<u8> {
             write_u32(&mut payload, resource.count);
             payload.push(access_tag(resource.access));
             payload.push(u8::from(resource.sampled));
+            write_inline_sampler(&mut payload, resource.inline_sampler.as_ref());
         }
         write_strings(&mut payload, &entry.required.capabilities);
         write_strings(&mut payload, &entry.required.extensions);
@@ -92,6 +93,7 @@ pub(super) fn decode(bytes: &[u8], key: &[u8; 32]) -> Option<TranslatedLibrary> 
                 count: reader.u32()?,
                 access: access_of_tag(reader.u8()?)?,
                 sampled: reader.boolean()?,
+                inline_sampler: read_inline_sampler(&mut reader)?,
             });
         }
         let required = RequiredFeatures {
@@ -282,4 +284,45 @@ fn access_of_tag(tag: u8) -> Option<Access> {
         3 => Access::ReadWrite,
         _ => return None,
     })
+}
+
+fn write_inline_sampler(payload: &mut Vec<u8>, sampler: Option<&crate::ir::InlineSampler>) {
+    let Some(sampler) = sampler else {
+        payload.push(0);
+        return;
+    };
+    payload.push(1);
+    payload.extend_from_slice(&[
+        sampler.min_filter,
+        sampler.mag_filter,
+        sampler.mip_filter,
+        sampler.address[0],
+        sampler.address[1],
+        sampler.address[2],
+        sampler.max_anisotropy,
+        sampler.compare_function,
+        sampler.border_color,
+        u8::from(sampler.normalized_coordinates),
+    ]);
+    write_u32(payload, sampler.lod_min_clamp);
+    write_u32(payload, sampler.lod_max_clamp);
+}
+
+fn read_inline_sampler(reader: &mut Reader<'_>) -> Option<Option<crate::ir::InlineSampler>> {
+    if !reader.boolean()? {
+        return Some(None);
+    }
+    let b = reader.take(10)?;
+    Some(Some(crate::ir::InlineSampler {
+        min_filter: b[0],
+        mag_filter: b[1],
+        mip_filter: b[2],
+        address: [b[3], b[4], b[5]],
+        max_anisotropy: b[6],
+        compare_function: b[7],
+        border_color: b[8],
+        normalized_coordinates: b[9] != 0,
+        lod_min_clamp: reader.u32()?,
+        lod_max_clamp: reader.u32()?,
+    }))
 }

@@ -1115,6 +1115,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     },
                     ty,
                     name: Some(param.name.clone()),
+                    inline_sampler: None,
                 });
                 let place = Place {
                     root,
@@ -1130,6 +1131,36 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     _ => Binding::Pointer(place),
                 };
                 self.bind(&param.name, binding);
+            }
+            INLINE_SAMPLER => {
+                let ExprKind::Int { value, .. } = single(attribute)?.kind else {
+                    unreachable!("the parser writes the index as a literal");
+                };
+                let sampler = self.context.program.inline_samplers[value as usize];
+                let index = u32::try_from(value)
+                    .ok()
+                    .and_then(|value| value.checked_add(crate::ir::INLINE_SAMPLER_BASE))
+                    .filter(|&index| index < 256)
+                    .ok_or_else(|| syntax_error(line, "too many constexpr samplers"))?;
+                let ty = self.context.ir(&param.ty);
+                let (argument, op) = self.add_parameter(parameters, &param.name, ty.clone());
+                entry.resources.push(Resource {
+                    argument,
+                    kind: ResourceKind::Sampler,
+                    index,
+                    count: 1,
+                    access: Access::Read,
+                    ty,
+                    name: Some(param.name.clone()),
+                    inline_sampler: Some(sampler),
+                });
+                self.bind(
+                    &param.name,
+                    Binding::Value(Value {
+                        op,
+                        ty: param.ty.clone(),
+                    }),
+                );
             }
             "texture" | "sampler" => {
                 let index = self.context.const_index(single(attribute)?)?;
@@ -1154,6 +1185,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     access,
                     ty,
                     name: Some(param.name.clone()),
+                    inline_sampler: None,
                 });
                 self.bind(
                     &param.name,
