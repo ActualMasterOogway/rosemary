@@ -613,6 +613,7 @@ pub(crate) fn install() {
         "dictionaryForKey:" => dictionary_for_key, c"@24@0:8@16";
         "dataForKey:" => data_for_key, c"@24@0:8@16";
         "setObject:forKey:" => set_object_for_key, c"v32@0:8@16@24";
+        "setValue:forKey:" => set_object_for_key, c"v32@0:8@16@24";
         "removeObjectForKey:" => remove_object_for_key, c"v24@0:8@16";
         "boolForKey:" => bool_for_key, c"c24@0:8@16";
         "integerForKey:" => integer_for_key, c"q24@0:8@16";
