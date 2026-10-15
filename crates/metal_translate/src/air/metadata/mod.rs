@@ -378,8 +378,17 @@ impl Metadata {
                 .iter()
                 .any(|item| matches!(item, Item::Text("air.function_constant")))
         };
-        for (position, node) in outputs.into_iter().enumerate() {
-            let items = self.items(node, values, types)?;
+        let outputs = outputs
+            .into_iter()
+            .map(|node| self.items(node, values, types))
+            .collect::<Result<Vec<_>, _>>()?;
+        let inputs = inputs
+            .into_iter()
+            .map(|node| self.items(node, values, types))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut next_output = first_generated_location(outputs.iter().map(Vec::as_slice));
+        let mut next_input = first_generated_location(inputs.iter().map(Vec::as_slice));
+        for (position, items) in outputs.into_iter().enumerate() {
             if gated(&items) {
                 return Err(semantic(format!(
                     "AIR output {position} exists only under a function constant, which specialization does not yet gate"
@@ -387,12 +396,11 @@ impl Metadata {
             }
             interface.outputs.push(StageOutput {
                 field: Some(position as u32),
-                binding: output_binding(&items)?,
-                name: argument_name(&items),
+                binding: output_binding(&items, &mut next_output)?,
+                name: varying_link_name(&items).or_else(|| argument_name(&items)),
             });
         }
-        for node in inputs {
-            let items = self.items(node, values, types)?;
+        for items in inputs {
             let (&Item::Number(argument), rest) = items
                 .split_first()
                 .ok_or_else(|| semantic("AIR interface descriptor is empty"))?
@@ -428,8 +436,8 @@ impl Metadata {
                 }
                 None => interface.inputs.push(StageInput {
                     argument,
-                    binding: input_binding(tag, rest)?,
-                    name: argument_name(&items),
+                    binding: input_binding(tag, rest, &mut next_input)?,
+                    name: varying_link_name(&items).or_else(|| argument_name(&items)),
                     signed: *tag == "air.vertex_input" && signed_integer_argument(&items),
                 }),
             }
