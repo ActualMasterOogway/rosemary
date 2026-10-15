@@ -396,6 +396,11 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSColorPanelColorDidChangeNotification",
     "NSPreferredScrollerStyleDidChangeNotification",
     "NSTextInputContextKeyboardSelectionDidChangeNotification",
+    // Observed by SDL's window listener; there is no minimize animation, window
+    // drag or occlusion tracking here to post them.
+    "NSWindowWillMiniaturizeNotification",
+    "NSWindowWillMoveNotification",
+    "NSWindowDidChangeOcclusionStateNotification",
 ];
 
 /// The other AppKit string globals a program reads.
@@ -437,6 +442,23 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ),
     // Dragged files arrive as this type; the guest compares pasteboard types to it.
     ("_kUTTypeFileURL", "public.file-url"),
+    // SDL's clipboard offers text under this type and maps MIME types through
+    // the tag class. Both are CoreServices' but compared only as strings.
+    ("_kUTTypeUTF8PlainText", "public.utf8-plain-text"),
+    ("_kUTTagClassMIMEType", "public.mime-type"),
+    ("_kUTTagClassFilenameExtension", "public.filename-extension"),
+    // CoreGraphics names, passed back in as colour space names and as an
+    // options key that is free to be ignored.
+    (
+        "_kCGColorSpaceExtendedLinearSRGB",
+        "kCGColorSpaceExtendedLinearSRGB",
+    ),
+    // SDL's GPU swapchain table reads it whenever the OS version says it exists.
+    ("_kCGColorSpaceITUR_2100_PQ", "kCGColorSpaceITUR_2100_PQ"),
+    (
+        "_kCGDisplayShowDuplicateLowResolutionModes",
+        "kCGDisplayShowDuplicateLowResolutionModes",
+    ),
     // The old-scale key of a backing-properties change; posted by nothing yet.
     (
         "_NSBackingPropertyOldScaleFactorKey",
