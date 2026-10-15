@@ -667,6 +667,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
     sig!("CFStringHasPrefix", BOOL, P, P),
+    sig!("CFStringHasSuffix", BOOL, P, P),
     sig!(
         "CFURLCreateStringByAddingPercentEscapes",
         P,

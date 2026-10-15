@@ -959,6 +959,27 @@ pub unsafe extern "C" fn CFStringCompare(a: CFTypeRef, b: CFTypeRef, options: u6
     }
 }
 
+/// `Boolean CFStringHasPrefix(CFStringRef, CFStringRef)`, by UTF-16 unit as
+/// Apple's compares.
+pub unsafe extern "C" fn CFStringHasPrefix(string: CFTypeRef, prefix: CFTypeRef) -> Boolean {
+    let (Some(s), Some(p)) = (unsafe { string::as_string(string) }, unsafe {
+        string::as_string(prefix)
+    }) else {
+        return 0;
+    };
+    s.utf16().starts_with(&p.utf16()) as Boolean
+}
+
+/// `Boolean CFStringHasSuffix(CFStringRef, CFStringRef)`
+pub unsafe extern "C" fn CFStringHasSuffix(string: CFTypeRef, suffix: CFTypeRef) -> Boolean {
+    let (Some(s), Some(p)) = (unsafe { string::as_string(string) }, unsafe {
+        string::as_string(suffix)
+    }) else {
+        return 0;
+    };
+    s.utf16().ends_with(&p.utf16()) as Boolean
+}
+
 #[repr(C)]
 pub struct CFRange {
     location: CFIndex,
@@ -1123,6 +1144,20 @@ pub unsafe extern "C" fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef) 
         return;
     }
     a.values.push(a.policy.retain(value));
+}
+
+/// `void CFArrayExchangeValuesAtIndices(CFMutableArrayRef, CFIndex, CFIndex)`
+pub unsafe extern "C" fn CFArrayExchangeValuesAtIndices(array: CFTypeRef, a: CFIndex, b: CFIndex) {
+    let Some(array) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    if !array.mutable {
+        return;
+    }
+    let len = array.values.len();
+    if let (Some(a), Some(b)) = (collections::at(a, len), collections::at(b, len)) {
+        array.values.swap(a, b);
+    }
 }
 
 /// The function called by [`CFArrayApplyFunction`] for each value in its range.

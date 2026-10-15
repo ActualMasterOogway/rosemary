@@ -77,6 +77,8 @@ exports::exports! {
         "CFStringGetBytes" => api::CFStringGetBytes,
         "CFStringCreateExternalRepresentation" => api::CFStringCreateExternalRepresentation,
         "CFStringCompare" => api::CFStringCompare,
+        "CFStringHasPrefix" => api::CFStringHasPrefix,
+        "CFStringHasSuffix" => api::CFStringHasSuffix,
         "CFStringCompareWithOptions" => api::CFStringCompareWithOptions,
         "CFStringFindWithOptions" => api::CFStringFindWithOptions,
         "CFStringCreateMutable" => api::CFStringCreateMutable,
@@ -105,6 +107,7 @@ exports::exports! {
         "CFArrayGetValueAtIndex" => api::CFArrayGetValueAtIndex,
         "CFArrayCreateMutable" => api::CFArrayCreateMutable,
         "CFArrayAppendValue" => api::CFArrayAppendValue,
+        "CFArrayExchangeValuesAtIndices" => api::CFArrayExchangeValuesAtIndices,
         "CFArrayCreateCopy" => api::CFArrayCreateCopy,
         "CFArrayInsertValueAtIndex" => api::CFArrayInsertValueAtIndex,
         "CFArrayRemoveValueAtIndex" => api::CFArrayRemoveValueAtIndex,
@@ -297,6 +300,10 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         (
             "_kCFTypeDictionaryKeyCallBacks".to_string(),
             &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
+        ),
+        (
+            "_kCFCopyStringDictionaryKeyCallBacks".to_string(),
+            &callbacks::COPY_STRING_KEY_CALLBACKS as *const _ as usize as u64,
         ),
     ];
     // A `const CFTimeInterval`, so the symbol is the double itself. Qt's
