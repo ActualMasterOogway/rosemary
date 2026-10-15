@@ -737,6 +737,19 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                                 self.store(&LValue::Memory(element_place), value, item.line)?;
                             }
                         }
+                        // `S s = { a, b };` is `(S){ a, b }`: the fields in
+                        // declaration order.
+                        (ExprKind::InitList(items), Ty::Struct(_)) => {
+                            let literal = Expr {
+                                kind: ExprKind::CompoundLiteral(
+                                    ty.clone(),
+                                    items.iter().map(|item| (None, item.clone())).collect(),
+                                ),
+                                line: init.line,
+                            };
+                            let value = self.rvalue(&literal)?;
+                            self.store(&lvalue, value, *line)?;
+                        }
                         _ => {
                             let value = self.rvalue(init)?;
                             let value = self.convert(value, ty, *line)?;
