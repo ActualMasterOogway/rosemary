@@ -464,6 +464,18 @@ unsafe extern "C" fn set_autoenables_items(receiver: Id, _sel: Sel, value: u8) {
     menu_of(receiver).no_autoenable = (value == 0) as usize;
 }
 
+/// Remembered only: the menu bar is chrome drawn by the compositor here, so
+/// hiding it has no effect, but `+menuBarVisible` should read back what was set.
+static MENU_BAR_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+unsafe extern "C" fn menu_bar_visible(_class: Id, _sel: Sel) -> u8 {
+    MENU_BAR_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) as u8
+}
+
+unsafe extern "C" fn set_menu_bar_visible(_class: Id, _sel: Sel, value: u8) {
+    MENU_BAR_VISIBLE.store(value != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
 unsafe extern "C" fn is_alternate(receiver: Id, _sel: Sel) -> u8 {
     item_of(receiver).alternate as u8
 }
@@ -578,6 +590,10 @@ unsafe extern "C" fn add_item_with_title(
 
 pub(crate) fn install() {
     let menu = objc::class::lookup(c"NSMenu").expect("declared before its methods");
+    class_methods!(menu, {
+        "menuBarVisible" => menu_bar_visible, c"c16@0:8";
+        "setMenuBarVisible:" => set_menu_bar_visible, c"v20@0:8c16";
+    });
     methods!(menu, {
         "initWithTitle:" => init_with_title, c"@24@0:8@16";
         "title" => menu_title, c"@16@0:8";
