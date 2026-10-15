@@ -1443,6 +1443,20 @@ fn order_front(receiver: Id, make_key: bool) {
     crate::event::window_geometry_changed(receiver);
 }
 
+/// `-setIsVisible:`, which is `-orderFront:` or `-orderOut:` by its argument.
+unsafe extern "C" fn set_is_visible(receiver: Id, _sel: Sel, visible: u8) {
+    match visible {
+        0 => unsafe { order_out(receiver, objc::sel::get("orderOut:"), std::ptr::null_mut()) },
+        _ => unsafe {
+            make_key_and_order_front(
+                receiver,
+                objc::sel::get("orderFront:"),
+                std::ptr::null_mut(),
+            )
+        },
+    }
+}
+
 unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
     trace!("{receiver:p} ordered out");
     let sdl = window_of(receiver).sdl;
@@ -2466,6 +2480,7 @@ pub(crate) fn install() {
         "isKeyWindow" => is_key_window, c"c16@0:8";
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
+        "setIsVisible:" => set_is_visible, c"v20@0:8c16";
         // No window is ever attached as a sheet: nothing implements -beginSheet:.
         "isSheet" => no, c"c16@0:8";
         "attachedSheet" => nil, c"@16@0:8";
