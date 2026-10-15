@@ -156,8 +156,16 @@ static ARENA: AtomicUsize = AtomicUsize::new(0);
 static BUILT: AtomicUsize = AtomicUsize::new(0);
 static BUILDING: Mutex<()> = Mutex::new(());
 static OVERFLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static OVERFLOW: RwLock<crate::address::AddressMap<()>> =
-    RwLock::new(HashMap::with_hasher(std::hash::BuildHasherDefault::new()));
+/// Classes built past the arena. Sharded like the refcounts, because retain and
+/// release ask [`is_known`] of every object once this is in use.
+static OVERFLOW: [RwLock<crate::address::AddressMap<()>>; OVERFLOW_SHARDS] =
+    [const { RwLock::new(HashMap::with_hasher(std::hash::BuildHasherDefault::new())) };
+        OVERFLOW_SHARDS];
+const OVERFLOW_SHARDS: usize = 64;
+
+fn overflow(p: usize) -> &'static RwLock<crate::address::AddressMap<()>> {
+    &OVERFLOW[(crate::address::mix(p as u64) >> 58) as usize % OVERFLOW_SHARDS]
+}
 
 /// Whether `p` is a class this runtime built.
 pub fn is_known(p: *const Class) -> bool {
@@ -170,7 +178,7 @@ pub fn is_known(p: *const Class) -> bool {
         return true;
     }
     OVERFLOWED.load(Ordering::Acquire)
-        && OVERFLOW
+        && overflow(p as usize)
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(&(p as usize))
@@ -229,7 +237,7 @@ impl Class {
             }
             None => {
                 let class: &'static Class = Box::leak(Box::new(class));
-                OVERFLOW
+                overflow(std::ptr::from_ref(class) as usize)
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(std::ptr::from_ref(class) as usize, ());
@@ -317,16 +325,18 @@ impl Class {
         if cached.class == class && cached.sel == sel as usize && cached.generation == generation {
             return cached.method;
         }
-        let method = self.chain().find_map(|c| c.own_method(sel))?;
+        // Misses are cached too: respondsToSelector: and forwarding probes ask
+        // for methods that are not there far more often than once.
+        let method = self.chain().find_map(|c| c.own_method(sel));
         METHOD_CACHE.with(|cache| {
             cache[slot].set(CachedMethod {
                 class,
                 sel: sel as usize,
                 generation,
-                method: Some(method),
+                method,
             })
         });
-        Some(method)
+        method
     }
 
     /// Install `imp` for `sel`, failing if this class already declares it.
