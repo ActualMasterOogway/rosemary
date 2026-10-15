@@ -59,6 +59,37 @@ pub(crate) fn compare_op(metal: u64) -> vk::CompareOp {
 }
 
 pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> Id {
+    match create(gpu, descriptor) {
+        Some(sampler) => object::make(c"RosemaryMTLSamplerState", SamplerState { gpu, sampler }),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The sampler a shader's `constexpr sampler` describes, made on first use.
+/// Null when the device cannot make it, which binds as an unbound sampler.
+pub(crate) fn inline(gpu: &Gpu, sampler: &metal_translate::ir::InlineSampler) -> vk::Sampler {
+    let mut made = gpu
+        .inline_samplers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *made.entry(*sampler).or_insert_with(|| {
+        let descriptor = SamplerDescriptor {
+            min_filter: sampler.min_filter.into(),
+            mag_filter: sampler.mag_filter.into(),
+            mip_filter: sampler.mip_filter.into(),
+            address: sampler.address.map(u64::from),
+            max_anisotropy: sampler.max_anisotropy.into(),
+            compare_function: sampler.compare_function.into(),
+            lod_min_clamp: f32::from_bits(sampler.lod_min_clamp),
+            lod_max_clamp: f32::from_bits(sampler.lod_max_clamp),
+            normalized_coordinates: sampler.normalized_coordinates,
+            border_color: sampler.border_color.into(),
+        };
+        create(gpu, &descriptor).unwrap_or(vk::Sampler::null())
+    })
+}
+
+fn create(gpu: &Gpu, descriptor: &SamplerDescriptor) -> Option<vk::Sampler> {
     let border = match descriptor.border_color {
         1 => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         2 => vk::BorderColor::FLOAT_OPAQUE_WHITE,
@@ -77,8 +108,17 @@ pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> 
              device has neither the samplerMirrorClampToEdge feature nor \
              VK_KHR_sampler_mirror_clamp_to_edge",
         );
-        return std::ptr::null_mut();
+        return None;
     }
+    // Vulkan's unnormalized coordinates sample level zero only, and say so
+    // with a zero LOD range.
+    let (min_lod, max_lod) = match descriptor.normalized_coordinates {
+        false => (0.0, 0.0),
+        // Metal's "not mipmapped" samples level zero whatever the texture
+        // has; Vulkan spells that as a zero LOD clamp.
+        true if descriptor.mip_filter == 0 => (descriptor.lod_min_clamp, 0.25),
+        true => (descriptor.lod_min_clamp, descriptor.lod_max_clamp),
+    };
     let info = vk::SamplerCreateInfo::default()
         .mag_filter(filter(descriptor.mag_filter))
         .min_filter(filter(descriptor.min_filter))
@@ -90,25 +130,18 @@ pub(crate) fn new_sampler(gpu: &'static Gpu, descriptor: &SamplerDescriptor) -> 
         .max_anisotropy(anisotropy)
         .compare_enable(descriptor.compare_function != 0)
         .compare_op(compare_op(descriptor.compare_function))
-        .min_lod(descriptor.lod_min_clamp)
-        .max_lod(if descriptor.mip_filter == 0 {
-            // Metal's "not mipmapped" samples level zero whatever the texture
-            // has; Vulkan spells that as a zero LOD clamp.
-            0.25
-        } else {
-            descriptor.lod_max_clamp
-        })
+        .min_lod(min_lod)
+        .max_lod(max_lod)
         .border_color(border)
         .unnormalized_coordinates(!descriptor.normalized_coordinates);
     // SAFETY: a well-formed create info on this live device.
-    let sampler = match unsafe { gpu.device.create_sampler(&info, None) } {
-        Ok(sampler) => sampler,
+    match unsafe { gpu.device.create_sampler(&info, None) } {
+        Ok(sampler) => Some(sampler),
         Err(error) => {
             gpu::trace(format!("vkCreateSampler failed with {error:?}"));
-            return std::ptr::null_mut();
+            None
         }
-    };
-    object::make(c"RosemaryMTLSamplerState", SamplerState { gpu, sampler })
+    }
 }
 
 pub(super) unsafe extern "C" fn sampler_descriptor_init(receiver: Id, _sel: Sel) -> Id {

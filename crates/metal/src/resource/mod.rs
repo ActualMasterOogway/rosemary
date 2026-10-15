@@ -2,7 +2,7 @@ mod buffer;
 mod common;
 mod depth_stencil;
 mod heap;
-mod sampler;
+pub(crate) mod sampler;
 mod texture;
 mod vertex;
 
