@@ -21,10 +21,31 @@ struct Macro {
 ///
 /// `__HAVE_FMA__` says `fma` is a fused operation on the device, which it is
 /// on every Vulkan adapter this runtime accepts.
+///
+/// The limits and constants after them are `<metal_stdlib>`'s, which defines
+/// them as macros; MojoShader's output uses `FLT_MAX` for a guarded `rsqrt`.
 const PREDEFINED: &[(&str, &str)] = &[
     ("__METAL_VERSION__", "220"),
     ("__METAL_MACOS__", "1"),
     ("__HAVE_FMA__", "1"),
+    ("FLT_MAX", "3.40282347e+38f"),
+    ("FLT_MIN", "1.17549435e-38f"),
+    ("FLT_EPSILON", "1.19209290e-07f"),
+    ("HALF_MAX", "65504.0h"),
+    ("HALF_MIN", "6.10351562e-05h"),
+    ("HALF_EPSILON", "9.765625e-04h"),
+    ("INT_MAX", "2147483647"),
+    ("UINT_MAX", "4294967295u"),
+    ("M_PI_F", "3.14159265f"),
+    ("M_PI_2_F", "1.57079633f"),
+    ("M_PI_4_F", "0.785398163f"),
+    ("M_1_PI_F", "0.318309886f"),
+    ("M_2_PI_F", "0.636619772f"),
+    ("M_E_F", "2.71828183f"),
+    ("M_LN2_F", "0.693147181f"),
+    ("M_LN10_F", "2.30258509f"),
+    ("M_SQRT2_F", "1.41421356f"),
+    ("M_SQRT1_2_F", "0.707106781f"),
 ];
 
 /// Run the preprocessor over `source`, with `macros` defined first, as

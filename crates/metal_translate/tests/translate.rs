@@ -790,6 +790,19 @@ fn source_msl_loops_leave_through_one_block() {
     translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
 }
 
+/// MojoShader marks each constant it declares as used with a cast to void,
+/// and guards `rsqrt` with `<metal_stdlib>`'s `FLT_MAX`.
+#[test]
+fn source_msl_compiles_mojoshader_idioms() {
+    let source = "kernel void f(device float4* output [[buffer(0)]]) {\n\
+        const float4 c0 = float4(0.0, 0.5, 1.0, 2.0); (void) c0;\n\
+        (void) output[1];\n\
+        float r = (c0.x == 0.0) ? FLT_MAX : rsqrt(c0.y);\n\
+        output[0] = c0 * r * M_PI_F + float(UINT_MAX);\n\
+    }";
+    translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+}
+
 #[test]
 fn source_msl_compiles_a_bounded_typed_blit_kernel() {
     let source = "struct BlitParams { uint3 offset; uint3 size; uint2 stride; };\n\
