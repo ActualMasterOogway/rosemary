@@ -303,6 +303,14 @@ fn parse_packed_air(
             })
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
+    // The metadata numbers outputs by position whatever the function returns;
+    // an entry returning one unwrapped value has no field to name.
+    let mut outputs = interface.outputs;
+    if !matches!(function.result, crate::ir::Type::Struct(_)) {
+        for output in &mut outputs {
+            output.field = None;
+        }
+    }
     let module = Module {
         static_initializers,
         functions: vec![function],
@@ -312,7 +320,7 @@ fn parse_packed_air(
             stage,
             resources,
             inputs: interface.inputs,
-            outputs: interface.outputs,
+            outputs,
         }],
     };
     module.verify()?;
