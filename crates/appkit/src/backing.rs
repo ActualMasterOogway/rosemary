@@ -350,6 +350,7 @@ pub(crate) fn end_offscreen(key: usize) -> Option<Store> {
             stack.truncate(at);
         }
     });
+    release_context_override_above(focus_depth());
     OFFSCREEN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -387,7 +388,12 @@ fn push_focus(view: Id) -> bool {
 }
 
 fn pop_focus() {
-    FOCUS.with(|stack| stack.borrow_mut().pop());
+    let depth = FOCUS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        stack.pop();
+        stack.len()
+    });
+    release_context_override_above(depth);
 }
 
 fn current_focus() -> Option<Focus> {
@@ -1780,14 +1786,22 @@ unsafe extern "C" fn get_rects_being_drawn(
     }
 }
 
-/// A context explicitly selected on this thread. `Some(nil)` represents an
-/// explicit clear; `None` leaves the focused-view fallback available.
-struct CurrentGraphicsContext(Cell<Option<Id>>);
+/// A context explicitly selected on this thread, and the focus depth it was
+/// selected at. AppKit installs its own context for each `-drawRect:`, so an
+/// override only applies at the depth it was set; `None` leaves the focused
+/// view's context available.
+#[derive(Clone, Copy)]
+struct ContextOverride {
+    context: Id,
+    depth: usize,
+}
+
+struct CurrentGraphicsContext(Cell<Option<ContextOverride>>);
 
 impl Drop for CurrentGraphicsContext {
     fn drop(&mut self) {
-        if let Some(context) = self.0.get().filter(|context| !context.is_null()) {
-            objc::arc::release(context);
+        if let Some(held) = self.0.get().filter(|held| !held.context.is_null()) {
+            objc::arc::release(held.context);
         }
     }
 }
@@ -1797,16 +1811,37 @@ thread_local! {
         const { CurrentGraphicsContext(Cell::new(None)) };
 }
 
+fn focus_depth() -> usize {
+    FOCUS.with(|stack| stack.borrow().len())
+}
+
 fn set_thread_current_context(context: Id) {
+    let depth = focus_depth();
     let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
         let retained = if context.is_null() {
             context
         } else {
             objc::arc::retain(context)
         };
-        let previous = current.0.replace(Some(retained));
-        if let Some(previous) = previous.filter(|previous| !previous.is_null()) {
-            objc::arc::release(previous);
+        let previous = current.0.replace(Some(ContextOverride {
+            context: retained,
+            depth,
+        }));
+        if let Some(previous) = previous.filter(|previous| !previous.context.is_null()) {
+            objc::arc::release(previous.context);
+        }
+    });
+}
+
+/// Drop an override whose focus has ended, so a stale context neither shadows
+/// later drawing nor outlives the window it came from.
+fn release_context_override_above(depth: usize) {
+    let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
+        if let Some(held) = current.0.get().filter(|held| held.depth > depth) {
+            current.0.set(None);
+            if !held.context.is_null() {
+                objc::arc::release(held.context);
+            }
         }
     });
 }
@@ -1816,9 +1851,10 @@ unsafe extern "C" fn set_current_context(_class: Id, _sel: Sel, context: Id) {
 }
 
 unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
+    let depth = focus_depth();
     match CURRENT_GRAPHICS_CONTEXT.try_with(|current| current.0.get()) {
-        Ok(Some(context)) => return context,
-        Ok(None) => {}
+        Ok(Some(held)) if held.depth == depth => return held.context,
+        Ok(_) => {}
         // Avoid panicking through Objective-C if Cocoa calls back as this
         // thread's local graphics context is being destroyed.
         Err(_) => return std::ptr::null_mut(),
@@ -1963,6 +1999,41 @@ mod tests {
 
         set_thread_context_from_class(std::ptr::null_mut());
         assert!(thread_context_from_class().is_null());
+    }
+
+    #[test]
+    fn explicit_nil_does_not_disable_the_focused_context_later() {
+        crate::bootstrap();
+        set_thread_context_from_class(std::ptr::null_mut());
+        assert!(thread_context_from_class().is_null());
+
+        begin_offscreen(0x7e57, 4, 4, 1.0, false);
+        assert!(!thread_context_from_class().is_null());
+        let class = objc::class::lookup(c"NSGraphicsContext").expect("declared");
+        let bitmap = objc::object::create_instance(class, 0);
+        set_thread_context_from_class(bitmap);
+        assert_eq!(thread_context_from_class(), bitmap);
+        end_offscreen(0x7e57);
+
+        // The override ended with its focus.
+        assert!(thread_context_from_class().is_null());
+        begin_offscreen(0x7e58, 4, 4, 1.0, false);
+        assert!(!thread_context_from_class().is_null());
+        assert_ne!(thread_context_from_class(), bitmap);
+        end_offscreen(0x7e58);
+    }
+
+    #[test]
+    fn current_graphics_context_is_per_thread() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSGraphicsContext").expect("declared");
+        let context = objc::object::create_instance(class, 0);
+        set_thread_context_from_class(context);
+        std::thread::spawn(|| assert!(thread_context_from_class().is_null()))
+            .join()
+            .unwrap();
+        assert_eq!(thread_context_from_class(), context);
+        set_thread_context_from_class(std::ptr::null_mut());
     }
 
     /// A view of `NSView`'s, and one of a flipped subclass, so a tree can be
