@@ -154,6 +154,9 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "class_getProperty", P, P, P),
     rtc!([0] -> true, "class_getSuperclass", P, P),
     rtc!([0], "class_isMetaClass", U8, P),
+    // `class_addMethod` that also overwrites; the IMP leaves as a thunk the same
+    // way. Unity swizzles NSApplication with it at start-up.
+    rtcb!([0], [2], "class_replaceMethod", P, P, P, P, P),
     rtc!([0], "class_replaceProperty", V, P, P, P, I32),
     rtc!([0], "class_respondsToSelector", U8, P, P),
     //
@@ -460,6 +463,15 @@ static REFUSED: &[(&str, &str)] = &[
         "objc_removeAssociatedObjects",
         "as objc_setAssociatedObject",
     ),
+    // A native guest binds these straight to the builtin runtime's stubs, which
+    // jump into the block's `invoke`. Translated, that `invoke` is guest code
+    // the host stub cannot jump to.
+    (
+        "imp_implementationWithBlock",
+        "a block IMP jumps straight into the block's invoke, which is guest code",
+    ),
+    ("imp_getBlock", "as imp_implementationWithBlock"),
+    ("imp_removeBlock", "as imp_implementationWithBlock"),
 ];
 
 /// A nil-terminated object-list variadic, and the counted method that says the same
