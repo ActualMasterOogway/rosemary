@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::path::Path;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::OnceLock;
 
 static NAME: OnceLock<CString> = OnceLock::new();
 
@@ -19,18 +19,6 @@ pub fn name() -> &'static std::ffi::CStr {
 /// A loose binary still gets a name: its own, which is a better answer for an
 /// audio mixer than SDL's "SDL Application".
 pub fn publish(executable: &Path) {
-    // Whether to skip setting the app identifier.
-    // Necessary for WebKitGTK to work underneath sandboxed environments.
-    static SHOULD_SKIP_SETTING_IDENTIFIER: LazyLock<bool> = LazyLock::new(|| {
-        if let Ok(v) = std::env::var("ROSEMARY_SKIP_SETTING_IDENTIFIER")
-            && v == "1"
-        {
-            true
-        } else {
-            std::fs::exists("/.flatpak-info").is_ok()
-        }
-    });
-
     let bundle = foundation::bundle::main();
     let owned = |text: Option<&str>| text.map(str::to_string);
     // Nothing in an `Info.plist` names the developer or a product page, so
@@ -41,7 +29,7 @@ pub fn publish(executable: &Path) {
     if let Some(title) = name.as_deref().and_then(|n| CString::new(n).ok()) {
         let _ = NAME.set(title);
     }
-    let mut metadata = sdl3::AppMetadata {
+    sdl3::set_app_metadata(&sdl3::AppMetadata {
         name,
         version: owned(bundle.and_then(|b| b.version())),
         identifier: owned(bundle.and_then(|b| b.identifier())),
@@ -50,11 +38,7 @@ pub fn publish(executable: &Path) {
             .and_then(|b| b.category())
             .map(|category| kind(category).to_string()),
         ..Default::default()
-    };
-    if *SHOULD_SKIP_SETTING_IDENTIFIER {
-        metadata.identifier = None;
-    }
-    sdl3::set_app_metadata(&metadata);
+    });
 }
 
 /// `LSApplicationCategoryType` as one of the three words SDL knows.
