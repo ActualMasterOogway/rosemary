@@ -17,6 +17,7 @@ pub struct AttrList {
 
 const ATTR_BIT_MAP_COUNT: u16 = 5;
 
+const ATTR_CMN_NAME: u32 = 0x0000_0001;
 const ATTR_CMN_DEVID: u32 = 0x0000_0002;
 const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
 const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
@@ -27,6 +28,7 @@ const ATTR_CMN_GRPID: u32 = 0x0001_0000;
 const ATTR_CMN_ACCESSMASK: u32 = 0x0002_0000;
 const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const ATTR_CMN_FILEID: u32 = 0x0200_0000;
+const ATTR_CMN_ERROR: u32 = 0x2000_0000;
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
 
 const ATTR_DIR_LINKCOUNT: u32 = 0x0000_0001;
@@ -50,6 +52,9 @@ const COMMON: u32 = ATTR_CMN_DEVID
     | ATTR_CMN_FLAGS
     | ATTR_CMN_FILEID
     | ATTR_CMN_RETURNED_ATTRS;
+/// What only `getattrlistbulk` answers: an entry's name is the one thing a
+/// listing does not already know, and its error is per entry.
+const BULK_ONLY: u32 = ATTR_CMN_NAME | ATTR_CMN_ERROR;
 const DIR: u32 = ATTR_DIR_LINKCOUNT | ATTR_DIR_ENTRYCOUNT;
 const FILE: u32 = ATTR_FILE_LINKCOUNT
     | ATTR_FILE_TOTALSIZE
@@ -78,12 +83,20 @@ fn object_type(mode: u16) -> u32 {
 }
 
 /// Why a request was refused, before anything was looked up.
-fn check(list: &AttrList, options: u64) -> Result<(), c_int> {
+fn check(list: &AttrList, options: u64, bulk: bool) -> Result<(), c_int> {
     if list.bitmapcount != ATTR_BIT_MAP_COUNT || options & !OPTIONS != 0 {
         return Err(libc::EINVAL);
     }
+    // A bulk listing is unreadable without the returned set, so Darwin insists.
+    if bulk && list.commonattr & ATTR_CMN_RETURNED_ATTRS == 0 {
+        return Err(libc::EINVAL);
+    }
+    let common = match bulk {
+        true => COMMON | BULK_ONLY,
+        false => COMMON,
+    };
     let unsupported = [
-        ("common", list.commonattr & !COMMON),
+        ("common", list.commonattr & !common),
         ("volume", list.volattr),
         ("directory", list.dirattr & !DIR),
         ("file", list.fileattr & !FILE),
@@ -104,38 +117,53 @@ fn check(list: &AttrList, options: u64) -> Result<(), c_int> {
     Err(libc::ENOTSUP)
 }
 
-/// Lay out the answer for an object `st` describes. `entries` is the number
-/// of directory entries, asked for only when it is wanted.
-fn pack(list: &AttrList, options: u64, st: &Stat, entries: impl FnOnce() -> u32) -> Vec<u8> {
-    let is_dir = object_type(st.mode) == 2;
+/// Lay out the answer for an object `found` describes, or failed to. `entries`
+/// is the number of directory entries, asked for only when it is wanted.
+///
+/// `name` is given only for a `getattrlistbulk` entry, which also pads the
+/// entry to 8 bytes so the next one starts aligned.
+fn pack(
+    list: &AttrList,
+    options: u64,
+    found: Result<&Stat, c_int>,
+    name: Option<&[u8]>,
+    entries: impl FnOnce() -> u32,
+) -> Vec<u8> {
+    let zero = Stat::default();
+    let (st, error) = match found {
+        Ok(st) => (st, 0),
+        Err(error) => (&zero, error),
+    };
+    let is_dir = error == 0 && object_type(st.mode) == 2;
     let pack_invalid = options & FSOPT_PACK_INVAL_ATTRS != 0;
     // Darwin returns directory attributes only for a directory and file
     // attributes only for anything else. The others are left out, or packed as
-    // zero with FSOPT_PACK_INVAL_ATTRS so the layout is the one asked for.
-    let (dir_valid, file_valid) = match is_dir {
-        true => (list.dirattr, 0),
-        false => (0, list.fileattr),
+    // zero with FSOPT_PACK_INVAL_ATTRS so the layout is the one asked for. An
+    // entry that could not be looked up has only its name and its error.
+    let common_asked = list.commonattr & !ATTR_CMN_RETURNED_ATTRS;
+    let (common_valid, dir_valid, file_valid) = match (error, is_dir) {
+        (0, true) => (common_asked & !ATTR_CMN_ERROR, list.dirattr, 0),
+        (0, false) => (common_asked & !ATTR_CMN_ERROR, 0, list.fileattr),
+        _ => (common_asked & (ATTR_CMN_NAME | ATTR_CMN_ERROR), 0, 0),
     };
-    let (dir, file) = match pack_invalid {
-        true => (list.dirattr, list.fileattr),
-        false => (dir_valid, file_valid),
+    let (common, dir, file) = match pack_invalid {
+        true => (common_asked, list.dirattr, list.fileattr),
+        false => (common_valid, dir_valid, file_valid),
     };
 
     let mut out = vec![0u8; 4];
-    let common = list.commonattr;
-    if common & ATTR_CMN_RETURNED_ATTRS != 0 {
+    if list.commonattr & ATTR_CMN_RETURNED_ATTRS != 0 {
         // `attribute_set_t`: what is actually valid, then its own padding
         // word. The flag itself is not listed as returned.
-        for bits in [
-            common & !ATTR_CMN_RETURNED_ATTRS,
-            0,
-            dir_valid,
-            file_valid,
-            0,
-        ] {
+        for bits in [common_valid, 0, dir_valid, file_valid, 0] {
             out.extend_from_slice(&bits.to_ne_bytes());
         }
     }
+    // An `attrreference_t`, filled in once the name's place is known.
+    let name_ref = (common & ATTR_CMN_NAME != 0).then(|| {
+        out.extend_from_slice(&[0; 8]);
+        out.len() - 8
+    });
     let time = |out: &mut Vec<u8>, t: crate::stat::Timespec| {
         out.extend_from_slice(&t.sec.to_ne_bytes());
         out.extend_from_slice(&t.nsec.to_ne_bytes());
@@ -172,6 +200,9 @@ fn pack(list: &AttrList, options: u64, st: &Stat, entries: impl FnOnce() -> u32)
     if common & ATTR_CMN_FILEID != 0 {
         i64_(&mut out, st.ino as i64);
     }
+    if common & ATTR_CMN_ERROR != 0 {
+        u32_(&mut out, error as u32);
+    }
     if dir & ATTR_DIR_LINKCOUNT != 0 {
         // Hard links *to the directory*, not `st_nlink`: a Linux directory's
         // link count also counts its subdirectories' `..`, and `du` would take
@@ -200,6 +231,18 @@ fn pack(list: &AttrList, options: u64, st: &Stat, entries: impl FnOnce() -> u32)
     }
     if file & ATTR_FILE_DATAALLOCSIZE != 0 {
         i64_(&mut out, if is_dir { 0 } else { alloc });
+    }
+    if let Some(at) = name_ref {
+        let name = name.unwrap_or_default();
+        let offset = (out.len() - at) as u32;
+        out[at..at + 4].copy_from_slice(&offset.to_ne_bytes());
+        out[at + 4..at + 8].copy_from_slice(&(name.len() as u32 + 1).to_ne_bytes());
+        out.extend_from_slice(name);
+        out.push(0);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    if name.is_some() {
+        out.resize(out.len().next_multiple_of(8), 0);
     }
     let len = out.len() as u32;
     out[..4].copy_from_slice(&len.to_ne_bytes());
@@ -250,7 +293,7 @@ pub unsafe extern "C" fn getattrlist(
         return -1;
     }
     let list = unsafe { list.read_unaligned() };
-    if let Err(errno) = check(&list, options) {
+    if let Err(errno) = check(&list, options, false) {
         crate::errno::set(errno);
         return -1;
     }
@@ -267,7 +310,7 @@ pub unsafe extern "C" fn getattrlist(
         // SAFETY: `host` is the NUL-terminated path just used.
         let answer = (rc == 0).then(|| {
             let st = crate::stat::from_host(&st);
-            pack(&list, options, &st, || {
+            pack(&list, options, Ok(&st), None, || {
                 count_entries(unsafe { CStr::from_ptr(host) })
             })
         });
@@ -297,7 +340,7 @@ pub unsafe extern "C" fn fgetattrlist(
         return -1;
     }
     let list = unsafe { list.read_unaligned() };
-    if let Err(errno) = check(&list, options) {
+    if let Err(errno) = check(&list, options, false) {
         crate::errno::set(errno);
         return -1;
     }
@@ -307,7 +350,7 @@ pub unsafe extern "C" fn fgetattrlist(
         return -1;
     }
     let st = crate::stat::from_host(&st);
-    let answer = pack(&list, options, &st, || {
+    let answer = pack(&list, options, Ok(&st), None, || {
         let path = starnix::fd::path(fd).unwrap_or_default();
         count_entries(
             &std::ffi::CString::new(path.into_os_string().into_encoded_bytes()).unwrap_or_default(),
@@ -316,10 +359,172 @@ pub unsafe extern "C" fn fgetattrlist(
     unsafe { copy_out(answer, options, buf, size) }
 }
 
+/// A directory `getattrlistbulk` is part-way through, by the guest's descriptor.
+///
+/// Darwin keeps the place in the descriptor's own offset. A host offset cannot
+/// hold the mount points a listing shows after the directory's own entries, so
+/// the place is kept here instead, in a handle of its own that leaves the
+/// guest's offset alone. Dropped by [`forget`] when the descriptor is closed.
+struct Bulk {
+    dir: *mut libc::DIR,
+    /// The entry that did not fit in the last caller's buffer.
+    pending: Option<crate::dirent::Dirent>,
+}
+
+// SAFETY: the handle is used by one caller at a time, out of the map.
+unsafe impl Send for Bulk {}
+
+static BULK: std::sync::Mutex<Option<std::collections::HashMap<c_int, Bulk>>> =
+    std::sync::Mutex::new(None);
+
+fn bulk<T>(with: impl FnOnce(&mut std::collections::HashMap<c_int, Bulk>) -> T) -> T {
+    let mut guard = BULK.lock().unwrap_or_else(|e| e.into_inner());
+    with(guard.get_or_insert_with(Default::default))
+}
+
+/// Drop the listing of `fd`, which is closed or about to be replaced.
+pub(crate) fn forget(fd: c_int) {
+    if let Some(gone) = bulk(|open| open.remove(&fd)) {
+        // SAFETY: the handle this module opened, used by nothing else.
+        unsafe { crate::dirent::closedir(gone.dir) };
+    }
+}
+
+/// A fresh handle on the directory `fd` names, starting at its beginning.
+fn open_bulk(fd: c_int) -> Result<Bulk, c_int> {
+    // SAFETY: a relative path under the caller's descriptor.
+    let own = unsafe {
+        libc::openat(
+            fd,
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if own < 0 {
+        return Err(crate::errno::get());
+    }
+    // SAFETY: a descriptor this function owns, handed to the handle.
+    let dir = unsafe { libc::fdopendir(own) };
+    if dir.is_null() {
+        let error = crate::errno::get();
+        // SAFETY: still ours, since `fdopendir` failed.
+        unsafe { libc::close(own) };
+        return Err(error);
+    }
+    Ok(Bulk { dir, pending: None })
+}
+
+/// `int getattrlistbulk(int dirfd, struct attrlist *, void *attrBuf, size_t
+/// attrBufSize, uint64_t options)`: as many of the directory's next entries as
+/// fit, each laid out as [`getattrlist`] would and prefixed by its length.
+/// Returns how many, and 0 at the end.
+///
+/// # Safety
+///
+/// `list` is readable and `buf` is writable for `size` bytes.
+pub unsafe extern "C" fn getattrlistbulk(
+    fd: c_int,
+    list: *const AttrList,
+    buf: *mut c_void,
+    size: usize,
+    options: u64,
+) -> c_int {
+    if list.is_null() || buf.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    let list = unsafe { list.read_unaligned() };
+    if let Err(errno) = check(&list, options, true) {
+        crate::errno::set(errno);
+        return -1;
+    }
+    // Out of the map while it is read, so one listing never waits on another's
+    // `stat`s.
+    let mut state = match bulk(|open| open.remove(&fd)) {
+        Some(state) => state,
+        None => match open_bulk(fd) {
+            Ok(state) => state,
+            Err(errno) => {
+                crate::errno::set(errno);
+                return -1;
+            }
+        },
+    };
+    let mut out = Vec::new();
+    let mut count = 0;
+    let mut failed = None;
+    loop {
+        let entry = match state.pending.take() {
+            Some(entry) => entry,
+            // SAFETY: the handle `open_bulk` made.
+            None => match unsafe { crate::dirent::next_listed(state.dir) } {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(errno) => {
+                    failed = Some(errno);
+                    break;
+                }
+            },
+        };
+        // SAFETY: NUL-terminated within the entry.
+        let name = unsafe { CStr::from_ptr(entry.name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let mut st = Stat::default();
+        // Never followed: an entry is the link itself, as `readdir` reports it.
+        // SAFETY: the caller's directory and a NUL-terminated name under it.
+        let rc = unsafe { crate::stat::fstatat(fd, name.as_ptr(), &mut st, 0x20) };
+        let found = match rc {
+            0 => Ok(&st),
+            _ => Err(crate::errno::from_host(crate::errno::get())),
+        };
+        let packed = pack(&list, options, found, Some(name.to_bytes()), || {
+            // SAFETY: as for the `stat` above.
+            let at = unsafe { libc::openat(fd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+            let n = match at < 0 {
+                true => 0,
+                false => count_entries(
+                    &std::ffi::CString::new(
+                        starnix::fd::path(at)
+                            .unwrap_or_default()
+                            .into_os_string()
+                            .into_encoded_bytes(),
+                    )
+                    .unwrap_or_default(),
+                ),
+            };
+            if at >= 0 {
+                // SAFETY: opened just above.
+                unsafe { libc::close(at) };
+            }
+            n
+        });
+        if out.len() + packed.len() > size {
+            state.pending = Some(entry);
+            if count == 0 {
+                failed = Some(libc::ERANGE);
+            }
+            break;
+        }
+        out.extend_from_slice(&packed);
+        count += 1;
+    }
+    bulk(|open| open.insert(fd, state));
+    if let Some(errno) = failed.filter(|_| count == 0) {
+        crate::errno::set(errno);
+        return -1;
+    }
+    // SAFETY: `out` is at most `size` bytes, the caller's obligation.
+    unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), buf.cast::<u8>(), out.len()) };
+    count
+}
+
 exports::exports! {
     functions {
         "getattrlist" => getattrlist,
         "fgetattrlist" => fgetattrlist,
+        "getattrlistbulk" => getattrlistbulk,
     }
 }
 
@@ -393,7 +598,7 @@ mod tests {
             ATTR_DIR_LINKCOUNT,
             ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE,
         );
-        let b = pack(&l, 0, &st, || unreachable!());
+        let b = pack(&l, 0, Ok(&st), None, || unreachable!());
         // Length, returned set, OBJTYPE, OWNERID, FILE_LINKCOUNT, ALLOCSIZE;
         // the directory attribute is left out for a file.
         assert_eq!(b.len(), 4 + 20 + 4 + 4 + 4 + 8);
@@ -402,6 +607,121 @@ mod tests {
         assert_eq!(word(&b, 16), ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE);
         assert_eq!((word(&b, 24), word(&b, 28), word(&b, 32)), (1, 501, 3));
         assert_eq!(i64::from_ne_bytes(b[36..44].try_into().unwrap()), 4096);
+    }
+
+    /// What Unity's player asks for when it scans its data directory.
+    fn unity() -> AttrList {
+        list(
+            ATTR_CMN_RETURNED_ATTRS
+                | ATTR_CMN_ERROR
+                | ATTR_CMN_FLAGS
+                | ATTR_CMN_MODTIME
+                | ATTR_CMN_OBJTYPE
+                | ATTR_CMN_NAME,
+            0,
+            ATTR_FILE_TOTALSIZE,
+        )
+    }
+
+    /// Every entry `fd` lists, as (name, object type, size), reading `size`
+    /// bytes at a time.
+    fn listing(fd: c_int, size: usize) -> Vec<(String, u32, i64)> {
+        let mut found = Vec::new();
+        let mut buf = vec![0u8; size];
+        loop {
+            // SAFETY: live locals of the sizes passed.
+            let n = unsafe { getattrlistbulk(fd, &unity(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+            assert!(n >= 0, "errno {}", crate::errno::get());
+            if n == 0 {
+                return found;
+            }
+            let mut at = 0;
+            for _ in 0..n {
+                let e = &buf[at..];
+                let len = word(e, 0) as usize;
+                assert_eq!(len % 8, 0, "entries stay 8-byte aligned");
+                assert_eq!(word(e, 4) & ATTR_CMN_ERROR, 0);
+                let name_at = 0x18 + word(e, 0x18) as usize;
+                let name_len = word(e, 0x1c) as usize;
+                let name = String::from_utf8(e[name_at..name_at + name_len - 1].to_vec()).unwrap();
+                let kind = word(e, 0x20);
+                let total = match word(e, 0x10) & ATTR_FILE_TOTALSIZE {
+                    0 => -1,
+                    _ => i64::from_ne_bytes(e[0x38..0x40].try_into().unwrap()),
+                };
+                found.push((name, kind, total));
+                at += len;
+            }
+        }
+    }
+
+    fn scratch(what: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("attrlist-{what}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("five"), b"12345").unwrap();
+        dir
+    }
+
+    fn open_dir(dir: &std::path::Path) -> c_int {
+        let path = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) }
+    }
+
+    #[test]
+    fn a_bulk_listing_names_every_entry_once() {
+        let dir = scratch("bulk");
+        let fd = open_dir(&dir);
+        let mut found = listing(fd, 4096);
+        found.sort();
+        assert_eq!(
+            found,
+            [("five".to_string(), 1, 5), ("sub".to_string(), 2, -1)]
+        );
+        // At the end it stays at the end.
+        assert!(listing(fd, 4096).is_empty());
+        // SAFETY: the descriptor opened above.
+        unsafe { crate::net::descriptor::close(fd) };
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bulk_listing_resumes_where_the_buffer_ran_out() {
+        let dir = scratch("resume");
+        let fd = open_dir(&dir);
+        // Room for one entry a call, so the second waits for the next call.
+        let mut found = listing(fd, 72);
+        found.sort();
+        assert_eq!(found.len(), 2, "{found:?}");
+        let mut tiny = [0u8; 8];
+        // SAFETY: the descriptor above and a live local.
+        let n = unsafe { getattrlistbulk(fd, &unity(), tiny.as_mut_ptr().cast(), 8, 0) };
+        assert_eq!(n, 0, "the end, not a buffer too small for nothing");
+        unsafe { crate::net::descriptor::close(fd) };
+
+        // A closed descriptor's place is forgotten: the next one starts over.
+        let fd = open_dir(&dir);
+        // SAFETY: as above.
+        let n = unsafe { getattrlistbulk(fd, &unity(), tiny.as_mut_ptr().cast(), 8, 0) };
+        assert_eq!((n, crate::errno::get()), (-1, libc::ERANGE));
+        assert_eq!(listing(fd, 4096).len(), 2);
+        unsafe { crate::net::descriptor::close(fd) };
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bulk_listing_needs_the_returned_set() {
+        let mut l = unity();
+        l.commonattr &= !ATTR_CMN_RETURNED_ATTRS;
+        let mut buf = [0u8; 64];
+        // SAFETY: a live local; the descriptor is never reached.
+        let n = unsafe { getattrlistbulk(0, &l, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        assert_eq!((n, crate::errno::get()), (-1, libc::EINVAL));
+    }
+
+    #[test]
+    fn a_name_is_refused_outside_a_bulk_listing() {
+        assert_eq!(ask(c"/", list(ATTR_CMN_NAME, 0, 0), 0), Err(libc::ENOTSUP));
     }
 
     #[test]
