@@ -56,6 +56,7 @@ mod ip {
     pub const RECVTTL: i32 = 24;
     pub const PKTINFO: i32 = 26;
     pub const RECVTOS: i32 = 27;
+    pub const DONTFRAG: i32 = 28;
 }
 
 /// Darwin IPv6 option names from `<netinet6/in6.h>`.
@@ -71,6 +72,7 @@ mod ipv6 {
     pub const RECVTCLASS: i32 = 35;
     pub const TCLASS: i32 = 36;
     pub const RECVPKTINFO: i32 = 61;
+    pub const DONTFRAG: i32 = 62;
 }
 
 /// Darwin TCP option names from `<netinet/tcp.h>`.
@@ -201,6 +203,151 @@ const TCP_OPTIONAL: &[(i32, Option<i32>)] = &[(tcp::NOTSENT_LOWAT, host::TCP_NOT
 /// failure was a crash before the program had started.
 fn nosigpipe(level: i32, name: i32) -> bool {
     level == SOL_SOCKET && name == so::NOSIGPIPE
+}
+
+/// Darwin's `IP_DONTFRAG` / `IPV6_DONTFRAG`: set the Don't Fragment (DF) bit on
+/// outgoing packets.
+///
+/// On Linux, there is no direct `IP_DONTFRAG` socket option; the DF bit is
+/// controlled via Path MTU Discovery (`IP_MTU_DISCOVER` / `IPV6_MTU_DISCOVER`).
+/// Setting `IP_DONTFRAG` to 1 maps to `IP_PMTUDISC_DO`, and 0 maps to
+/// `IP_PMTUDISC_DONT`. On Darwin and BSDs, the option is native.
+fn is_dontfrag(level: i32, name: i32) -> bool {
+    (level == IPPROTO_IP && name == ip::DONTFRAG)
+        || (level == IPPROTO_IPV6 && name == ipv6::DONTFRAG)
+}
+
+/// # Safety
+///
+/// `value` is `len` readable bytes, or is null with `len` zero.
+unsafe fn set_dontfrag(fd: i32, level: i32, value: *const c_void, len: u32) -> i32 {
+    if value.is_null() || (len as usize) < core::mem::size_of::<i32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: caller guarantees `value` points to at least `len` readable bytes.
+    let on = unsafe { value.cast::<i32>().read_unaligned() } != 0;
+    #[cfg(target_os = "linux")]
+    {
+        let (host_level, host_opt, host_val) = if level == IPPROTO_IP {
+            (
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                if on { libc::IP_PMTUDISC_DO } else { libc::IP_PMTUDISC_DONT },
+            )
+        } else {
+            (
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MTU_DISCOVER,
+                if on { libc::IPV6_PMTUDISC_DO } else { libc::IPV6_PMTUDISC_DONT },
+            )
+        };
+        // SAFETY: host_val is a stack-allocated c_int.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                host_level,
+                host_opt,
+                (&raw const host_val).cast(),
+                core::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (host_level, host_opt) = if level == IPPROTO_IP {
+            (libc::IPPROTO_IP, ip::DONTFRAG)
+        } else {
+            (libc::IPPROTO_IPV6, ipv6::DONTFRAG)
+        };
+        let host_val: libc::c_int = on as libc::c_int;
+        // SAFETY: host_val is a stack-allocated c_int.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                host_level,
+                host_opt,
+                (&raw const host_val).cast(),
+                core::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    }
+}
+
+/// # Safety
+///
+/// `value` is `*len` writable bytes and `len` is a writable `socklen_t`.
+unsafe fn get_dontfrag(fd: i32, level: i32, value: *mut c_void, len: *mut u32) -> i32 {
+    if value.is_null() || len.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: caller guarantees `len` points to a writable socklen_t.
+    if (unsafe { len.read() } as usize) < core::mem::size_of::<i32>() {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (host_level, host_opt) = if level == IPPROTO_IP {
+            (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER)
+        } else {
+            (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER)
+        };
+        let mut host_val: libc::c_int = 0;
+        let mut host_len = core::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: host_val is stack-allocated with its own size in host_len.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                host_level,
+                host_opt,
+                (&raw mut host_val).cast(),
+                &mut host_len,
+            )
+        };
+        if rc == 0 {
+            let on: i32 = match host_val {
+                libc::IP_PMTUDISC_DO | libc::IP_PMTUDISC_PROBE => 1,
+                _ => 0,
+            };
+            // SAFETY: `value` has room for an i32, verified above.
+            unsafe {
+                value.cast::<i32>().write_unaligned(on);
+                len.write(core::mem::size_of::<i32>() as u32);
+            }
+        }
+        rc
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (host_level, host_opt) = if level == IPPROTO_IP {
+            (libc::IPPROTO_IP, ip::DONTFRAG)
+        } else {
+            (libc::IPPROTO_IPV6, ipv6::DONTFRAG)
+        };
+        let mut host_val: libc::c_int = 0;
+        let mut host_len = core::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: host_val is stack-allocated with its own size in host_len.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                host_level,
+                host_opt,
+                (&raw mut host_val).cast(),
+                &mut host_len,
+            )
+        };
+        if rc == 0 {
+            let on: i32 = if host_val != 0 { 1 } else { 0 };
+            // SAFETY: `value` has room for an i32, verified above.
+            unsafe {
+                value.cast::<i32>().write_unaligned(on);
+                len.write(core::mem::size_of::<i32>() as u32);
+            }
+        }
+        rc
+    }
 }
 
 /// Darwin's `SO_NREAD` and `SO_NWRITE`: how much is waiting to be read, and how
@@ -464,6 +611,10 @@ pub(crate) unsafe extern "C" fn setsockopt(
         // SAFETY: the caller's buffer, with the length they gave for it.
         return unsafe { set_nosigpipe(fd, value, len) };
     }
+    if is_dontfrag(level, name) {
+        // SAFETY: the caller's buffer, with the length they gave for it.
+        return unsafe { set_dontfrag(fd, level, value, len) };
+    }
     if level == SOL_SOCKET && matches!(name, so::NREAD | so::NWRITE) {
         crate::errno::set(libc::ENOPROTOOPT);
         return -1;
@@ -596,6 +747,10 @@ unsafe extern "C" fn getsockopt(
     if nosigpipe(level, name) {
         // SAFETY: the caller's buffer and length slot.
         return unsafe { get_nosigpipe(fd, value, len) };
+    }
+    if is_dontfrag(level, name) {
+        // SAFETY: the caller's buffer and length slot.
+        return unsafe { get_dontfrag(fd, level, value, len) };
     }
     if level == SOL_SOCKET && matches!(name, so::NREAD | so::NWRITE) {
         // SAFETY: the caller's buffer and length slot.
@@ -927,6 +1082,86 @@ mod tests {
 
         forget(fd);
         assert!(!suppresses_sigpipe(fd));
+        // SAFETY: a descriptor this test opened and no longer uses.
+        unsafe { libc::close(fd) };
+    }
+
+    /// `IP_DONTFRAG` sets the DF bit on IPv4 sockets (translated to PMTUD on Linux)
+    /// and reads back in Darwin's 0/1 boolean representation.
+    #[test]
+    fn ip_dontfrag_sets_and_reads_back() {
+        // SAFETY: a UDP socket of this host's own making.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        assert!(fd >= 0);
+
+        let on = 1i32;
+        // SAFETY: four readable bytes, and the length says four.
+        let rc = unsafe { setsockopt(fd, IPPROTO_IP, ip::DONTFRAG, (&raw const on).cast(), 4) };
+        assert_eq!(rc, 0, "IP_DONTFRAG must succeed");
+
+        let mut back = 0i32;
+        let mut len = 4u32;
+        // SAFETY: four writable bytes and a live length.
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                IPPROTO_IP,
+                ip::DONTFRAG,
+                (&raw mut back).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((rc, back, len), (0, 1, 4));
+
+        let off = 0i32;
+        // SAFETY: four readable bytes, and the length says four.
+        let rc = unsafe { setsockopt(fd, IPPROTO_IP, ip::DONTFRAG, (&raw const off).cast(), 4) };
+        assert_eq!(rc, 0);
+
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                IPPROTO_IP,
+                ip::DONTFRAG,
+                (&raw mut back).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((rc, back, len), (0, 0, 4));
+
+        // SAFETY: a descriptor this test opened and no longer uses.
+        unsafe { libc::close(fd) };
+    }
+
+    /// `IPV6_DONTFRAG` sets the DF bit on IPv6 sockets.
+    #[test]
+    fn ipv6_dontfrag_sets_and_reads_back() {
+        // SAFETY: an IPv6 UDP socket of this host's own making.
+        let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
+        if fd < 0 {
+            // Host environment might not have IPv6 enabled.
+            return;
+        }
+
+        let on = 1i32;
+        // SAFETY: four readable bytes, and the length says four.
+        let rc = unsafe { setsockopt(fd, IPPROTO_IPV6, ipv6::DONTFRAG, (&raw const on).cast(), 4) };
+        assert_eq!(rc, 0, "IPV6_DONTFRAG must succeed");
+
+        let mut back = 0i32;
+        let mut len = 4u32;
+        // SAFETY: four writable bytes and a live length.
+        let rc = unsafe {
+            getsockopt(
+                fd,
+                IPPROTO_IPV6,
+                ipv6::DONTFRAG,
+                (&raw mut back).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((rc, back, len), (0, 1, 4));
+
         // SAFETY: a descriptor this test opened and no longer uses.
         unsafe { libc::close(fd) };
     }
