@@ -57,6 +57,23 @@ fn multiblock() -> bool {
     *ON
 }
 
+/// How many bytes past its entry a region read out of live memory is decoded from.
+///
+/// Not a bound the walk proves - forward branches chain - but several times what the
+/// instruction cap and the forward limit allow between them, so a region cut short
+/// by it is one that would have been cut by the cap anyway. It only shortens the
+/// region: the walk treats the window's end as the end of the mapping.
+pub fn max_extent() -> u64 {
+    (max_instructions() as u64 * MAX_INSTRUCTION_LEN + forward_limit()) * 4
+}
+
+/// How far past a region's end its walk can have looked: one branch's reach and one
+/// instruction. A copy of live memory that extends this far past the region holds
+/// everything that decided it.
+pub fn lookahead() -> u64 {
+    forward_limit() + MAX_INSTRUCTION_LEN
+}
+
 /// How far forward a branch may point and still be followed, in bytes.
 /// [`MAX_FORWARD_BRANCH_DIST`] unless `ROSEMARY_REGION_FORWARD` says otherwise.
 fn forward_limit() -> u64 {

@@ -353,7 +353,8 @@ impl ThreadState {
 
 /// One thread's window onto the code cache, and the two tables lifted code reads.
 ///
-/// Never invalidated, for the reason the cache itself is never invalidated.
+/// Invalidated only by a write to generated code, which the owning thread learns of
+/// from [`crate::smc`]'s log before its next lookup. See [`CodeWindow::catch_up`].
 pub(crate) struct CodeWindow {
     slots: RefCell<Box<[Option<(u64, std::sync::Arc<crate::cache::Translation>)>]>>,
     /// The two tables lifted code reads: the rows a probe hashes into, and the
@@ -366,6 +367,8 @@ pub(crate) struct CodeWindow {
     links: UnsafeCell<ThreadLinks>,
     /// The geometry `slot` uses, copied out of [`link_config`] once.
     config: BlockLinkConfig,
+    /// How much of [`crate::smc`]'s retirement log this window has applied.
+    seen: Cell<usize>,
 }
 
 /// How many PCs one thread remembers, unless [`WINDOW_ENV`] says otherwise. A power
@@ -418,6 +421,8 @@ impl CodeWindow {
             slots: RefCell::new(vec![None; rows].into_boxed_slice()),
             links: UnsafeCell::new(ThreadLinks::new(config, crate::jit::call_return_stack())),
             config,
+            // Nothing retired before this thread existed can be in its tables.
+            seen: Cell::new(crate::smc::logged()),
         }
     }
 
@@ -447,6 +452,31 @@ impl CodeWindow {
     pub(crate) fn attach(&self, ctx: &mut RegisterContext) {
         // SAFETY: as `link_table`.
         unsafe { (*self.links.get()).attach(ctx) };
+    }
+
+    /// Drop every slot and row naming an address a write to guest code retired
+    /// since this window last looked. One load when nothing was.
+    #[inline(always)]
+    pub(crate) fn catch_up(&self) {
+        if let Some((retired, cursor)) = crate::smc::retracted_since(self.seen.get()) {
+            self.retract(&retired);
+            self.seen.set(cursor);
+        }
+    }
+
+    #[cold]
+    fn retract(&self, retired: &[u64]) {
+        if let Ok(mut slots) = self.slots.try_borrow_mut() {
+            for &pc in retired {
+                let slot = &mut slots[self.config.slot(pc)];
+                if slot.as_ref().is_some_and(|(at, _)| *at == pc) {
+                    *slot = None;
+                }
+            }
+        }
+        // SAFETY: as `put` - the only writer, on the thread that owns this window,
+        // in the run loop rather than inside a region.
+        unsafe { (*self.links.get()).retract_all(retired) };
     }
 
     pub(crate) fn relink(&self, pc: u64, translation: &std::sync::Arc<crate::cache::Translation>) {

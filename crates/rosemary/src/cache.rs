@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -107,7 +108,9 @@ impl Table {
             match slot.pc.load(Ordering::Acquire) {
                 EMPTY => return None,
                 seen if seen == pc => {
-                    return Some(slot.translation.load(Ordering::Acquire).cast_const());
+                    // Null once retracted; see [`EntryIndex::retract`].
+                    let t = slot.translation.load(Ordering::Acquire);
+                    return (!t.is_null()).then_some(t.cast_const());
                 }
                 _ => at = (at + 1) & self.mask,
             }
@@ -176,6 +179,26 @@ impl EntryIndex {
         self.live.fetch_add(added, Ordering::Relaxed);
     }
 
+    /// Forget `pc`, which a write to guest code retired. The slot keeps its address,
+    /// since an open-addressed probe cannot have holes punched in it; a null pointer
+    /// reads as a miss, and a re-lift fills it again. Writer side only.
+    fn retract(&self, pc: u64) {
+        let table = self.table();
+        let mut at = mix(pc) & table.mask;
+        loop {
+            let slot = &table.slots[at as usize];
+            match slot.pc.load(Ordering::Relaxed) {
+                EMPTY => return,
+                seen if seen == pc => {
+                    slot.translation
+                        .store(std::ptr::null_mut(), Ordering::Release);
+                    return;
+                }
+                _ => at = (at + 1) & table.mask,
+            }
+        }
+    }
+
     /// Keep the table under half full, so a probe of a missing address always reaches
     /// an empty slot rather than running the whole array.
     fn grow_for(&self, extra: usize) {
@@ -185,8 +208,9 @@ impl EntryIndex {
             return;
         }
         let bigger = Table::empty(wanted * 4);
-        // Rehashed out of the old table rather than rebuilt from the regions: nothing
-        // is ever removed from either, so the old table is exactly the set to keep.
+        // Rehashed out of the old table rather than rebuilt from the regions: an
+        // address is never removed from it, only nulled, so the old table is exactly
+        // the set to keep.
         for slot in &table.slots {
             let pc = slot.pc.load(Ordering::Relaxed);
             if pc != EMPTY {
@@ -204,7 +228,8 @@ impl EntryIndex {
 /// Two maps of the same thing, on purpose:
 ///
 /// - [`microlift::runtime::CodeCache`] is the authority. It owns the translations, it
-///   owns the page index invalidation would sweep, and - the reason this crate stopped
+///   owns the page index an invalidation sweeps (a write to generated code; see
+///   [`crate::smc`]), and - the reason this crate stopped
 ///   keeping its own map - it owns the **link cells**. Inserting a translation there is
 ///   what fills in the cells of every region that had been branching to it and the
 ///   cells of its own that name something already compiled, in both directions and
@@ -246,7 +271,16 @@ struct Published {
     /// So nothing is unmapped for the life of the process. That was already true before
     /// the switch; what is new is that it is now the *only* thing keeping it true.
     retained: Vec<Arc<Translation>>,
+    /// The bytes each translation of guest-generated code was lifted from, by host
+    /// page: what a drain compares a written page against. See [`crate::smc`].
+    snapshots: HashMap<u64, Vec<(Arc<Translation>, Arc<crate::smc::Snapshot>)>>,
 }
+
+/// How many times a lift of generated code is retried when its bytes change before
+/// it can be published. Past it the translation is published anyway and its pages
+/// queued, so it runs at most until the next drain retires it: a write racing an
+/// execution on another thread may be seen either side of it.
+const STALE_RETRIES: usize = 4;
 
 // SAFETY: the one thing keeping a cache off a second thread is the raw pointer
 // inside `LifterConfig`'s `DynamicSymbol`s - the *host address* a fast import
@@ -265,6 +299,7 @@ impl CodeCache {
             published: RwLock::new(Published {
                 cache: microlift::runtime::CodeCache::new(),
                 retained: Vec::new(),
+                snapshots: HashMap::new(),
             }),
             index: EntryIndex::new(),
             inserts: AtomicU64::new(0),
@@ -331,7 +366,23 @@ impl CodeCache {
         if let Some(hit) = self.lookup(pc) {
             return Ok(hit);
         }
+        let mut attempt = 0;
+        loop {
+            match self.lift_and_publish(program, pc, attempt == STALE_RETRIES)? {
+                Some(translation) => return Ok(translation),
+                None => attempt += 1,
+            }
+        }
+    }
 
+    /// One lift of `pc`, published - or `None` when the guest rewrote the bytes it
+    /// was made from before it could be, and `last` is not set.
+    fn lift_and_publish<M: Regions>(
+        &self,
+        program: &Program<M>,
+        pc: u64,
+        last: bool,
+    ) -> Result<Option<Arc<Translation>>, VmError> {
         let selecting = crate::stats::enabled().then(std::time::Instant::now);
         // A region always begins at the address it was made for, so its cache
         // key is `pc` and two entry points into one function are two keys.
@@ -432,9 +483,30 @@ impl CodeCache {
              it was lifted for"
         );
 
+        let generated = crate::shims::vmmap::contains(start);
+
         // Two threads that missed on the same address both compiled it. The loser is
         // displaced from microlift's map but not dropped - see [`Published::retained`].
         let mut published = self.write();
+        let snapshot = match generated {
+            false => None,
+            true => {
+                let snapshot = snapshot_of(&translation, start, &bytes);
+                // Guarded, then compared: a store since the copy the lift was made
+                // from is either seen here or faults and is seen by a drain, which
+                // cannot run before this lock is let go.
+                crate::smc::guard(&snapshot.spans());
+                if !snapshot.changed().is_empty() {
+                    crate::stats::record_stale_lift();
+                    if !last {
+                        published.retained.push(Arc::new(translation));
+                        return Ok(None);
+                    }
+                    crate::smc::requeue(&snapshot.spans());
+                }
+                Some(snapshot)
+            }
+        };
         // The one call that matters: as well as making the translation findable, this
         // fills in every link cell whose target is already compiled, and every cell
         // *elsewhere* that has been waiting for one of these resume points.
@@ -444,7 +516,61 @@ impl CodeCache {
         self.inserts.fetch_add(1, Ordering::Release);
         self.index
             .publish(&translation.resume_points, Arc::as_ptr(&translation));
-        Ok(translation)
+        if let Some(snapshot) = snapshot {
+            let snapshot = Arc::new(snapshot);
+            let mut pages: Vec<u64> = snapshot.pages().collect();
+            pages.dedup();
+            for page in pages {
+                published
+                    .snapshots
+                    .entry(page)
+                    .or_default()
+                    .push((Arc::clone(&translation), Arc::clone(&snapshot)));
+            }
+        }
+        Ok(Some(translation))
+    }
+
+    /// Retire every translation whose guest bytes a write has changed since it was
+    /// lifted. Called by the run loop before it looks anything up, whenever
+    /// [`crate::smc::dirty`] says a guarded page was written.
+    ///
+    /// Retired translations are unpublished here and in [`EntryIndex`]; each thread
+    /// drops its own rows when it replays the log [`crate::smc::retire`] appends to.
+    /// None is freed - see [`Published::retained`].
+    pub fn drain_writes(&self) {
+        let mut published = self.write();
+        let published = &mut *published;
+        let mut retired = Vec::new();
+        for page in crate::smc::take_pending() {
+            let start = page.start();
+            let Some(snaps) = published.snapshots.get_mut(&start) else {
+                continue;
+            };
+            page.guard();
+            let changed: Vec<(u64, u64)> = snaps.iter().flat_map(|(_, s)| s.changed()).collect();
+            for (at, len) in changed {
+                for pc in published.cache.invalidate_range(at, len) {
+                    self.index.retract(pc);
+                    retired.push(pc);
+                }
+            }
+            // A snapshot is kept while its translation still answers for the address
+            // it was published under.
+            let cache = &published.cache;
+            snaps.retain(|(translation, s)| {
+                cache
+                    .peek(s.entry)
+                    .is_some_and(|t| Arc::ptr_eq(t, translation))
+            });
+            if snaps.is_empty() {
+                published.snapshots.remove(&start);
+            }
+        }
+        if !retired.is_empty() {
+            crate::stats::record_retired(retired.len());
+            crate::smc::retire(&retired);
+        }
     }
 
     /// An existing translation covering `pc`, if there is one.
@@ -454,6 +580,11 @@ impl CodeCache {
     /// code, and the import lookups are the more expensive question. See
     /// `Vm::run_loop`.
     pub(crate) fn lookup(&self, pc: u64) -> Option<Arc<Translation>> {
+        // Not before: a translation that is still in the index here may be one a
+        // write has already made wrong.
+        if crate::smc::dirty() {
+            self.drain_writes();
+        }
         if let Some(hit) = self.index.get(pc) {
             // SAFETY: the pointer was taken from an `Arc` this cache put in
             // `retained`, which never gives one up. So the strong count is at least
@@ -468,6 +599,36 @@ impl CodeCache {
         // publish. Counted by microlift as a host dispatch, which it is - the index
         // hits above are the ones that never became one.
         self.read().cache.lookup(pc)
+    }
+}
+
+/// What a translation of generated code was made from: the region's own bytes, as
+/// lifted, and any data it read outside them, as they are now.
+fn snapshot_of(translation: &Translation, start: u64, bytes: &[u8]) -> crate::smc::Snapshot {
+    let end = start + bytes.len() as u64;
+    let mut ranges: Vec<(u64, Box<[u8]>)> = vec![(start, bytes.into())];
+    for dep in &translation.data_dependencies {
+        if dep.start >= start && dep.end <= end {
+            continue;
+        }
+        if !crate::smc::tracked(dep.start, dep.end - dep.start) {
+            continue;
+        }
+        // FIXME (ACCURACY): read after the lift rather than by it, so a store to a
+        // jump table between the two is missed. Every arena this has met keeps its
+        // tables inside the region.
+        // SAFETY: tracked arena memory, which is never unmapped.
+        let live = unsafe {
+            std::slice::from_raw_parts(
+                dep.start as usize as *const u8,
+                (dep.end - dep.start) as usize,
+            )
+        };
+        ranges.push((dep.start, live.into()));
+    }
+    crate::smc::Snapshot {
+        entry: start,
+        ranges,
     }
 }
 

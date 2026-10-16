@@ -2300,3 +2300,76 @@ pub mod steam {
         (found as *mut std::ffi::c_void, code)
     }
 }
+
+/// A JIT's call-site patch, as Mono makes one: code emitted into a `MAP_JIT`
+/// arena calls one stub, runs, and is then rewritten in place to call another -
+/// once by a store from guest code and once by a host `memcpy` - with a new
+/// function emitted beside it on the same page in between.
+pub const PATCHED_CALL_C: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+
+typedef int (*fn)(void);
+
+static void emit_ret(uint8_t *at, int value) {
+    at[0] = 0xb8; /* mov eax, imm32 */
+    memcpy(at + 1, &value, 4);
+    at[5] = 0xc3; /* ret */
+}
+
+static int32_t rel(uint8_t *site, uint8_t *target) {
+    return (int32_t)(target - (site + 5));
+}
+
+/* `volatile` so the store is a store the lifted code makes, not one folded
+   into a memcpy the compiler chose. */
+static void patch(uint8_t *site, uint8_t *target) {
+    volatile int32_t *imm = (volatile int32_t *)(site + 1);
+    *imm = rel(site, target);
+}
+
+int main(void) {
+    uint8_t *code = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE | PROT_EXEC,
+                         MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (code == MAP_FAILED) {
+        perror("mmap");
+        return 1;
+    }
+    uint8_t *caller = code, *a = code + 0x100, *b = code + 0x200, *c = code + 0x300;
+    emit_ret(a, 1);
+    emit_ret(b, 2);
+    caller[0] = 0xe8; /* call rel32 */
+    int32_t r = rel(caller, a);
+    memcpy(caller + 1, &r, 4);
+    caller[5] = 0xc3;
+
+    fn call = (fn)caller;
+    int before = 0;
+    for (int i = 0; i < 3; i++) before += call();
+
+    /* New code beside the old, on the same page: must not disturb it. */
+    emit_ret(c, 3);
+    int beside = call() + ((fn)c)();
+
+    patch(caller, b);
+    int after = 0;
+    for (int i = 0; i < 3; i++) after += call();
+
+    r = rel(caller, c);
+    memcpy(caller + 1, &r, 4);
+    int again = call();
+
+    printf("before %d beside %d after %d again %d\n", before, beside, after, again);
+    return 0;
+}
+"#;
+
+/// Build [`PATCHED_CALL_C`], or `None` if this host cannot.
+pub fn patched_call_fixture() -> Option<String> {
+    static BUILT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| build_x86_64("patched_call", PATCHED_CALL_C, &["-O1"]))
+        .clone()
+}

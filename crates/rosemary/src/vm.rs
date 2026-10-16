@@ -886,6 +886,14 @@ impl Vm {
                 }
             }
 
+            // A write to generated code retires what was lifted from it, here and
+            // in every thread's tables, before anything is looked up. See
+            // [`crate::smc`].
+            if crate::smc::dirty() {
+                self.cache.drain_writes();
+            }
+            state.code().catch_up();
+
             let mut missed = false;
             let translation = match state.code().get(pc) {
                 Some(hit) => {

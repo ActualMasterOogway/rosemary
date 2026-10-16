@@ -772,10 +772,39 @@ pub fn observe(darwin: i32, on: bool) -> Result<(), c_int> {
 type Handler1 = extern "C" fn(c_int);
 type Handler3 = extern "C" fn(c_int, *mut Siginfo, *mut Ucontext);
 
+/// A host fault the runtime resolves itself, asked before any guest handler sees
+/// the signal: a store to a page the code cache write-protected. Zero when unset.
+static FAULT_FILTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Have [`deliver`] ask `filter` about every `SIGSEGV` and `SIGBUS` first, and
+/// return without delivering when it answers true. `filter` must be
+/// async-signal-safe.
+pub fn set_fault_filter(filter: fn(c_int, *mut libc::siginfo_t) -> bool) {
+    FAULT_FILTER.store(filter as usize, Ordering::Release);
+}
+
+fn filtered(host: c_int, info: *mut libc::siginfo_t) -> bool {
+    if host != libc::SIGSEGV && host != libc::SIGBUS {
+        return false;
+    }
+    type Filter = fn(c_int, *mut libc::siginfo_t) -> bool;
+    match FAULT_FILTER.load(Ordering::Acquire) {
+        0 => false,
+        f => {
+            // SAFETY: only ever stored from a `Filter` by `set_fault_filter`.
+            let filter: Filter = unsafe { core::mem::transmute::<usize, Filter>(f) };
+            filter(host, info)
+        }
+    }
+}
+
 /// What the kernel enters for every guest handler: the signal number, and for
 /// an `SA_SIGINFO` handler both structures, rebuilt in Darwin's numbering and
 /// layout. Async-signal-safe: no allocation, no locks.
 extern "C" fn deliver(host: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
+    if filtered(host, info) {
+        return;
+    }
     let Some(darwin) = signal_from_host(host) else {
         return;
     };

@@ -327,6 +327,7 @@ pub fn install() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
+    darwin::signal::set_fault_filter(guarded_write_filter);
     keep_the_fault_signals();
     // `SIGABRT` beside the two faults, because the allocator is the third way a
     // program of this size dies and the only one that used to leave no report at
@@ -554,8 +555,34 @@ fn salvage() {
     out.flush();
 }
 
+/// Whether a `SIGSEGV`/`SIGBUS` is a store to a guarded arena page, now writable.
+/// Async-signal-safe.
+fn is_guarded_write(signal: i32, info: *mut libc::siginfo_t) -> bool {
+    if signal != libc::SIGSEGV && signal != libc::SIGBUS {
+        return false;
+    }
+    // SAFETY: the kernel's own `siginfo_t`, live for the handler.
+    let Some(info) = (unsafe { info.as_ref() }) else {
+        return false;
+    };
+    // SAFETY: as above; `si_addr` is defined for both signals.
+    crate::smc::on_fault(unsafe { darwin::signal::fault_address(info) })
+}
+
+/// The same question for [`darwin::signal`]'s handler, which displaces this one
+/// when the guest installs a fault handler of its own.
+pub(crate) fn guarded_write_filter(signal: i32, info: *mut libc::siginfo_t) -> bool {
+    is_guarded_write(signal, info)
+}
+
 /// The handler. Prints, restores the previous disposition, and returns.
 extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    // A store to a page the code cache guarded is not a crash: unprotect, note it,
+    // and let the store retry. First, and before any lock, since the store may be a
+    // host `memcpy` as easily as lifted code. See [`crate::smc`].
+    if is_guarded_write(signal, info) {
+        return;
+    }
     // A fault *inside* this handler would recurse until the alternate stack ran
     // out, which would replace one unexplained crash with another.
     static REPORTING: AtomicBool = AtomicBool::new(false);

@@ -205,6 +205,7 @@ fn mmap(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) ->
     // The guest said it means to execute these bytes; see [`ARENAS`].
     if prot & libc::PROT_EXEC != 0 && p != libc::MAP_FAILED {
         arenas::push(p as usize as u64, len as u64);
+        crate::smc::track(p as usize as u64, len as u64, prot);
     }
 
     if tracing() {
@@ -231,6 +232,11 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
 
     if prot & libc::PROT_EXEC != 0 && rc == 0 {
         arenas::push(addr as u64, len as u64);
+    }
+    // Any protection, not only an executable one: whatever guard the code cache
+    // held on these pages was just replaced. See [`crate::smc`].
+    if rc == 0 && contains(addr as u64) {
+        crate::smc::track(addr as u64, len as u64, prot);
     }
 
     if tracing() {

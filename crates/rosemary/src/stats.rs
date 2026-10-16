@@ -51,7 +51,7 @@ macro_rules! counters {
 counters! {
     REGIONS, INSTRUCTIONS, BYTES,
     SELECT_NS, LIFT_NS, COMPILE_NS,
-    REFUSED, TAIL_EXITS,
+    REFUSED, TAIL_EXITS, STALE_LIFTS, RETIRED,
     ENTRIES, WINDOW_MISSES, TAIL_IMPORTS, LINKED,
     DISPATCHES, DISPATCH_HITS, DISPATCH_EVICTIONS,
     PUBLISHES, PUBLISHED_ROWS, RELINKS,
@@ -286,6 +286,16 @@ pub fn record_refused() {
     REFUSED.fetch_add(1, Relaxed);
 }
 
+/// A lift of generated code whose bytes changed before it could be published.
+pub fn record_stale_lift() {
+    STALE_LIFTS.fetch_add(1, Relaxed);
+}
+
+/// Addresses unpublished because a write changed the code behind them.
+pub fn record_retired(n: usize) {
+    RETIRED.fetch_add(n as u64, Relaxed);
+}
+
 /// An exit taken because the translation could not serve the PC it was entered at -
 /// either the instruction there runs past the bytes it was given, or its dispatch was
 /// never offered that address.
@@ -436,9 +446,12 @@ pub fn report() {
         );
     }
     eprintln!(
-        "rosemary: stats  {} refused, {} tail exit(s)",
+        "rosemary: stats  {} refused, {} tail exit(s), {} address(es) retired by writes to code, \
+         {} stale lift(s)",
         REFUSED.load(Relaxed),
         TAIL_EXITS.load(Relaxed),
+        RETIRED.load(Relaxed),
+        STALE_LIFTS.load(Relaxed),
     );
     // The exit mix, which is the other half of "why is this slow" and the half
     // translation time cannot answer. Printed as a rate as well as a count.

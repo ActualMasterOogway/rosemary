@@ -1224,36 +1224,47 @@ fn slice_of(bytes: &[u8], base: u64, region: &crate::region::Region) -> Option<V
 /// The region to lift in order to execute `va`, when `va` is code the guest *wrote*
 /// rather than code it loaded.
 ///
-/// ## What is different about an arena
-///
-/// Only one thing, and it is the reason this function exists rather than being a call
-/// site of the image path:
-///
-/// ## The bytes are copied, deliberately
+/// ## The bytes are copied first, deliberately
 ///
 /// The arena is live guest memory, and the guest's own JIT is still writing to it -
-/// possibly on another thread.
-///
-/// ## Scope
-///
-/// The code cache never invalidates, so a guest that frees a method and emits a
-/// different one at the same address is served the first translation.
+/// possibly on another thread. The region is decoded from the copy and the code cut
+/// out of the same copy, so the two cannot disagree, and the copy is what
+/// [`crate::smc`] later compares the arena against: a write after it either faults on
+/// a guarded page or is caught when the translation is published.
 fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
     let (base, len) = crate::shims::vmmap::arena_at(va)?;
-    let offset = usize::try_from(va - base).ok()?;
-    let len = usize::try_from(len).ok()?;
+    // From the guest page `va` starts in, so the decoder's page rules see the same
+    // alignment they would in place, and only as far as the region turns out to
+    // need: a window the region stops short of is all of it, and one it runs into
+    // is doubled, up to everything a region starting at `va` can reach.
+    let from = (va & !(4096 - 1)).max(base);
+    let reach = va
+        .saturating_add(crate::region::max_extent())
+        .min(base + len);
+    let slack = crate::region::lookahead();
+    let mut to = va.saturating_add(2 * slack).min(reach);
+    let (region, bytes) = loop {
+        let window = usize::try_from(to - from).ok()?;
+        // SAFETY: `base` came from a successful `mmap` this runtime made on the
+        // guest's behalf and never unmapped - see [`crate::shims::vmmap`], where
+        // the arena is recorded - so the whole range is mapped and readable. A torn
+        // read produces an instruction stream that fails to decode or a snapshot
+        // that fails the check at publish, not a dangling reference.
+        let bytes: Vec<u8> =
+            unsafe { std::slice::from_raw_parts(from as usize as *const u8, window) }.to_vec();
+        let region = crate::region::region_for(&bytes, from, va, true)?;
+        // A branch's reach of room past the end means the window cut neither an
+        // instruction nor a target the walk would have followed.
+        if to == reach || region.range.end.saturating_add(slack) <= to {
+            break (region, bytes);
+        }
+        to = from.saturating_add((to - from) * 2).min(reach);
+    };
+    let window = bytes.len();
 
-    // SAFETY: `base` came from a successful `mmap` this runtime made on the
-    // guest's behalf and never unmapped - see [`crate::shims::vmmap`], where the
-    // arena is recorded - so the whole range is mapped and readable. The guest
-    // may be writing into it concurrently, which is why the bytes are copied
-    // here rather than borrowed: a torn read produces an instruction stream that
-    // fails to decode, not a dangling reference.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(base as usize as *const u8, len) };
-
-    let region = crate::region::region_for(bytes, base, va, true)?;
     if crate::shims::vmmap::tracing() {
-        let head = &bytes[offset..(offset + 64).min(len)];
+        let offset = usize::try_from(va - from).ok()?;
+        let head = &bytes[offset..(offset + 64).min(window)];
         eprintln!(
             "rosemary: lift generated {va:#x} in arena {base:#x}+{len:#x}, region {:#x}..{:#x}, {} starts, bytes {}",
             region.range.start,
@@ -1265,7 +1276,7 @@ fn lift_generated(va: u64) -> Option<(crate::region::Region, Vec<u8>)> {
                 .join(" ")
         );
     }
-    let code = slice_of(bytes, base, &region)?;
+    let code = slice_of(&bytes, from, &region)?;
     Some((region, code))
 }
 

@@ -39,6 +39,7 @@ pub mod region;
 pub mod retstub;
 pub mod shims;
 pub mod signal;
+pub mod smc;
 pub mod stack;
 pub mod startup;
 pub mod stats;
