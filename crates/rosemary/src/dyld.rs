@@ -858,7 +858,9 @@ fn open_with<S: MachSpec + 'static>(
     let object = MachObject::parse_any(bytes, spec)
         .map_err(|e| format!("{resolved}: not a loadable Mach-O for this backend: {e}"))?;
 
-    let mut memory = MmapSpace::new();
+    // The emulated backend keeps anonymous images, which it recompiles rather
+    // than runs.
+    let mut memory = MmapSpace::new().file_backed(spec.natively_executable());
     // Vendored libc++ ahead of the filesystem; see [`crate::cxxlib`].
     let mut source = crate::cxxlib::source(flavor);
     let hosts = HostProviders::new();

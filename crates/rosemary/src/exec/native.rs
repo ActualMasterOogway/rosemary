@@ -154,7 +154,7 @@ impl Native {
             reason: e.to_string(),
         })?;
 
-        let mut memory = MmapSpace::new();
+        let mut memory = MmapSpace::new().file_backed(true);
         let mut host = NativeDylibProvider::system();
         host.allow_everything();
         darwin::divergent::deny_in(&mut host);

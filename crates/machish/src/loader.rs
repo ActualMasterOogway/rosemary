@@ -5,9 +5,9 @@ use crate::error::{Error, Result};
 use crate::exports::ExportTable;
 use crate::extensions::ExtensionSet;
 use crate::fixups::{Binder, StubMap, decode_image};
-use crate::image::{DependencyKind, MachObject, map_segments, protect_segments};
+use crate::image::{DependencyKind, MachObject, map_segments_from, protect_segments};
 use crate::install_name::{PathContext, dirname, expand};
-use crate::memory::{AddressSpace, ProtectionPolicy};
+use crate::memory::{AddressSpace, FileBacking, ProtectionPolicy};
 use crate::namespace::{DylibRequest, DylibSource, Namespace, NamespaceImage, NoDylibSource};
 use crate::report::{ImageReport, LinkReport, SegmentReport};
 use crate::resolve::SymbolProvider;
@@ -64,6 +64,9 @@ pub struct Loader<S: MachSpec> {
 struct Collected {
     path: String,
     bytes: Vec<u8>,
+    /// Where `bytes` start in the file at `path`, assuming that is what they
+    /// were read from; the address space checks before relying on it.
+    file_offset: u64,
     /// Install names recorded by its *dependents*, which are how their bind
     /// ordinals name it and are not always the same as its own `LC_ID_DYLIB`.
     requested_as: Vec<String>,
@@ -194,6 +197,7 @@ impl<S: MachSpec + 'static> Loader<S> {
             // `parse_any` may have narrowed a fat file; store the thin slice so
             // every later phase sees the same bytes at the same offsets.
             bytes: root_obj.bytes().to_vec(),
+            file_offset: slice_offset(root, root_obj.bytes()),
             requested_as: Vec::new(),
             rpaths: root_obj.rpaths().map(|r| r.to_string()).collect(),
             implied: self.inserted.clone(),
@@ -284,6 +288,7 @@ impl<S: MachSpec + 'static> Loader<S> {
                 images.push(Collected {
                     path: fetched.path,
                     bytes: obj.bytes().to_vec(),
+                    file_offset: slice_offset(&fetched.bytes, obj.bytes()),
                     requested_as: alloc::vec![install_name],
                     rpaths: inherited,
                     implied: fetched.implied,
@@ -302,7 +307,11 @@ impl<S: MachSpec + 'static> Loader<S> {
         let mut out = Vec::with_capacity(collected.len());
         for c in collected {
             let obj = MachObject::parse(&c.bytes, self.spec)?;
-            let mapped = map_segments(&obj, mem)?;
+            let file = FileBacking {
+                path: &c.path,
+                offset: c.file_offset,
+            };
+            let mapped = map_segments_from(&obj, mem, Some(file))?;
             let exports = ExportTable::parse(&obj)?;
             out.push(Mapped {
                 obj,
@@ -429,6 +438,11 @@ impl<S: MachSpec + 'static> Loader<S> {
         }
         Ok(report)
     }
+}
+
+/// Where `slice`, which `parse_any` narrowed out of `whole`, starts in it.
+fn slice_offset(whole: &[u8], slice: &[u8]) -> u64 {
+    (slice.as_ptr() as usize).wrapping_sub(whole.as_ptr() as usize) as u64
 }
 
 pub fn loader_directory(image_path: &str) -> &str {

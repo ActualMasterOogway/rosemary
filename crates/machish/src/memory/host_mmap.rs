@@ -48,6 +48,8 @@ pub struct MmapSpace {
     want_exec: bool,
     /// Whether the live mappings are `MAP_JIT` (implies `want_exec` on macOS).
     jit: bool,
+    /// Whether [`map_file`](AddressSpace::map_file) maps rather than declines.
+    file_backed: bool,
 }
 
 impl MmapSpace {
@@ -56,6 +58,7 @@ impl MmapSpace {
             regions: Vec::new(),
             want_exec: false,
             jit: false,
+            file_backed: false,
         }
     }
 
@@ -68,6 +71,38 @@ impl MmapSpace {
     pub fn executable(mut self, yes: bool) -> Self {
         self.want_exec = yes;
         self
+    }
+
+    /// Map image segments from their files instead of copying them in, so
+    /// the page cache shares them across processes and `/proc/<pid>/maps`
+    /// names them.
+    ///
+    /// Off by default: a recompiled guest's image is only ever data to the
+    /// recompiler, and it keeps the anonymous mappings it was written against.
+    pub fn file_backed(mut self, yes: bool) -> Self {
+        self.file_backed = yes;
+        self
+    }
+
+    /// Replace `[dst, dst+len)` with fresh anonymous memory, as `reserve` left it.
+    fn remap_anonymous(&self, dst: *mut u8, len: usize) -> Result<()> {
+        let (prot, flags) = self.mmap_flags();
+        // SAFETY: `dst..dst+len` lies inside a region this space owns, so
+        // MAP_FIXED replaces only our own pages.
+        let raw = unsafe {
+            libc::mmap(
+                dst as *mut c_void,
+                len,
+                prot,
+                flags | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if raw == libc::MAP_FAILED {
+            return Err(Error::Memory("mmap failed"));
+        }
+        Ok(())
     }
 
     fn in_bounds(&self, addr: Word, len: usize) -> Result<*mut u8> {
@@ -258,6 +293,61 @@ impl AddressSpace for MmapSpace {
         Ok(())
     }
 
+    fn map_file(&mut self, addr: Word, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+        use std::os::fd::AsRawFd;
+
+        // macOS checks executable file pages against a code signature only
+        // dyld registers, and MAP_JIT memory cannot be file-backed at all.
+        if !self.file_backed || self.jit || cfg!(target_os = "macos") {
+            return Ok(0);
+        }
+        // Whole pages only, so a mapping never reaches into a page another
+        // segment or the zero-fill shares; the caller copies the remainder.
+        let page = host_page_size();
+        let len = data.len() & !(page as usize - 1);
+        let Ok(off) = libc::off_t::try_from(offset) else {
+            return Ok(0);
+        };
+        if len == 0 || !addr.is_multiple_of(page) || !offset.is_multiple_of(page) {
+            return Ok(0);
+        }
+        let dst = self.in_bounds(addr, len)?;
+        let Ok(file) = std::fs::File::open(path) else {
+            return Ok(0);
+        };
+        // Past the end of the file a mapping raises SIGBUS instead of reading.
+        match file.metadata() {
+            Ok(m) if m.is_file() && m.len() >= offset.saturating_add(len as u64) => {}
+            _ => return Ok(0),
+        }
+
+        let (prot, _) = self.mmap_flags();
+        // SAFETY: MAP_FIXED over a range inside a region this space owns,
+        // checked by `in_bounds`; private, so writes never reach the file.
+        let raw = unsafe {
+            libc::mmap(
+                dst as *mut c_void,
+                len,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                file.as_raw_fd(),
+                off,
+            )
+        };
+        if raw == libc::MAP_FAILED {
+            // A failed MAP_FIXED may already have unmapped the range.
+            self.remap_anonymous(dst, len)?;
+            return Ok(0);
+        }
+        // SAFETY: `dst..dst+len` was just mapped readable.
+        let mapped = unsafe { core::slice::from_raw_parts(dst as *const u8, len) };
+        if mapped != &data[..len] {
+            self.remap_anonymous(dst, len)?;
+            return Ok(0);
+        }
+        Ok(len)
+    }
+
     fn read(&self, addr: Word, out: &mut [u8]) -> Result<()> {
         let src = self.in_bounds(addr, out.len())?;
         // SAFETY: `src` is within the owned mapping, which is readable.
@@ -353,6 +443,8 @@ unsafe fn icache_flush(_p: *mut c_void, _len: usize) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned;
+    use alloc::{format, vec};
 
     #[test]
     fn reserve_anywhere_is_zeroed_and_aligned() {
@@ -489,6 +581,91 @@ mod tests {
         let mut buf = [0u8; 8];
         mem.read(b, &mut buf).unwrap();
         assert_eq!(buf, [0u8; 8], "the second reservation overlapped the first");
+    }
+
+    /// A file of `pages` host pages plus a partial one, each byte distinct
+    /// from its neighbours so a misplaced page cannot compare equal.
+    fn patterned_file(name: &str, pages: usize) -> (std::path::PathBuf, Vec<u8>) {
+        let page = host_page_size() as usize;
+        let data: Vec<u8> = (0..pages * page + 100).map(|i| (i % 251) as u8).collect();
+        let path = std::env::temp_dir().join(format!("machish-{name}-{}", std::process::id()));
+        std::fs::write(&path, &data).unwrap();
+        (path, data)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn maps_whole_pages_of_a_matching_file() {
+        let page = host_page_size() as usize;
+        let (path, data) = patterned_file("match", 3);
+        let mut mem = MmapSpace::new().file_backed(true);
+        let base = mem.reserve(4 * page, page, Placement::Anywhere).unwrap();
+
+        let mapped = mem
+            .map_file(base, path.to_str().unwrap(), 0, &data)
+            .unwrap();
+        assert_eq!(mapped, 3 * page, "only whole pages are mapped");
+        mem.write(base + mapped as Word, &data[mapped..]).unwrap();
+
+        let mut out = vec![0u8; data.len()];
+        mem.read(base, &mut out).unwrap();
+        assert_eq!(out, data);
+
+        // Private: a fixup-style write must not reach the file.
+        mem.write(base, &[0xee; 8]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+
+        #[cfg(target_os = "linux")]
+        {
+            let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+            let name = path.to_str().unwrap();
+            assert!(
+                maps.lines().any(|l| l.ends_with(name)),
+                "the mapping should name its file"
+            );
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn declines_bytes_the_file_does_not_hold() {
+        let page = host_page_size() as usize;
+        let (path, mut data) = patterned_file("mismatch", 2);
+        data[page + 1] ^= 0xff;
+        let mut mem = MmapSpace::new().file_backed(true);
+        let base = mem.reserve(4 * page, page, Placement::Anywhere).unwrap();
+
+        let mapped = mem
+            .map_file(base, path.to_str().unwrap(), 0, &data)
+            .unwrap();
+        assert_eq!(mapped, 0);
+        // The file's pages must not have been left behind.
+        let mut out = vec![0xffu8; 2 * page];
+        mem.read(base, &mut out).unwrap();
+        assert!(out.iter().all(|&b| b == 0));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn declines_unless_asked_or_misaligned() {
+        let page = host_page_size() as usize;
+        let (path, data) = patterned_file("decline", 2);
+        let path = path.to_str().unwrap().to_owned();
+
+        let mut plain = MmapSpace::new();
+        let base = plain.reserve(4 * page, page, Placement::Anywhere).unwrap();
+        assert_eq!(plain.map_file(base, &path, 0, &data).unwrap(), 0);
+
+        let mut mem = MmapSpace::new().file_backed(true);
+        let base = mem.reserve(4 * page, page, Placement::Anywhere).unwrap();
+        assert_eq!(mem.map_file(base + 1, &path, 0, &data[1..]).unwrap(), 0);
+        assert_eq!(mem.map_file(base, &path, 1, &data[1..]).unwrap(), 0);
+        assert_eq!(
+            mem.map_file(base, "/nonexistent/machish", 0, &data)
+                .unwrap(),
+            0
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

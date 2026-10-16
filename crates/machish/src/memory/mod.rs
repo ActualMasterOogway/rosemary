@@ -83,6 +83,14 @@ impl Prot {
     }
 }
 
+/// The file an image's bytes were read from, for spaces that can map it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FileBacking<'a> {
+    pub path: &'a str,
+    /// Where the image starts in the file: nonzero for a fat file's slice.
+    pub offset: u64,
+}
+
 /// Where an image must land in the address space.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
@@ -143,6 +151,19 @@ pub trait AddressSpace {
 
     /// Copy `data` into the space starting at absolute address `addr`.
     fn write(&mut self, addr: Word, data: &[u8]) -> Result<()>;
+
+    /// Map a leading part of `data` at `addr` from the file at `path`, where
+    /// `data` claims to be that file's bytes from `offset`, and return how many
+    /// bytes were mapped. The caller [`write`](Self::write)s the rest.
+    ///
+    /// A claim, not a promise: a source may hand over bytes it built itself
+    /// under a path that names something else, or the file may have changed
+    /// since it was read. A space that maps must check the mapped bytes match
+    /// `data` and map nothing when they do not. The default maps nothing.
+    fn map_file(&mut self, addr: Word, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+        let _ = (addr, path, offset, data);
+        Ok(0)
+    }
 
     /// Read `out.len()` bytes from absolute address `addr`.
     fn read(&self, addr: Word, out: &mut [u8]) -> Result<()>;

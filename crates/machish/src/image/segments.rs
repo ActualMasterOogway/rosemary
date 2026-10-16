@@ -3,7 +3,9 @@ use core::ops::Range;
 
 use crate::error::{Error, Result};
 use crate::image::MachObject;
-use crate::memory::{AddressSpace, Placement, Prot, ProtectionPolicy, align_down, align_up};
+use crate::memory::{
+    AddressSpace, FileBacking, Placement, Prot, ProtectionPolicy, align_down, align_up,
+};
 use crate::raw::{View, Word};
 use crate::spec::MachSpec;
 use crate::spec::constants::SEGMENT_COMMAND_64_SIZE;
@@ -151,6 +153,16 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
     obj: &MachObject<'_, S>,
     mem: &mut M,
 ) -> Result<MappedImage> {
+    map_segments_from(obj, mem, None)
+}
+
+/// [`map_segments`], letting `mem` map each segment from `file` rather than
+/// copy it, where the space supports that and the file still holds the bytes.
+pub fn map_segments_from<S: MachSpec, M: AddressSpace>(
+    obj: &MachObject<'_, S>,
+    mem: &mut M,
+    file: Option<FileBacking<'_>>,
+) -> Result<MappedImage> {
     let page = obj.spec().page_size();
     let preferred = obj.preferred_base()?;
 
@@ -189,7 +201,14 @@ pub fn map_segments<S: MachSpec, M: AddressSpace>(
         let src = bytes.get(range.clone()).ok_or(Error::Truncated {
             what: "segment contents",
         })?;
-        mem.write(seg.vmaddr.wrapping_add(slide), src)?;
+        let addr = seg.vmaddr.wrapping_add(slide);
+        let mapped = match file {
+            Some(f) => mem.map_file(addr, f.path, f.offset + range.start as u64, src)?,
+            None => 0,
+        };
+        if mapped < src.len() {
+            mem.write(addr + mapped as Word, &src[mapped..])?;
+        }
     }
 
     Ok(MappedImage {
