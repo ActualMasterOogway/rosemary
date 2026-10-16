@@ -77,7 +77,11 @@ fn requires_aqua(sdk: Option<u32>, key: Option<&foundation::plist::Value>) -> bo
         Some(other) => other
             .as_i64()
             .map(|value| value != 0)
-            .or_else(|| other.as_str().map(|text| matches!(text, "YES" | "true" | "1")))
+            .or_else(|| {
+                other
+                    .as_str()
+                    .map(|text| matches!(text, "YES" | "true" | "1"))
+            })
             .unwrap_or(false),
         None => false,
     };

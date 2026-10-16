@@ -238,7 +238,10 @@ fn show_selected(receiver: Id) {
 }
 
 fn index_of(receiver: Id, item: Id) -> Option<usize> {
-    read(receiver).items.iter().position(|i| *i == item as usize)
+    read(receiver)
+        .items
+        .iter()
+        .position(|i| *i == item as usize)
 }
 
 unsafe extern "C" fn is_flipped(_receiver: Id, _sel: Sel) -> u8 {
@@ -349,7 +352,11 @@ fn index_with_identifier(receiver: Id, identifier: Id) -> Option<usize> {
     })
 }
 
-unsafe extern "C" fn index_of_item_with_identifier(receiver: Id, _sel: Sel, identifier: Id) -> isize {
+unsafe extern "C" fn index_of_item_with_identifier(
+    receiver: Id,
+    _sel: Sel,
+    identifier: Id,
+) -> isize {
     index_with_identifier(receiver, identifier).map_or(isize::MAX, |at| at as isize)
 }
 
@@ -495,7 +502,12 @@ unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
     let left = (content.origin.x - 3.0) as f32;
     let right = (content.origin.x + content.size.width + 3.0) as f32;
     let bottom = (content.origin.y + content.size.height + 3.0) as f32;
-    let frame = chrome::Rect::new(left + 0.5, top + 0.5, right - left - 1.0, bottom - top - 1.0);
+    let frame = chrome::Rect::new(
+        left + 0.5,
+        top + 0.5,
+        right - left - 1.0,
+        bottom - top - 1.0,
+    );
     canvas.fill_rounded_rect(frame, 4.0, chrome::Color::rgba(0, 0, 0, 0.04));
     canvas.stroke_rounded_rect(frame, 4.0, 1.0, edge);
     if has_tabs {
@@ -524,7 +536,12 @@ unsafe extern "C" fn draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
                 }
                 if at > 0 {
                     canvas.fill_rect(
-                        chrome::Rect::new(x, STRIP_TOP as f32 + 1.0, 1.0, STRIP_HEIGHT as f32 - 2.0),
+                        chrome::Rect::new(
+                            x,
+                            STRIP_TOP as f32 + 1.0,
+                            1.0,
+                            STRIP_HEIGHT as f32 - 2.0,
+                        ),
                         edge,
                     );
                 }
@@ -589,7 +606,9 @@ pub(crate) fn set_archived(receiver: Id, items: Vec<Id>, selected: Option<usize>
     update(receiver, |t| {
         t.items = items.iter().map(|i| *i as usize).collect();
         t.kind = kind;
-        t.selected = selected.filter(|at| *at < count).or((count > 0).then_some(0));
+        t.selected = selected
+            .filter(|at| *at < count)
+            .or((count > 0).then_some(0));
     });
     show_selected(receiver);
 }

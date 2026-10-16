@@ -380,7 +380,8 @@ fn select_by_click(receiver: Id, row: isize) {
     const DID_CHANGE: &str = "NSTableViewSelectionDidChangeNotification";
     let changed = objc::sel::get("tableViewSelectionDidChange:");
     if responds(delegate, changed) {
-        let notification = foundation::notification::make(DID_CHANGE, receiver, std::ptr::null_mut());
+        let notification =
+            foundation::notification::make(DID_CHANGE, receiver, std::ptr::null_mut());
         // SAFETY: `void (id, SEL, NSNotification *)`.
         unsafe {
             let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
@@ -665,9 +666,10 @@ unsafe extern "C" fn header_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
         let column_state = column(*column_object as Id);
         let column_width = column_state.width as f32 + 3.0;
         // SAFETY: a string this column retained, or nil.
-        let title =
-            String::from_utf8_lossy(&unsafe { foundation::string::bytes(column_state.title as Id) })
-                .into_owned();
+        let title = String::from_utf8_lossy(&unsafe {
+            foundation::string::bytes(column_state.title as Id)
+        })
+        .into_owned();
         if let Some((font, size)) = &font {
             let size = (*size as f32).min(11.0);
             let line = font.truncate(&title, size, (column_width - 8.0).max(0.0));

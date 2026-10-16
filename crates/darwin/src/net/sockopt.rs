@@ -233,13 +233,21 @@ unsafe fn set_dontfrag(fd: i32, level: i32, value: *const c_void, len: u32) -> i
             (
                 libc::IPPROTO_IP,
                 libc::IP_MTU_DISCOVER,
-                if on { libc::IP_PMTUDISC_DO } else { libc::IP_PMTUDISC_DONT },
+                if on {
+                    libc::IP_PMTUDISC_DO
+                } else {
+                    libc::IP_PMTUDISC_DONT
+                },
             )
         } else {
             (
                 libc::IPPROTO_IPV6,
                 libc::IPV6_MTU_DISCOVER,
-                if on { libc::IPV6_PMTUDISC_DO } else { libc::IPV6_PMTUDISC_DONT },
+                if on {
+                    libc::IPV6_PMTUDISC_DO
+                } else {
+                    libc::IPV6_PMTUDISC_DONT
+                },
             )
         };
         // SAFETY: host_val is a stack-allocated c_int.

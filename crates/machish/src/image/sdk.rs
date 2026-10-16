@@ -2,9 +2,7 @@
 //! behaviour that changed between releases.
 
 use crate::raw::View;
-use crate::spec::constants::{
-    self as c, LOAD_COMMAND_SIZE, MACH_HEADER_64_SIZE,
-};
+use crate::spec::constants::{self as c, LOAD_COMMAND_SIZE, MACH_HEADER_64_SIZE};
 
 /// The SDK version a 64-bit image's load commands record, packed as
 /// `xxxx.yy.zz` in nibbles the way `dyld_get_program_sdk_version` answers it:
@@ -76,7 +74,10 @@ mod tests {
 
     #[test]
     fn reads_the_sdk_from_a_version_min_command() {
-        let bytes = image(&[(c::LC_UUID, &[0; 4]), (c::LC_VERSION_MIN_MACOSX, &[0x000A_0900, 0x000A_0D00])]);
+        let bytes = image(&[
+            (c::LC_UUID, &[0; 4]),
+            (c::LC_VERSION_MIN_MACOSX, &[0x000A_0900, 0x000A_0D00]),
+        ]);
         assert_eq!(sdk_version(&bytes), Some(0x000A_0D00));
     }
 

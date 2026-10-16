@@ -326,12 +326,7 @@ unsafe extern "C" fn cell_at(receiver: Id, _sel: Sel, row: isize, column: isize)
     cell_at_index(&matrix, index_of(&matrix, row, column))
 }
 
-unsafe extern "C" fn cell_frame_at(
-    receiver: Id,
-    _sel: Sel,
-    row: isize,
-    column: isize,
-) -> NSRect {
+unsafe extern "C" fn cell_frame_at(receiver: Id, _sel: Sel, row: isize, column: isize) -> NSRect {
     let matrix = read(receiver);
     let Ok(r) = usize::try_from(row) else {
         return NSRect::default();
@@ -539,7 +534,13 @@ unsafe extern "C" fn deselect_all_cells(receiver: Id, _sel: Sel) {
     select_index(receiver, None);
 }
 
-unsafe extern "C" fn set_state_at(receiver: Id, _sel: Sel, state: isize, row: isize, column: isize) {
+unsafe extern "C" fn set_state_at(
+    receiver: Id,
+    _sel: Sel,
+    state: isize,
+    row: isize,
+    column: isize,
+) {
     let matrix = read(receiver);
     let Some(at) = index_of(&matrix, row, column) else {
         return;
@@ -762,11 +763,7 @@ unsafe extern "C" fn size_to_cells(receiver: Id, _sel: Sel) {
             receiver,
             objc::sel::get("setFrameSize:"),
             NSSize {
-                width: span(
-                    matrix.columns,
-                    matrix.cell_size.width,
-                    matrix.spacing.width,
-                ),
+                width: span(matrix.columns, matrix.cell_size.width, matrix.spacing.width),
                 height: span(matrix.rows, matrix.cell_size.height, matrix.spacing.height),
             },
         );
@@ -823,7 +820,9 @@ unsafe extern "C" fn set_prototype(receiver: Id, _sel: Sel, cell: Id) {
         return;
     }
     objc::arc::retain(button);
-    let old = update(receiver, |m| std::mem::replace(&mut m.prototype, button as usize));
+    let old = update(receiver, |m| {
+        std::mem::replace(&mut m.prototype, button as usize)
+    });
     objc::arc::release(old as Id);
 }
 

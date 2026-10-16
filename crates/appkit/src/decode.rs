@@ -824,17 +824,19 @@ fn tab_view_item(builder: &mut dyn Builder, uid: Uid) -> Option<Id> {
 /// artwork by name, as an `NSButtonImageSource`, which is the look and the
 /// behaviour both.
 fn check_kind(builder: &dyn Builder, cell: Uid) -> Option<usize> {
-    ["NSNormalImage", "NSAlternateImage"].iter().find_map(|key| {
-        let source = builder.archive().field_object(cell, key)?;
-        if !builder.archive().is_kind_of(source, "NSButtonImageSource") {
-            return None;
-        }
-        match text(builder, source, "NSImageName")? {
-            "NSSwitch" => Some(crate::controls::button_type::SWITCH),
-            "NSRadioButton" => Some(crate::controls::button_type::RADIO),
-            _ => None,
-        }
-    })
+    ["NSNormalImage", "NSAlternateImage"]
+        .iter()
+        .find_map(|key| {
+            let source = builder.archive().field_object(cell, key)?;
+            if !builder.archive().is_kind_of(source, "NSButtonImageSource") {
+                return None;
+            }
+            match text(builder, source, "NSImageName")? {
+                "NSSwitch" => Some(crate::controls::button_type::SWITCH),
+                "NSRadioButton" => Some(crate::controls::button_type::RADIO),
+                _ => None,
+            }
+        })
 }
 
 /// `NSPopUpButton`: a view, its cell's menu, and which item is selected.
