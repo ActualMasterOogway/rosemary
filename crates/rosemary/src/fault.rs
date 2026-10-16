@@ -566,7 +566,12 @@ fn is_guarded_write(signal: i32, info: *mut libc::siginfo_t) -> bool {
         return false;
     };
     // SAFETY: as above; `si_addr` is defined for both signals.
-    crate::smc::on_fault(unsafe { darwin::signal::fault_address(info) })
+    if !crate::smc::on_fault(unsafe { darwin::signal::fault_address(info) }) {
+        return false;
+    }
+    // The write may have changed code this thread is about to link into.
+    crate::thread::break_links();
+    true
 }
 
 /// The same question for [`darwin::signal`]'s handler, which displaces this one

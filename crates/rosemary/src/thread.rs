@@ -157,6 +157,32 @@ pub fn each_key(mut f: impl FnMut(u32)) {
     }
 }
 
+/// Make this thread's live guest context stop linking, so the region running on it
+/// returns to the run loop at its next exit instead of following a row.
+///
+/// For a write to guest code: [`crate::smc`] only retires what the write made stale
+/// when the run loop drains it, and a chain of linked regions may never get there -
+/// a JIT that patches a call and then makes it keeps entering the old translation.
+/// The run loop attaches the table again on its next entry, after the drain.
+///
+/// Async-signal-safe: a thread-port read, a lock-free scan of [`TABLE`] and a store.
+pub(crate) fn break_links() {
+    let Some(thread) = by_key(key()) else {
+        return;
+    };
+    let at = thread.context.load(Ordering::Acquire);
+    if at == 0 {
+        return;
+    }
+    // SAFETY: non-zero is the innermost live context on *this* thread, published by
+    // the entry below this frame, so it is valid and nothing else is writing it. A
+    // null table is the documented way to end a link chain - the next probe declines.
+    unsafe {
+        std::ptr::addr_of_mut!((*(at as *mut RegisterContext)).link_table)
+            .write_volatile(std::ptr::null_mut());
+    }
+}
+
 /// Everything about executing guest code that belongs to one host thread.
 pub struct ThreadState {
     /// The half of this state other threads read. Held here as well so the
