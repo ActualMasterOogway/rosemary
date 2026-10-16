@@ -718,6 +718,7 @@ pub fn lifter_config_base() -> LifterConfig {
         outline_helpers: true,
         address_mode: AddressMode::Direct,
         atomic128,
+        total_store_order: crate::jit::total_store_order(),
         specialization,
         eliminate_dead_flags: crate::jit::eliminate_dead_flags(),
         resumption: VmResumptionPoints::ExitOnly,

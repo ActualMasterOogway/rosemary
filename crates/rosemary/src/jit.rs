@@ -15,6 +15,8 @@ use static_init::dynamic;
 pub const OPT_ENV: &str = "ROSEMARY_JIT_OPT";
 pub const VERIFY_ENV: &str = "ROSEMARY_JIT_VERIFY";
 pub const DEAD_FLAGS_ENV: &str = "ROSEMARY_DEAD_FLAGS";
+/// Whether guest memory accesses are fenced to keep x86 store order. See [`total_store_order`].
+pub const TSO_ENV: &str = "ROSEMARY_TSO";
 /// Turns [`block_linking`] off. Named for what setting it does, since the
 /// feature itself is on by default.
 pub const NO_BLOCK_LINK_ENV: &str = "ROSEMARY_NO_BLOCK_LINK";
@@ -294,6 +296,31 @@ pub fn verify() -> bool {
         },
     };
     *VERIFY
+}
+
+/// Whether guest memory accesses are fenced to keep x86's total store order.
+///
+/// On by default wherever the host is not x86: without it, lock-free guest code that
+/// publishes with plain stores (Unity's job queues, Mono's class setup) races on a
+/// weakly ordered host, which is how a loading screen ends up waiting on a job no
+/// thread holds.
+pub fn total_store_order() -> bool {
+    #[dynamic]
+    static ON: bool = {
+        let default = !cfg!(any(target_arch = "x86", target_arch = "x86_64"));
+        match std::env::var(TSO_ENV) {
+            Err(_) => default,
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => {
+                    eprintln!("rosemary: {TSO_ENV}={value:?} is not a boolean; using {default}");
+                    default
+                }
+            },
+        }
+    };
+    *ON
 }
 
 /// Whether microlift is asked to skip the IR for flag writes nothing reads.
