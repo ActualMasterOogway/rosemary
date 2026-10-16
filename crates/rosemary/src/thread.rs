@@ -391,36 +391,73 @@ pub(crate) struct CodeWindow {
     /// twice, and so that "which pointers a context owes a region" is stated in one
     /// place instead of here as well. See [`ThreadLinks`].
     links: UnsafeCell<ThreadLinks>,
-    /// The geometry `slot` uses, copied out of [`link_config`] once.
-    config: BlockLinkConfig,
     /// How much of [`crate::smc`]'s retirement log this window has applied.
     seen: Cell<usize>,
 }
 
-/// How many PCs one thread remembers, unless [`WINDOW_ENV`] says otherwise. A power
-/// of two, so the index is a mask.
+/// How many translations one thread's window remembers. A power of two, so the index
+/// is a mask.
+///
+/// Its own size rather than the link table's: the window is only asked on an exit, and
+/// each slot holds an `Arc`, so it cannot be demand-zero pages the way the rows are.
 const WINDOW: usize = 8192;
 
-pub const WINDOW_ENV: &str = "ROSEMARY_LINK_ROWS";
+/// How many link-table rows one thread has, unless [`ROWS_ENV`] says otherwise. A
+/// power of two, so the index is a mask.
+///
+/// Sized for Mono: Subnautica publishes 6.1 resume points per region over 5278 regions,
+/// about 32k rows, and its 8192-row table missed on 56% of entries. A row is 32 bytes,
+/// so this is 2 MiB of address space a thread, committed only where rows are written.
+const ROWS: usize = 65536;
+
+pub const ROWS_ENV: &str = "ROSEMARY_LINK_ROWS";
+
+/// How many rows of the link table a PC may occupy, unless [`WAYS_ENV`] says otherwise.
+///
+/// Mono's JIT code is dense in resume points (a far `call r11` every 13-20 bytes), and
+/// with fewer ways two such ranges that overlap modulo the table's span overflow their
+/// sets and evict each other on every transfer. `tools/unitybench sweep`, in entries
+/// per frame: ~21200 at 8192x1, ~3200 at 65536x1, ~540 at 65536x2, and at 65536x4 only
+/// the warm-up's ~70.
+const WAYS: u32 = 4;
+
+pub const WAYS_ENV: &str = "ROSEMARY_LINK_WAYS";
+
+/// How many ways this run uses.
+fn ways() -> u32 {
+    #[dynamic]
+    static WAYS_IN_USE: u32 = match std::env::var(WAYS_ENV) {
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(n) if n.is_power_of_two() && n <= microlift::core::link::MAX_WAYS => n,
+            _ => {
+                eprintln!(
+                    "rosemary: {WAYS_ENV}={v:?} is not 1, 2 or {}; using {WAYS}",
+                    microlift::core::link::MAX_WAYS
+                );
+                WAYS
+            }
+        },
+        Err(_) => WAYS,
+    };
+    *WAYS_IN_USE
+}
 
 /// How many rows this run uses.
-fn window() -> usize {
+fn rows() -> usize {
     #[dynamic]
-    static ROWS: usize = {
-        match std::env::var(WINDOW_ENV) {
+    static ROWS_IN_USE: usize = {
+        match std::env::var(ROWS_ENV) {
             Ok(v) => match v.trim().parse::<usize>() {
                 Ok(n) if n >= 256 => n.next_power_of_two(),
                 _ => {
-                    eprintln!(
-                        "rosemary: {WINDOW_ENV}={v:?} is not an integer >= 256; using {WINDOW}"
-                    );
-                    WINDOW
+                    eprintln!("rosemary: {ROWS_ENV}={v:?} is not an integer >= 256; using {ROWS}");
+                    ROWS
                 }
             },
-            Err(_) => WINDOW,
+            Err(_) => ROWS,
         }
     };
-    *ROWS
+    *ROWS_IN_USE
 }
 
 /// The table geometry, shared with the lifter so that the slot lifted code
@@ -429,7 +466,7 @@ fn window() -> usize {
 pub fn link_config() -> BlockLinkConfig {
     #[dynamic]
     static CONFIG: BlockLinkConfig = {
-        let config = BlockLinkConfig::new(window() as u32);
+        let config = BlockLinkConfig::new(rows() as u32).with_ways(ways());
         // Which of the two shapes of linking this process runs.
         match crate::jit::pinned_link_abi() {
             Some(abi) => config.pinned(abi),
@@ -441,24 +478,21 @@ pub fn link_config() -> BlockLinkConfig {
 
 impl CodeWindow {
     fn new() -> Self {
-        let config = link_config();
-        let rows = config.entries as usize;
         CodeWindow {
-            slots: RefCell::new(vec![None; rows].into_boxed_slice()),
-            links: UnsafeCell::new(ThreadLinks::new(config, crate::jit::call_return_stack())),
-            config,
+            slots: RefCell::new(vec![None; WINDOW].into_boxed_slice()),
+            links: UnsafeCell::new(ThreadLinks::new(
+                link_config(),
+                crate::jit::call_return_stack(),
+            )),
             // Nothing retired before this thread existed can be in its tables.
             seen: Cell::new(crate::smc::logged()),
         }
     }
 
-    /// The slot a PC maps to.
-    ///
-    /// Microlift's own `slot`, so this and the shift-and-mask baked into every region
-    /// cannot drift apart - called on the copy this window was built with rather than
-    /// on the static, which is the same arithmetic without the read.
+    /// The window slot a PC maps to. Nothing compiled computes it, so it need not
+    /// match the link table's arithmetic.
     fn slot(&self, pc: u64) -> usize {
-        self.config.slot(pc)
+        ((pc >> 4) as usize) & (WINDOW - 1)
     }
 
     /// The address of the block-link table for this thread, as `ctx.link_table`
@@ -494,7 +528,7 @@ impl CodeWindow {
     fn retract(&self, retired: &[u64]) {
         if let Ok(mut slots) = self.slots.try_borrow_mut() {
             for &pc in retired {
-                let slot = &mut slots[self.config.slot(pc)];
+                let slot = &mut slots[self.slot(pc)];
                 if slot.as_ref().is_some_and(|(at, _)| *at == pc) {
                     *slot = None;
                 }

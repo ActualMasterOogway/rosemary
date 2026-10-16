@@ -439,9 +439,10 @@ pub fn report() {
         let rows = PUBLISHED_ROWS.load(Relaxed);
         eprintln!(
             "rosemary: stats  {publishes} publish(es) of {rows} link row(s), \
-             {:.1} per publish into a {}-row table ({:?})",
+             {:.1} per publish into a {}-row {}-way table ({:?})",
             rows as f64 / publishes as f64,
             crate::thread::link_config().entries,
+            crate::thread::link_config().ways,
             crate::jit::link_publish(),
         );
     }
