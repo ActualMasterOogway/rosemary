@@ -410,6 +410,24 @@ pub fn data_symbols() -> Vec<(String, u64)> {
 }
 
 static KEY_STRINGS: &[(&str, &str)] = &[
+    // CFError.c's user-info keys, which are Foundation's.
+    ("_kCFErrorDescriptionKey", "NSDescription"),
+    ("_kCFErrorLocalizedDescriptionKey", "NSLocalizedDescription"),
+    (
+        "_kCFErrorLocalizedFailureReasonKey",
+        "NSLocalizedFailureReason",
+    ),
+    (
+        "_kCFErrorLocalizedRecoverySuggestionKey",
+        "NSLocalizedRecoverySuggestion",
+    ),
+    ("_kCFErrorUnderlyingErrorKey", "NSUnderlyingError"),
+    ("_kCFErrorURLKey", "NSErrorFailingURLKey"),
+    ("_kCFErrorFilePathKey", "NSFilePath"),
+    ("_kCFErrorDomainPOSIX", "NSPOSIXErrorDomain"),
+    ("_kCFErrorDomainOSStatus", "NSOSStatusErrorDomain"),
+    ("_kCFErrorDomainMach", "NSMachErrorDomain"),
+    ("_kCFErrorDomainCocoa", "NSCocoaErrorDomain"),
     ("_kCFBundleIdentifierKey", "CFBundleIdentifier"),
     ("_kCFBundleNameKey", "CFBundleName"),
     ("_kCFBundleVersionKey", "CFBundleVersion"),
