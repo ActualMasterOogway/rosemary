@@ -343,6 +343,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         Event::WindowFocus { window, gained } => {
             crate::decor::focus_changed(window, gained);
             let object = object_for(window);
+            if !gained {
+                crate::screen::forget_recentring();
+            }
             if !object.is_null() && gained {
                 window::set_key_window(object);
                 // SDL drops relative mouse mode when focus goes, and a window
@@ -400,7 +403,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                     kind: kind::FLAGS_CHANGED,
                     ..fields(w)
                 }),
-                false => send(id, None, |w, _| fields(w)),
+                false => {
+                    let live = down.then(|| LiveKey::begin(code));
+                    send(id, None, |w, _| fields(w));
+                    drop(live);
+                }
             }
         }
         // A key event describes a physical key. Text input is the separate,
@@ -439,6 +446,19 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             }
             // The first real motion after a warp is the one that reports it.
             let warped = take_warp_delta();
+            crate::screen::note_recentring_motion();
+            // Ending puts the physical cursor where the guest's pointer is,
+            // so that is where this motion is reported; while it lasts, SDL's
+            // position is a relative-mode one and only the deltas are real.
+            let (x, y) = if crate::screen::end_recentring_if_idle((x, y)) {
+                pointer_position()
+            } else if crate::screen::recentring() {
+                let (px, py) = pointer_position();
+                warp_pointer(px + dx, py + dy);
+                (px + dx, py + dy)
+            } else {
+                (x, y)
+            };
             crate::cgevent::note_mouse_delta(dx, dy);
             crate::screen::hold_at_edge(id, x, y, dx, dy);
             // SDL's position keeps integrating the deltas of a disassociated
@@ -864,6 +884,9 @@ pub fn route(window: Id, event: Id) {
         },
         false => responder_of(window),
     };
+    if kind == kind::LEFT_MOUSE_DOWN {
+        focus_clicked(window, start);
+    }
     let Some((responder, method)) = chain(start, sel) else {
         if tracing() {
             eprintln!("rosemary: appkit: -{selector}: nothing from {start:p} up implements it");
@@ -884,6 +907,69 @@ pub fn route(window: Id, event: Id) {
             std::mem::transmute(method.implementation());
         f(responder, sel, event);
     }
+}
+
+fn focus_clicked(window: Id, view: Id) {
+    let sel = objc::sel::get("acceptsFirstResponder");
+    // SAFETY: null or a live object this runtime allocated.
+    let Some(method) = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel)) else {
+        return;
+    };
+    if crate::view::is_default_accepts_first_responder(method.implementation()) {
+        return;
+    }
+    // SAFETY: `BOOL (id, SEL)`, the class's own implementation.
+    let accepts = unsafe {
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> u8 =
+            std::mem::transmute(method.implementation());
+        f(view, sel) != 0
+    };
+    if !accepts || responder_of(window) == view {
+        return;
+    }
+    // SAFETY: `-makeFirstResponder:` is `BOOL (id, SEL, NSResponder *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel, Id) -> u8 =
+            std::mem::transmute(objc::msg::entry());
+        f(window, objc::sel::get("makeFirstResponder:"), view);
+    }
+}
+
+thread_local! {
+    static LIVE_KEY: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+}
+
+/// The host key down being dispatched right now, whose text SDL queues
+/// directly behind it. Only that key may take the text: a synthesized or
+/// replayed event would otherwise take the text of a later keystroke.
+struct LiveKey;
+
+impl LiveKey {
+    fn begin(key_code: u16) -> Self {
+        LIVE_KEY.with(|live| live.set(Some(key_code)));
+        LiveKey
+    }
+}
+
+impl Drop for LiveKey {
+    fn drop(&mut self) {
+        LIVE_KEY.with(|live| live.set(None));
+    }
+}
+
+/// The text SDL resolved for the key down being dispatched, if `key_code` is
+/// that key and its text has not been taken yet. Taking it removes it from the
+/// queue, so the pump does not commit it a second time.
+pub(crate) fn take_live_key_text(key_code: u16) -> Option<String> {
+    LIVE_KEY.with(|live| {
+        if live.get() != Some(key_code) {
+            return None;
+        }
+        // Once per key down, even when there is no text: anything queued
+        // after a textless key belongs to a later one.
+        live.set(None);
+        sdl3::video::take_next_text()
+    })
 }
 
 /// The responder method an event type is delivered through.
@@ -1032,7 +1118,7 @@ pub(crate) fn pointer_position() -> (f32, f32) {
 fn track_pointer(window: u32, x: f32, y: f32) -> (f32, f32) {
     POINTER_WINDOW.store(window, std::sync::atomic::Ordering::Relaxed);
     let mut pointer = POINTER.lock().unwrap_or_else(|e| e.into_inner());
-    if crate::screen::mouse_is_associated() {
+    if crate::screen::mouse_is_associated() && !crate::screen::recentring() {
         *pointer = (x, y);
     }
     *pointer
@@ -1063,7 +1149,7 @@ pub(crate) fn settle_pointer() {
 /// Where the guest is to be told the pointer is on the desktop, for the calls
 /// that ask the window system rather than reading an event.
 pub(crate) fn frozen_pointer() -> Option<(f32, f32)> {
-    if crate::screen::mouse_is_associated() {
+    if crate::screen::mouse_is_associated() && !crate::screen::recentring() {
         return None;
     }
     let (x, y) = *POINTER.lock().unwrap_or_else(|e| e.into_inner());

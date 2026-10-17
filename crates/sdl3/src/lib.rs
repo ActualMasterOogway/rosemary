@@ -240,6 +240,7 @@ struct Api {
         Option<unsafe extern "C" fn(u32, *mut c_int) -> *mut *mut DisplayMode>,
 
     SDL_PollEvent: Option<unsafe extern "C" fn(*mut Event) -> bool>,
+    SDL_PeepEvents: Option<unsafe extern "C" fn(*mut Event, c_int, c_int, u32, u32) -> c_int>,
     SDL_WaitEventTimeout: Option<unsafe extern "C" fn(*mut Event, i32) -> bool>,
     SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_StopTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
@@ -469,6 +470,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetDisplayName,
             SDL_GetFullscreenDisplayModes,
             SDL_PollEvent,
+            SDL_PeepEvents,
             SDL_WaitEventTimeout,
             SDL_StartTextInput,
             SDL_StopTextInput,
@@ -1737,6 +1739,33 @@ pub mod video {
             return None;
         }
         Some(translate(&raw))
+    }
+
+    pub fn take_next_text() -> Option<String> {
+        let peep = api()?.SDL_PeepEvents?;
+        let mut raw = super::Event::default();
+        // SAFETY: room for one event; `SDL_PEEKEVENT` over every type.
+        if unsafe { peep(&mut raw, 1, 1, 0, u32::MAX) } != 1 || kind(&raw) != event_type::TEXT_INPUT
+        {
+            return None;
+        }
+        // SAFETY: as above, `SDL_GETEVENT`, now that it is known to be text.
+        if unsafe {
+            peep(
+                &mut raw,
+                1,
+                2,
+                event_type::TEXT_INPUT,
+                event_type::TEXT_INPUT,
+            )
+        } != 1
+        {
+            return None;
+        }
+        match translate(&raw) {
+            Event::Text { text, .. } => Some(text),
+            _ => None,
+        }
     }
 
     /// The next event, waiting up to `milliseconds` for one: for a loop with
