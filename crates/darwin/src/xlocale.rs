@@ -341,8 +341,6 @@ mod plain {
         pub fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> i64;
         pub fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64;
         pub fn strtoull(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64;
-        pub fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-        pub fn strtof(nptr: *const c_char, endptr: *mut *mut c_char) -> f32;
         pub fn strcoll(a: *const c_char, b: *const c_char) -> c_int;
         pub fn strxfrm(dst: *mut c_char, src: *const c_char, n: usize) -> usize;
         pub fn strftime(buf: *mut c_char, n: usize, fmt: *const c_char, tm: *const c_void)
@@ -439,10 +437,6 @@ localised! {
     strtoul_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64 = strtoul;
     /// `unsigned long long strtoull_l(const char *, char **, int, locale_t)`
     strtoull_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> u64 = strtoull;
-    /// `double strtod_l(const char *, char **, locale_t)`
-    strtod_l(nptr: *const c_char, endptr: *mut *mut c_char) -> f64 = strtod;
-    /// `float strtof_l(const char *, char **, locale_t)`
-    strtof_l(nptr: *const c_char, endptr: *mut *mut c_char) -> f32 = strtof;
     /// `int strcoll_l(const char *, const char *, locale_t)`
     strcoll_l(a: *const c_char, b: *const c_char) -> c_int = strcoll;
     /// `size_t strxfrm_l(char *, const char *, size_t, locale_t)`
@@ -882,8 +876,6 @@ exports::exports! {
         "strtoll_l" => strtoll_l,
         "strtoul_l" => strtoul_l,
         "strtoull_l" => strtoull_l,
-        "strtod_l" => strtod_l,
-        "strtof_l" => strtof_l,
         "strcoll_l" => strcoll_l,
         "strxfrm_l" => strxfrm_l,
         "strftime_l" => strftime_l,
