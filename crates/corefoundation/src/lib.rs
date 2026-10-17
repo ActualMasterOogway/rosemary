@@ -307,6 +307,16 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             "_kCFTypeDictionaryKeyCallBacks".to_string(),
             &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
         ),
+        // `CFSetCallBacks` has the dictionary key callbacks' layout: retain,
+        // release, description, equality and hash.
+        (
+            "_kCFTypeSetCallBacks".to_string(),
+            &callbacks::TYPE_KEY_CALLBACKS as *const _ as usize as u64,
+        ),
+        (
+            "_kCFCopyStringSetCallBacks".to_string(),
+            &callbacks::COPY_STRING_KEY_CALLBACKS as *const _ as usize as u64,
+        ),
         (
             "_kCFCopyStringDictionaryKeyCallBacks".to_string(),
             &callbacks::COPY_STRING_KEY_CALLBACKS as *const _ as usize as u64,
@@ -323,6 +333,7 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_kCFAllocatorDefault",
         "_kCFAllocatorSystemDefault",
         "_kCFAllocatorMalloc",
+        "_kCFAllocatorMallocZone",
         "_kCFAllocatorNull",
     ] {
         out.push((name.to_string(), base::global_cell(name, 0)));
