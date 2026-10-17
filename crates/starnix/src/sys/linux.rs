@@ -240,11 +240,11 @@ pub fn descriptors() -> io::Result<Vec<Descriptor>> {
         .collect())
 }
 
-/// The descriptors a `/proc/<pid>/fd` directory lists, each with its link,
-/// whose target is not read again here.
+/// The descriptors a `/proc/<pid>/fd` directory lists, each with its entry
+/// when it leads to a file that can be stat'ed through `/proc`.
 fn descriptors_in(
     dir: &str,
-) -> io::Result<impl Iterator<Item = (Descriptor, Option<PathBuf>)> + use<>> {
+) -> io::Result<impl Iterator<Item = (Descriptor, Option<std::fs::DirEntry>)> + use<>> {
     Ok(std::fs::read_dir(dir)?.flatten().filter_map(|entry| {
         let fd = entry.file_name().to_str()?.parse::<i32>().ok()?;
         let target = std::fs::read_link(entry.path()).unwrap_or_default();
@@ -257,27 +257,33 @@ fn descriptors_in(
         };
         // An `anon_inode:` link is an eventfd, a timerfd and the like: an
         // object of the kernel's, not a file anyone else can name.
-        let file = (kind == DescriptorKind::File && !target.starts_with("anon_inode:"))
-            .then(|| entry.path());
+        let file =
+            (kind == DescriptorKind::File && !target.starts_with("anon_inode:")).then_some(entry);
         Some((Descriptor { fd, kind }, file))
     }))
 }
 
 /// The device and inode of what `path` leads to.
 fn file_id(path: &std::path::Path) -> Option<FileId> {
-    std::fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
 }
 
 pub fn in_use(pid: i32) -> Option<InUse> {
     let base = format!("/proc/{pid}");
-    let directories = ["cwd", "root"]
+    let mut directories: Vec<FileId> = ["cwd", "root"]
         .iter()
         .filter_map(|link| file_id(std::path::Path::new(&format!("{base}/{link}"))))
         .collect();
-    let open = descriptors_in(&format!("{base}/fd"))
+    let mut open: Vec<FileId> = descriptors_in(&format!("{base}/fd"))
         .ok()?
-        .filter_map(|(_, file)| file_id(&file?))
+        .filter_map(|(_, file)| file_id(&file?.path()))
         .collect();
+    for files in [&mut directories, &mut open] {
+        files.sort_unstable();
+        files.dedup();
+    }
     Some(InUse {
         directories,
         open,
@@ -311,7 +317,11 @@ fn mapped_files(base: &str) -> Vec<FileId> {
 fn mapped_file(line: &str) -> Option<FileId> {
     let mut fields = line.split_whitespace().skip(3);
     let (major, minor) = fields.next()?.split_once(':')?;
-    let inode = fields.next()?.parse::<u64>().ok().filter(|&inode| inode != 0)?;
+    let inode = fields
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .filter(|&inode| inode != 0)?;
     let major = u32::from_str_radix(major, 16).ok()?;
     let minor = u32::from_str_radix(minor, 16).ok()?;
     Some((libc::makedev(major, minor), inode))
@@ -514,4 +524,23 @@ pub fn xattr_remove_path(
 
 pub fn xattr_is_missing(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENODATA)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_maps_line_names_its_device_and_inode() {
+        let line = "7f0000000000-7f0000001000 r-xp 00001000 08:11 1234 /usr/lib/libc.so";
+        assert_eq!(mapped_file(line), Some((libc::makedev(0x8, 0x11), 1234)));
+    }
+
+    #[test]
+    fn an_anonymous_maps_line_names_no_file() {
+        assert_eq!(
+            mapped_file("55d0c0000000-55d0c0021000 rw-p 00000000 00:00 0 [heap]"),
+            None
+        );
+    }
 }

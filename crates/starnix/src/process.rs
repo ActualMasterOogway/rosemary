@@ -217,12 +217,12 @@ pub type FileId = (u64, u64);
 /// The files a process is using, as `proc_listpidspath` looks for them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InUse {
-    /// Its working directory and its root directory.
+    /// Its working directory and its root directory, sorted and deduplicated.
     pub directories: Vec<FileId>,
     /// What its descriptors have open, other than sockets, pipes and the
-    /// host's event objects.
+    /// host's event objects. Sorted and deduplicated.
     pub open: Vec<FileId>,
-    /// What it has mapped from files.
+    /// What it has mapped from files, sorted and deduplicated.
     pub mapped: Vec<FileId>,
 }
 
@@ -254,11 +254,16 @@ fn own_in_use() -> InUse {
                 .then_some((st.st_dev as u64, st.st_ino as u64))
         })
         .collect();
-    InUse {
+    let mut used = InUse {
         directories,
         open,
         mapped: Vec::new(),
+    };
+    for files in [&mut used.directories, &mut used.open] {
+        files.sort_unstable();
+        files.dedup();
     }
+    used
 }
 
 #[cfg(test)]
@@ -276,13 +281,25 @@ mod tests {
         };
         let path = std::env::temp_dir().join(format!("starnix-in-use-{}", std::process::id()));
         let file = std::fs::File::create(&path).unwrap();
+        let _cleanup = Cleanup(path.clone());
         let used = in_use(me()).unwrap();
-        assert!(used.directories.contains(&id(&std::env::current_dir().unwrap())));
+        assert!(
+            used.directories
+                .contains(&id(&std::env::current_dir().unwrap()))
+        );
         assert!(used.open.contains(&id(&path)));
         #[cfg(target_os = "linux")]
         assert!(used.mapped.contains(&id(&std::env::current_exe().unwrap())));
         drop(file);
-        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Removes the file even when an assertion fails first.
+    struct Cleanup(std::path::PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     #[test]
