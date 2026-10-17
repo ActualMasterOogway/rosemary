@@ -376,39 +376,40 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 scancode,
                 crate::keymap::typed_key(scancode, key, modifiers),
             );
-            let modifiers =
-                crate::keymap::modifiers(modifiers) | crate::keymap::key_flags(scancode);
-            let code = crate::keymap::virtual_key(scancode);
-            if down && !crate::keymap::is_modifier(scancode) {
-                let window = object_for(id);
-                crate::text::begin_key_interpretation(responder_of(window));
+            let window = object_for(id);
+            if window.is_null() {
+                return;
             }
-            let fields = |window| Fields {
-                kind: match down {
-                    true => kind::KEY_DOWN,
-                    false => kind::KEY_UP,
+            let modifier = crate::keymap::is_modifier(scancode);
+            let event = nsevent::make(Fields {
+                // A modifier is `-flagsChanged:`, not a key down: AppKit has no
+                // key-up for one, and a guest that treated it as a key would
+                // see shift as a character.
+                kind: match (modifier, down) {
+                    (true, _) => kind::FLAGS_CHANGED,
+                    (false, true) => kind::KEY_DOWN,
+                    (false, false) => kind::KEY_UP,
                 },
-                modifiers,
-                key_code: code,
+                modifiers: crate::keymap::modifiers(modifiers) | crate::keymap::key_flags(scancode),
+                key_code: crate::keymap::virtual_key(scancode),
                 characters: objc::arc::autorelease(foundation::string::from_str(&text)),
                 repeat,
                 window,
                 ..Fields::default()
-            };
-            // A modifier is `-flagsChanged:`, not a key down: AppKit has no
-            // key-up for one, and a guest that treated it as a key would see
-            // shift as a character.
-            match crate::keymap::is_modifier(scancode) {
-                true => send(id, None, |w, _| Fields {
-                    kind: kind::FLAGS_CHANGED,
-                    ..fields(w)
-                }),
-                false => {
-                    let live = down.then(|| LiveKey::begin(code));
-                    send(id, None, |w, _| fields(w));
-                    drop(live);
+            });
+            // SDL queues a key's resolved text directly behind it, and the key
+            // is not sent until the guest asks for it - after this pump has
+            // moved on. The text goes with the key so the responder that
+            // interprets it is the one that types it.
+            if down && !modifier {
+                let typed = SCRIPTED_TEXT
+                    .with(|scripted| scripted.take())
+                    .unwrap_or_else(sdl3::video::take_next_text);
+                if let Some(typed) = typed {
+                    nsevent::attach_text(event, &typed);
                 }
             }
+            queue_key(window, event);
         }
         // A key event describes a physical key. Text input is the separate,
         // layout- and IME-resolved commit, and must go to the focused
@@ -936,40 +937,50 @@ fn focus_clicked(window: Id, view: Id) {
 }
 
 thread_local! {
-    static LIVE_KEY: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+    /// Text a script typed for the key it is about to deliver, standing in for
+    /// the host text SDL would have queued behind it. See [`deliver_typed_key`].
+    static SCRIPTED_TEXT: std::cell::Cell<Option<Option<String>>> =
+        const { std::cell::Cell::new(None) };
 }
 
-/// The host key down being dispatched right now, whose text SDL queues
-/// directly behind it. Only that key may take the text: a synthesized or
-/// replayed event would otherwise take the text of a later keystroke.
-struct LiveKey;
-
-impl LiveKey {
-    fn begin(key_code: u16) -> Self {
-        LIVE_KEY.with(|live| live.set(Some(key_code)));
-        LiveKey
-    }
+/// Deliver a scripted key down with the text a real keyboard would have
+/// resolved for it. Returns the text if the key never became an event - a
+/// dialog or the decorations took it - so the caller can deliver it as text.
+pub(crate) fn deliver_typed_key(event: sdl3::video::Event, text: Option<String>) -> Option<String> {
+    SCRIPTED_TEXT.with(|scripted| scripted.set(Some(text)));
+    deliver(event);
+    SCRIPTED_TEXT.with(|scripted| scripted.take()).flatten()
 }
 
-impl Drop for LiveKey {
-    fn drop(&mut self) {
-        LIVE_KEY.with(|live| live.set(None));
-    }
-}
-
-/// The text SDL resolved for the key down being dispatched, if `key_code` is
-/// that key and its text has not been taken yet. Taking it removes it from the
-/// queue, so the pump does not commit it a second time.
-pub(crate) fn take_live_key_text(key_code: u16) -> Option<String> {
-    LIVE_KEY.with(|live| {
-        if live.get() != Some(key_code) {
-            return None;
+/// Queue a key event for the application, where `-nextEventMatchingMask:`
+/// returns it and `-run` sends it, as AppKit does: SDL 2.0.4 reads the keyboard
+/// only from the events that method returns. See the FIXME (ACCURACY) on
+/// `application::next_event`.
+fn queue_key(window: Id, event: Id) {
+    // Before the queue, which is where AppKit runs a local monitor.
+    if !crate::monitor::allows(event) {
+        if tracing() {
+            eprintln!("rosemary: appkit: a local event monitor swallowed the event");
         }
-        // Once per key down, even when there is no text: anything queued
-        // after a textless key belongs to a later one.
-        live.set(None);
-        sdl3::video::take_next_text()
-    })
+        return;
+    }
+    if crate::application::shared().is_null() {
+        send_to_window(window, event);
+        return;
+    }
+    crate::application::enqueue_input(event);
+}
+
+/// An event is leaving the application's queue for the guest, which will send
+/// it. A key down starts a new keystroke for the responder it will reach: the
+/// host text that follows goes to it only if it interprets this key.
+pub(crate) fn handing_out(event: Id) {
+    let Some(fields) = nsevent::fields_of(event) else {
+        return;
+    };
+    if fields.kind == kind::KEY_DOWN && !fields.window.is_null() {
+        crate::text::begin_key_interpretation(responder_of(fields.window));
+    }
 }
 
 /// The responder method an event type is delivered through.

@@ -1230,7 +1230,7 @@ mod tests {
             let event = crate::nsevent::make(crate::nsevent::Fields {
                 kind: crate::nsevent::kind::KEY_DOWN,
                 modifiers,
-                characters: foundation::string::from_str(characters),
+                characters: objc::arc::autorelease(foundation::string::from_str(characters)),
                 ..crate::nsevent::Fields::default()
             });
             // SAFETY: `-performKeyEquivalent:` is `BOOL (id, SEL, NSEvent *)`.
