@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::process::{
-    Audit, Descriptor, DescriptorKind, Identity, Process, Region, State, Thread, Usage,
+    Audit, Descriptor, DescriptorKind, FileId, Identity, InUse, Process, Region, State, Thread,
+    Usage,
 };
 use crate::socket::Peer;
 use crate::system::{CpuTicks, Memory, page_size};
@@ -234,21 +235,86 @@ pub fn command_line(pid: i32) -> Option<Vec<u8>> {
 }
 
 pub fn descriptors() -> io::Result<Vec<Descriptor>> {
-    Ok(std::fs::read_dir("/proc/self/fd")?
-        .flatten()
-        .filter_map(|entry| {
-            let fd = entry.file_name().to_str()?.parse::<i32>().ok()?;
-            let target = std::fs::read_link(entry.path()).unwrap_or_default();
-            let target = target.to_string_lossy();
-            let kind = match () {
-                _ if target.starts_with("socket:") => DescriptorKind::Socket,
-                _ if target.starts_with("pipe:") => DescriptorKind::Pipe,
-                _ if target.contains("[eventpoll]") => DescriptorKind::Queue,
-                _ => DescriptorKind::File,
-            };
-            Some(Descriptor { fd, kind })
-        })
+    Ok(descriptors_in("/proc/self/fd")?
+        .map(|(descriptor, _)| descriptor)
         .collect())
+}
+
+/// The descriptors a `/proc/<pid>/fd` directory lists, each with its link,
+/// whose target is not read again here.
+fn descriptors_in(
+    dir: &str,
+) -> io::Result<impl Iterator<Item = (Descriptor, Option<PathBuf>)> + use<>> {
+    Ok(std::fs::read_dir(dir)?.flatten().filter_map(|entry| {
+        let fd = entry.file_name().to_str()?.parse::<i32>().ok()?;
+        let target = std::fs::read_link(entry.path()).unwrap_or_default();
+        let target = target.to_string_lossy();
+        let kind = match () {
+            _ if target.starts_with("socket:") => DescriptorKind::Socket,
+            _ if target.starts_with("pipe:") => DescriptorKind::Pipe,
+            _ if target.contains("[eventpoll]") => DescriptorKind::Queue,
+            _ => DescriptorKind::File,
+        };
+        // An `anon_inode:` link is an eventfd, a timerfd and the like: an
+        // object of the kernel's, not a file anyone else can name.
+        let file = (kind == DescriptorKind::File && !target.starts_with("anon_inode:"))
+            .then(|| entry.path());
+        Some((Descriptor { fd, kind }, file))
+    }))
+}
+
+/// The device and inode of what `path` leads to.
+fn file_id(path: &std::path::Path) -> Option<FileId> {
+    std::fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
+}
+
+pub fn in_use(pid: i32) -> Option<InUse> {
+    let base = format!("/proc/{pid}");
+    let directories = ["cwd", "root"]
+        .iter()
+        .filter_map(|link| file_id(std::path::Path::new(&format!("{base}/{link}"))))
+        .collect();
+    let open = descriptors_in(&format!("{base}/fd"))
+        .ok()?
+        .filter_map(|(_, file)| file_id(&file?))
+        .collect();
+    Some(InUse {
+        directories,
+        open,
+        mapped: mapped_files(&base),
+    })
+}
+
+/// What `/proc/<pid>` shows mapped from files. `map_files` leads to each
+/// file itself; without leave to read it, the device and inode `maps` names
+/// stand in, which on a filesystem with subvolumes can be the volume's device
+/// rather than the one `stat` reports.
+fn mapped_files(base: &str) -> Vec<FileId> {
+    let mut files: Vec<FileId> = match std::fs::read_dir(format!("{base}/map_files")) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| file_id(&entry.path()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    if files.is_empty() {
+        let maps = std::fs::read_to_string(format!("{base}/maps")).unwrap_or_default();
+        files = maps.lines().filter_map(mapped_file).collect();
+    }
+    files.sort_unstable();
+    files.dedup();
+    files
+}
+
+/// The device and inode a `maps` line names: `start-end perms offset
+/// major:minor inode path`, both numbers of the device in hex.
+fn mapped_file(line: &str) -> Option<FileId> {
+    let mut fields = line.split_whitespace().skip(3);
+    let (major, minor) = fields.next()?.split_once(':')?;
+    let inode = fields.next()?.parse::<u64>().ok().filter(|&inode| inode != 0)?;
+    let major = u32::from_str_radix(major, 16).ok()?;
+    let minor = u32::from_str_radix(minor, 16).ok()?;
+    Some((libc::makedev(major, minor), inode))
 }
 
 pub fn regions() -> io::Result<Vec<Region>> {

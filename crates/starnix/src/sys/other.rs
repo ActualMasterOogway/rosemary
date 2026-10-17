@@ -80,6 +80,10 @@ pub fn peer(fd: RawFd) -> Option<Peer> {
     (rc == 0).then_some(Peer { pid: None, uid })
 }
 
+pub fn in_use(_pid: i32) -> Option<crate::process::InUse> {
+    None
+}
+
 pub fn fd_path(_fd: RawFd) -> Option<PathBuf> {
     None
 }
