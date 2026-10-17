@@ -292,9 +292,9 @@ pub fn in_use(pid: i32) -> Option<InUse> {
 }
 
 /// What `/proc/<pid>` shows mapped from files. `map_files` leads to each
-/// file itself; without leave to read it, the device and inode `maps` names
-/// stand in, which on a filesystem with subvolumes can be the volume's device
-/// rather than the one `stat` reports.
+/// file itself; without leave to read it, `maps` names them, and each path is
+/// stat'ed for the device `stat` reports, which on a filesystem with
+/// subvolumes is not the one `maps` gives.
 fn mapped_files(base: &str) -> Vec<FileId> {
     let mut files: Vec<FileId> = match std::fs::read_dir(format!("{base}/map_files")) {
         Ok(entries) => entries
@@ -304,27 +304,27 @@ fn mapped_files(base: &str) -> Vec<FileId> {
         Err(_) => Vec::new(),
     };
     if files.is_empty() {
-        let maps = std::fs::read_to_string(format!("{base}/maps")).unwrap_or_default();
-        files = maps.lines().filter_map(mapped_file).collect();
+        let backing = super::procmap::backing_files(&format!("{base}/maps")).unwrap_or_default();
+        files = backing
+            .into_iter()
+            .map(|file| {
+                // The path is the process's own, so it is read through its root.
+                let found = file.path.as_ref().and_then(|path| {
+                    file_id(
+                        &PathBuf::from(format!("{base}/root"))
+                            .join(path.strip_prefix("/").unwrap_or(path)),
+                    )
+                });
+                // A different file at the path is not the one mapped.
+                found
+                    .filter(|&(_, inode)| inode == file.inode)
+                    .unwrap_or((file.dev, file.inode))
+            })
+            .collect();
     }
     files.sort_unstable();
     files.dedup();
     files
-}
-
-/// The device and inode a `maps` line names: `start-end perms offset
-/// major:minor inode path`, both numbers of the device in hex.
-fn mapped_file(line: &str) -> Option<FileId> {
-    let mut fields = line.split_whitespace().skip(3);
-    let (major, minor) = fields.next()?.split_once(':')?;
-    let inode = fields
-        .next()?
-        .parse::<u64>()
-        .ok()
-        .filter(|&inode| inode != 0)?;
-    let major = u32::from_str_radix(major, 16).ok()?;
-    let minor = u32::from_str_radix(minor, 16).ok()?;
-    Some((libc::makedev(major, minor), inode))
 }
 
 pub fn regions() -> io::Result<Vec<Region>> {
@@ -524,23 +524,4 @@ pub fn xattr_remove_path(
 
 pub fn xattr_is_missing(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENODATA)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_maps_line_names_its_device_and_inode() {
-        let line = "7f0000000000-7f0000001000 r-xp 00001000 08:11 1234 /usr/lib/libc.so";
-        assert_eq!(mapped_file(line), Some((libc::makedev(0x8, 0x11), 1234)));
-    }
-
-    #[test]
-    fn an_anonymous_maps_line_names_no_file() {
-        assert_eq!(
-            mapped_file("55d0c0000000-55d0c0021000 rw-p 00000000 00:00 0 [heap]"),
-            None
-        );
-    }
 }
