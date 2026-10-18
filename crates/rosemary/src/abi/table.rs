@@ -1956,6 +1956,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getgrgid", P, U32),
     sig!("getgrgid_r", I32, U32, P, P, U64, P),
     sig!("getgrnam", P, P),
+    sig!("CFErrorCopyDescription", P, P),
+    sig!("CFMakeCollectable", P, P),
     sig!("getgrnam_r", I32, P, P, P, U64, P),
     sig!("gethostbyname", P, P),
     sig!("gethostbyname2", P, P, I32),
