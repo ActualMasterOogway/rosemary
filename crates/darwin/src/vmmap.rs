@@ -1,12 +1,11 @@
 use std::ffi::c_void;
 
-/// Darwin's `<sys/mman.h>` flag bits, by their own names.
-///
-/// Written out rather than taken from the `libc` crate, whose Darwin constants
-/// are not available when compiling for Linux - and whose names would in any
-/// case be the *host's*, which is exactly the confusion this module exists to
-/// undo.
 pub mod darwin {
+    pub const PROT_NONE: i32 = 0x00;
+    pub const PROT_READ: i32 = 0x01;
+    pub const PROT_WRITE: i32 = 0x02;
+    pub const PROT_EXEC: i32 = 0x04;
+
     pub const MAP_SHARED: i32 = 0x0001;
     pub const MAP_PRIVATE: i32 = 0x0002;
     pub const MAP_FIXED: i32 = 0x0010;
@@ -121,6 +120,32 @@ pub fn map_flags(flags: i32) -> i32 {
     }
 }
 
+/// The host `PROT_*` bits for a guest's Darwin ones.
+///
+/// Bits other than read/write/execute are dropped rather than refused, since
+/// xnu's `mprotect` masks them off too (`VM_PROT_COPY`, `VM_PROT_TRUSTED`, ...),
+/// while Linux answers `EINVAL` for any bit it does not know.
+pub fn prot_flags(prot: i32) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        prot
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut out = libc::PROT_NONE;
+        for (theirs, ours) in [
+            (darwin::PROT_READ, libc::PROT_READ),
+            (darwin::PROT_WRITE, libc::PROT_WRITE),
+            (darwin::PROT_EXEC, libc::PROT_EXEC),
+        ] {
+            if prot & theirs != 0 {
+                out |= ours;
+            }
+        }
+        out
+    }
+}
+
 /// What a guest's `MADV_*` becomes on this host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Advice {
@@ -198,7 +223,7 @@ pub fn sync_flags(flags: i32) -> i32 {
 /// # Safety
 ///
 /// The guest's own request. Every argument is passed to the host `mmap` as
-/// given, apart from the two this module translates.
+/// given, apart from the three this module translates.
 pub unsafe extern "C" fn mmap(
     addr: *mut c_void,
     len: usize,
@@ -207,18 +232,28 @@ pub unsafe extern "C" fn mmap(
     fd: i32,
     off: i64,
 ) -> *mut c_void {
-    // SAFETY: the caller's own arguments, with the flags rewritten into this
-    // host's spelling of the same request.
+    // SAFETY: the caller's own arguments, with the protection and flags
+    // rewritten into this host's spelling of the same request.
     unsafe {
         libc::mmap(
             addr,
             len,
-            prot,
+            prot_flags(prot),
             map_flags(flags),
             map_fd(flags, fd),
             off as libc::off_t,
         )
     }
+}
+
+/// `int mprotect(void *addr, size_t len, int prot)`
+///
+/// # Safety
+///
+/// The guest's own request.
+pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32 {
+    // SAFETY: the caller's own range, with the protection rewritten.
+    unsafe { libc::mprotect(addr, len, prot_flags(prot)) }
 }
 
 /// `int madvise(void *addr, size_t len, int advice)`
@@ -274,13 +309,14 @@ pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32
     unsafe { libc::msync(addr, len, sync_flags(flags)) }
 }
 
-// `munmap`, `mprotect`, `mlock`, `munlock` and `mincore` are deliberately
-// absent: none of them takes a flag word that diverges, so each is a genuine
-// passthrough and is claimed as one in `crate::passthrough`.
+// `mlock`, `munlock` and `mincore` are deliberately absent: none of them takes
+// a flag word that diverges, so each is a genuine passthrough and is claimed as
+// one in `crate::passthrough`.
 exports::exports! {
     functions {
         "mmap" => mmap,
         "munmap" => libc::munmap,
+        "mprotect" => mprotect,
         "madvise" => madvise,
         "posix_madvise" => posix_madvise,
         "msync" => msync,
@@ -383,6 +419,15 @@ mod tests {
             Advice::Invalid,
             "an advice neither side names"
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn mprotect_drops_protection_bits_the_host_would_refuse() {
+        // `VM_PROT_COPY`, which xnu masks off and Linux rejects.
+        let prot = darwin::PROT_READ | darwin::PROT_WRITE | 0x10;
+        assert_eq!(prot_flags(prot), libc::PROT_READ | libc::PROT_WRITE);
+        assert_eq!(prot_flags(darwin::PROT_NONE), libc::PROT_NONE);
     }
 
     #[test]
