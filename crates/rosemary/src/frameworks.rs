@@ -84,6 +84,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(forcefeedback::symbol),
     },
     Framework {
+        leaf: "Network",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(network::provide),
+        data: None,
+        symbol: Some(network::symbol),
+    },
+    Framework {
         leaf: "OpenCL",
         version: 'A',
         umbrellas: &[],
