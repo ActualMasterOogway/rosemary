@@ -1601,6 +1601,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     cbsig!([0], "_dyld_register_func_for_remove_image", V, P),
     sig!("_dyld_get_image_name", P, U32),
     sig!("_dyld_find_unwind_sections", BOOL, P, P),
+    // Initializers run inside `NSAddImage`, as inside `dlopen`.
+    rsig!("NSAddImage", P, P, U32),
+    sig!("NSAddressOfSymbol", P, P),
+    sig!("NSIsSymbolNameDefined", BOOL, P),
+    sig!("NSLinkEditError", V, P, P, P, P),
+    sig!("NSLookupAndBindSymbol", P, P),
+    sig!("NSLookupSymbolInImage", P, P, P, U32),
     sig!("_exit", V, I32),
     // The Darwin spellings that skip the signal mask, imported as `__longjmp`
     // and `__setjmp`.
@@ -2736,9 +2743,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_make_memory_entry_64", I32, U32, P, U64, I32, P, U32),
     sig!("mach_vm_allocate", I32, U32, P, U64, I32),
     sig!("mach_vm_deallocate", I32, U32, U64, U64),
+    sig!("mach_vm_copy", I32, U32, U64, U64, U64),
     sig!("mach_vm_region", I32, U32, P, P, I32, P, P, P),
     sig!("mach_vm_read_overwrite", I32, U32, U64, U64, U64, P),
     sig!("vm_allocate", I32, U32, P, U64, I32),
+    sig!("vm_copy", I32, U32, U64, U64, U64),
     sig!("vm_deallocate", I32, U32, U64, U64),
     sig!("vm_read_overwrite", I32, U32, U64, U64, U64, P),
     sig!("vm_region_64", I32, U32, P, P, I32, P, P, P),
