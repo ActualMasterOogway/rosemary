@@ -110,6 +110,7 @@ exports::exports! {
         "CFArrayApplyFunction" => api::CFArrayApplyFunction,
         "CFArrayGetCount" => api::CFArrayGetCount,
         "CFArrayGetValueAtIndex" => api::CFArrayGetValueAtIndex,
+        "CFArrayGetValues" => api::CFArrayGetValues,
         "CFArrayCreateMutable" => api::CFArrayCreateMutable,
         "CFArrayAppendValue" => api::CFArrayAppendValue,
         "CFArrayExchangeValuesAtIndices" => api::CFArrayExchangeValuesAtIndices,
@@ -1150,6 +1151,25 @@ mod collection_tests {
             let array = api::CFArrayCreate(std::ptr::null(), raw.as_ptr(), 2, std::ptr::null());
             assert_eq!(api::CFArrayGetCount(array), 2);
             assert_eq!(api::CFArrayGetValueAtIndex(array, 1), 9 as CFTypeRef);
+            api::CFRelease(array);
+        }
+    }
+
+    #[test]
+    fn array_get_values_copies_requested_range() {
+        bootstrap();
+        unsafe {
+            let values = [
+                10usize as CFTypeRef,
+                20usize as CFTypeRef,
+                30usize as CFTypeRef,
+                40usize as CFTypeRef,
+            ];
+            let array = api::CFArrayCreate(std::ptr::null(), values.as_ptr(), 4, std::ptr::null());
+            let mut out = [std::ptr::null(); 2];
+            api::CFArrayGetValues(array, 1, 2, out.as_mut_ptr());
+            assert_eq!(out[0], 20usize as CFTypeRef);
+            assert_eq!(out[1], 30usize as CFTypeRef);
             api::CFRelease(array);
         }
     }

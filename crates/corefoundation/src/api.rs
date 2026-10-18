@@ -1244,6 +1244,36 @@ pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex
     }
 }
 
+/// `void CFArrayGetValues(CFArrayRef, CFRange, const void **)`.
+///
+/// Under SysV AMD64 and AAPCS64, `CFRange` (two `CFIndex` fields) is passed
+/// flattened in two consecutive integer registers.
+pub unsafe extern "C" fn CFArrayGetValues(
+    array: CFTypeRef,
+    range_location: CFIndex,
+    range_length: CFIndex,
+    values: *mut CFTypeRef,
+) {
+    if values.is_null() || range_length <= 0 {
+        return;
+    }
+    let Some(a) = (unsafe { collections::array(array) }) else {
+        return;
+    };
+    let start = range_location.max(0) as usize;
+    let len = range_length as usize;
+    for i in 0..len {
+        let index = start + i;
+        let val = if index < a.values.len() {
+            a.values[index]
+        } else {
+            std::ptr::null()
+        };
+        // SAFETY: caller guaranteed `values` points to at least `range_length` pointers.
+        unsafe { *values.add(i) = val };
+    }
+}
+
 //
 
 pub unsafe extern "C" fn CFSetGetTypeID() -> CFTypeID {
