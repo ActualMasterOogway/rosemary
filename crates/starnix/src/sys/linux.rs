@@ -412,6 +412,13 @@ pub fn cpu_brand() -> Option<String> {
     })
 }
 
+/// systemd's machine id, or D-Bus's where it is not installed.
+pub fn host_uuid() -> Option<[u8; 16]> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| crate::system::parse_uuid(&std::fs::read_to_string(path).ok()?))
+}
+
 pub fn peer(fd: RawFd) -> Option<Peer> {
     // SAFETY: `fd` is expected to be an open file descriptor
     let fd = unsafe { BorrowedFd::borrow_raw(fd) };

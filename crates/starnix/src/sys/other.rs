@@ -73,6 +73,10 @@ pub fn cpu_brand() -> Option<String> {
     None
 }
 
+pub fn host_uuid() -> Option<[u8; 16]> {
+    None
+}
+
 pub fn peer(fd: RawFd) -> Option<Peer> {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: two writable ids.
