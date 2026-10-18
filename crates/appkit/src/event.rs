@@ -409,7 +409,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                     nsevent::attach_text(event, &typed);
                 }
             }
-            queue_key(window, event);
+            queue_input(window, event);
         }
         // A key event describes a physical key. Text input is the separate,
         // layout- and IME-resolved commit, and must go to the focused
@@ -707,14 +707,15 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
     crate::geometry::point_in_window(x as f64, y as f64, height)
 }
 
-/// Hand one input event to its window, as `-[NSApplication sendEvent:]` does.
+/// Queue one mouse event for its window, which `-[NSApplication sendEvent:]`
+/// hands it to once the guest's loop or `-run` takes it.
 fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fields) {
     let window = object_for(id);
     if window.is_null() {
         return;
     }
     let point = at.map(|(x, y)| location(window, x, y)).unwrap_or_default();
-    dispatch(window, nsevent::make(fields(window, point)));
+    queue_input(window, nsevent::make(fields(window, point)));
 }
 
 /// Hand a built event to its window's `-sendEvent:`, after the local monitors.
@@ -952,11 +953,11 @@ pub(crate) fn deliver_typed_key(event: sdl3::video::Event, text: Option<String>)
     SCRIPTED_TEXT.with(|scripted| scripted.take()).flatten()
 }
 
-/// Queue a key event for the application, where `-nextEventMatchingMask:`
-/// returns it and `-run` sends it, as AppKit does: SDL 2.0.4 reads the keyboard
-/// only from the events that method returns. See the FIXME (ACCURACY) on
-/// `application::next_event`.
-fn queue_key(window: Id, event: Id) {
+/// Queue a key or mouse event for the application, where
+/// `-nextEventMatchingMask:` returns it and `-run` sends it, as AppKit does:
+/// SDL 2.0.4 reads the keyboard, and ClassiCube the mouse, only from the events
+/// that method returns. See the FIXME (ACCURACY) on `application::next_event`.
+fn queue_input(window: Id, event: Id) {
     // Before the queue, which is where AppKit runs a local monitor.
     if !crate::monitor::allows(event) {
         if tracing() {
