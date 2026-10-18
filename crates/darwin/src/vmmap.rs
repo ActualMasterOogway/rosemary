@@ -47,15 +47,9 @@ pub mod darwin {
 /// Asked separately from [`map_flags`] because the descriptor has to be dealt
 /// with too: on Darwin an anonymous mapping's `fd` argument is not a descriptor
 /// at all but a VM tag, and Linux's `mmap` validates it.
+#[inline(always)]
 pub fn is_anonymous(flags: i32) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        flags & libc::MAP_ANON != 0
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        flags & darwin::MAP_ANON != 0
-    }
+    flags & darwin::MAP_ANON != 0
 }
 
 /// The `fd` to give the host for a guest's `(flags, fd)`.
