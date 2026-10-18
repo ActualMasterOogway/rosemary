@@ -234,26 +234,156 @@ fn swapping() -> bool {
 }
 
 fn swap_ctrl_cmd(sdl_modifiers: u16) -> u16 {
+    if edit_chord() != 0 {
+        return control_as_command(sdl_modifiers);
+    }
     if !swapping() {
         return sdl_modifiers;
     }
-    let ctrl = sdl_modifiers & (keymod::LCTRL | keymod::RCTRL);
-    let gui = sdl_modifiers & (keymod::LGUI | keymod::RGUI);
+    let ctrl = sdl_modifiers & keymod::CTRL;
+    let gui = sdl_modifiers & keymod::GUI;
     (sdl_modifiers & !(ctrl | gui)) | (ctrl << 4) | (gui >> 4)
 }
 
+/// Each held Control reported as the Command on the same side.
+fn control_as_command(sdl_modifiers: u16) -> u16 {
+    let ctrl = sdl_modifiers & keymod::CTRL;
+    (sdl_modifiers & !ctrl) | (ctrl << 4)
+}
+
+/// `ROSEMARY_CONTROL_EDIT_KEYS=1`: Control with A, C, V, X, Y or Z acts as
+/// Command, and Control stays Control everywhere else.
+///
+/// The narrow form of `ROSEMARY_SWAP_CTRL_CMD`, for a program that edits text
+/// with Command and also reads Control as a key of its own - a game that
+/// crouches on it, say. On a desktop that keeps Super's letter chords for
+/// itself, Command-V is otherwise unreachable.
+pub const CONTROL_EDIT_KEYS_ENV: &str = "ROSEMARY_CONTROL_EDIT_KEYS";
+
+fn control_edit_keys() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(CONTROL_EDIT_KEYS_ENV).is_some_and(|v| v != "0"))
+}
+
+/// The letters whose Command chords are editing: select all, copy, paste, cut,
+/// redo and undo.
+const EDIT_KEYS: [u32; 6] = [
+    scancode::A,
+    scancode::C,
+    scancode::V,
+    scancode::X,
+    scancode::Y,
+    scancode::Z,
+];
+
+/// The Control sides (`SDL_Keymod` bits) being reported as Command, from the
+/// editing key that started the chord until Control is let go; zero outside
+/// one. Held across the chord rather than the one key, so that Control-A then
+/// Control-C is one selection and copy and not two Command presses with a
+/// Control press between them.
+static EDIT_CHORD: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+pub fn edit_chord() -> u16 {
+    EDIT_CHORD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_edit_chord(sides: u16) {
+    EDIT_CHORD.store(sides & keymod::CTRL, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// An editing letter with Control and no other modifier but Shift.
+fn is_edit_chord_key(scancode: u32, sdl_modifiers: u16) -> bool {
+    EDIT_KEYS.contains(&scancode)
+        && sdl_modifiers & keymod::CTRL != 0
+        && sdl_modifiers & (keymod::ALT | keymod::GUI) == 0
+}
+
+/// What a key event does to the editing chord, decided before the event is
+/// made so that its key code and flags follow the chord's new state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChordStep {
+    /// Nothing: the event goes out as the chord already has it.
+    Keep,
+    /// An editing key outside a chord: Control becomes Command first.
+    Begin,
+    /// A key that is not an editing chord, pressed during one, or an event that
+    /// shows no Control held: Command goes back to Control (or is let go)
+    /// first, so every other Control chord is left alone.
+    Leave,
+    /// The last Control let go: the event is the release of Command, and the
+    /// chord is over once it has gone out.
+    EndAfter,
+}
+
+/// [`ChordStep`] for a key event, given the chord's current sides. Pure, so
+/// the rules can be tested without the global state.
+fn chord_step(chord: u16, scancode: u32, sdl_modifiers: u16, down: bool) -> ChordStep {
+    let control_key = matches!(scancode, scancode::LCTRL | scancode::RCTRL);
+    let control_held = sdl_modifiers & keymod::CTRL != 0;
+    if chord == 0 {
+        return match down && is_edit_chord_key(scancode, sdl_modifiers) {
+            true => ChordStep::Begin,
+            false => ChordStep::Keep,
+        };
+    }
+    match (control_key, control_held) {
+        (true, false) if !down => ChordStep::EndAfter,
+        (true, _) => ChordStep::Keep,
+        // A Control release this pump never saw - dropped under a modal
+        // dialog, say - must not leave the next Control press as Command.
+        (false, false) => ChordStep::Leave,
+        (false, true) if down && !is_modifier(scancode) => {
+            match is_edit_chord_key(scancode, sdl_modifiers) {
+                true => ChordStep::Keep,
+                false => ChordStep::Leave,
+            }
+        }
+        (false, true) => ChordStep::Keep,
+    }
+}
+
+/// [`chord_step`] for this key event, or [`ChordStep::Keep`] when
+/// `ROSEMARY_CONTROL_EDIT_KEYS` is off.
+pub fn edit_chord_step(scancode: u32, sdl_modifiers: u16, down: bool) -> ChordStep {
+    if !control_edit_keys() || swapping() {
+        return ChordStep::Keep;
+    }
+    chord_step(edit_chord(), scancode, sdl_modifiers, down)
+}
+
+/// The Command an editing chord reports in place of Control on `side`.
+pub fn chord_command(side: u16) -> u16 {
+    match side {
+        keymod::RCTRL => vk::RIGHT_COMMAND,
+        _ => vk::COMMAND,
+    }
+}
+
+/// The Control key code for `side`, which the chord took over.
+pub fn chord_control(side: u16) -> u16 {
+    match side {
+        keymod::RCTRL => vk::RIGHT_CONTROL,
+        _ => vk::CONTROL,
+    }
+}
+
 pub fn virtual_key(scancode: u32) -> u16 {
-    let scancode = match (swapping(), scancode) {
-        (true, scancode::LCTRL) => scancode::LGUI,
-        (true, scancode::RCTRL) => scancode::RGUI,
-        (true, scancode::LGUI) => scancode::LCTRL,
-        (true, scancode::RGUI) => scancode::RCTRL,
-        _ => scancode,
-    };
     VIRTUAL_KEYS
         .iter()
-        .find(|(sdl, _)| *sdl == scancode)
+        .find(|(sdl, _)| *sdl == chord_scancode(edit_chord() != 0, scancode))
         .map_or(UNKNOWN, |(_, vk)| *vk)
+}
+
+/// The scancode whose key code `scancode` is reported as. A chord moves only
+/// Control: Super stays Command, as its flags do.
+fn chord_scancode(chord: bool, scancode: u32) -> u32 {
+    match (swapping(), chord, scancode) {
+        (true, _, scancode::LCTRL) | (false, true, scancode::LCTRL) => scancode::LGUI,
+        (true, _, scancode::RCTRL) | (false, true, scancode::RCTRL) => scancode::RGUI,
+        (true, _, scancode::LGUI) => scancode::LCTRL,
+        (true, _, scancode::RGUI) => scancode::RCTRL,
+        _ => scancode,
+    }
 }
 
 /// `NSEventModifierFlags`.
@@ -415,6 +545,97 @@ pub fn characters(code: u32, keycode: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_editing_letter_with_control_begins_a_chord() {
+        let ctrl = keymod::LCTRL;
+        assert_eq!(chord_step(0, scancode::V, ctrl, true), ChordStep::Begin);
+        assert_eq!(
+            chord_step(0, scancode::Z, ctrl | keymod::LSHIFT, true),
+            ChordStep::Begin
+        );
+        assert_eq!(chord_step(0, scancode::V, ctrl, false), ChordStep::Keep);
+        assert_eq!(chord_step(0, scancode::S, ctrl, true), ChordStep::Keep);
+        assert_eq!(chord_step(0, scancode::V, 0, true), ChordStep::Keep);
+        assert_eq!(
+            chord_step(0, scancode::V, ctrl | keymod::LALT, true),
+            ChordStep::Keep
+        );
+        assert_eq!(
+            chord_step(0, scancode::V, ctrl | keymod::LGUI, true),
+            ChordStep::Keep
+        );
+    }
+
+    #[test]
+    fn another_editing_letter_stays_in_the_chord() {
+        let (chord, ctrl) = (keymod::LCTRL, keymod::LCTRL);
+        assert_eq!(chord_step(chord, scancode::C, ctrl, true), ChordStep::Keep);
+        assert_eq!(chord_step(chord, scancode::A, ctrl, false), ChordStep::Keep);
+        assert_eq!(
+            chord_step(chord, scancode::LSHIFT, ctrl | keymod::LSHIFT, true),
+            ChordStep::Keep
+        );
+    }
+
+    #[test]
+    fn any_other_control_chord_leaves_the_edit_chord() {
+        let (chord, ctrl) = (keymod::LCTRL, keymod::LCTRL);
+        assert_eq!(chord_step(chord, scancode::S, ctrl, true), ChordStep::Leave);
+        assert_eq!(
+            chord_step(chord, scancode::V, ctrl | keymod::LALT, true),
+            ChordStep::Leave
+        );
+    }
+
+    #[test]
+    fn the_chord_ends_only_when_the_last_control_is_let_go() {
+        let chord = keymod::LCTRL | keymod::RCTRL;
+        assert_eq!(
+            chord_step(chord, scancode::LCTRL, keymod::RCTRL, false),
+            ChordStep::Keep
+        );
+        assert_eq!(
+            chord_step(chord, scancode::RCTRL, 0, false),
+            ChordStep::EndAfter
+        );
+    }
+
+    #[test]
+    fn a_key_without_control_leaves_a_stale_chord() {
+        assert_eq!(
+            chord_step(keymod::LCTRL, scancode::W, 0, true),
+            ChordStep::Leave
+        );
+        assert_eq!(
+            chord_step(keymod::LCTRL, scancode::LSHIFT, keymod::LSHIFT, true),
+            ChordStep::Leave
+        );
+    }
+
+    #[test]
+    fn a_chord_reports_control_as_command_side_for_side() {
+        assert_eq!(
+            control_as_command(keymod::LCTRL | keymod::LSHIFT),
+            keymod::LGUI | keymod::LSHIFT
+        );
+        assert_eq!(control_as_command(keymod::RCTRL), keymod::RGUI);
+        assert_eq!(
+            control_as_command(keymod::LCTRL | keymod::RCTRL),
+            keymod::GUI
+        );
+    }
+
+    #[test]
+    fn a_chord_moves_control_and_leaves_super() {
+        if swapping() {
+            return;
+        }
+        assert_eq!(chord_scancode(true, scancode::LCTRL), scancode::LGUI);
+        assert_eq!(chord_scancode(true, scancode::RCTRL), scancode::RGUI);
+        assert_eq!(chord_scancode(true, scancode::LGUI), scancode::LGUI);
+        assert_eq!(chord_scancode(false, scancode::LCTRL), scancode::LCTRL);
+    }
 
     /// Two keys with the same virtual code would be one key as far as a guest's
     /// lookup table is concerned.
