@@ -159,6 +159,7 @@ exports::exports! {
         "vm_deallocate" | "mach_vm_deallocate" => vm::vm_deallocate,
         "mach_vm_region" => vm::vm_region_64,
         "vm_read_overwrite" => vm::vm_read_overwrite,
+        "vm_copy" | "mach_vm_copy" => vm::vm_copy,
 
         "mach_msg" => msg::mach_msg,
         "mach_msg_overwrite" => msg::mach_msg_overwrite,
