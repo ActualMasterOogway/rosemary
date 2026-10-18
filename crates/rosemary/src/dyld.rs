@@ -2489,11 +2489,11 @@ mod tests {
         let host = unsafe {
             libc::dlsym(
                 handle as *mut libc::c_void,
-                c"CGLChoosePixelFormat".as_ptr(),
+                c"CGLDescribePixelFormat".as_ptr(),
             )
         };
         assert!(!host.is_null());
-        assert!(lookup(handle, "CGLChoosePixelFormat").is_none());
+        assert!(lookup(handle, "CGLDescribePixelFormat").is_none());
         assert!(lookup(handle, "gluPerspective").is_none());
         let expected = appkit::symbol("CGLGetCurrentContext").unwrap();
         assert_eq!(

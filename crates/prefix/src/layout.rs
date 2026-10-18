@@ -138,6 +138,12 @@ pub fn create(directory: &Path) -> std::io::Result<bool> {
     if created(directory) {
         return Ok(false);
     }
+    // Two processes started together on a fresh prefix would otherwise both
+    // make its symlinks, and the second fails with EEXIST.
+    let _lock = crate::repair::lock(&Prefix::at(directory))?;
+    if created(directory) {
+        return Ok(false);
+    }
     let drive = directory.join(DRIVE);
     let user = user_name();
     fill_in(directory)?;
