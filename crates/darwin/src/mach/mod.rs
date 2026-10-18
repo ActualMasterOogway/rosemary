@@ -123,8 +123,11 @@ exports::exports! {
         "thread_set_state" => thread::thread_set_state,
         "thread_abort" | "thread_abort_safely" => thread::thread_abort,
         "thread_policy_set" => thread::thread_policy_set,
+        "thread_policy_get" => thread::thread_policy_get,
         "mach_port_space_basic_info" => tasks::mach_port_space_basic_info,
         "task_policy_get" => tasks::task_policy_get,
+        "task_suspend" => tasks::task_suspend,
+        "task_resume" => tasks::task_resume,
         "task_set_special_port" => task::task_set_special_port,
 
         // The exception-port family. `task`, `host` and `thread` are the same
