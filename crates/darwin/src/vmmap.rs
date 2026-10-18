@@ -286,6 +286,7 @@ pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32
 exports::exports! {
     functions {
         "mmap" => mmap,
+        "munmap" => libc::munmap,
         "madvise" => madvise,
         "posix_madvise" => posix_madvise,
         "msync" => msync,
