@@ -1693,6 +1693,33 @@ fn report(message: &str) {
     );
 }
 
+/// `void malloc_printf(const char *format, ...)`
+///
+/// libmalloc's own printer, prefixed as its reports are. Interposing
+/// allocators (mimalloc, jemalloc) print their diagnostics through it.
+///
+/// # Safety
+///
+/// `format` is a NUL-terminated string the arguments match.
+pub unsafe extern "C" fn malloc_printf(format: *const c_char, args: ...) {
+    unsafe extern "C" {
+        fn vasprintf(out: *mut *mut c_char, format: *const c_char, ap: std::ffi::VaList) -> c_int;
+    }
+    if format.is_null() {
+        return;
+    }
+    let mut out: *mut c_char = std::ptr::null_mut();
+    // SAFETY: the caller's format and arguments.
+    if unsafe { vasprintf(&mut out, format, args) } < 0 {
+        return;
+    }
+    // SAFETY: the host's NUL-terminated rendering, freed once reported.
+    unsafe {
+        report(&std::ffi::CStr::from_ptr(out).to_string_lossy());
+        libc::free(out.cast());
+    }
+}
+
 /// `malloc_error_break`: where libmalloc tells a developer to stop.
 #[inline(never)]
 pub extern "C" fn malloc_error_break() {
@@ -2652,6 +2679,7 @@ pub unsafe extern "C" fn malloc_type_zone_malloc_with_options(
 exports::exports! {
     functions {
         "malloc" => malloc,
+        "malloc_printf" => malloc_printf,
         "calloc" => calloc,
         "valloc" => valloc,
         "aligned_alloc" => aligned_alloc,
