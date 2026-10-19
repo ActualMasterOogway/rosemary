@@ -364,6 +364,14 @@ fn shimmed() -> Vec<(&'static str, *const ())> {
             "NSRunAlertPanel",
             crate::shims::nslog::native::run_alert_panel() as *const (),
         ),
+        (
+            "CFStringCreateWithFormat",
+            crate::shims::nslog::native::cfstring_create_with_format() as *const (),
+        ),
+        (
+            "CFStringCreateWithFormatAndArguments",
+            crate::shims::nslog::native::cfstring_create_with_format_and_arguments() as *const (),
+        ),
     ]
 }
 
