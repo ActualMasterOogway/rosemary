@@ -263,6 +263,8 @@ exports::exports! {
         "CGRectOffset" => geometry::CGRectOffset,
         "CGRectIntegral" => geometry::CGRectIntegral,
         "CGRectIsEmpty" => geometry::CGRectIsEmpty,
+        // FIXME (PORTABILITY): this needs to be ported to macOS
+        #[cfg(not(target_os = "macos"))]
         "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
         "NSRectFill" => color::NSRectFill,
         "NSDrawNinePartImage" => image::NSDrawNinePartImage,
