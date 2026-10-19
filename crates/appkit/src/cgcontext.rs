@@ -1714,6 +1714,24 @@ mod tests {
         assert_eq!(pixels, [[0; 4], [0; 4], [0, 0, 255, 255], [0, 0, 255, 255]]);
     }
 
+    /// A clipped fill in a mode that ignores the source, or replaces the
+    /// destination, still leaves everything outside the clip alone.
+    #[test]
+    fn a_clip_bounds_clear_and_copy_fills() {
+        for (mode, inside) in [(16, [0u8; 4]), (17, [0, 0, 255, 255])] {
+            let pixels = pixels_after(|context| unsafe {
+                CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+                CGContextFillRect(context, rect(0.0, 0.0, 2.0, 2.0));
+                CGContextClipToRect(context, rect(1.0, 0.0, 1.0, 2.0));
+                CGContextSetBlendMode(context, mode);
+                CGContextSetRGBFillColor(context, 0.0, 0.0, 1.0, 1.0);
+                CGContextFillRect(context, rect(0.0, 0.0, 2.0, 2.0));
+            });
+            let white = [255u8; 4];
+            assert_eq!(pixels, [white, inside, white, inside], "blend mode {mode}");
+        }
+    }
+
     /// A clip keeps drawing inside it, and restoring the state lifts it.
     #[test]
     fn a_clip_bounds_a_fill_until_restored() {

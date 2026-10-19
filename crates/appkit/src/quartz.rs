@@ -589,6 +589,69 @@ fn touched(
     sk::IntRect::from_ltrb(left, top, right, bottom)
 }
 
+/// Whether tiny-skia clips a fill in `mode` correctly by scaling the source
+/// by coverage - its own `should_pre_scale_coverage`, which is private. In
+/// any other mode its rectangle blitter writes through the clip: it scales
+/// the source by the mask but never moves the result back toward the
+/// destination, so a clipped `Clear` empties the whole rectangle.
+fn clips_by_scaling_source(mode: sk::BlendMode) -> bool {
+    use sk::BlendMode::*;
+    matches!(
+        mode,
+        Destination | DestinationOver | Plus | DestinationOut | SourceAtop | SourceOver | Xor
+    )
+}
+
+/// `fill_path` with `clip` honoured in every blend mode: where tiny-skia
+/// would not, the fill is made unclipped on a copy of the area it reaches,
+/// which is then laid back over the target by the clip's coverage.
+fn fill_clipped(
+    pixmap: &mut sk::PixmapMut,
+    path: &sk::Path,
+    paint: &sk::Paint,
+    rule: sk::FillRule,
+    transform: sk::Transform,
+    clip: Option<&sk::Mask>,
+) {
+    let Some(clip) = clip.filter(|_| !clips_by_scaling_source(paint.blend_mode)) else {
+        pixmap.fill_path(path, paint, rule, transform, clip);
+        return;
+    };
+    // One pixel more than the bounds, for anti-aliased edges.
+    let Some(area) = touched(path, transform, 1.0, pixmap.width(), pixmap.height()) else {
+        return;
+    };
+    let Some(mut scratch) = sk::Pixmap::new(area.width(), area.height()) else {
+        return;
+    };
+    let stride = pixmap.width() as usize * 4;
+    let (x0, y0) = (area.x() as usize, area.y() as usize);
+    let (w, h) = (area.width() as usize, area.height() as usize);
+    for row in 0..h {
+        let from = (y0 + row) * stride + x0 * 4;
+        scratch.data_mut()[row * w * 4..(row + 1) * w * 4]
+            .copy_from_slice(&pixmap.data_mut()[from..from + w * 4]);
+    }
+    let shifted = transform.post_translate(-(x0 as f32), -(y0 as f32));
+    scratch.fill_path(path, paint, rule, shifted, None);
+    let coverage = clip.data();
+    let mask_width = clip.width() as usize;
+    let target = pixmap.data_mut();
+    for row in 0..h {
+        for col in 0..w {
+            let m = u16::from(coverage[(y0 + row) * mask_width + x0 + col]);
+            if m == 0 {
+                continue;
+            }
+            let at = (y0 + row) * stride + (x0 + col) * 4;
+            let made = &scratch.data()[(row * w + col) * 4..][..4];
+            for (d, s) in target[at..at + 4].iter_mut().zip(made) {
+                *d = ((u16::from(*d) * (255 - m) + u16::from(*s) * m + 127) / 255) as u8;
+            }
+        }
+    }
+}
+
 /// Fill `path`, given in base space, with `ink`.
 pub(crate) fn fill(context: CFTypeRef, path: &Elements, rule: sk::FillRule, stroke_ink: bool) {
     let Some(state) = state_of(context) else {
@@ -608,7 +671,7 @@ pub(crate) fn fill(context: CFTypeRef, path: &Elements, rule: sk::FillRule, stro
         let paint = source.paint(frame.base, &state, frame.swap)?;
         let transform = frame.base.sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.fill_path(&skia, &paint, rule, transform, clip);
+        fill_clipped(pixmap, &skia, &paint, rule, transform, clip);
         touched(&skia, transform, 1.0, pixmap.width(), pixmap.height())
     });
 }
@@ -661,7 +724,26 @@ pub(crate) fn stroke(context: CFTypeRef, path: &Elements) {
         let style = stroke_style(&state.line);
         let transform = geometry.sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.stroke_path(&skia, &paint, &style, transform, clip);
+        match clip.is_some() && !clips_by_scaling_source(paint.blend_mode) {
+            // The outline, filled, so `fill_clipped` can honour the clip.
+            true => {
+                let scale = sk::PathStroker::compute_resolution_scale(&transform);
+                let dashed = match &style.dash {
+                    Some(dash) => skia.dash(dash, scale)?,
+                    None => skia.clone(),
+                };
+                let outline = dashed.stroke(&style, scale)?;
+                fill_clipped(
+                    pixmap,
+                    &outline,
+                    &paint,
+                    sk::FillRule::Winding,
+                    transform,
+                    clip,
+                );
+            }
+            false => pixmap.stroke_path(&skia, &paint, &style, transform, clip),
+        }
         let reach = (state.line.width.max(1.0)
             * geometry.scale_factor()
             * state.line.miter.max(1.0)) as f32;
@@ -867,7 +949,14 @@ pub(crate) fn draw_pixels(
         let paint = source.paint(geometry, &state, frame.swap)?;
         let transform = geometry.sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.fill_path(&path, &paint, sk::FillRule::Winding, transform, clip);
+        fill_clipped(
+            pixmap,
+            &path,
+            &paint,
+            sk::FillRule::Winding,
+            transform,
+            clip,
+        );
         touched(&path, transform, 1.0, pixmap.width(), pixmap.height())
     });
 }
@@ -896,7 +985,14 @@ pub(crate) fn draw_through_mask(
         let paint = source.paint(geometry, &state, frame.swap)?;
         let transform = geometry.sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.fill_path(&path, &paint, sk::FillRule::Winding, transform, clip);
+        fill_clipped(
+            pixmap,
+            &path,
+            &paint,
+            sk::FillRule::Winding,
+            transform,
+            clip,
+        );
         touched(&path, transform, 1.0, pixmap.width(), pixmap.height())
     });
 }
@@ -938,7 +1034,14 @@ pub(crate) fn clear(context: CFTypeRef, rect: NSRect) {
         };
         let transform = state.ctm.then(frame.base).sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.fill_path(&path, &paint, sk::FillRule::Winding, transform, clip);
+        fill_clipped(
+            pixmap,
+            &path,
+            &paint,
+            sk::FillRule::Winding,
+            transform,
+            clip,
+        );
         touched(&path, transform, 1.0, pixmap.width(), pixmap.height())
     });
 }
@@ -1066,7 +1169,14 @@ pub(crate) fn draw_shading(context: CFTypeRef, shading: Shading) {
         let skia = region.to_skia()?;
         let transform = user_to_device.sk();
         let clip = clip_for(&state, pixmap.width(), pixmap.height());
-        pixmap.fill_path(&skia, &paint, sk::FillRule::Winding, transform, clip);
+        fill_clipped(
+            pixmap,
+            &skia,
+            &paint,
+            sk::FillRule::Winding,
+            transform,
+            clip,
+        );
         touched(&skia, transform, 1.0, pixmap.width(), pixmap.height())
     });
 }
