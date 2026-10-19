@@ -105,6 +105,7 @@ exports::group! {
     /// it and has neither an `NSBundle` nor a `$HOME`.
     bundle::cf,
     notification::cf,
+    error::cf,
     runtime,
     calculate,
     locale::cf,

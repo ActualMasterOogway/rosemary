@@ -612,6 +612,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CFStringCompareFlags` is a `CFOptionFlags` - both 64-bit on LP64.
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFCopyDescription", P, P),
+    sig!("CFErrorCopyDescription", P, P),
+    sig!("CFMakeCollectable", P, P),
     sig!("CFCopyTypeIDDescription", P, U64),
     sig!("CFStringCompareWithOptions", I64, P, P, I64, I64, U64),
     // `Boolean CFStringFindWithOptions(CFStringRef, CFStringRef, CFRange,
@@ -1956,8 +1958,6 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getgrgid", P, U32),
     sig!("getgrgid_r", I32, U32, P, P, U64, P),
     sig!("getgrnam", P, P),
-    sig!("CFErrorCopyDescription", P, P),
-    sig!("CFMakeCollectable", P, P),
     sig!("getgrnam_r", I32, P, P, P, U64, P),
     sig!("gethostbyname", P, P),
     sig!("gethostbyname2", P, P, I32),
