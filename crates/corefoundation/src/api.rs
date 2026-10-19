@@ -2652,6 +2652,17 @@ pub unsafe extern "C" fn CFRunLoopRun() {
     runloop::current().run_in_mode(runloop::DEFAULT_MODE, f64::INFINITY, false);
 }
 
+/// `CFStringRef CFRunLoopCopyCurrentMode(CFRunLoopRef)`: NULL when the loop is
+/// not running.
+pub unsafe extern "C" fn CFRunLoopCopyCurrentMode(loop_: CFTypeRef) -> CFTypeRef {
+    let Some(l) = (unsafe { borrow::<RunLoop>(loop_) }) else {
+        return std::ptr::null();
+    };
+    l.current_mode().map_or(std::ptr::null(), |mode| {
+        string::from_bytes(mode.as_bytes(), false)
+    })
+}
+
 pub unsafe extern "C" fn CFRunLoopStop(loop_: CFTypeRef) {
     if let Some(l) = unsafe { borrow::<RunLoop>(loop_) } {
         l.stop();

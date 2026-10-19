@@ -570,8 +570,34 @@ pub mod cf {
             .retain(|o| o.center != center || o.observer != observer);
     }
 
+    /// `CFNotificationCenterPostNotification(center, name, object, userInfo,
+    /// deliverImmediately)`
+    ///
+    /// The local center is the class above's, so a post reaches every kind of
+    /// observer. A post to the distributed center reaches only its own
+    /// callbacks: there is no other process to carry it to.
+    unsafe extern "C" fn CFNotificationCenterPostNotification(
+        center: Id,
+        name: Id,
+        object: *const c_void,
+        user_info: Id,
+        _immediately: u8,
+    ) {
+        if name.is_null() {
+            return;
+        }
+        // SAFETY: a string.
+        let text = unsafe { super::text_of(name) };
+        if center == local_center() {
+            super::post(&text, object as Id, user_info);
+        } else {
+            super::post_to_callbacks(center, &text, object, user_info);
+        }
+    }
+
     exports::exports! {
         functions {
+            "CFNotificationCenterPostNotification" => CFNotificationCenterPostNotification,
             "CFNotificationCenterGetLocalCenter" => CFNotificationCenterGetLocalCenter,
             "CFNotificationCenterGetDistributedCenter" => CFNotificationCenterGetDistributedCenter,
             "CFNotificationCenterAddObserver" => CFNotificationCenterAddObserver,

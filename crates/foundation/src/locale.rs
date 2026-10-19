@@ -92,17 +92,21 @@ unsafe extern "C" fn current_locale(_class: Id, _sel: Sel) -> Id {
 /// list looking for a localisation it has, and an invented second entry would
 /// send it to a language the user never asked for.
 unsafe extern "C" fn preferred_languages(_class: Id, _sel: Sel) -> Id {
+    // SAFETY: a fresh object this call owns.
+    unsafe { corefoundation::api::CFAutorelease(preferred_languages_array()) as Id }
+}
+
+/// The array [`preferred_languages`] answers, with one reference the caller owns.
+fn preferred_languages_array() -> corefoundation::base::CFTypeRef {
     let tag = crate::string::from_str(&tag());
     let array = corefoundation::collections::new_array(
         &[tag as corefoundation::base::CFTypeRef],
         corefoundation::callbacks::Policy::from_type_callbacks(),
         false,
     );
-    // SAFETY: both are fresh objects this call owns.
-    unsafe {
-        corefoundation::api::CFRelease(tag as corefoundation::base::CFTypeRef);
-        corefoundation::api::CFAutorelease(array) as Id
-    }
+    // SAFETY: a fresh object this call owns, now held by the array.
+    unsafe { corefoundation::api::CFRelease(tag as corefoundation::base::CFTypeRef) };
+    array
 }
 
 /// Whether this locale measures in metres.
@@ -300,8 +304,26 @@ pub mod cf {
         super::shared()
     }
 
+    /// `CFLocaleRef CFLocaleCreate(CFAllocatorRef, CFStringRef identifier)`.
+    ///
+    /// FIXME (ACCURACY): there is one locale object, so every identifier is
+    /// answered with it rather than with the locale it names.
+    unsafe extern "C" fn CFLocaleCreate(_allocator: Id, identifier: Id) -> Id {
+        if identifier.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe { CFLocaleCopyCurrent() }
+    }
+
+    /// `CFArrayRef CFLocaleCopyPreferredLanguages(void)`.
+    unsafe extern "C" fn CFLocaleCopyPreferredLanguages() -> Id {
+        super::preferred_languages_array() as Id
+    }
+
     exports::exports! {
         functions {
+            "CFLocaleCreate" => CFLocaleCreate,
+            "CFLocaleCopyPreferredLanguages" => CFLocaleCopyPreferredLanguages,
             "CFLocaleGetSystem" => CFLocaleGetSystem,
             "CFLocaleCopyCurrent" => CFLocaleCopyCurrent,
             "CFLocaleGetIdentifier" => CFLocaleGetIdentifier,

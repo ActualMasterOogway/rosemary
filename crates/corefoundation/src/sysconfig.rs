@@ -550,6 +550,52 @@ pub unsafe extern "C" fn SCDynamicStoreKeyCreateNetworkGlobalEntity(
     crate::string::from_bytes(&key, false)
 }
 
+/// `CFStringRef SCDynamicStoreKeyCreateProxies(CFAllocatorRef)`
+pub unsafe extern "C" fn SCDynamicStoreKeyCreateProxies(_allocator: CFTypeRef) -> CFTypeRef {
+    crate::string::from_bytes(b"State:/Network/Global/Proxies", false)
+}
+
+/// `Boolean SCDynamicStoreSetNotificationKeys(SCDynamicStoreRef, CFArrayRef, CFArrayRef)`
+///
+/// Accepted and never delivered on: the values above do not change while the
+/// program runs, so there is nothing to notify.
+pub unsafe extern "C" fn SCDynamicStoreSetNotificationKeys(
+    store: CFTypeRef,
+    _keys: CFTypeRef,
+    _patterns: CFTypeRef,
+) -> u8 {
+    u8::from(!store.is_null())
+}
+
+/// `CFRunLoopSourceRef SCDynamicStoreCreateRunLoopSource(CFAllocatorRef, SCDynamicStoreRef, CFIndex)`
+///
+/// A source that never fires, for the reason [`SCDynamicStoreSetNotificationKeys`]
+/// gives. A caller that gets NULL instead hands it straight to
+/// `CFRunLoopAddSource`.
+pub unsafe extern "C" fn SCDynamicStoreCreateRunLoopSource(
+    allocator: CFTypeRef,
+    store: CFTypeRef,
+    order: isize,
+) -> CFTypeRef {
+    if store.is_null() {
+        return std::ptr::null();
+    }
+    let context = crate::api::CFRunLoopSourceContext {
+        version: 0,
+        info: std::ptr::null_mut(),
+        retain: std::ptr::null(),
+        release: std::ptr::null(),
+        copy_description: std::ptr::null(),
+        equal: std::ptr::null(),
+        hash: std::ptr::null(),
+        schedule: std::ptr::null(),
+        cancel: std::ptr::null(),
+        perform: None,
+    };
+    // SAFETY: a version-0 context that lives across the call.
+    unsafe { crate::api::CFRunLoopSourceCreate(allocator.cast(), order, &context) }
+}
+
 /// `CFPropertyListRef SCDynamicStoreCopyValue(SCDynamicStoreRef, CFStringRef key)`
 ///
 /// One key is answered: the global IPv4 entity, whose `PrimaryInterface` is what
@@ -671,6 +717,29 @@ const KEY_STRINGS: &[(&str, &str)] = &[
     ("_kSCPropNetInterfaceType", "Type"),
     ("_kSCNetworkInterfaceTypeEthernet", "Ethernet"),
     ("_kSCNetworkInterfaceTypeIEEE80211", "IEEE80211"),
+    // The keys of the proxies entity, which a browser reads at startup.
+    ("_kSCEntNetProxies", "Proxies"),
+    ("_kSCPropNetProxiesExceptionsList", "ExceptionsList"),
+    ("_kSCPropNetProxiesFTPEnable", "FTPEnable"),
+    ("_kSCPropNetProxiesFTPPort", "FTPPort"),
+    ("_kSCPropNetProxiesFTPProxy", "FTPProxy"),
+    ("_kSCPropNetProxiesHTTPEnable", "HTTPEnable"),
+    ("_kSCPropNetProxiesHTTPPort", "HTTPPort"),
+    ("_kSCPropNetProxiesHTTPProxy", "HTTPProxy"),
+    ("_kSCPropNetProxiesHTTPSEnable", "HTTPSEnable"),
+    ("_kSCPropNetProxiesHTTPSPort", "HTTPSPort"),
+    ("_kSCPropNetProxiesHTTPSProxy", "HTTPSProxy"),
+    (
+        "_kSCPropNetProxiesProxyAutoConfigEnable",
+        "ProxyAutoConfigEnable",
+    ),
+    (
+        "_kSCPropNetProxiesProxyAutoConfigURLString",
+        "ProxyAutoConfigURLString",
+    ),
+    ("_kSCPropNetProxiesSOCKSEnable", "SOCKSEnable"),
+    ("_kSCPropNetProxiesSOCKSPort", "SOCKSPort"),
+    ("_kSCPropNetProxiesSOCKSProxy", "SOCKSProxy"),
 ];
 
 /// The `kSC*` globals, as `(Mach-O name, address)`.
@@ -703,6 +772,9 @@ exports::exports! {
         "SCDynamicStoreCopyComputerName" => SCDynamicStoreCopyComputerName,
         "SCDynamicStoreKeyCreateNetworkGlobalEntity" => SCDynamicStoreKeyCreateNetworkGlobalEntity,
         "SCDynamicStoreCopyValue" => SCDynamicStoreCopyValue,
+        "SCDynamicStoreKeyCreateProxies" => SCDynamicStoreKeyCreateProxies,
+        "SCDynamicStoreSetNotificationKeys" => SCDynamicStoreSetNotificationKeys,
+        "SCDynamicStoreCreateRunLoopSource" => SCDynamicStoreCreateRunLoopSource,
         "SCPreferencesCreate" => SCPreferencesCreate,
         "SCPreferencesGetValue" => SCPreferencesGetValue,
         "SCNetworkServiceCopy" => SCNetworkServiceCopy,
