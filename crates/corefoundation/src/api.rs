@@ -155,6 +155,8 @@ pub unsafe extern "C" fn CFCopyDescription(object: CFTypeRef) -> CFTypeRef {
         return std::ptr::null();
     }
     if crate::base::is_opaque(object) {
+        // FIXME (ACCURACY): CF prints the allocator's address; none is tracked
+        // for an opaque handle, so it reads as the null allocator.
         let text = format!("<CFType {object:p} [0x0]>");
         let units: Vec<u16> = text.encode_utf16().collect();
         return crate::string::from_utf16(&units);
