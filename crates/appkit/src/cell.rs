@@ -491,18 +491,164 @@ unsafe extern "C" fn set_menu_item(receiver: Id, _sel: Sel, item: Id) {
     objc::arc::release(old);
 }
 
-/// `-drawWithFrame:inView:` and `-drawInteriorWithFrame:inView:`.
+/// A word-sized answer from a method taking no arguments, or `default` when
+/// the receiver has no such method.
+fn ask(receiver: Id, selector: &str, default: usize) -> usize {
+    if !responds(receiver, selector) {
+        return default;
+    }
+    // SAFETY: every selector asked here returns an integer, BOOL or object
+    // and takes no arguments.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> usize = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(selector))
+    }
+}
+
+fn is_a(object: Id, class: &std::ffi::CStr) -> bool {
+    let Some(wanted) = objc::class::lookup(class) else {
+        return false;
+    };
+    // SAFETY: an object this runtime allocated.
+    unsafe { objc::object::class_of(object) }
+        .is_some_and(|c| c.chain().any(|k| std::ptr::eq(k, wanted)))
+}
+
+/// The current graphics context's `CGContext`, and whether its user space
+/// grows downward.
+fn current_port() -> Option<(corefoundation::base::CFTypeRef, bool)> {
+    let class = objc::class::lookup(c"NSGraphicsContext")?;
+    let context = ask(class as *const _ as Id, "currentContext", 0) as Id;
+    if context.is_null() {
+        return None;
+    }
+    let port = ask(context, "CGContext", 0) as corefoundation::base::CFTypeRef;
+    let flipped = ask(context, "isFlipped", 0) as u8 != 0;
+    (!port.is_null()).then_some((port, flipped))
+}
+
+/// What a standalone cell draws as.
+enum Drawn {
+    Push,
+    Bevel,
+    Round,
+    Check,
+    Radio,
+    Disclosure,
+    Popup { pulls_down: bool },
+    Combo,
+    Search,
+    Field,
+}
+
+fn drawn_as(cell: Id) -> Option<Drawn> {
+    if is_a(cell, c"NSPopUpButtonCell") {
+        return Some(Drawn::Popup {
+            pulls_down: ask(cell, "pullsDown", 0) as u8 != 0,
+        });
+    }
+    if is_a(cell, c"NSSearchFieldCell") {
+        return Some(Drawn::Search);
+    }
+    if is_a(cell, c"NSComboBoxCell") {
+        return Some(Drawn::Combo);
+    }
+    if is_a(cell, c"NSTextFieldCell") {
+        return (ask(cell, "isBezeled", 0) as u8 != 0).then_some(Drawn::Field);
+    }
+    if !is_a(cell, c"NSButtonCell") {
+        return None;
+    }
+    // NSSwitchButton, NSRadioButton.
+    match ask(cell, "buttonType", 0) {
+        3 => return Some(Drawn::Check),
+        4 => return Some(Drawn::Radio),
+        _ => {}
+    }
+    if ask(cell, "isBordered", 1) as u8 == 0 {
+        return None;
+    }
+    Some(match ask(cell, "bezelStyle", 1) {
+        // NSRoundedBezelStyle
+        1 => Drawn::Push,
+        // NSDisclosureBezelStyle
+        5 => Drawn::Disclosure,
+        // Circular, help, textured rounded, round rect, recessed, inline.
+        7 | 9 | 11 | 12 | 13 | 15 => Drawn::Round,
+        // The square and bevel styles.
+        _ => Drawn::Bevel,
+    })
+}
+
+/// `-drawWithFrame:inView:`: the cell's control, as `crate::aqua` paints it,
+/// into the current graphics context - for a program drawing native widgets,
+/// its own bitmap context.
 ///
-/// FIXME (ACCURACY): a standalone cell draws nothing yet. A control here paints
-/// itself into the focused view's store; a cell is asked to paint into whatever
-/// context is current, which for a program drawing native widgets is its own
-/// bitmap context.
+/// FIXME (ACCURACY): a cell's title and image are not drawn; the programs
+/// seen to draw standalone cells draw their labels themselves.
 unsafe extern "C" fn draw_with_frame(
-    _receiver: Id,
+    receiver: Id,
     _sel: Sel,
-    _frame: foundation::geometry::NSRect,
+    frame: foundation::geometry::NSRect,
     _view: Id,
 ) {
+    draw_cell(receiver, frame, false);
+}
+
+/// `-drawInteriorWithFrame:inView:`: only what sits inside the bezel, which
+/// for the cells drawn here is a check box's or radio button's glyph.
+unsafe extern "C" fn draw_interior_with_frame(
+    receiver: Id,
+    _sel: Sel,
+    frame: foundation::geometry::NSRect,
+    _view: Id,
+) {
+    draw_cell(receiver, frame, true);
+}
+
+fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
+    let Some(drawn) = drawn_as(cell) else {
+        return;
+    };
+    if interior && !matches!(drawn, Drawn::Check | Drawn::Radio | Drawn::Disclosure) {
+        return;
+    }
+    let Some((port, flipped)) = current_port() else {
+        return;
+    };
+    let Some(p) = crate::aqua::Painter::new(port, frame, flipped) else {
+        return;
+    };
+    let size = crate::aqua::Size::from_control_size(get(cell, Slot::ControlSize));
+    let key = ask(cell, "keyEquivalent", 0) as Id;
+    let look = crate::aqua::Look {
+        pressed: ask(cell, "isHighlighted", 0) as u8 != 0,
+        disabled: ask(cell, "isEnabled", 1) as u8 == 0,
+        focused: get(cell, Slot::ShowsFirstResponder) != 0,
+        // SAFETY: a string or nil.
+        default: !key.is_null() && unsafe { foundation::string::bytes(key) } == b"\r",
+    };
+    let value = match ask(cell, "state", 0) as isize {
+        0 => crate::aqua::Value::Off,
+        -1 => crate::aqua::Value::Mixed,
+        _ => crate::aqua::Value::On,
+    };
+    use crate::aqua;
+    match drawn {
+        Drawn::Push => aqua::push_button(&p, frame, size, look),
+        Drawn::Bevel => aqua::bevel_button(&p, frame, look),
+        Drawn::Round => aqua::round_button(&p, frame, look),
+        Drawn::Check => aqua::check_box(&p, frame, size, value, look),
+        Drawn::Radio => aqua::radio_button(&p, frame, size, value, look),
+        Drawn::Disclosure => {
+            let direction = if value == aqua::Value::Off { 0 } else { 1 };
+            aqua::disclosure(&p, frame, direction, look)
+        }
+        Drawn::Popup { pulls_down } => aqua::popup_button(&p, frame, size, look, pulls_down),
+        Drawn::Combo => aqua::combo_box(&p, frame, size, look),
+        Drawn::Search => aqua::round_field(&p, frame, look.focused),
+        Drawn::Field => aqua::text_field(&p, frame, look.focused),
+    }
 }
 
 /// `-[NSPopUpButtonCell initTextCell:pullsDown:]`
@@ -562,7 +708,7 @@ pub(crate) fn install() {
         "doubleValue" => double_value, c"d16@0:8";
         "setDoubleValue:" => set_double_value, c"v24@0:8d16";
         "drawWithFrame:inView:" => draw_with_frame, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
-        "drawInteriorWithFrame:inView:" => draw_with_frame, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+        "drawInteriorWithFrame:inView:" => draw_interior_with_frame, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
     });
     let popup_cell =
         objc::class::lookup(c"NSPopUpButtonCell").expect("declared before its methods");

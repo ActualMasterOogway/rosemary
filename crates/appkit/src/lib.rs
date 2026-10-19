@@ -15,6 +15,7 @@ pub mod alert;
 mod animation;
 pub mod appearance;
 pub mod application;
+mod aqua;
 pub mod backing;
 mod bezier;
 pub mod button;
