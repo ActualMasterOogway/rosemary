@@ -230,7 +230,9 @@ pub(crate) fn frame_of(context: CFTypeRef) -> Option<Frame> {
         },
         width: ctx.width as u32,
         height: ctx.height as u32,
-        swap: layout(ctx) == Layout::Bgra,
+        // Only a context drawn in place keeps its bytes' order; any other is
+        // drawn on an R, G, B, A copy, see `render`.
+        swap: direct(ctx) && layout(ctx) == Layout::Bgra,
         scale: 1.0,
     })
 }
@@ -262,6 +264,13 @@ fn layout(ctx: &BitmapContext) -> Layout {
         (true, false) => Layout::Argb,
         (false, true) => Layout::Abgr,
     }
+}
+
+/// Whether a context's bytes are drawn on in place: four channels in an order
+/// tiny-skia's pixmap takes, with no padding at the end of a row. Any other
+/// layout is converted to R, G, B, A and back around each draw.
+fn direct(ctx: &BitmapContext) -> bool {
+    matches!(layout(ctx), Layout::Rgba | Layout::Bgra) && ctx.bytes_per_row == ctx.width * 4
 }
 
 /// Whether a context's fourth byte is padding Quartz keeps opaque.
@@ -300,8 +309,7 @@ pub(crate) fn render(
     let kind = layout(ctx);
     // SAFETY: a bitmap context's storage is `bytes_per_row * height` bytes.
     let bytes = unsafe { std::slice::from_raw_parts_mut(ctx.data, ctx.bytes_per_row * ctx.height) };
-    let direct = matches!(kind, Layout::Rgba | Layout::Bgra) && ctx.bytes_per_row == width * 4;
-    let touched = match direct {
+    let touched = match direct(ctx) {
         true => {
             let Some(mut pixmap) = sk::PixmapMut::from_bytes(bytes, width as u32, height as u32)
             else {

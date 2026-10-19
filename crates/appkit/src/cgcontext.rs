@@ -1639,6 +1639,31 @@ mod tests {
         assert_eq!(pixels, [0, 0xffff_0000, 0, 0]);
     }
 
+    /// A little-endian context whose rows are padded is drawn on a copy, and
+    /// its colours still land in the right bytes.
+    #[test]
+    fn fills_a_padded_little_endian_bitmap_in_its_own_order() {
+        crate::bootstrap();
+        // One pixel per row, padded to two.
+        let mut pixels = [0u32; 4];
+        // SAFETY: `pixels` is two writable rows of eight bytes.
+        unsafe {
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                1,
+                2,
+                8,
+                8,
+                std::ptr::null(),
+                0x2002,
+            );
+            CGContextSetRGBFillColor(context, 1.0, 0.0, 0.0, 1.0);
+            CGContextFillRect(context, rect(0.0, 0.0, 1.0, 2.0));
+            CGContextRelease(context);
+        }
+        assert_eq!(pixels, [0xffff_0000, 0, 0xffff_0000, 0]);
+    }
+
     #[test]
     fn saved_state_restores_the_transform() {
         crate::bootstrap();
