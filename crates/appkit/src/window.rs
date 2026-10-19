@@ -1459,6 +1459,7 @@ fn order_front(receiver: Id, make_key: bool) {
     );
     if make_key && want != Presentation::Tooltip {
         KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
+        crate::event::announce_key(receiver);
     }
     let window = window_of(receiver);
     if window.first_responder.is_null() && !window.initial_first_responder.is_null() {
@@ -1503,6 +1504,7 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
         std::sync::atomic::Ordering::AcqRel,
         std::sync::atomic::Ordering::Acquire,
     );
+    crate::event::announce_resign(receiver);
 }
 
 /// `-dealloc`. The content view is told it has no window before it is released,
@@ -1512,6 +1514,7 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
 /// The SDL window is hidden rather than destroyed: a Metal swapchain may still
 /// be keyed by it, and that table is not this crate's to clear.
 pub(crate) unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
+    crate::event::forget_announced(receiver);
     children()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

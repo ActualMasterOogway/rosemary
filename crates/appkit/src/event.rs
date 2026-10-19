@@ -359,13 +359,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 crate::screen::apply_mouse_association();
                 crate::screen::confine_pointer(object);
             }
-            post(
-                window,
-                match gained {
-                    true => window::DID_BECOME_KEY,
-                    false => window::DID_RESIGN_KEY,
-                },
-            );
+            match gained {
+                true => announce_key(object),
+                false => announce_resign(object),
+            }
         }
         Event::Key {
             window: id,
@@ -1391,6 +1388,69 @@ fn post(id: u32, name: &str) {
         return;
     }
     post_for(object, name);
+}
+
+/// The window last announced as key and main, which is not always
+/// [`window::key_window`]: that one follows every ordering, and this one only
+/// changes with a pair of notifications, so no window becomes key twice
+/// without resigning in between.
+static ANNOUNCED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn answers(object: Id, selector: &str) -> bool {
+    // SAFETY: a window this crate made; both selectors are `BOOL (id, SEL)`,
+    // sent so a subclass's override decides.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> u8 =
+            std::mem::transmute(objc::msg::entry());
+        f(object, objc::sel::get(selector)) != 0
+    }
+}
+
+/// `object` becomes the key window, and the main one when it can: the window
+/// before it resigns both first, as AppKit orders them. Toolkits activate on
+/// these - Gecko only fires DOM focus events in a window it was told is key.
+pub(crate) fn announce_key(object: Id) {
+    if object.is_null() || !answers(object, "canBecomeKeyWindow") {
+        return;
+    }
+    let previous = ANNOUNCED.swap(object as usize, std::sync::atomic::Ordering::AcqRel) as Id;
+    if previous == object {
+        return;
+    }
+    if !previous.is_null() {
+        post_for(previous, window::DID_RESIGN_KEY);
+        post_for(previous, window::DID_RESIGN_MAIN);
+    }
+    post_for(object, window::DID_BECOME_KEY);
+    if answers(object, "canBecomeMainWindow") {
+        post_for(object, window::DID_BECOME_MAIN);
+    }
+}
+
+/// `object` stops being key and main, if it was: focus left it, or it left
+/// the screen.
+pub(crate) fn announce_resign(object: Id) {
+    let was = ANNOUNCED.compare_exchange(
+        object as usize,
+        0,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    );
+    if was.is_ok() && !object.is_null() {
+        post_for(object, window::DID_RESIGN_KEY);
+        post_for(object, window::DID_RESIGN_MAIN);
+    }
+}
+
+/// A window being freed is no longer the announced one; nothing is posted
+/// about an object that is going.
+pub(crate) fn forget_announced(object: Id) {
+    let _ = ANNOUNCED.compare_exchange(
+        object as usize,
+        0,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Acquire,
+    );
 }
 
 /// Send the window notification `name` about `object` to its delegate and to
