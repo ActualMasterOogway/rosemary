@@ -239,6 +239,37 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
         .map(|_| unsafe { named(std::ptr::null_mut(), objc::sel::get(name)) })
 }
 
+/// `+colorNamed:bundle:`: the colour asset of that name in the bundle's asset
+/// catalog, the main bundle's for nil, or nil for a name it does not have.
+///
+/// Resolved for the current appearance when asked, where Apple's answer is a
+/// dynamic colour that resolves when drawn.
+// FIXME (ACCURACY): a colour asset with a dark variant does not follow an
+// appearance change made after it was looked up.
+unsafe extern "C" fn color_named_bundle(_class: Id, _sel: Sel, name: Id, bundle: Id) -> Id {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: an `NSString`.
+    let name = String::from_utf8_lossy(&unsafe { foundation::string::bytes(name) }).into_owned();
+    // SAFETY: nil or the `NSBundle` the selector takes.
+    let Some(layout) = (unsafe { foundation::bundle::layout_of(bundle) }) else {
+        return std::ptr::null_mut();
+    };
+    let Some(catalog) = crate::catalog::of_bundle(&layout.root) else {
+        return std::ptr::null_mut();
+    };
+    match catalog.color(&name, crate::appearance::is_dark()) {
+        Some([r, g, b, a]) => make(r, g, b, a),
+        None => std::ptr::null_mut(),
+    }
+}
+
+unsafe extern "C" fn color_named(class: Id, sel: Sel, name: Id) -> Id {
+    // SAFETY: the same receiver and name, and nil for the main bundle.
+    unsafe { color_named_bundle(class, sel, name, std::ptr::null_mut()) }
+}
+
 /// `+currentControlTint`: `NSBlueControlTint`, the default appearance's, which
 /// the selection and accent colours above are.
 unsafe extern "C" fn current_control_tint(_class: Id, _sel: Sel) -> usize {
@@ -526,6 +557,8 @@ pub(crate) fn install() {
     }
     class_methods!(class, {
         "currentControlTint" => current_control_tint, c"Q16@0:8";
+        "colorNamed:" => color_named, c"@24@0:8@16";
+        "colorNamed:bundle:" => color_named_bundle, c"@32@0:8@16@24";
         "controlAlternatingRowBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "alternatingContentBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";

@@ -995,6 +995,19 @@ fn entries_of_type(directory: &Path, extension: &str) -> Vec<PathBuf> {
 }
 
 /// The main bundle, or `None` for a program that is not in one.
+/// The bundle an `NSBundle` object stands for; null is the main one.
+///
+/// # Safety
+///
+/// `bundle` must be null or an `NSBundle`.
+pub unsafe fn layout_of(bundle: objc::object::Id) -> Option<&'static Layout> {
+    if bundle.is_null() {
+        return main();
+    }
+    // SAFETY: an `NSBundle`, every one of which this crate made.
+    unsafe { class::layout_of(bundle) }
+}
+
 pub fn main() -> Option<&'static Layout> {
     *MAIN.read().unwrap_or_else(|e| e.into_inner())
 }

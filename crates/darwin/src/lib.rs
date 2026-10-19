@@ -40,6 +40,7 @@ pub mod credentials;
 pub mod data;
 pub mod dirent;
 pub mod dispatch;
+pub mod distnote;
 pub mod divergent;
 pub mod env;
 pub mod errno;

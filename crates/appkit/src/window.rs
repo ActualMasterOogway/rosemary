@@ -1858,6 +1858,12 @@ unsafe extern "C" fn convert_rect_from_backing(receiver: Id, sel: Sel, rect: NSR
     scale_rect(rect, 1.0 / unsafe { backing_scale_factor(receiver, sel) })
 }
 
+/// `-animator`: the window itself, as a view's is, so what a program animates
+/// is set at once, which is where the animation would have ended.
+unsafe extern "C" fn animator(receiver: Id, _sel: Sel) -> Id {
+    receiver
+}
+
 unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     let window = window_of(receiver);
     objc::arc::release(window.background);
@@ -2735,6 +2741,7 @@ pub(crate) fn install() {
         "setDynamicDepthLimit:" => ignored_flag, c"v20@0:8c16";
         "setMovableByWindowBackground:" => ignored_flag, c"v20@0:8c16";
         "setAlphaValue:" => set_alpha_value, c"v24@0:8d16";
+        "animator" => animator, c"@16@0:8";
         "alphaValue" => alpha_value, c"d16@0:8";
         "setShowsToolbarButton:" => set_shows_toolbar_button, c"v20@0:8c16";
         "showsToolbarButton" => shows_toolbar_button, c"c16@0:8";

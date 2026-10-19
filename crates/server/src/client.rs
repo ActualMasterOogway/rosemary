@@ -72,6 +72,12 @@ pub fn configured() -> bool {
     CONFIG.get().is_some()
 }
 
+/// The directory of the server this process was pointed at, which is also
+/// where other per-prefix rendezvous points live.
+pub fn directory() -> Option<&'static Path> {
+    CONFIG.get().map(|c| c.directory.as_path())
+}
+
 struct Session {
     client: Option<Client>,
     /// The pid the client was opened by; a different `getpid` is a fork child

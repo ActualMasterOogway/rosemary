@@ -19,6 +19,7 @@ mod aqua;
 pub mod backing;
 mod bezier;
 pub mod button;
+mod catalog;
 mod cell;
 pub mod cgcontext;
 pub mod cgevent;
@@ -71,6 +72,7 @@ pub mod screen;
 pub mod script;
 mod scroll;
 mod segmented;
+mod status;
 mod tab;
 mod table;
 pub mod text;
@@ -138,6 +140,7 @@ pub fn bootstrap() {
         pasteboard::install();
         nsevent::install();
         monitor::install();
+        status::install();
     });
 }
 

@@ -18,6 +18,7 @@ pub mod cookies;
 pub mod decimal;
 pub mod defaults;
 mod define;
+mod distributed;
 pub mod error;
 pub mod exception;
 pub mod filehandle;
@@ -74,6 +75,7 @@ pub fn bootstrap() {
         runtime::install();
         signature::install();
         notification::install();
+        distributed::install();
         constant::install();
         declare_abstract();
         bundle::class::install();
@@ -267,6 +269,7 @@ pub const CLASSES: &[&str] = &[
     "NSNull",
     "NSNotification",
     "NSNotificationCenter",
+    "NSDistributedNotificationCenter",
     "NSAutoreleasePool",
     "NSBundle",
     "NSDate",
