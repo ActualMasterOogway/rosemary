@@ -105,6 +105,7 @@ exports::group! {
     /// it and has neither an `NSBundle` nor a `$HOME`.
     bundle::cf,
     notification::cf,
+    error::cf,
     runtime,
     calculate,
     locale::cf,
@@ -344,6 +345,37 @@ fn zeroed<T>() -> u64 {
 
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSLocalizedDescriptionKey", "NSLocalizedDescription"),
+    (
+        "_NSLocalizedFailureReasonErrorKey",
+        "NSLocalizedFailureReason",
+    ),
+    (
+        "_NSLocalizedRecoverySuggestionErrorKey",
+        "NSLocalizedRecoverySuggestion",
+    ),
+    (
+        "_NSLocalizedRecoveryOptionsErrorKey",
+        "NSLocalizedRecoveryOptions",
+    ),
+    ("_NSLocalizedFailureErrorKey", "NSLocalizedFailure"),
+    ("_NSHelpAnchorErrorKey", "NSHelpAnchor"),
+    ("_NSStringEncodingErrorKey", "NSStringEncodingErrorKey"),
+    ("_NSOSStatusErrorDomain", "NSOSStatusErrorDomain"),
+    ("_NSMachErrorDomain", "NSMachErrorDomain"),
+    (
+        "_NSFileHandleNotificationDataItem",
+        "NSFileHandleNotificationDataItem",
+    ),
+    (
+        "_NSFileHandleNotificationFileHandleItem",
+        "NSFileHandleNotificationFileHandleItem",
+    ),
+    ("_NSCalendarIdentifierGregorian", "gregorian"),
+    ("_NSCalendarIdentifierISO8601", "iso8601"),
+    ("_NSURLIsWritableKey", "NSURLIsWritableKey"),
+    ("_NSURLIsReadableKey", "NSURLIsReadableKey"),
+    ("_NSURLIsExecutableKey", "NSURLIsExecutableKey"),
+    ("_NSURLTypeIdentifierKey", "NSURLTypeIdentifierKey"),
     ("_NSArgumentDomain", "NSArgumentDomain"),
     ("_NSGlobalDomain", "NSGlobalDomain"),
     ("_NSFilePosixPermissions", "NSFilePosixPermissions"),
