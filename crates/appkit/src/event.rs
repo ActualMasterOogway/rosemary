@@ -664,7 +664,7 @@ fn begin_edit_chord(id: u32, window: Id, sdl_modifiers: u16) {
         .filter(|s| sides & s != 0)
     {
         control &= !side;
-        let flags = crate::keymap::modifiers(rest | control);
+        let flags = crate::keymap::chord_flags(rest, control, 0);
         flags_changed(window, crate::keymap::chord_control(side), flags);
     }
     let mut command = 0;
@@ -673,7 +673,7 @@ fn begin_edit_chord(id: u32, window: Id, sdl_modifiers: u16) {
         .filter(|s| sides & s != 0)
     {
         command |= side;
-        let flags = crate::keymap::modifiers(rest | (command << 4));
+        let flags = crate::keymap::chord_flags(rest, 0, command);
         flags_changed(window, crate::keymap::chord_command(side), flags);
     }
     CHORD_WINDOW.store(id, std::sync::atomic::Ordering::Relaxed);
@@ -700,7 +700,7 @@ pub(crate) fn leave_edit_chord(sdl_modifiers: u16) {
         .filter(|s| sides & s != 0)
     {
         command &= !side;
-        let flags = crate::keymap::modifiers(rest | (command << 4));
+        let flags = crate::keymap::chord_flags(rest, 0, command);
         flags_changed(window, crate::keymap::chord_command(side), flags);
     }
     let held = sdl_modifiers & keymod::CTRL;
@@ -710,7 +710,7 @@ pub(crate) fn leave_edit_chord(sdl_modifiers: u16) {
         .filter(|s| held & s != 0)
     {
         control |= side;
-        let flags = crate::keymap::modifiers(rest | control);
+        let flags = crate::keymap::chord_flags(rest, control, 0);
         flags_changed(window, crate::keymap::chord_control(side), flags);
     }
 }
@@ -772,9 +772,6 @@ fn without_control(modifiers: u64) -> u64 {
 
 /// Offer a key press to whatever takes it as a key equivalent: the window's
 /// views, then the main menu. True when something did.
-///
-/// With [`crate::decor::Config::control_shortcuts`], Control also reaches a
-/// menu item whose equivalent is Command, once nothing took it as it was.
 fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
     use crate::keymap::flags;
     let modifiers = fields.modifiers;
@@ -799,19 +796,8 @@ fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
         }
     };
     let menu = crate::menu::main_menu();
-    let event = nsevent::make(fields.clone());
-    if offer(window, event) || offer(menu, event) {
-        return true;
-    }
-    let control_only = modifiers & flags::CONTROL != 0 && modifiers & flags::COMMAND == 0;
-    if !(control_only && !crate::decor::config().control_shortcuts) {
-        return false;
-    }
-    let aliased = nsevent::make(Fields {
-        modifiers: (modifiers & !flags::CONTROL) | flags::COMMAND,
-        ..fields
-    });
-    offer(menu, aliased)
+    let event = nsevent::make(fields);
+    offer(window, event) || offer(menu, event)
 }
 
 /// A pointer position SDL reports against the window's top-left, in the

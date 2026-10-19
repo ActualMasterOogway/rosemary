@@ -23,9 +23,6 @@ use static_init::dynamic;
 pub const DECORATIONS_ENV: &str = "ROSEMARY_DECORATIONS";
 /// `ROSEMARY_MENU`: `titlebar`, `strip` or `none`.
 pub const MENU_ENV: &str = "ROSEMARY_MENU";
-/// `ROSEMARY_MENU_CTRL=0` stops Control standing in for Command in menu key
-/// equivalents.
-pub const MENU_CTRL_ENV: &str = "ROSEMARY_MENU_CTRL";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decorations {
@@ -46,16 +43,12 @@ pub enum MenuPlacement {
 pub struct Config {
     pub decorations: Decorations,
     pub menu: MenuPlacement,
-    /// Whether Control+key reaches a menu item whose equivalent is
-    /// Command+key: Linux users reach for Control, and the host's desktop
-    /// often keeps the Super key for itself.
-    pub control_shortcuts: bool,
 }
 
 impl Config {
-    /// The configuration the three variables' values ask for; anything
+    /// The configuration the two variables' values ask for; anything
     /// unrecognised is the default, with a warning.
-    pub fn parse(decorations: Option<&str>, menu: Option<&str>, control: Option<&str>) -> Config {
+    pub fn parse(decorations: Option<&str>, menu: Option<&str>) -> Config {
         let warn = |name: &str, value: &str| {
             eprintln!("rosemary: appkit: {name}={value} is not recognised; using the default");
         };
@@ -84,15 +77,7 @@ impl Config {
                 default_menu
             }
         };
-        let control_shortcuts = !matches!(
-            control.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-            Some("0" | "false" | "off" | "no")
-        );
-        Config {
-            decorations,
-            menu,
-            control_shortcuts,
-        }
+        Config { decorations, menu }
     }
 }
 
@@ -100,11 +85,7 @@ pub fn config() -> Config {
     #[dynamic]
     static CONFIG: Config = {
         let read = |name| std::env::var(name).ok();
-        Config::parse(
-            read(DECORATIONS_ENV).as_deref(),
-            read(MENU_ENV).as_deref(),
-            read(MENU_CTRL_ENV).as_deref(),
-        )
+        Config::parse(read(DECORATIONS_ENV).as_deref(), read(MENU_ENV).as_deref())
     };
     *CONFIG
 }
@@ -1746,41 +1727,39 @@ mod tests {
 
     #[test]
     fn client_decorations_are_the_default() {
-        let config = Config::parse(None, None, None);
+        let config = Config::parse(None, None);
         assert_eq!(config.decorations, Decorations::Client);
         assert_eq!(config.menu, MenuPlacement::Titlebar);
-        assert!(config.control_shortcuts);
     }
 
     #[test]
     fn server_decorations_put_the_menus_in_a_strip() {
-        let config = Config::parse(Some("server"), None, None);
+        let config = Config::parse(Some("server"), None);
         assert_eq!(config.menu, MenuPlacement::Strip);
         // The titlebar is the host's, so there is nowhere else to put them.
-        let config = Config::parse(Some("server"), Some("titlebar"), None);
+        let config = Config::parse(Some("server"), Some("titlebar"));
         assert_eq!(config.menu, MenuPlacement::Strip);
-        let config = Config::parse(Some("Server"), Some("none"), Some("0"));
+        let config = Config::parse(Some("Server"), Some("none"));
         assert_eq!(config.menu, MenuPlacement::Hidden);
-        assert!(!config.control_shortcuts);
     }
 
     #[test]
     fn an_unknown_value_is_the_default() {
-        let config = Config::parse(Some("sideways"), Some("everywhere"), Some("maybe"));
-        assert_eq!(config, Config::parse(None, None, None));
+        let config = Config::parse(Some("sideways"), Some("everywhere"));
+        assert_eq!(config, Config::parse(None, None));
     }
 
     #[test]
     fn the_inset_is_the_rows_a_window_draws() {
         let theme = theme();
-        let client = Config::parse(None, None, None);
+        let client = Config::parse(None, None);
         let titlebar = f64::from(theme.titlebar_height);
         let strip = f64::from(theme.strip_height);
         assert_eq!(inset_for(client, true, false, false), titlebar);
         assert_eq!(inset_for(client, false, false, false), 0.0);
         assert_eq!(inset_for(client, true, false, true), 0.0, "full screen");
 
-        let client_strip = Config::parse(None, Some("strip"), None);
+        let client_strip = Config::parse(None, Some("strip"));
         assert_eq!(
             inset_for(client_strip, true, false, false),
             titlebar + strip
@@ -1788,10 +1767,10 @@ mod tests {
         // A panel has no menu bar of its own.
         assert_eq!(inset_for(client_strip, true, true, false), titlebar);
 
-        let server = Config::parse(Some("server"), None, None);
+        let server = Config::parse(Some("server"), None);
         assert_eq!(inset_for(server, true, false, false), strip);
         assert_eq!(inset_for(server, true, true, false), 0.0);
-        let server_bare = Config::parse(Some("server"), Some("none"), None);
+        let server_bare = Config::parse(Some("server"), Some("none"));
         assert_eq!(inset_for(server_bare, true, false, false), 0.0);
     }
 
