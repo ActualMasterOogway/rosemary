@@ -39,13 +39,16 @@ pub fn make(domain: &str, code: i64, description: &str) -> Id {
 
 /// A new error at +1, as `CFErrorCreate` makes one: `description` under
 /// `NSLocalizedDescription` in its user info, beside each of `entries` - an
-/// underlying error under `NSUnderlyingError`, say.
+/// underlying error under `NSUnderlyingError`, say. `description` wins over
+/// an `entries` item under `NSLocalizedDescription`, and a null result (the
+/// allocation failed) leaves nothing owned.
 pub fn create(domain: &str, code: i64, description: &str, entries: &[(&str, Id)]) -> Id {
     let text = crate::string::from_str(description);
     let mut pairs = vec![(crate::string::from_str("NSLocalizedDescription"), text)];
     pairs.extend(
         entries
             .iter()
+            .filter(|&&(key, _)| key != "NSLocalizedDescription")
             .map(|&(key, value)| (crate::string::from_str(key), objc::arc::retain(value))),
     );
     let as_cf: Vec<_> = pairs
@@ -73,6 +76,9 @@ pub fn create(domain: &str, code: i64, description: &str, entries: &[(&str, Id)]
         description: description.to_string(),
         user_info,
     });
+    if error.is_null() {
+        objc::arc::release(user_info);
+    }
     error
 }
 
