@@ -1087,6 +1087,9 @@ pub(crate) fn install() {
         "postEvent:atStart:" => post_event, c"v28@0:8@16B24";
         "currentEvent" => current_event, c"@16@0:8";
         "sendEvent:" => send_event, c"v24@0:8@16";
+        // Private: the window server's hit-testing cache, which this runtime
+        // has none of. Gecko drops a hidden popup from it.
+        "_removeWindowFromCache:" => ignored_sender, c"v24@0:8@16";
         // Private but SDL 1.2's SDLMain calls it for the application menu.
         "setAppleMenu:" => ignored_sender, c"v24@0:8@16";
         "hide:" => ignored_sender, c"v24@0:8@16";

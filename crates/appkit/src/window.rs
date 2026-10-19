@@ -2639,6 +2639,10 @@ pub(crate) fn install() {
         "makeKeyAndOrderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "makeKeyWindow" => ignored, c"v16@0:8";
         "makeMainWindow" => ignored, c"v16@0:8";
+        // Private. The number is SDL's window id and cannot be reassigned;
+        // Gecko sets -1 then the old number back to reset a reshown popup in
+        // the window server's cache, which this runtime has no counterpart of.
+        "_setWindowNumber:" => ignored_integer, c"v24@0:8q16";
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "orderFrontRegardless" => order_front_regardless, c"v16@0:8";
         "orderOut:" => order_out, c"v24@0:8@16";
