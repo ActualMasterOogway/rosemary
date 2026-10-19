@@ -144,6 +144,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     },
     rtc!([0], "class_copyPropertyList", P, P, P),
     rtc!([0] -> true, "class_createInstance", P, P, U64),
+    rtc!([0], "class_getClassMethod", P, P, P),
     rtc!([0], "class_getInstanceMethod", P, P, P),
     rtc!([0], "class_getInstanceSize", U64, P),
     rtc!([0], "class_getInstanceVariable", P, P, P),
@@ -167,6 +168,8 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // makes that answer usable from guest code, and it returns a `ptrdiff_t`.
     rt!("ivar_getName", P, P),
     rt!("ivar_getOffset", I64, P),
+    // Both implementations are already the runtime's, so nothing crosses.
+    rt!("method_exchangeImplementations", V, P, P),
     rtb!([1], "method_setImplementation", P, P, P),
     // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
     // not the file uses ARC.
@@ -287,7 +290,9 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0] -> true, "object_getClass", P, P),
     rtc!([0], "object_getClassName", P, P),
     rt!("object_getIndexedIvars", P, P),
+    rtc!([0], "object_getInstanceVariable", P, P, P, P),
     rtc!([0] -> true, "object_getIvar", P, P, P),
+    rtc!([0, 1] -> true, "object_setClass", P, P, P),
     rtc!([0, 2], "object_setIvar", V, P, P, P),
     rt!("property_copyAttributeList", P, P, P),
     rt!("property_getAttributes", P, P),

@@ -7,7 +7,7 @@ use objc::sel::Sel;
 use crate::define::{class_methods, methods};
 
 /// Seconds between Apple's epoch, 2001-01-01, and the Unix one.
-const UNIX_TO_REFERENCE: f64 = 978_307_200.0;
+pub(crate) const UNIX_TO_REFERENCE: f64 = 978_307_200.0;
 
 #[repr(C)]
 pub struct Date {
@@ -470,6 +470,25 @@ unsafe extern "C" fn add_timer_for_mode(_receiver: Id, _sel: Sel, timer: Id, _mo
     }
 }
 
+/// `-getCFRunLoop`: the loop every method here acts on.
+unsafe extern "C" fn get_cf_run_loop(_receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: no arguments.
+    unsafe { corefoundation::api::CFRunLoopGetMain() as Id }
+}
+
+/// `-currentMode`: nil when the loop is not running.
+unsafe extern "C" fn current_mode(_receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the main loop, which is what every method here acts on.
+    let mode = unsafe {
+        corefoundation::api::CFRunLoopCopyCurrentMode(corefoundation::api::CFRunLoopGetMain())
+    };
+    if mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a fresh string this call owns.
+    unsafe { corefoundation::api::CFAutorelease(mode) as Id }
+}
+
 /// `-runMode:beforeDate:`, which is `CFRunLoopRunInMode` under another name.
 unsafe extern "C" fn run_mode_before_date(_receiver: Id, _sel: Sel, _mode: Id, limit: Id) -> u8 {
     let seconds = match limit.is_null() {
@@ -548,6 +567,8 @@ pub(crate) fn install() {
         "addTimer:forMode:" => add_timer_for_mode, c"v32@0:8@16@24";
         "runMode:beforeDate:" => run_mode_before_date, c"B32@0:8@16@24";
         "runUntilDate:" => run_until_date, c"v24@0:8@16";
+        "getCFRunLoop" => get_cf_run_loop, c"^v16@0:8";
+        "currentMode" => current_mode, c"@16@0:8";
     });
 }
 

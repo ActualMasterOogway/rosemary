@@ -15,13 +15,17 @@ pub mod alert;
 mod animation;
 pub mod appearance;
 pub mod application;
+mod aqua;
 pub mod backing;
 mod bezier;
 pub mod button;
 mod cell;
 pub mod cgcontext;
 pub mod cgevent;
+pub mod cgfont;
 pub mod cgl;
+pub mod cgpaint;
+pub mod cgpath;
 pub mod classes;
 pub mod color;
 mod controls;
@@ -36,6 +40,9 @@ mod displaylink;
 pub mod dock;
 pub mod event;
 mod font;
+pub mod hitheme;
+pub mod launchservices;
+pub(crate) mod quartz;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
@@ -123,6 +130,7 @@ pub fn bootstrap() {
         // Last of the controls (text fields and labels included): a cell
         // forwards what its control implements.
         cell::install();
+        hitheme::install();
         input_context::install();
         opengl::install();
         darwin::idle::on_idle(opengl::going_idle);
@@ -207,9 +215,15 @@ exports::exports! {
         "CGEventPost" => cgevent::CGEventPost,
         "CGGetLastMouseDelta" => cgevent::CGGetLastMouseDelta,
         "CGEventSourceFlagsState" => cgevent::CGEventSourceFlagsState,
+        "CGEventSourceCounterForEventType" => cgevent::CGEventSourceCounterForEventType,
+        "CGEventTapCreate" => cgevent::CGEventTapCreate,
         "CGDisplayModeCopyPixelEncoding" => screen::CGDisplayModeCopyPixelEncoding,
         "CGColorSpaceCreateWithName" => graphics::CGColorSpaceCreateWithName,
         "CGColorSpaceCreateDeviceRGB" => graphics::CGColorSpaceCreateDeviceRGB,
+        "CGColorSpaceCreateDeviceGray" => graphics::CGColorSpaceCreateDeviceGray,
+        "CGColorSpaceCreateWithPlatformColorSpace" => graphics::CGColorSpaceCreateWithPlatformColorSpace,
+        "CGColorSpaceCreatePattern" => graphics::CGColorSpaceCreatePattern,
+        "CGColorSpaceGetNumberOfComponents" => graphics::CGColorSpaceGetNumberOfComponents,
         "CGColorSpaceRelease" => graphics::CGColorSpaceRelease,
         "CGColorSpaceGetName" => graphics::CGColorSpaceGetName,
         "CGColorSpaceCopyName" => graphics::CGColorSpaceCopyName,
@@ -217,6 +231,9 @@ exports::exports! {
         "CGDataProviderCreateWithData" => graphics::CGDataProviderCreateWithData,
         "CGDataProviderRelease" => graphics::CGDataProviderRelease,
         "CGImageCreate" => graphics::CGImageCreate,
+        "CGImageMaskCreate" => graphics::CGImageMaskCreate,
+        "CGImageCreateWithImageInRect" => graphics::CGImageCreateWithImageInRect,
+        "CGImageCreateWithPNGDataProvider" => graphics::CGImageCreateWithPNGDataProvider,
         "CGImageCreateCopyWithColorSpace" => graphics::CGImageCreateCopyWithColorSpace,
         "CGImageRetain" => graphics::CGImageRetain,
         "CGImageRelease" => graphics::CGImageRelease,
@@ -240,12 +257,19 @@ exports::exports! {
         "NSUnionRect" => geometry::NSUnionRect,
         "NSMouseInRect" => geometry::NSMouseInRect,
         "NSInsetRect" => geometry::NSInsetRect,
+        "NSIntersectionRect" => geometry::NSIntersectionRect,
+        "NSOffsetRect" => geometry::NSOffsetRect,
+        "CGRectInset" => geometry::CGRectInset,
+        "CGRectOffset" => geometry::CGRectOffset,
+        "CGRectIntegral" => geometry::CGRectIntegral,
+        "CGRectIsEmpty" => geometry::CGRectIsEmpty,
+        "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
         "NSRectFill" => color::NSRectFill,
         "NSDrawNinePartImage" => image::NSDrawNinePartImage,
         "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
         "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
         "CGRectEqualToRect" | "NSEqualRects" => geometry::CGRectEqualToRect,
-        "GetCurrentKeyModifiers" => keymap::GetCurrentKeyModifiers,
+        "GetCurrentKeyModifiers" | "GetCurrentEventKeyModifiers" => keymap::GetCurrentKeyModifiers,
         "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
         "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,
         "TISCopyCurrentKeyboardLayoutInputSource" => textinput::TISCopyCurrentKeyboardLayoutInputSource,
@@ -287,7 +311,12 @@ exports::exports! {
     groups {
         pasteboard_manager,
         coretext,
+        cgfont,
+        hitheme,
+        launchservices,
         cgcontext,
+        cgpath,
+        cgpaint,
         cgl,
     }
 }
@@ -405,6 +434,11 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSWindowWillMiniaturizeNotification",
     "NSWindowWillMoveNotification",
     "NSWindowDidChangeOcclusionStateNotification",
+    // Observed by Gecko's widget layer; no tint change, menu action broadcast
+    // or global frame tracking posts them here.
+    "NSControlTintDidChangeNotification",
+    "NSMenuWillSendActionNotification",
+    "NSViewGlobalFrameDidChangeNotification",
 ];
 
 /// The other AppKit string globals a program reads.
@@ -444,6 +478,27 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
         "_NSWorkspaceLaunchConfigurationArchitecture",
         workspace::LAUNCH_ARCHITECTURE,
     ),
+    ("_NSDeviceIsScreen", "NSDeviceIsScreen"),
+    ("_NSDragPboard", "Apple CFPasteboard drag"),
+    ("_NSEventTrackingRunLoopMode", "NSEventTrackingRunLoopMode"),
+    ("_NSPrintPanelAccessorySummaryItemNameKey", "name"),
+    (
+        "_NSPrintPanelAccessorySummaryItemDescriptionKey",
+        "description",
+    ),
+    ("_kCATransactionAnimationDuration", "animationDuration"),
+    ("_kCATransactionDisableActions", "disableActions"),
+    ("_kCGColorSpaceGenericRGB", "kCGColorSpaceGenericRGB"),
+    (
+        "_kCGImageSourceShouldAllowFloat",
+        "kCGImageSourceShouldAllowFloat",
+    ),
+    (
+        "_kCGImageSourceTypeIdentifierHint",
+        "kCGImageSourceTypeIdentifierHint",
+    ),
+    ("_kUTTypePNG", "public.png"),
+    ("_kLSItemDisplayName", "LSItemDisplayName"),
     // Dragged files arrive as this type; the guest compares pasteboard types to it.
     ("_kUTTypeFileURL", "public.file-url"),
     // SDL's clipboard offers text under this type and maps MIME types through

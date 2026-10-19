@@ -99,7 +99,7 @@ unsafe extern "C" fn open_file_with(receiver: Id, sel: Sel, path: Id, _applicati
     unsafe { open_file(receiver, sel, path) }
 }
 
-fn open_target(url: &corefoundation::url::Contents) -> Option<String> {
+pub(crate) fn open_target(url: &corefoundation::url::Contents) -> Option<String> {
     if url.scheme().is_empty() {
         return None;
     }

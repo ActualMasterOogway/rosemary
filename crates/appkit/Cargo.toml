@@ -18,3 +18,4 @@ gamecontroller.workspace = true
 iosurface.workspace = true
 static_init.workspace = true
 owned_ttf_parser.workspace = true
+tiny-skia.workspace = true

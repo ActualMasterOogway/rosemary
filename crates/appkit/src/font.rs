@@ -119,6 +119,147 @@ unsafe extern "C" fn system_font_size_for_control_size(
     }
 }
 
+/// `+smallSystemFontSize`, the small control size's.
+unsafe extern "C" fn small_system_font_size(_class: Id, _sel: Sel) -> f64 {
+    11.0
+}
+
+/// `+labelFontSize`.
+unsafe extern "C" fn label_font_size(_class: Id, _sel: Sel) -> f64 {
+    10.0
+}
+
+/// The UI font at `size`, or at `default` when the caller passes zero or less -
+/// which is how every `...FontOfSize:` asks for its role's standard size.
+fn ui_font(size: f64, default: f64) -> Id {
+    let size = if size > 0.0 { size } else { default };
+    // SAFETY: `kCTFontUIFontSystem` with no language.
+    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
+    // SAFETY: a fresh object, or null.
+    unsafe { autorelease(font) }
+}
+
+unsafe extern "C" fn control_content_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
+    ui_font(size, 13.0)
+}
+
+unsafe extern "C" fn menu_bar_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
+    ui_font(size, 14.0)
+}
+
+unsafe extern "C" fn tool_tips_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
+    ui_font(size, 11.0)
+}
+
+/// `-[NSFont fontDescriptor]`. A font here is its own attribute dictionary,
+/// which is what a `CTFontDescriptor` is too.
+unsafe extern "C" fn font_descriptor(receiver: Id, _sel: Sel) -> Id {
+    receiver
+}
+
+/// `-[NSFontDescriptor symbolicTraits]`, `CTFontSymbolicTraits` bits.
+unsafe extern "C" fn symbolic_traits(receiver: Id, _sel: Sel) -> u32 {
+    // SAFETY: a font or descriptor dictionary this runtime made.
+    unsafe { crate::coretext::CTFontGetSymbolicTraits(receiver as *const _) }
+}
+
+/// `-[NSFontManager availableFontFamilies]`: every family the face database
+/// holds, each once, sorted as AppKit's is.
+unsafe extern "C" fn available_font_families(_receiver: Id, _sel: Sel) -> Id {
+    let mut families: Vec<String> = crate::fonts::all_faces()
+        .into_iter()
+        .map(|face| face.family)
+        .collect();
+    families.sort_unstable_by_key(|f| f.to_lowercase());
+    families.dedup();
+    let strings: Vec<Id> = families
+        .iter()
+        .map(|f| foundation::string::from_str(f))
+        .collect();
+    autoreleased_array(&strings)
+}
+
+/// `-[NSFontManager availableMembersOfFontFamily:]`: one
+/// `@[postScriptName, faceName, weight, traits]` per face, regular first.
+///
+/// The weight is AppKit's 0-15 scale (5 regular, 9 bold) and the traits are
+/// `NSFontTraitMask` bits.
+unsafe extern "C" fn available_members_of_font_family(_receiver: Id, _sel: Sel, family: Id) -> Id {
+    /// `NSItalicFontMask`, `NSBoldFontMask` and `NSFixedPitchFontMask`.
+    const ITALIC: i64 = 1;
+    const BOLD: i64 = 2;
+    const FIXED_PITCH: i64 = 0x400;
+    if family.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: an NSString, as the selector requires.
+    let wanted =
+        String::from_utf8_lossy(&unsafe { foundation::string::bytes(family) }).into_owned();
+    let mut faces: Vec<_> = crate::fonts::all_faces()
+        .into_iter()
+        .filter(|face| face.family.eq_ignore_ascii_case(&wanted))
+        .collect();
+    if faces.is_empty() {
+        return std::ptr::null_mut();
+    }
+    faces.sort_by_key(|face| (face.italic, face.weight.abs_diff(400)));
+    faces.dedup_by(|a, b| a.postscript == b.postscript);
+    let members: Vec<Id> = faces
+        .iter()
+        .map(|face| {
+            let traits = (if face.italic { ITALIC } else { 0 })
+                | (if face.weight >= 600 { BOLD } else { 0 })
+                | (if face.monospace { FIXED_PITCH } else { 0 });
+            let row = [
+                foundation::string::from_str(&face.postscript),
+                foundation::string::from_str(&face.style),
+                number(appkit_weight(face.weight)),
+                number(traits),
+            ];
+            let array = autoreleased_array(&row);
+            objc::arc::retain(array)
+        })
+        .collect();
+    // Each member's retain above is the reference this hands over.
+    autoreleased_array(&members)
+}
+
+/// An OpenType weight class on AppKit's 0-15 scale, by the table AppKit itself
+/// uses to go the other way: 100 is 2, 400 is 5, 700 is 9, 900 is 11.
+fn appkit_weight(weight: u16) -> i64 {
+    match weight {
+        0..=149 => 2,
+        150..=249 => 3,
+        250..=349 => 4,
+        350..=449 => 5,
+        450..=549 => 6,
+        550..=649 => 8,
+        650..=749 => 9,
+        750..=849 => 10,
+        _ => 11,
+    }
+}
+
+fn number(value: i64) -> Id {
+    corefoundation::collections::new_number(corefoundation::collections::Number::Integer(value))
+        as Id
+}
+
+/// An autoreleased `NSArray` of `objects`, taking over the reference each holds.
+fn autoreleased_array(objects: &[Id]) -> Id {
+    let values: Vec<corefoundation::base::CFTypeRef> = objects.iter().map(|o| *o as _).collect();
+    let array = corefoundation::collections::new_array(
+        &values,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for object in objects {
+        objc::arc::release(*object);
+    }
+    // SAFETY: a fresh array this call owns.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
+}
+
 unsafe fn autorelease(font: *const std::ffi::c_void) -> Id {
     if font.is_null() {
         return std::ptr::null_mut();
@@ -162,6 +303,8 @@ pub(crate) fn install() {
         "fontName" => font_name, c"@16@0:8";
         "displayName" => font_family_name, c"@16@0:8";
         "pointSize" => font_point_size, c"d16@0:8";
+        "fontDescriptor" => font_descriptor, c"@16@0:8";
+        "symbolicTraits" => symbolic_traits, c"I16@0:8";
     });
 
     let class = objc::class::lookup(c"NSFont").expect("declared before its methods");
@@ -177,6 +320,11 @@ pub(crate) fn install() {
         "userFixedPitchFontOfSize:" => user_fixed_pitch_font_of_size, c"@24@0:8d16";
         "systemFontSize" => system_font_size, c"d16@0:8";
         "systemFontSizeForControlSize:" => system_font_size_for_control_size, c"d24@0:8Q16";
+        "smallSystemFontSize" => small_system_font_size, c"d16@0:8";
+        "labelFontSize" => label_font_size, c"d16@0:8";
+        "controlContentFontOfSize:" => control_content_font_of_size, c"@24@0:8d16";
+        "menuBarFontOfSize:" => menu_bar_font_of_size, c"@24@0:8d16";
+        "toolTipsFontOfSize:" => tool_tips_font_of_size, c"@24@0:8d16";
     });
 
     let class = objc::class::lookup(c"NSFontManager").expect("declared before its methods");
@@ -186,6 +334,8 @@ pub(crate) fn install() {
     methods!(class, {
         "localizedNameForFamily:face:" => localized_name, c"@32@0:8@16@24";
         "fontWithFamily:traits:weight:size:" => font_with_family, c"@48@0:8@16Q24q32d40";
+        "availableFontFamilies" => available_font_families, c"@16@0:8";
+        "availableMembersOfFontFamily:" => available_members_of_font_family, c"@24@0:8@16";
     });
 }
 

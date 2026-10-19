@@ -324,6 +324,19 @@ pub fn register_mapped_images(report: &LinkReport) {
     let _ = PROGRAM_IMAGES.set(LinkedImage::of(report));
 }
 
+/// The slide of the first image the executable was linked against whose
+/// install name satisfies `is_image`.
+///
+/// A `dlopen`ed image binds to the program's copy of a runtime library rather
+/// than mapping its own, so that library is in no report but the program's.
+pub fn program_image_slide(is_image: &dyn Fn(&str) -> bool) -> Option<u64> {
+    PROGRAM_IMAGES
+        .get()?
+        .iter()
+        .find(|image| is_image(&image.name))
+        .map(|image| image.slide)
+}
+
 /// The main executable's export table, parsed once, on first use.
 static MAIN_EXPORTS: Mutex<Option<&'static MainExports>> = Mutex::new(None);
 

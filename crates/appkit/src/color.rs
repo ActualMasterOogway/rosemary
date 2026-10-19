@@ -139,6 +139,9 @@ static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("shadowColor", 0.0, 0.0, 0.0, 1.0),
     ("highlightColor", 1.0, 1.0, 1.0, 1.0),
     ("gridColor", 0.90, 0.90, 0.90, 1.0),
+    ("controlHighlightColor", 0.84, 0.84, 0.84, 1.0),
+    ("secondarySelectedControlColor", 0.83, 0.83, 0.83, 1.0),
+    ("scrollBarColor", 0.67, 0.67, 0.67, 1.0),
     // The label tiers and the separator differ from `labelColor` only in alpha,
     // which is how AppKit defines them.
     ("secondaryLabelColor", 0.0, 0.0, 0.0, 0.5),
@@ -234,6 +237,12 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
         .iter()
         .find(|(n, ..)| *n == name)
         .map(|_| unsafe { named(std::ptr::null_mut(), objc::sel::get(name)) })
+}
+
+/// `+currentControlTint`: `NSBlueControlTint`, the default appearance's, which
+/// the selection and accent colours above are.
+unsafe extern "C" fn current_control_tint(_class: Id, _sel: Sel) -> usize {
+    1
 }
 
 unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
@@ -516,6 +525,7 @@ pub(crate) fn install() {
         meta.replace_method(objc::sel::get(name), named as *const c_void, c"@16@0:8");
     }
     class_methods!(class, {
+        "currentControlTint" => current_control_tint, c"Q16@0:8";
         "controlAlternatingRowBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "alternatingContentBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
