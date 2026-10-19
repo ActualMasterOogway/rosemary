@@ -589,6 +589,46 @@ pub(crate) fn draw_image(
     );
 }
 
+/// The focused view's store as a canvas: `draw` gets its premultiplied B, G,
+/// R, A pixels, top row first, with their width and height, and answers the
+/// rectangle of them it changed. False with nothing focused.
+pub(crate) fn draw_focused(draw: impl FnOnce(&mut [u8], u32, u32) -> Option<Rect>) -> bool {
+    let Some(focus) = current_focus() else {
+        return false;
+    };
+    let (width, height) = (focus.width.max(1.0) as u32, focus.height.max(1.0) as u32);
+    let drawn = {
+        let stores = match focus.offscreen {
+            true => &OFFSCREEN,
+            false => &VIEW_STORES,
+        };
+        let mut stores = stores.lock().unwrap_or_else(|e| e.into_inner());
+        let store = stores
+            .get_or_insert_with(HashMap::new)
+            .entry(focus.view as usize)
+            .or_insert_with(|| Store::new(width, height));
+        store.resize(width, height);
+        let drawn = draw(&mut store.pixels, store.width, store.height);
+        if drawn.is_some_and(|r| !r.is_empty()) {
+            store.dirty = true;
+        }
+        drawn
+    };
+    if let Some(drawn) = drawn
+        && !focus.offscreen
+    {
+        damage(
+            focus.window,
+            Rect {
+                x: drawn.x + focus.x as i64,
+                y: drawn.y + focus.y as i64,
+                ..drawn
+            },
+        );
+    }
+    true
+}
+
 /// [`draw_image`], into the focused view's store; answers the rectangle of
 /// it that changed.
 #[allow(clippy::too_many_arguments)]
@@ -1879,11 +1919,71 @@ fn shared_instance(name: &'static std::ffi::CStr) -> Id {
     object
 }
 
-unsafe extern "C" fn context_is_flipped(_receiver: Id, _sel: Sel) -> u8 {
+/// Graphics contexts made over a caller's `CGContext`, by object: the port,
+/// retained, and whether the context is flipped.
+static WRAPPED: Mutex<Vec<(usize, usize, bool)>> = Mutex::new(Vec::new());
+
+fn wrapped(context: Id) -> Option<(usize, bool)> {
+    WRAPPED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(object, _, _)| *object == context as usize)
+        .map(|(_, port, flipped)| (*port, *flipped))
+}
+
+/// `+graphicsContextWithGraphicsPort:flipped:` and its `CGContext` spelling:
+/// a context that draws into the port given rather than the focused view.
+unsafe extern "C" fn context_with_port(
+    class: Id,
+    _sel: Sel,
+    port: *const c_void,
+    flipped: u8,
+) -> Id {
+    if port.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the class this method is installed on.
+    let class = unsafe { objc::class::from_ptr(class as *const objc::class::Class) }
+        .or_else(|| objc::class::lookup(c"NSGraphicsContext"))
+        .expect("NSGraphicsContext is declared");
+    let context = objc::object::create_instance(class, 0);
+    // SAFETY: the caller's live `CGContext`, held for this object's life.
+    let port = unsafe { crate::cgcontext::CGContextRetain(port) };
+    WRAPPED.lock().unwrap_or_else(|e| e.into_inner()).push((
+        context as usize,
+        port as usize,
+        flipped != 0,
+    ));
+    objc::arc::autorelease(context)
+}
+
+unsafe extern "C" fn context_dealloc(receiver: Id, _sel: Sel) {
+    let port = {
+        let mut table = WRAPPED.lock().unwrap_or_else(|e| e.into_inner());
+        let at = table
+            .iter()
+            .position(|(object, _, _)| *object == receiver as usize);
+        at.map(|at| table.remove(at).1)
+    };
+    if let Some(port) = port {
+        // SAFETY: the reference `context_with_port` took.
+        unsafe { crate::cgcontext::CGContextRelease(port as *const c_void) };
+    }
+    objc::arc::finalize(receiver);
+}
+
+unsafe extern "C" fn context_is_flipped(receiver: Id, _sel: Sel) -> u8 {
+    if let Some((_, flipped)) = wrapped(receiver) {
+        return u8::from(flipped);
+    }
     current_focus().is_some_and(|focus| focus.flipped) as u8
 }
 
-unsafe extern "C" fn cg_context(_receiver: Id, _sel: Sel) -> *const c_void {
+unsafe extern "C" fn cg_context(receiver: Id, _sel: Sel) -> *const c_void {
+    if let Some((port, _)) = wrapped(receiver) {
+        return port as *const c_void;
+    }
     crate::cgcontext::focus_context()
 }
 
@@ -1924,8 +2024,11 @@ pub(crate) fn install() {
     class_methods!(context, {
         "currentContext" => current_context, c"@16@0:8";
         "setCurrentContext:" => set_current_context, c"v24@0:8@16";
+        "graphicsContextWithGraphicsPort:flipped:" => context_with_port, c"@28@0:8^v16c24";
+        "graphicsContextWithCGContext:flipped:" => context_with_port, c"@28@0:8^v16c24";
     });
     methods!(context, {
+        "dealloc" => context_dealloc, c"v16@0:8";
         "isFlipped" => context_is_flipped, c"c16@0:8";
         "CGContext" => cg_context, c"^v16@0:8";
         "graphicsPort" => cg_context, c"^v16@0:8";

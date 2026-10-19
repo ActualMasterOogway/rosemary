@@ -852,6 +852,7 @@ fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fie
 
 /// Hand a built event to its window's `-sendEvent:`, after the local monitors.
 pub(crate) fn dispatch(window: Id, event: Id) {
+    crate::cgevent::count(nsevent::kind_of(event));
     // Before the window sees it, which is where AppKit runs a local monitor: a
     // monitor exists to swallow an event, and one that ran afterwards could
     // only take it back.

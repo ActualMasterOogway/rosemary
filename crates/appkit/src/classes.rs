@@ -48,6 +48,9 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     ("NSButtonCell", Some("NSActionCell"), 0),
     ("NSPopUpButtonCell", Some("NSButtonCell"), 0),
     ("NSTextFieldCell", Some("NSActionCell"), 0),
+    // Gecko's native theme subclasses the first and draws with both.
+    ("NSSearchFieldCell", Some("NSTextFieldCell"), 0),
+    ("NSComboBoxCell", Some("NSTextFieldCell"), 0),
     ("NSSegmentedCell", Some("NSActionCell"), 0),
     ("NSImageCell", Some("NSCell"), 0),
     ("NSText", Some("NSView"), 0),

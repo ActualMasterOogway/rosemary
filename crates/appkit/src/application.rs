@@ -825,6 +825,13 @@ unsafe extern "C" fn modal_window(receiver: Id, _sel: Sel) -> Id {
     unsafe { (*(receiver as *const Application)).modal_window }
 }
 
+/// `-_isRunningModal`, private but sent by Gecko: whether a modal session is
+/// running, which here is whether there is a modal window.
+unsafe extern "C" fn is_running_modal(receiver: Id, sel: Sel) -> u8 {
+    // SAFETY: an application.
+    u8::from(!unsafe { modal_window(receiver, sel) }.is_null())
+}
+
 /// `NSModalResponse`. Apple's values, because a caller compares against them.
 mod modal_response {
     /// `NSModalResponseStop`, which is what `-stopModal` makes the session return.
@@ -1094,6 +1101,8 @@ pub(crate) fn install() {
         "requestUserAttention:" => request_user_attention, c"q24@0:8q16";
         "cancelUserAttentionRequest:" => cancel_user_attention_request, c"v24@0:8q16";
         "modalWindow" => modal_window, c"@16@0:8";
+        "_isRunningModal" => is_running_modal, c"c16@0:8";
+        "_isRunningAppModal" => is_running_modal, c"c16@0:8";
         "beginModalSessionForWindow:" => begin_modal_session, c"@24@0:8@16";
         "runModalSession:" => run_modal_session, c"q24@0:8^v16";
         "endModalSession:" => end_modal_session, c"v24@0:8^v16";
