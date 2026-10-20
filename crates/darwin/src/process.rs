@@ -146,6 +146,7 @@ fn me() -> Option<Process> {
         cputype: arch.cpu_type(),
         cpusubtype: arch.cpu_subtype(),
         translated: crate::sysctl::is_translated(),
+        image: server::client::image(),
     })
 }
 

@@ -1,11 +1,12 @@
-pub use starnix::process::{State, Thread, Usage};
+pub use starnix::process::{Region, State, Thread, Usage};
 
 use crate::codec::{Decoder, Encoder, List, Malformed, Wire};
 use crate::credentials::{Change, Credentials, Denied, SetId};
+use crate::task::{Completion, TaskOp, TaskOutcome, Work};
 use crate::wire_struct;
 
 // TODO: make this automatic based on source hashes like `metal_translate`
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// What a process tells the server about itself.
 ///
@@ -33,6 +34,10 @@ pub struct Checkin {
     /// not, and `credentials` are its own.
     pub fresh: bool,
     pub setid: SetId,
+    /// Whether the process answers work the server queues for it (see
+    /// [`crate::task`]). A host with no private signal to spare cannot be
+    /// reached, and work for it is refused rather than left waiting.
+    pub serviceable: bool,
 }
 
 impl Wire for Checkin {
@@ -46,7 +51,8 @@ impl Wire for Checkin {
             .put(&self.translated)
             .put(&self.credentials)
             .put(&self.fresh)
-            .put(&self.setid);
+            .put(&self.setid)
+            .put(&self.serviceable);
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
         Ok(Self {
@@ -60,6 +66,7 @@ impl Wire for Checkin {
             credentials: input.take()?,
             fresh: input.take()?,
             setid: input.take()?,
+            serviceable: input.take()?,
         })
     }
 }
@@ -119,6 +126,9 @@ pub struct Process {
     pub cputype: i32,
     pub cpusubtype: i32,
     pub translated: bool,
+    /// Which image of the pid this is: a new one at every `exec`, so a task
+    /// port names one image and dies with it, as Darwin's does.
+    pub image: u64,
 }
 
 impl Process {
@@ -152,7 +162,8 @@ impl Wire for Process {
             .put(&List(self.argv.clone()))
             .put(&self.cputype)
             .put(&self.cpusubtype)
-            .put(&self.translated);
+            .put(&self.translated)
+            .put(&self.image);
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
         Ok(Self {
@@ -179,9 +190,20 @@ impl Wire for Process {
             cputype: input.take()?,
             cpusubtype: input.take()?,
             translated: input.take()?,
+            image: input.take()?,
         })
     }
 }
+
+wire_struct!(Region {
+    start,
+    end,
+    read,
+    write,
+    execute,
+    shared,
+    offset,
+});
 
 wire_struct!(Usage {
     virtual_size,
@@ -324,7 +346,36 @@ pub enum Request {
     Applications {
         identifier: Option<String>,
     },
+    /// Have task `pid`, as of `image`, do `op` to itself. Answered with
+    /// [`Reply::Task`] once it has, or once it is gone.
+    Task {
+        pid: i32,
+        image: u64,
+        op: TaskOp,
+    },
+    /// Task `pid`'s mappings, as of `image`; the host answers this one
+    /// without the task's help.
+    Regions {
+        pid: i32,
+        image: u64,
+    },
+    /// The first message on a process's *service connection*, which carries
+    /// only [`Request::Fetch`] and [`Request::Complete`] from then on.
+    Serve {
+        image: u64,
+    },
+    /// The work queued for the caller. Answered with [`Reply::Work`], empty
+    /// once the queue is drained.
+    Fetch,
+    /// Answers to fetched work, in any number.
+    Complete(Vec<Completion>),
 }
+
+/// The tags of the service connection's messages, which the signal handler
+/// builds and reads by hand (see [`crate::task::Sink`]).
+pub const REQUEST_FETCH: u8 = 14;
+pub const REQUEST_COMPLETE: u8 = 15;
+pub const REPLY_WORK: u8 = 14;
 
 #[derive(Clone, Debug)]
 pub enum Reply {
@@ -339,6 +390,8 @@ pub enum Reply {
         /// The host pid of the prefix's launchd, which guests know as pid 1,
         /// or 0 when the prefix has none running.
         launchd: i32,
+        /// The image this check-in made, or the one it continues.
+        image: u64,
     },
     Processes(Vec<Process>),
     /// `None` for a pid that is not a live guest process.
@@ -352,6 +405,10 @@ pub enum Reply {
     /// already is, which the launch belongs to.
     Launch(Option<Application>),
     Applications(Vec<Application>),
+    Task(TaskOutcome),
+    /// `None` for a task that is gone.
+    Regions(Option<Vec<Region>>),
+    Work(Vec<Work>),
 }
 
 impl Wire for Request {
@@ -370,6 +427,11 @@ impl Wire for Request {
                 launch,
             } => out.put(&9u8).put(application).put(launch),
             Request::Applications { identifier } => out.put(&10u8).put(identifier),
+            Request::Task { pid, image, op } => out.put(&11u8).put(pid).put(image).put(op),
+            Request::Regions { pid, image } => out.put(&12u8).put(pid).put(image),
+            Request::Serve { image } => out.put(&13u8).put(image),
+            Request::Fetch => out.put(&REQUEST_FETCH),
+            Request::Complete(list) => out.put(&REQUEST_COMPLETE).put(&List(list.clone())),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -392,6 +454,20 @@ impl Wire for Request {
             10 => Request::Applications {
                 identifier: input.take()?,
             },
+            11 => Request::Task {
+                pid: input.take()?,
+                image: input.take()?,
+                op: input.take()?,
+            },
+            12 => Request::Regions {
+                pid: input.take()?,
+                image: input.take()?,
+            },
+            13 => Request::Serve {
+                image: input.take()?,
+            },
+            REQUEST_FETCH => Request::Fetch,
+            REQUEST_COMPLETE => Request::Complete(input.take::<List<Completion>>()?.0),
             _ => return Err(Malformed),
         })
     }
@@ -406,7 +482,13 @@ impl Wire for Reply {
                 server_pid,
                 credentials,
                 launchd,
-            } => out.put(&3u8).put(server_pid).put(credentials).put(launchd),
+                image,
+            } => out
+                .put(&3u8)
+                .put(server_pid)
+                .put(credentials)
+                .put(launchd)
+                .put(image),
             Reply::Processes(list) => out.put(&4u8).put(&List(list.clone())),
             Reply::Process(process) => out.put(&5u8).put(process),
             Reply::Usage(usage) => out.put(&6u8).put(usage),
@@ -417,6 +499,11 @@ impl Wire for Reply {
             Reply::Credentials(Err(denied)) => out.put(&9u8).put(denied),
             Reply::Launch(running) => out.put(&10u8).put(running),
             Reply::Applications(list) => out.put(&11u8).put(&List(list.clone())),
+            Reply::Task(outcome) => out.put(&12u8).put(outcome),
+            Reply::Regions(list) => out
+                .put(&13u8)
+                .put(&list.as_ref().map(|list| List(list.clone()))),
+            Reply::Work(list) => out.put(&REPLY_WORK).put(&List(list.clone())),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -427,6 +514,7 @@ impl Wire for Reply {
                 server_pid: input.take()?,
                 credentials: input.take()?,
                 launchd: input.take()?,
+                image: input.take()?,
             },
             4 => Reply::Processes(input.take::<List<Process>>()?.0),
             5 => Reply::Process(input.take()?),
@@ -436,6 +524,9 @@ impl Wire for Reply {
             9 => Reply::Credentials(Err(input.take()?)),
             10 => Reply::Launch(input.take()?),
             11 => Reply::Applications(input.take::<List<Application>>()?.0),
+            12 => Reply::Task(input.take()?),
+            13 => Reply::Regions(input.take::<Option<List<Region>>>()?.map(|list| list.0)),
+            REPLY_WORK => Reply::Work(input.take::<List<Work>>()?.0),
             _ => return Err(Malformed),
         })
     }
@@ -501,6 +592,39 @@ mod tests {
             Reply::Applications(list) => assert_eq!(list, vec![application]),
             other => panic!("decoded as {other:?}"),
         }
+    }
+
+    #[test]
+    fn task_requests_and_their_answers_round_trip() {
+        let request = Request::Task {
+            pid: 9,
+            image: 3,
+            op: TaskOp::Write {
+                address: 0x1000,
+                data: b"hi".to_vec(),
+            },
+        };
+        match decode(&encode(&request)).unwrap() {
+            Request::Task { pid, image, op } => {
+                assert_eq!((pid, image), (9, 3));
+                assert!(matches!(op, TaskOp::Write { data, .. } if data == b"hi"));
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        let region = Region {
+            start: 0x1000,
+            end: 0x3000,
+            read: true,
+            ..Region::default()
+        };
+        match decode(&encode(&Reply::Regions(Some(vec![region])))).unwrap() {
+            Reply::Regions(Some(list)) => assert_eq!(list, vec![region]),
+            other => panic!("decoded as {other:?}"),
+        }
+        assert!(matches!(
+            decode(&encode(&Reply::Task(TaskOutcome::Gone))).unwrap(),
+            Reply::Task(TaskOutcome::Gone)
+        ));
     }
 
     #[test]

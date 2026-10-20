@@ -23,6 +23,8 @@ struct Record {
     connection: Option<u64>,
     /// Names the guest gave its threads, which the host may have truncated.
     thread_names: HashMap<i32, String>,
+    /// Which image of the pid this is; see [`Process::image`].
+    image: u64,
 }
 
 /// A running application, LaunchServices' table of them.
@@ -42,6 +44,8 @@ pub struct Registry {
     applications: Vec<Running>,
     /// The host pid of the prefix's launchd, which guests see as [`LAUNCHD`].
     launchd: Option<i32>,
+    /// The last image handed out; never reused while the server runs.
+    images: u64,
 }
 
 impl Registry {
@@ -162,6 +166,16 @@ impl Registry {
             }
         }
         let system = self.in_launchd_tree(pid);
+        // A fresh image is a new task; checking in again on a new connection
+        // continues the one there was. A pid with no live record - a `fork`
+        // child, or a reused pid - is a new task either way.
+        let image = match self.live(pid) {
+            Some(record) if !checkin.fresh => record.image,
+            _ => {
+                self.images += 1;
+                self.images
+            }
+        };
         self.records.insert(
             pid,
             Record {
@@ -171,6 +185,7 @@ impl Registry {
                 system,
                 connection: Some(connection),
                 thread_names: HashMap::new(),
+                image,
             },
         );
         credentials
@@ -275,6 +290,11 @@ impl Registry {
         self.live(pid).is_some()
     }
 
+    /// The image `pid` (the host's) is running, while it is a live guest.
+    pub fn image(&mut self, pid: i32) -> Option<u64> {
+        self.live(pid).map(|record| record.image)
+    }
+
     /// Every connected process, for diagnostics and for tests.
     pub fn len(&self) -> usize {
         self.records.len()
@@ -317,6 +337,7 @@ impl Registry {
             cputype: record.checkin.cputype,
             cpusubtype: record.checkin.cpusubtype,
             translated: record.checkin.translated,
+            image: record.image,
         })
     }
 
@@ -365,6 +386,24 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::credentials::SetId;
+
+    #[test]
+    fn an_exec_is_a_new_image_and_a_reconnect_is_not() {
+        let mut registry = Registry::new();
+        let identity = host::identity(me()).unwrap();
+        registry.checkin(me(), 1, fresh("/bin/sh", SetId::default()), identity);
+        let first = registry.image(me()).unwrap();
+        let again = Checkin {
+            fresh: false,
+            ..checkin("/bin/sh")
+        };
+        registry.checkin(me(), 2, again, identity);
+        assert_eq!(registry.image(me()), Some(first));
+        registry.checkin(me(), 3, fresh("/bin/ls", SetId::default()), identity);
+        let exec = registry.image(me()).unwrap();
+        assert_ne!(exec, first);
+        assert_eq!(registry.process(me()).unwrap().image, exec);
+    }
 
     fn me() -> i32 {
         // SAFETY: `getpid` has no preconditions.
