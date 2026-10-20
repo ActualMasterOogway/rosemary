@@ -91,6 +91,9 @@ pub fn check_in(path: &str, argv: Vec<Vec<u8>>) {
         credentials: crate::credentials::offered(),
         fresh: true,
         setid,
+        // Before the check-in, so a signal the server sends once it knows
+        // this process finds the handler in place.
+        serviceable: crate::mach::service::install(),
         ..Checkin::default()
     };
     let _ = ME.set(Me {

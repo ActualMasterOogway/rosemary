@@ -967,6 +967,9 @@ extern "C" fn run(context: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     let qos = u64::from(start.qos_class) | ((start.qos_relative_priority as u32 as u64) << 32);
     thread_ids::register(thread_bits(unsafe { libc::pthread_self() }), id(), qos);
     handle::begin();
+    // Before the guest runs: the server may ask this task for something at
+    // any moment, and this thread may be the one the signal lands on.
+    crate::mach::service::prepare_thread();
     start
         .registered
         .store(true, std::sync::atomic::Ordering::Release);
