@@ -4,8 +4,11 @@ pub mod bootstrap;
 pub mod clock;
 pub mod info;
 pub mod kern;
+pub mod local;
 pub mod msg;
+pub mod remote;
 pub mod senders;
+pub mod service;
 pub mod space;
 pub mod sync;
 pub mod task;
@@ -161,7 +164,10 @@ exports::exports! {
         "vm_allocate" | "mach_vm_allocate" => vm::vm_allocate,
         "vm_deallocate" | "mach_vm_deallocate" => vm::vm_deallocate,
         "mach_vm_region" => vm::vm_region_64,
-        "vm_read_overwrite" => vm::vm_read_overwrite,
+        "vm_read_overwrite" | "mach_vm_read_overwrite" => vm::vm_read_overwrite,
+        "vm_read" | "mach_vm_read" => vm::vm_read,
+        "vm_write" | "mach_vm_write" => vm::vm_write,
+        "vm_protect" | "mach_vm_protect" => vm::vm_protect,
         "vm_copy" | "mach_vm_copy" => vm::vm_copy,
 
         "mach_msg" => msg::mach_msg,

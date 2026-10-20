@@ -2755,6 +2755,14 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("vm_read_overwrite", I32, U32, U64, U64, U64, P),
     sig!("vm_region_64", I32, U32, P, P, I32, P, P, P),
     sig!("vm_region_recurse_64", I32, U32, P, P, P, P, P),
+    sig!("vm_read", I32, U32, U64, U64, P, P),
+    sig!("mach_vm_write", I32, U32, U64, U64, U32),
+    sig!("vm_write", I32, U32, U64, U64, U32),
+    //
+    // These do carry a protection, and `darwin::mach::local` hands it to the
+    // same bookkeeping as the `mprotect` shim (`shims::vmmap::protect_hook`).
+    sig!("mach_vm_protect", I32, U32, U64, U64, U32, I32),
+    sig!("vm_protect", I32, U32, U64, U64, U32, I32),
     sig!("mach_thread_self", U32),
     sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
