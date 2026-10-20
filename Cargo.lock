@@ -170,6 +170,7 @@ dependencies = [
  "owned_ttf_parser",
  "prefix",
  "sdl3",
+ "server",
  "static_init",
  "tiny-skia",
 ]

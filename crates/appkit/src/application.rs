@@ -238,28 +238,17 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
     // After the delegate has built its menus, and before any key press, so
     // Control-Command-F works without the menu having been opened.
     crate::menu::add_full_screen_item();
+    // Launches handed over while this one was under way, then any later.
+    crate::launch::finished_launching();
 }
 
 /// The URLs this launch was asked to open, in the order they were given.
 fn launch_urls() -> Vec<String> {
-    fn scheme(argument: &str) -> bool {
-        let Some((scheme, rest)) = argument.split_once(':') else {
-            return false;
-        };
-        // Two characters at least, so a lone drive letter or a stray `x:` is
-        // not mistaken for one, and a body.
-        scheme.len() >= 2
-            && !rest.is_empty()
-            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    }
     foundation::processinfo::guest_arguments()
         .iter()
         .skip(1)
         .filter_map(|argument| argument.to_str().map(str::to_owned))
-        .filter(|argument| scheme(argument))
+        .filter(|argument| crate::launch::is_launch_url(argument))
         .collect()
 }
 
@@ -278,9 +267,46 @@ fn launch_urls() -> Vec<String> {
 /// `receiver` is an application and `delegate` is null or live.
 unsafe fn open_launch_urls(receiver: Id, delegate: Id) {
     let urls = launch_urls();
-    if urls.is_empty() || delegate.is_null() {
+    if urls.is_empty() {
         return;
     }
+    // SAFETY: the caller's.
+    unsafe { send_open_urls(receiver, delegate, &urls) };
+}
+
+/// The delegate of the shared application, or nil.
+pub(crate) fn shared_delegate() -> Id {
+    match shared() {
+        app if app.is_null() => app,
+        // SAFETY: the shared application.
+        app => unsafe { (*(app as *const Application)).delegate },
+    }
+}
+
+/// `-[delegate application:openURLs:]` on the shared application's delegate,
+/// for URLs handed to the running application. False when the delegate does
+/// not implement it.
+///
+/// # Safety
+///
+/// The shared application's delegate is null or live.
+pub(crate) unsafe fn open_urls(urls: &[String]) -> bool {
+    // SAFETY: the caller's.
+    unsafe { send_open_urls(shared(), shared_delegate(), urls) }
+}
+
+/// # Safety
+///
+/// `receiver` is an application and `delegate` is null or live.
+unsafe fn send_open_urls(receiver: Id, delegate: Id, urls: &[String]) -> bool {
+    if delegate.is_null() {
+        return false;
+    }
+    let sel = objc::sel::get("application:openURLs:");
+    let Some(method) = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel))
+    else {
+        return false;
+    };
     let objects: Vec<corefoundation::base::CFTypeRef> = urls
         .iter()
         .map(|url| corefoundation::url::new(url))
@@ -295,21 +321,18 @@ unsafe fn open_launch_urls(receiver: Id, delegate: Id) {
         // SAFETY: a URL this call just made.
         unsafe { corefoundation::api::CFRelease(*object) };
     }
-    let sel = objc::sel::get("application:openURLs:");
-    let method = (unsafe { objc::object::class_of(delegate) }).and_then(|c| c.method(sel));
-    if let Some(method) = method {
-        // SAFETY: `-application:openURLs:` is `void (id, SEL, NSApplication *,
-        // NSArray<NSURL *> *)`.
-        unsafe {
-            let f: unsafe extern "C" fn(Id, Sel, Id, Id) = std::mem::transmute::<
-                *const c_void,
-                unsafe extern "C" fn(Id, Sel, Id, Id),
-            >(method.implementation());
-            f(delegate, sel, receiver, array as Id);
-        }
+    // SAFETY: `-application:openURLs:` is `void (id, SEL, NSApplication *,
+    // NSArray<NSURL *> *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id) = std::mem::transmute::<
+            *const c_void,
+            unsafe extern "C" fn(Id, Sel, Id, Id),
+        >(method.implementation());
+        f(delegate, sel, receiver, array as Id);
     }
     // SAFETY: the array this call made, which the delegate retains if it keeps it.
     unsafe { corefoundation::api::CFRelease(array) };
+    true
 }
 
 unsafe extern "C" fn run(receiver: Id, sel: Sel) {

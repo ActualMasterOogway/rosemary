@@ -452,6 +452,26 @@ fn answer(
             shared.shutdown.store(true, Ordering::Relaxed);
             Reply::Done
         }
+        Request::Launch {
+            application,
+            launch,
+        } => {
+            if peer_pid != 0 && application.pid != peer_pid {
+                return Reply::Refused(format!(
+                    "pid {} launched from pid {peer_pid}",
+                    application.pid
+                ));
+            }
+            match starnix::process::identity(application.pid) {
+                Some(identity) => {
+                    Reply::Launch(shared.registry().launch(application, launch, identity))
+                }
+                None => Reply::Refused(format!("pid {} is not running", application.pid)),
+            }
+        }
+        Request::Applications { identifier } => {
+            Reply::Applications(shared.registry().applications(identifier.as_deref()))
+        }
     }
 }
 

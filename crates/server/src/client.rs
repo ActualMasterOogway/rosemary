@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 use crate::codec;
 use crate::credentials::{Change, Credentials, Denied};
 use crate::location;
-use crate::protocol::{Checkin, Process, Reply, Request, Thread, Usage, VERSION};
+use crate::protocol::{
+    Application, Checkin, Launch, Process, Reply, Request, Thread, Usage, VERSION,
+};
 
 /// One connection.
 pub struct Client {
@@ -407,4 +409,29 @@ pub fn name_thread(tid: i32, name: &str) {
         tid,
         name: name.to_owned(),
     });
+}
+
+/// Become `application`, unless an instance already running is the
+/// application for `launch`: then `Some` of that one. `None` without a server,
+/// where every launch is a new instance.
+pub fn launch(application: Application, launch: Launch) -> Option<Option<Application>> {
+    let mut application = application;
+    application.pid = pid();
+    match call(&Request::Launch {
+        application,
+        launch,
+    })? {
+        Reply::Launch(running) => Some(running),
+        _ => None,
+    }
+}
+
+/// The running applications, oldest first, with `identifier` if given.
+pub fn applications(identifier: Option<&str>) -> Option<Vec<Application>> {
+    match call(&Request::Applications {
+        identifier: identifier.map(str::to_owned),
+    })? {
+        Reply::Applications(list) => Some(list),
+        _ => None,
+    }
 }

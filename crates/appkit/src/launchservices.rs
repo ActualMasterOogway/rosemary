@@ -2,8 +2,10 @@
 //!
 //! The only application registered here is the running one, so a question about
 //! a handler is answered with it when its `Info.plist` claims the scheme, and
-//! with "not found" otherwise. Opening a document or URL is handed to the host,
-//! as `-[NSWorkspace openURL:]` is.
+//! with "not found" otherwise. A URL whose handler that is goes to it, as a Mac
+//! sends a running handler the URL; any other document or URL is handed to the
+//! host, as `-[NSWorkspace openURL:]` is. Launching an application goes by
+//! LaunchServices' rule that it runs once; see [`crate::launch`].
 
 #![allow(non_snake_case)]
 
@@ -220,12 +222,26 @@ pub unsafe extern "C" fn LSCopyApplicationForMIMEType(
     APPLICATION_NOT_FOUND
 }
 
-/// Hand a URL to the host, as `-[NSWorkspace openURL:]` does.
+/// Open `url` in this application if it is the handler LaunchServices would
+/// pick, which then receives it as a `GURL` event. True when it was sent.
+pub(crate) fn handled_here(url: &corefoundation::url::Contents) -> bool {
+    let scheme = url.scheme();
+    if scheme.eq_ignore_ascii_case("file") {
+        return false;
+    }
+    let ours = handler_for(&scheme).is_some_and(|id| Some(id) == main_identifier());
+    ours && crate::launch::open_in_self(std::slice::from_ref(&url.text))
+}
+
+/// Hand a URL to its handler, as `-[NSWorkspace openURL:]` does.
 fn open(url: CFTypeRef) -> bool {
     // SAFETY: a `CFURL` or null.
     let Some(contents) = (unsafe { corefoundation::url::as_url(url) }) else {
         return false;
     };
+    if handled_here(contents) {
+        return true;
+    }
     crate::workspace::open_target(contents).is_some_and(|target| sdl3::open_url(&target))
 }
 
@@ -251,11 +267,43 @@ pub struct LaunchUrlSpec {
     async_ref_con: *mut c_void,
 }
 
+/// `kLSLaunchNewInstance`.
+const LAUNCH_NEW_INSTANCE: u32 = 0x0008_0000;
+
+/// Launch the application at `app_url` with `items`, by LaunchServices' rule
+/// that an instance already running takes the launch.
+fn launch_application(app_url: CFTypeRef, items: &[String], flags: u32) -> OSStatus {
+    // SAFETY: a `CFURL` or null.
+    let Some(path) = (unsafe { corefoundation::url::as_url(app_url) }).and_then(|u| u.file_path())
+    else {
+        return PARAM_ERR;
+    };
+    let host = prefix::ns::host_path(&path);
+    if foundation::bundle::Layout::at(&host).is_none() {
+        return APPLICATION_NOT_FOUND;
+    }
+    let new_instance = flags & LAUNCH_NEW_INSTANCE != 0;
+    let mode = match new_instance {
+        true => crate::launch::Launch::NewInstance,
+        false => crate::launch::Launch::Open,
+    };
+    if let Some(running) = crate::launch::running_instance(&host, mode) {
+        return match crate::launch::hand_over(running.pid, items) {
+            true => NO_ERR,
+            false => UNKNOWN_ERR,
+        };
+    }
+    match crate::workspace::spawn_application(&path, items, new_instance) {
+        Ok(_) => NO_ERR,
+        Err(_) => UNKNOWN_ERR,
+    }
+}
+
 /// `OSStatus LSOpenFromURLSpec(const LSLaunchURLSpec *, CFURLRef *)`
 ///
-/// Each item is opened by the host's handler for it. A spec naming an
-/// application with no items asks to launch another program, which there is
-/// none of here.
+/// A spec naming an application launches it with the items, or hands them to
+/// the instance already running. Without one, each item is opened by its
+/// handler.
 pub unsafe extern "C" fn LSOpenFromURLSpec(
     spec: *const LaunchUrlSpec,
     launched: *mut CFTypeRef,
@@ -268,9 +316,21 @@ pub unsafe extern "C" fn LSOpenFromURLSpec(
         unsafe { launched.write(std::ptr::null()) };
     }
     // SAFETY: the caller's spec.
-    let items = unsafe { (*spec).item_urls };
+    let (app_url, items, flags) =
+        unsafe { ((*spec).app_url, (*spec).item_urls, (*spec).launch_flags) };
     // SAFETY: null or an array of URLs.
-    let Some(list) = (unsafe { corefoundation::collections::array(items) }) else {
+    let list = unsafe { corefoundation::collections::array(items) };
+    if !app_url.is_null() {
+        let texts: Vec<String> = list
+            .map(|list| list.values.clone())
+            .unwrap_or_default()
+            .into_iter()
+            // SAFETY: the spec's items are URLs.
+            .filter_map(|url| unsafe { corefoundation::url::as_url(url) }.map(|u| u.text.clone()))
+            .collect();
+        return launch_application(app_url, &texts, flags);
+    }
+    let Some(list) = list else {
         return APPLICATION_NOT_FOUND;
     };
     let urls: Vec<CFTypeRef> = list.values.clone();

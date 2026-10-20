@@ -42,6 +42,7 @@ pub mod dock;
 pub mod event;
 mod font;
 pub mod hitheme;
+pub mod launch;
 pub mod launchservices;
 pub(crate) mod quartz;
 pub use chrome::fonts;

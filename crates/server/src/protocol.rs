@@ -5,7 +5,7 @@ use crate::credentials::{Change, Credentials, Denied, SetId};
 use crate::wire_struct;
 
 // TODO: make this automatic based on source hashes like `metal_translate`
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// What a process tells the server about itself.
 ///
@@ -211,6 +211,83 @@ wire_struct!(Thread {
     nice,
 });
 
+/// A running application, as LaunchServices knows it: one bundle's process.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Application {
+    pub pid: i32,
+    /// The bundle as the guest spells it, symlinks resolved, so two spellings
+    /// of one bundle are one application.
+    pub bundle: String,
+    pub identifier: Option<String>,
+    pub name: Option<String>,
+    /// `LSMultipleInstancesProhibited`: one instance per bundle identifier,
+    /// wherever the bundle is and however it is launched.
+    pub prohibited: bool,
+}
+
+impl Application {
+    /// Whether this running instance is the application a `launch` of
+    /// `wanted` means, so that the launch is handed to it.
+    ///
+    /// LaunchServices tells instances apart by bundle, so two copies of one
+    /// application run side by side, except that an application prohibiting
+    /// multiple instances is one per bundle identifier, which `-n` does not
+    /// get past either.
+    pub fn answers(&self, wanted: &Application, launch: Launch) -> bool {
+        let same_identifier = (self.prohibited || wanted.prohibited)
+            && wanted.identifier.is_some()
+            && self.identifier == wanted.identifier;
+        self.pid != wanted.pid
+            && match launch {
+                Launch::Open => self.bundle == wanted.bundle || same_identifier,
+                Launch::NewInstance => same_identifier,
+                Launch::Direct => false,
+            }
+    }
+}
+
+wire_struct!(Application {
+    pid,
+    bundle,
+    identifier,
+    name,
+    prohibited,
+});
+
+/// How a launch treats an instance of its application that already runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Launch {
+    /// LaunchServices' launch: a running instance is the application, and the
+    /// launch is handed to it.
+    #[default]
+    Open,
+    /// `open -n`, `kLSLaunchNewInstance`: another instance, unless the
+    /// application prohibits one.
+    NewInstance,
+    /// The bundle's executable run directly, which LaunchServices is not
+    /// asked about: listed, never refused.
+    Direct,
+}
+
+impl Wire for Launch {
+    fn put(&self, out: &mut Encoder) {
+        let tag: u8 = match self {
+            Launch::Open => 1,
+            Launch::NewInstance => 2,
+            Launch::Direct => 3,
+        };
+        tag.put(out);
+    }
+    fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
+        Ok(match u8::take(input)? {
+            1 => Launch::Open,
+            2 => Launch::NewInstance,
+            3 => Launch::Direct,
+            _ => return Err(Malformed),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Request {
     /// The first message on a connection; nothing else is answered before it.
@@ -236,6 +313,17 @@ pub enum Request {
     Shutdown,
     /// Change the caller's own ids, by the rules in [`crate::credentials`].
     Credentials(Change),
+    /// Become `application`, unless `launch` says an instance already running
+    /// is the application instead. Answered with [`Reply::Launch`].
+    Launch {
+        application: Application,
+        launch: Launch,
+    },
+    /// The running applications, oldest first; only those with the bundle
+    /// identifier when one is given.
+    Applications {
+        identifier: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +348,10 @@ pub enum Reply {
     /// The caller's ids after a [`Request::Credentials`], or why they did not
     /// change.
     Credentials(Result<Credentials, Denied>),
+    /// `None`: the caller is the application now. Otherwise the instance that
+    /// already is, which the launch belongs to.
+    Launch(Option<Application>),
+    Applications(Vec<Application>),
 }
 
 impl Wire for Request {
@@ -273,6 +365,11 @@ impl Wire for Request {
             Request::ThreadName { tid, name } => out.put(&6u8).put(tid).put(name),
             Request::Shutdown => out.put(&7u8),
             Request::Credentials(change) => out.put(&8u8).put(change),
+            Request::Launch {
+                application,
+                launch,
+            } => out.put(&9u8).put(application).put(launch),
+            Request::Applications { identifier } => out.put(&10u8).put(identifier),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -288,6 +385,13 @@ impl Wire for Request {
             },
             7 => Request::Shutdown,
             8 => Request::Credentials(input.take()?),
+            9 => Request::Launch {
+                application: input.take()?,
+                launch: input.take()?,
+            },
+            10 => Request::Applications {
+                identifier: input.take()?,
+            },
             _ => return Err(Malformed),
         })
     }
@@ -311,6 +415,8 @@ impl Wire for Reply {
                 .put(&threads.as_ref().map(|list| List(list.clone()))),
             Reply::Credentials(Ok(credentials)) => out.put(&8u8).put(credentials),
             Reply::Credentials(Err(denied)) => out.put(&9u8).put(denied),
+            Reply::Launch(running) => out.put(&10u8).put(running),
+            Reply::Applications(list) => out.put(&11u8).put(&List(list.clone())),
         };
     }
     fn take(input: &mut Decoder<'_>) -> Result<Self, Malformed> {
@@ -328,6 +434,8 @@ impl Wire for Reply {
             7 => Reply::Threads(input.take::<Option<List<Thread>>>()?.map(|list| list.0)),
             8 => Reply::Credentials(Ok(input.take()?)),
             9 => Reply::Credentials(Err(input.take()?)),
+            10 => Reply::Launch(input.take()?),
+            11 => Reply::Applications(input.take::<List<Application>>()?.0),
             _ => return Err(Malformed),
         })
     }
@@ -360,6 +468,39 @@ mod tests {
         assert_eq!(back[0].argv[1], b"-l");
         assert_eq!(back[0].command(), "top");
         assert!(back[0].translated);
+    }
+
+    #[test]
+    fn a_launch_and_its_answer_round_trip() {
+        let application = Application {
+            pid: 7,
+            bundle: "/Applications/A.app".into(),
+            identifier: Some("com.example.a".into()),
+            name: None,
+            prohibited: true,
+        };
+        let request = Request::Launch {
+            application: application.clone(),
+            launch: Launch::NewInstance,
+        };
+        match decode(&encode(&request)).unwrap() {
+            Request::Launch {
+                application: back,
+                launch,
+            } => {
+                assert_eq!(back, application);
+                assert_eq!(launch, Launch::NewInstance);
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        match decode(&encode(&Reply::Launch(Some(application.clone())))).unwrap() {
+            Reply::Launch(Some(back)) => assert_eq!(back, application),
+            other => panic!("decoded as {other:?}"),
+        }
+        match decode(&encode(&Reply::Applications(vec![application.clone()]))).unwrap() {
+            Reply::Applications(list) => assert_eq!(list, vec![application]),
+            other => panic!("decoded as {other:?}"),
+        }
     }
 
     #[test]
