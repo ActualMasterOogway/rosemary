@@ -1726,6 +1726,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reassigning_the_main_menu_preserves_tracking_until_the_menu_changes() {
+        crate::bootstrap();
+        let app_class = objc::class::lookup(c"NSApplication").expect("NSApplication");
+        let menu_class = objc::class::lookup(c"NSMenu").expect("NSMenu");
+        let app = objc::object::create_instance(app_class, 0);
+        let first = objc::object::create_instance(menu_class, 0);
+        let second = objc::object::create_instance(menu_class, 0);
+        let selector = objc::sel::get("setMainMenu:");
+        // SAFETY: -setMainMenu: is void (id, SEL, id) on NSApplication
+        let set_main_menu: unsafe extern "C" fn(Id, objc::sel::Sel, Id) =
+            unsafe { std::mem::transmute(objc::msg::entry()) };
+        // SAFETY: The receiver is an application and both menus are live
+        unsafe {
+            set_main_menu(app, selector, first);
+            // An empty tracking session observes teardown without an SDL surface
+            TRACKING.with(|tracking| {
+                assert!(tracking.borrow().is_none());
+                *tracking.borrow_mut() = Some(Tracking {
+                    window: std::ptr::null_mut(),
+                    row: Row::Titlebar,
+                    title: NO_TITLE,
+                    levels: Vec::new(),
+                    focus: 0,
+                    chooser: 0,
+                });
+            });
+            set_main_menu(app, selector, first);
+            assert!(
+                TRACKING.with(|tracking| tracking.borrow().is_some()),
+                "reassigning the same menu must preserve tracking"
+            );
+            set_main_menu(app, selector, second);
+            assert!(
+                TRACKING.with(|tracking| tracking.borrow().is_none()),
+                "replacing the menu must end tracking"
+            );
+            set_main_menu(app, selector, std::ptr::null_mut());
+        }
+        objc::arc::release(first);
+        objc::arc::release(second);
+        objc::arc::release(app);
+    }
+
+    #[test]
     fn client_decorations_are_the_default() {
         let config = Config::parse(None, None);
         assert_eq!(config.decorations, Decorations::Client);
