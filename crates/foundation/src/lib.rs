@@ -388,6 +388,9 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSFileHFSCreatorCode", "NSFileHFSCreatorCode"),
     ("_NSFileHFSTypeCode", "NSFileHFSTypeCode"),
     ("_NSFileTypeUnknown", "NSFileTypeUnknown"),
+    ("_NSFileTypeDirectory", "NSFileTypeDirectory"),
+    ("_NSFileTypeRegular", "NSFileTypeRegular"),
+    ("_NSFileTypeSymbolicLink", "NSFileTypeSymbolicLink"),
     ("_NSPOSIXErrorDomain", "NSPOSIXErrorDomain"),
     ("_NSCocoaErrorDomain", "NSCocoaErrorDomain"),
     ("_NSFilePathErrorKey", "NSFilePath"),
@@ -436,6 +439,31 @@ mod tests {
     fn class(name: &std::ffi::CStr) -> Id {
         bootstrap();
         objc::class::ptr(objc::class::lookup(name).expect("registered")) as Id
+    }
+
+    /// Qt's Cocoa file picker loads these as Objective-C pointer globals.
+    /// Missing cells leave Mach-O GOT slots zero and crash the picker when it
+    /// categorizes a directory, regular file, or symbolic link.
+    #[test]
+    fn file_type_globals_are_present_with_the_expected_string_values() {
+        bootstrap();
+        let symbols = data_symbols();
+        for value in [
+            "NSFileTypeDirectory",
+            "NSFileTypeRegular",
+            "NSFileTypeSymbolicLink",
+        ] {
+            let symbol = format!("_{value}");
+            let (_, address) = symbols
+                .iter()
+                .find(|(name, _)| name == &symbol)
+                .unwrap_or_else(|| panic!("missing Foundation data symbol {symbol}"));
+            // SAFETY: `string_globals` registers each value as a pointer-sized
+            // cell and the test just looked up its actual returned address.
+            let object = unsafe { *(*address as *const Id) };
+            assert!(!object.is_null(), "{symbol} must hold an NSString");
+            assert_eq!(unsafe { string::bytes(object) }, value.as_bytes());
+        }
     }
 
     #[test]
