@@ -317,6 +317,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `CCCrypt`: 11 integer-class arguments, within `MAX_INT_ARGS_TOTAL` - the
     // three past the eighth spill to the host stack, all doubleword-wide.
     sig!("CCCrypt", I32, U32, U32, U32, P, U64, P, P, U64, P, U64, P),
+    sig!("CCRandomGenerateBytes", I32, P, U64),
     sig!("CCCryptorCreate", I32, U32, U32, U32, P, U64, P, P),
     sig!(
         "CCCryptorCreateFromData",
