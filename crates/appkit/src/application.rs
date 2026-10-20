@@ -145,6 +145,12 @@ unsafe extern "C" fn main_menu(receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn set_main_menu(receiver: Id, _sel: Sel, value: Id) {
     // SAFETY: an application.
     let slot = unsafe { &mut (*(receiver as *mut Application)).main_menu };
+    // Toolkits may reassign the same menu when a popup takes or returns focus.
+    // Reassignment is not a replacement: closing menu tracking here would
+    // dismiss the popup before the user can choose an item.
+    if *slot == value {
+        return;
+    }
     let old = std::mem::replace(slot, objc::arc::retain(value));
     objc::arc::release(old);
     // The menu bar shows the menus of the one it is given now.
@@ -1156,6 +1162,35 @@ mod tests {
             assert!(window_with_window_number(std::ptr::null_mut(), sel, 0).is_null());
             assert!(window_with_window_number(std::ptr::null_mut(), sel, -7).is_null());
         }
+    }
+
+    /// Qt can send the same menu again when a popup window gains focus. A
+    /// no-op reassignment must preserve both identity and ownership.
+    #[test]
+    fn setting_the_same_main_menu_does_not_replace_or_release_it() {
+        crate::bootstrap();
+        let app_class = objc::class::lookup(c"NSApplication").expect("application class");
+        let menu_class = objc::class::lookup(c"NSMenu").expect("menu class");
+        let app = objc::object::create_instance(app_class, INSTANCE_SIZE);
+        let first = objc::object::create_instance(menu_class, 0);
+        let second = objc::object::create_instance(menu_class, 0);
+        let selector = objc::sel::get("setMainMenu:");
+        // SAFETY: `app` is an NSApplication and both menus are live NSMenus.
+        unsafe {
+            set_main_menu(app, selector, first);
+            assert_eq!(main_menu(app, selector), first);
+            let count = objc::arc::retain_count(first);
+            set_main_menu(app, selector, first);
+            assert_eq!(main_menu(app, selector), first);
+            assert_eq!(objc::arc::retain_count(first), count);
+            set_main_menu(app, selector, second);
+            assert_eq!(main_menu(app, selector), second);
+            assert_eq!(objc::arc::retain_count(first), count - 1);
+            set_main_menu(app, selector, std::ptr::null_mut());
+        }
+        objc::arc::release(first);
+        objc::arc::release(second);
+        objc::arc::release(app);
     }
 
     /// Tests below temporarily replace the process-wide guest argv.
