@@ -40,7 +40,7 @@ pub fn id() -> u32 {
     }
     #[cfg(target_os = "linux")]
     {
-        unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+        rustix::thread::gettid().as_raw_pid() as u32
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
