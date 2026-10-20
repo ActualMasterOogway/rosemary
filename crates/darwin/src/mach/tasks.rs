@@ -68,13 +68,13 @@ pub unsafe extern "C" fn task_for_pid(target: Name, pid: i32, out: *mut Name) ->
     if space::task_pid(target).is_none() {
         return KERN_INVALID_ARGUMENT;
     }
-    if !crate::process::visible(pid) {
+    let Some(process) = crate::process::describe(pid) else {
         // What a Mac answers for a pid the caller may not have, and for one
         // that does not exist - the two are deliberately indistinguishable.
         return KERN_FAILURE;
-    }
+    };
     // SAFETY: the caller's out-parameter.
-    unsafe { out.write(space::insert_task(pid)) };
+    unsafe { out.write(space::insert_task(pid, process.image)) };
     KERN_SUCCESS
 }
 
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn processor_set_tasks(
     }
     let tasks: Vec<Name> = crate::process::list()
         .iter()
-        .map(|process| space::insert_task(process.pid))
+        .map(|process| space::insert_task(process.pid, process.image))
         .collect();
     // SAFETY: the caller's out-parameters.
     unsafe { out_of_line(&tasks, array, count) }
@@ -647,7 +647,7 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
-        let task = space::insert_task(pid);
+        let task = space::insert_task(pid, 0);
         let waited = |flag| {
             let mut status = 0;
             // SAFETY: a child of this process and a writable status.
