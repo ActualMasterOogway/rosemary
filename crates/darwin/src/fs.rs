@@ -167,7 +167,9 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
 
 /// `int unlinkat(int, const char *, int)`
 ///
-/// Darwin spells `AT_FDCWD` and `AT_REMOVEDIR` its own way.
+/// Darwin spells `AT_FDCWD` and `AT_REMOVEDIR` its own way. A dataless
+/// directory is one whose contents live elsewhere, which no host directory
+/// is, so `AT_REMOVEDIR_DATALESS` is plain `AT_REMOVEDIR`.
 ///
 /// # Safety
 ///
@@ -176,24 +178,29 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flag: c_int) -> c_int {
     const DARWIN_AT_REMOVEDIR: c_int = 0x0080;
     const DARWIN_AT_REMOVEDIR_DATALESS: c_int = 0x0100;
-    if flag & !(DARWIN_AT_REMOVEDIR | DARWIN_AT_REMOVEDIR_DATALESS) != 0 {
+    let removes_dir = DARWIN_AT_REMOVEDIR | DARWIN_AT_REMOVEDIR_DATALESS;
+    let beneath = crate::stat::beneath::SUPPORTED;
+    if flag & !(removes_dir | beneath) != 0 {
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let host_dirfd = match dirfd {
+    let dirfd = match dirfd {
         crate::stat::DARWIN_AT_FDCWD => libc::AT_FDCWD,
         fd => fd,
     };
-    let host_flag = if flag & (DARWIN_AT_REMOVEDIR | DARWIN_AT_REMOVEDIR_DATALESS) != 0 {
-        libc::AT_REMOVEDIR
-    } else {
-        0
+    let host_flag = match flag & removes_dir {
+        0 => 0,
+        _ => libc::AT_REMOVEDIR,
     };
-    crate::stat::with_fallback_at(host_dirfd, path, |path| {
-        if !crate::stat::may_write_at(host_dirfd, path) {
+    crate::stat::with_fallback_at(dirfd, path, |path| {
+        if !crate::stat::may_write_at(dirfd, path) {
             return (-1, false);
         }
-        let rc = unsafe { libc::unlinkat(host_dirfd, path, host_flag) };
+        let rc = match flag & beneath {
+            // SAFETY: the caller's descriptor, and a translated path.
+            0 => unsafe { libc::unlinkat(dirfd, path, host_flag) },
+            _ => unsafe { crate::stat::beneath::unlinkat(dirfd, path, host_flag) },
+        };
         (rc, rc == 0)
     })
 }
@@ -1036,6 +1043,103 @@ mod tests {
             -1
         );
         assert_eq!(crate::errno::get(), libc::ENOTDIR);
+        crate::errno::set(0);
+    }
+
+    const DARWIN_AT_REMOVEDIR: c_int = 0x0080;
+    const DARWIN_AT_REMOVEDIR_DATALESS: c_int = 0x0100;
+
+    #[test]
+    fn unlinkat_translates_darwin_at_fdcwd_and_removedir() {
+        let scratch = Scratch::new("unlinkat-cwd");
+        std::fs::create_dir(scratch.0.join("dir")).expect("a directory");
+        let path = scratch.c_path("dir");
+        crate::errno::set(0);
+        // SAFETY: a NUL-terminated path and Darwin's AT_FDCWD.
+        unsafe {
+            assert_eq!(unlinkat(crate::stat::DARWIN_AT_FDCWD, path.as_ptr(), 0), -1);
+            assert_eq!(crate::errno::get(), libc::EISDIR);
+            let flag = DARWIN_AT_REMOVEDIR;
+            assert_eq!(
+                unlinkat(crate::stat::DARWIN_AT_FDCWD, path.as_ptr(), flag),
+                0
+            );
+        }
+        assert!(!scratch.0.join("dir").exists());
+        crate::errno::set(0);
+    }
+
+    #[test]
+    fn unlinkat_removes_relative_to_its_descriptor() {
+        let scratch = Scratch::new("unlinkat-relative");
+        std::fs::create_dir(scratch.0.join("dir")).expect("a directory");
+        std::fs::write(scratch.0.join("file"), b"x").expect("a file");
+        let dir = scratch.open(".");
+        let fd = dir.as_raw_fd();
+        // SAFETY: a live directory descriptor and NUL-terminated relative paths.
+        unsafe {
+            assert_eq!(unlinkat(fd, c"file".as_ptr(), 0), 0);
+            assert_eq!(
+                unlinkat(fd, c"dir".as_ptr(), DARWIN_AT_REMOVEDIR_DATALESS),
+                0
+            );
+        }
+        assert!(!scratch.0.join("file").exists());
+        assert!(!scratch.0.join("dir").exists());
+    }
+
+    #[test]
+    fn unlinkat_refuses_a_flag_it_cannot_honour() {
+        let scratch = Scratch::new("unlinkat-flags");
+        std::fs::write(scratch.0.join("file"), b"x").expect("a file");
+        let dir = scratch.open(".");
+        // Darwin's AT_SYMLINK_NOFOLLOW_ANY, which has no host equivalent.
+        const DARWIN_AT_SYMLINK_NOFOLLOW_ANY: c_int = 0x0800;
+        crate::errno::set(0);
+        // SAFETY: a live directory descriptor and a NUL-terminated relative path.
+        let rc = unsafe {
+            unlinkat(
+                dir.as_raw_fd(),
+                c"file".as_ptr(),
+                DARWIN_AT_SYMLINK_NOFOLLOW_ANY,
+            )
+        };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        assert!(scratch.0.join("file").exists());
+        crate::errno::set(0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn unlinkat_resolve_beneath_removes_inside_and_refuses_an_escape() {
+        let flag = crate::stat::beneath::SUPPORTED;
+        let scratch = Scratch::new("unlinkat-beneath");
+        std::fs::create_dir_all(scratch.0.join("root/sub/dir")).expect("a directory");
+        std::fs::write(scratch.0.join("root/sub/file"), b"x").expect("a file");
+        std::fs::write(scratch.0.join("outside"), b"x").expect("a file");
+        std::os::unix::fs::symlink("..", scratch.0.join("root/up")).expect("a symlink");
+        let root = scratch.open("root");
+        let fd = root.as_raw_fd();
+        // SAFETY: a live directory descriptor and NUL-terminated relative paths.
+        unsafe {
+            assert_eq!(unlinkat(fd, c"sub/file".as_ptr(), flag), 0);
+            assert_eq!(
+                unlinkat(fd, c"sub/dir/".as_ptr(), flag | DARWIN_AT_REMOVEDIR),
+                0
+            );
+            for escape in [c"../outside", c"up/outside", c"sub/../..", c"/tmp/x"] {
+                crate::errno::set(0);
+                assert_eq!(unlinkat(fd, escape.as_ptr(), flag), -1, "{escape:?}");
+                assert_eq!(crate::errno::get(), libc::EXDEV, "{escape:?}");
+            }
+            // The symlink itself is inside, and removing it does not follow it.
+            assert_eq!(unlinkat(fd, c"up".as_ptr(), flag), 0);
+        }
+        assert!(!scratch.0.join("root/sub/file").exists());
+        assert!(!scratch.0.join("root/sub/dir").exists());
+        assert!(scratch.0.join("outside").exists());
+        assert!(!scratch.0.join("root/up").exists());
         crate::errno::set(0);
     }
 }
