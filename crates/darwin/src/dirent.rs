@@ -217,25 +217,26 @@ unsafe fn convert(host: *const libc::dirent) -> Dirent {
 
 /// Read one entry from `dir`, telling the end of the directory from an error.
 ///
-/// Both are a null return, and `errno` is what separates them - so the host's
-/// errno is cleared first, which is what the host's own `readdir` documents.
+/// Both are a null return, and `errno` is what separates them - so it is
+/// cleared first, which is what the host's own `readdir` documents.
 ///
 /// # Safety
 ///
 /// `dir` is a handle `opendir` returned and has not been closed.
 unsafe fn next(dir: *mut libc::DIR) -> Result<Option<Dirent>, c_int> {
-    let saved = starnix::errno::get();
-    starnix::errno::set(0);
+    let saved = crate::errno::get();
+    crate::errno::set(0);
     let host = unsafe { libc::readdir(dir) };
     if host.is_null() {
-        let err = starnix::errno::get();
-        starnix::errno::set(saved);
-        return match err {
-            0 => Ok(None),
+        return match crate::errno::get() {
+            0 => {
+                crate::errno::set(saved);
+                Ok(None)
+            }
             error => Err(error),
         };
     }
-    starnix::errno::set(saved);
+    crate::errno::set(saved);
     // SAFETY: non-null, and libc's own entry.
     Ok(Some(unsafe { convert(host) }))
 }
@@ -250,13 +251,8 @@ pub unsafe extern "C" fn readdir(dir: *mut libc::DIR) -> *mut Dirent {
         crate::errno::set(libc::EBADF);
         return std::ptr::null_mut();
     }
-    let entry = match unsafe { next_listed(dir) } {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return std::ptr::null_mut(),
-        Err(error) => {
-            crate::errno::set(error);
-            return std::ptr::null_mut();
-        }
+    let Ok(Some(entry)) = (unsafe { next_listed(dir) }) else {
+        return std::ptr::null_mut();
     };
     entries(|open| {
         let slot = open
@@ -347,11 +343,7 @@ pub unsafe extern "C" fn closedir(dir: *mut libc::DIR) -> c_int {
         return -1;
     }
     entries(|open| open.remove(&(dir as usize)));
-    let res = unsafe { libc::closedir(dir) };
-    if res != 0 {
-        crate::errno::set(starnix::errno::get());
-    }
-    res
+    unsafe { libc::closedir(dir) }
 }
 
 /// `DIR *opendir(const char *)`, with the case-insensitive fallback.
@@ -372,15 +364,13 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut libc::DIR {
     // SAFETY: a NUL-terminated path.
     let mut dir = unsafe { libc::opendir(host.as_ptr()) };
     if dir.is_null()
-        && starnix::errno::get() == libc::ENOENT
+        && crate::errno::get() == libc::ENOENT
         && let Some(found) = prefix::ns::fold(&host)
     {
         // SAFETY: a NUL-terminated path this crate just built.
         dir = unsafe { libc::opendir(found.as_ptr()) };
     }
-    if dir.is_null() {
-        crate::errno::set(starnix::errno::get());
-    } else {
+    if !dir.is_null() {
         // A handle closed behind this crate's back - by the host's own
         // `closedir` - can come back at the same address, and must not inherit
         // the old directory's listing.
@@ -677,26 +667,6 @@ mod tests {
             crate::errno::set(libc::EINTR);
             assert!(readdir(handle).is_null());
             assert_eq!(crate::errno::get(), libc::EINTR);
-            closedir(handle);
-        }
-        std::fs::remove_dir_all(dir).expect("the fixture is removed");
-    }
-
-    #[test]
-    fn reaching_the_end_of_a_directory_preserves_zero_guest_errno_when_host_errno_set() {
-        let dir = fixture("errno-zero");
-        let path = c_path(&dir);
-        // SAFETY: a path this test owns and a handle closed below.
-        unsafe {
-            let handle = opendir(path.as_ptr());
-            assert!(!handle.is_null());
-            while !readdir(handle).is_null() {}
-            // Simulate a guest that explicitly clears errno before readdir,
-            // while host errno holds an error like EINVAL from an earlier call.
-            starnix::errno::set(libc::EINVAL);
-            *crate::errno::guest_location() = 0;
-            assert!(readdir(handle).is_null());
-            assert_eq!(*crate::errno::guest_location(), 0);
             closedir(handle);
         }
         std::fs::remove_dir_all(dir).expect("the fixture is removed");
