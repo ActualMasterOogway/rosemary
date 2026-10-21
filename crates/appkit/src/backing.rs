@@ -1159,6 +1159,11 @@ fn compose_window(window: Id) {
     };
     let (width, height) = (width.max(1) as u32, height.max(1) as u32);
     let placed = place_tree(window, sdl);
+    let surface_damage: Vec<Rect> = placed
+        .iter()
+        .filter(|p| crate::coreanimation::surface_contents_changed(crate::view::layer_of(p.view)))
+        .map(|p| p.clip)
+        .collect();
     let now: Vec<(usize, Rect)> = placed.iter().map(|p| (p.view as usize, p.clip)).collect();
     let overlaid: Vec<usize> = OVERLAYS
         .lock()
@@ -1245,6 +1250,9 @@ fn compose_window(window: Id) {
         .entry(sdl as usize)
         .or_default();
     let mut region = std::mem::take(&mut state.damage);
+    for rect in &surface_damage {
+        region = region.union(rect);
+    }
     if resized {
         region = whole;
     }

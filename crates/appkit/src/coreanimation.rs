@@ -124,6 +124,10 @@ struct Node {
     /// `-contents`, retained. A surface also holds a use count while it is
     /// here, which is what tells its owner it is on screen.
     contents: usize,
+    contents_revision: u64,
+    active_contents_reads: usize,
+    surface_snapshot: Option<iosurface::Snapshot>,
+    surface_retry: bool,
     gravity: Gravity,
     /// `contents` as premultiplied BGRA, for the kinds that are not already:
     /// the object it was made from, its width and height, and its pixels.
@@ -145,6 +149,10 @@ impl Default for Node {
             corner_radius: 0.0,
             animations: Vec::new(),
             contents: 0,
+            contents_revision: 0,
+            active_contents_reads: 0,
+            surface_snapshot: None,
+            surface_retry: false,
             gravity: Gravity::Resize,
             decoded: None,
         }
@@ -426,20 +434,149 @@ unsafe extern "C" fn contents(receiver: Id, _sel: Sel) -> Id {
     read_node(receiver, |node| node.map_or(0, |node| node.contents)) as Id
 }
 
+/// A setter may replace a layer after its pixels have been sampled but before
+/// the old image has finished drawing. Track that interval across all exits.
+struct ContentsRead {
+    layer: Id,
+    revision: u64,
+}
+
+impl Drop for ContentsRead {
+    fn drop(&mut self) {
+        let superseded = {
+            let mut nodes = NODES.lock().unwrap_or_else(|e| e.into_inner());
+            nodes
+                .as_mut()
+                .and_then(|nodes| nodes.get_mut(&(self.layer as usize)))
+                .is_some_and(|node| {
+                    node.active_contents_reads -= 1;
+                    node.contents_revision != self.revision
+                })
+        };
+        if superseded {
+            // The setter's damage may have been consumed by this very draw.
+            changed(self.layer);
+        }
+        objc::arc::release(self.layer);
+    }
+}
+
+struct HeldContents(usize);
+
+impl HeldContents {
+    fn new(contents: usize) -> Self {
+        let retained = objc::arc::retain(contents as Id) as usize;
+        if iosurface::is_surface(retained as CFTypeRef) {
+            // SAFETY: retained above, through the guard's lifetime.
+            unsafe { iosurface::IOSurfaceIncrementUseCount(retained as CFTypeRef) };
+        }
+        Self(retained)
+    }
+}
+
+impl Drop for HeldContents {
+    fn drop(&mut self) {
+        let_go_of_contents(self.0);
+    }
+}
+
+fn dedup_surfaces() -> bool {
+    std::env::var_os("ROSEMARY_DEDUP_IOSURFACE_CONTENTS").is_some()
+}
+
 /// `-setContents:`. A surface shown by a layer is in use for as long as it is
 /// shown, as the window server's use of one is on a Mac.
 unsafe extern "C" fn set_contents(receiver: Id, _sel: Sel, contents: Id) {
+    replace_contents(receiver, contents, dedup_surfaces());
+}
+
+fn replace_contents(receiver: Id, contents: Id, dedup: bool) -> bool {
     let retained = objc::arc::retain(contents) as usize;
     if iosurface::is_surface(contents as CFTypeRef) {
         // SAFETY: a live surface.
         unsafe { iosurface::IOSurfaceIncrementUseCount(contents as CFTypeRef) };
     }
-    let old = with_node(receiver, |node| {
+    let (old, unchanged) = with_node(receiver, |node| {
+        let snapshot = if dedup {
+            // SAFETY: the replacement was retained before entering the table.
+            unsafe { iosurface::snapshot(retained as CFTypeRef, node.surface_snapshot.as_ref()) }
+        } else {
+            Err(iosurface::SnapshotError::Unsupported)
+        };
+        let unchanged = node.active_contents_reads == 0
+            && snapshot.as_ref().is_ok_and(|new| {
+                node.surface_snapshot
+                    .as_ref()
+                    .is_some_and(|old| new.same_pixels(old))
+            });
+        node.surface_retry = matches!(snapshot, Err(iosurface::SnapshotError::Busy));
+        match snapshot {
+            Ok(snapshot) => node.surface_snapshot = Some(snapshot),
+            Err(iosurface::SnapshotError::Busy) => {}
+            Err(iosurface::SnapshotError::Unsupported) => node.surface_snapshot = None,
+        }
+        node.contents_revision = node.contents_revision.wrapping_add(1);
         node.decoded = None;
-        std::mem::replace(&mut node.contents, retained)
+        (std::mem::replace(&mut node.contents, retained), unchanged)
     });
     let_go_of_contents(old);
-    changed(receiver);
+    if !unchanged {
+        changed(receiver);
+    }
+    unchanged
+}
+
+/// Called while walking attached view trees, before consuming window damage.
+/// A write completed after setContents must not disappear behind deduplication.
+pub(crate) fn surface_contents_changed(layer: Id) -> bool {
+    dedup_surfaces() && !crate::layer::is_metal(layer) && surface_tree_changed(layer, 0)
+}
+
+fn surface_tree_changed(layer: Id, depth: usize) -> bool {
+    if layer.is_null() || depth > 64 {
+        return false;
+    }
+    let Some((contents, snapshot, retry, children)) = read_node(layer, |node| {
+        node.filter(|node| {
+            !node.hidden
+                && (if node
+                    .animations
+                    .iter()
+                    .any(|(_, animation)| animation.spec.key_path == "opacity")
+                {
+                    presented(
+                        &node.animations,
+                        "opacity",
+                        node.opacity,
+                        darwin::mach::media_time(),
+                    ) > 0.0
+                } else {
+                    node.opacity > 0.0
+                })
+        })
+        .map(|node| {
+            (
+                HeldContents::new(node.contents),
+                node.surface_snapshot.clone(),
+                node.surface_retry,
+                node.sublayers.clone(),
+            )
+        })
+    }) else {
+        return false;
+    };
+    // No pixels can be read until a producer finishes its CPU publication.
+    // Repeatedly redrawing the old image while locked wastes every pump.
+    let busy = iosurface::cpu_access_active(contents.0 as CFTypeRef);
+    (!busy
+        && (retry
+            || snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.is_published()
+                    && !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
+            })))
+        || children
+            .into_iter()
+            .any(|child| surface_tree_changed(child as Id, depth + 1))
 }
 
 unsafe extern "C" fn contents_gravity(receiver: Id, _sel: Sel) -> Id {
@@ -1329,17 +1466,105 @@ fn decode_contents(contents: usize) -> Option<(usize, usize, Vec<u8>)> {
 
 /// Run `f` over `layer`'s contents, if it has any this can draw.
 fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
-    let (contents, cached) = read_node(layer, |node| {
-        node.map_or((0, false), |node| {
+    with_contents_mode(layer, f, dedup_surfaces())
+}
+
+fn with_contents_mode<T>(layer: Id, f: impl FnOnce(Source) -> T, dedup: bool) -> Option<T> {
+    let (held, cached, previous, revision, _reading) = if dedup {
+        with_node(layer, |node| {
             let cached = node
                 .decoded
                 .as_ref()
                 .is_some_and(|(object, ..)| *object == node.contents);
-            (node.contents, cached)
+            let reading = (node.contents != 0).then(|| {
+                node.active_contents_reads += 1;
+                // Retain while the compositor uses the layer outside NODES.
+                objc::arc::retain(layer);
+                ContentsRead {
+                    layer,
+                    revision: node.contents_revision,
+                }
+            });
+            (
+                HeldContents::new(node.contents),
+                cached,
+                node.surface_snapshot.clone(),
+                node.contents_revision,
+                reading,
+            )
         })
-    });
+    } else {
+        read_node(layer, |node| {
+            node.map_or((HeldContents(0), false, None, 0, None), |node| {
+                let cached = node
+                    .decoded
+                    .as_ref()
+                    .is_some_and(|(object, ..)| *object == node.contents);
+                (
+                    HeldContents::new(node.contents),
+                    cached,
+                    node.surface_snapshot.clone(),
+                    node.contents_revision,
+                    None,
+                )
+            })
+        })
+    };
+    let contents = held.0;
     if contents == 0 {
         return None;
+    }
+    if dedup && iosurface::is_surface(contents as CFTypeRef) {
+        // SAFETY: held pins both the allocation and its compositor use count.
+        let snapshot = unsafe { iosurface::snapshot(contents as CFTypeRef, previous.as_ref()) };
+        #[cfg(test)]
+        tests::pause_after_snapshot();
+        let image = match snapshot {
+            Ok(snapshot) => {
+                with_node(layer, |node| {
+                    if node.contents_revision == revision {
+                        node.surface_snapshot = Some(snapshot.clone());
+                        node.surface_retry = false;
+                    }
+                });
+                Some(snapshot)
+            }
+            Err(iosurface::SnapshotError::Busy) => {
+                with_node(layer, |node| {
+                    if node.contents_revision == revision {
+                        node.surface_retry = true;
+                    }
+                });
+                // Keep the last committed image while a producer is painting.
+                return previous.map(|snapshot| {
+                    f(Source {
+                        width: snapshot.width,
+                        height: snapshot.height,
+                        stride: snapshot.width * 4,
+                        bytes: snapshot.bytes(),
+                        swap: snapshot.pixel_format != iosurface::PIXEL_FORMAT_BGRA,
+                    })
+                });
+            }
+            Err(iosurface::SnapshotError::Unsupported) => {
+                with_node(layer, |node| {
+                    if node.contents_revision == revision {
+                        node.surface_snapshot = None;
+                        node.surface_retry = false;
+                    }
+                });
+                None
+            }
+        };
+        if let Some(snapshot) = image {
+            return Some(f(Source {
+                width: snapshot.width,
+                height: snapshot.height,
+                stride: snapshot.width * 4,
+                bytes: snapshot.bytes(),
+                swap: snapshot.pixel_format != iosurface::PIXEL_FORMAT_BGRA,
+            }));
+        }
     }
     if let Some(surface) = iosurface::pixels(contents as CFTypeRef) {
         let swap = match surface.pixel_format {
@@ -1798,6 +2023,22 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
+    thread_local! {
+        static SNAPSHOT_PAUSE: std::cell::RefCell<Option<(
+            std::sync::Arc<std::sync::Barrier>,
+            std::sync::Arc<std::sync::Barrier>,
+        )>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn pause_after_snapshot() {
+        SNAPSHOT_PAUSE.with(|pause| {
+            if let Some((ready, resume)) = pause.borrow().as_ref() {
+                ready.wait();
+                resume.wait();
+            }
+        });
+    }
+
     fn spec(duration: f64, repeat_count: f64) -> Spec {
         Spec {
             key_path: "position.x".into(),
@@ -2126,6 +2367,193 @@ mod tests {
             assert_eq!(iosurface::IOSurfaceIsInUse(surface), 0);
             corefoundation::api::CFRelease(surface);
         }
+        objc::arc::pool_pop(pool);
+    }
+
+    fn publish(surface: CFTypeRef, bytes: [u8; 8]) {
+        // SAFETY: this test owns a 2x1 surface and brackets its CPU writes.
+        unsafe {
+            assert_eq!(
+                iosurface::IOSurfaceLock(surface, 0, std::ptr::null_mut()),
+                0
+            );
+            let base = iosurface::IOSurfaceGetBaseAddress(surface) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), base, 8);
+            assert_eq!(
+                iosurface::IOSurfaceUnlock(surface, 0, std::ptr::null_mut()),
+                0
+            );
+        }
+    }
+
+    fn layer_image(layer: Id) -> Vec<u8> {
+        with_contents_mode(layer, |source| source.bytes[..8].to_vec(), true).unwrap()
+    }
+
+    #[test]
+    fn dedup_compares_against_owned_publication_and_detects_later_writes() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let a = surface();
+        let b = surface();
+        let red = [0, 0, 255, 255, 0, 0, 255, 255];
+        let blue = [255, 0, 0, 255, 255, 0, 0, 255];
+        publish(a, red);
+        publish(b, red);
+        assert!(!replace_contents(layer, a as Id, true));
+        assert_eq!(layer_image(layer), red);
+        assert!(replace_contents(layer, b as Id, true));
+        assert!(!surface_tree_changed(layer, 0));
+
+        // A producer changes the newly installed surface after deduplication.
+        publish(b, blue);
+        assert!(surface_tree_changed(layer, 0));
+        assert_eq!(layer_image(layer), blue);
+        assert!(!surface_tree_changed(layer, 0));
+
+        // Two live buffers can now agree while the last published image differs.
+        publish(b, red);
+        assert!(!replace_contents(layer, a as Id, true));
+        assert_eq!(layer_image(layer), red);
+        assert!(!replace_contents(layer, b as Id, false));
+        assert!(read_node(layer, |node| node
+            .unwrap()
+            .surface_snapshot
+            .is_none()));
+        unsafe {
+            corefoundation::api::CFRelease(a);
+            corefoundation::api::CFRelease(b);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn in_place_surface_reuse_updates_the_published_image() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let surface = surface();
+        publish(surface, [7; 8]);
+        assert!(!replace_contents(layer, surface as Id, true));
+        publish(surface, [9; 8]);
+        assert!(!replace_contents(layer, surface as Id, true));
+        assert_eq!(layer_image(layer), [9; 8]);
+        publish(surface, [9; 8]);
+        assert!(replace_contents(layer, surface as Id, true));
+        unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn a_busy_replacement_keeps_the_last_image_and_retries_after_unlock() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let old = surface();
+        let next = surface();
+        publish(old, [4; 8]);
+        replace_contents(layer, old as Id, true);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let next_address = next as usize;
+        let writer = std::thread::spawn(move || unsafe {
+            let next = next_address as CFTypeRef;
+            iosurface::IOSurfaceLock(next, 0, std::ptr::null_mut());
+            let base = iosurface::IOSurfaceGetBaseAddress(next) as *mut u8;
+            std::ptr::write_bytes(base, 8, 4);
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            std::ptr::write_bytes(base.add(4), 8, 4);
+            iosurface::IOSurfaceUnlock(next, 0, std::ptr::null_mut());
+        });
+        started_rx.recv().unwrap();
+        assert!(!replace_contents(layer, next as Id, true));
+        unsafe { corefoundation::api::CFRelease(old) };
+        assert_eq!(layer_image(layer), [4; 8]);
+        assert!(!surface_tree_changed(layer, 0)); // Still locked: no complete image.
+        finish_tx.send(()).unwrap();
+        writer.join().unwrap();
+        assert!(surface_tree_changed(layer, 0));
+        assert_eq!(layer_image(layer), [8; 8]);
+        assert!(!surface_tree_changed(layer, 0));
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceIsInUse(next), 1);
+            corefoundation::api::CFRelease(next);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn replacing_during_an_inflight_snapshot_cannot_suppress_damage() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let a = surface();
+        let b = surface();
+        let red = [0, 0, 255, 255, 0, 0, 255, 255];
+        let blue = [255, 0, 0, 255, 255, 0, 0, 255];
+        publish(a, red);
+        publish(b, red);
+        assert!(!replace_contents(layer, a as Id, true));
+        publish(a, blue);
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let thread_ready = ready.clone();
+        let thread_resume = resume.clone();
+        let address = layer as usize;
+        let painter = std::thread::spawn(move || {
+            SNAPSHOT_PAUSE.with(|pause| *pause.borrow_mut() = Some((thread_ready, thread_resume)));
+            with_contents_mode(address as Id, |source| source.bytes[..8].to_vec(), true).unwrap()
+        });
+        ready.wait();
+        let suppressed = replace_contents(layer, b as Id, true);
+        resume.wait();
+        let rendered = painter.join().unwrap();
+        assert_eq!(rendered, blue);
+        assert!(!suppressed, "an in-flight old image must force damage");
+        assert_eq!(layer_image(layer), red);
+        assert!(!surface_tree_changed(layer, 0));
+        unsafe {
+            corefoundation::api::CFRelease(a);
+            corefoundation::api::CFRelease(b);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn hidden_sublayers_do_not_repeatedly_invalidate_parent_views() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let parent: Id = send(class, "layer", ());
+        let child: Id = send(class, "layer", ());
+        send::<Id, ()>(parent, "addSublayer:", child);
+        let surface = surface();
+        publish(surface, [1; 8]);
+        replace_contents(child, surface as Id, true);
+        assert_eq!(layer_image(child), [1; 8]);
+        with_node(child, |node| node.hidden = true);
+        publish(surface, [2; 8]);
+        for _ in 0..3 {
+            assert!(!surface_tree_changed(parent, 0));
+        }
+        with_node(child, |node| node.hidden = false);
+        assert!(surface_tree_changed(parent, 0));
+        assert_eq!(layer_image(child), [2; 8]);
+        assert!(!surface_tree_changed(parent, 0));
+        with_node(child, |node| node.opacity = 0.0);
+        publish(surface, [3; 8]);
+        assert!(!surface_tree_changed(parent, 0));
+        with_node(child, |node| node.opacity = 1.0);
+        assert!(surface_tree_changed(parent, 0));
+        assert_eq!(layer_image(child), [3; 8]);
+        assert!(!surface_tree_changed(parent, 0));
+        unsafe { corefoundation::api::CFRelease(surface) };
         objc::arc::pool_pop(pool);
     }
 

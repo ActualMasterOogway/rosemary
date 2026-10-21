@@ -187,3 +187,125 @@ fn every_key_is_published_as_a_cell_holding_its_string() {
         0
     );
 }
+
+fn publish_pixels(surface: CFTypeRef, value: u8) {
+    // SAFETY: the test owns the surface and writes only its visible rows.
+    unsafe {
+        assert_eq!(IOSurfaceLock(surface, 0, std::ptr::null_mut()), SUCCESS);
+        let p = pixels(surface).unwrap();
+        for y in 0..p.height {
+            std::ptr::write_bytes(
+                p.data.add(y * p.bytes_per_row) as *mut u8,
+                value,
+                p.width * 4,
+            );
+        }
+        assert_eq!(IOSurfaceUnlock(surface, 0, std::ptr::null_mut()), SUCCESS);
+    }
+}
+
+#[test]
+fn snapshots_own_visible_bytes_and_detect_reused_surfaces() {
+    let a = bgra(2, 2);
+    let b = bgra(2, 2);
+    publish_pixels(a, 11);
+    publish_pixels(b, 11);
+    // SAFETY: retained test surfaces with lock-bracketed writes.
+    unsafe {
+        let first = snapshot(a, None).unwrap();
+        let equal = snapshot(b, Some(&first)).unwrap();
+        assert!(first.same_pixels(&equal));
+        // Padding changes are not visible content.
+        IOSurfaceLock(b, 0, std::ptr::null_mut());
+        (IOSurfaceGetBaseAddress(b) as *mut u8).add(8).write(99);
+        IOSurfaceUnlock(b, 0, std::ptr::null_mut());
+        let padded = snapshot(b, Some(&equal)).unwrap();
+        assert!(padded.same_pixels(&equal));
+        publish_pixels(b, 22);
+        assert!(!snapshot_is_current(b, &padded));
+        let changed = snapshot(b, Some(&padded)).unwrap();
+        assert!(!changed.same_pixels(&padded));
+        assert_eq!(first.bytes(), &[11; 16]);
+        assert_eq!(changed.bytes(), &[22; 16]);
+        corefoundation::api::CFRelease(a);
+        corefoundation::api::CFRelease(b);
+        assert_eq!(first.bytes(), &[11; 16]);
+    }
+}
+
+#[test]
+fn active_producers_cannot_be_observed_halfway_through_a_publication() {
+    let surface = bgra(64, 2);
+    publish_pixels(surface, 3);
+    let before = unsafe { snapshot(surface, None).unwrap() };
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let address = surface as usize;
+    let producer = std::thread::spawn(move || unsafe {
+        let surface = address as CFTypeRef;
+        IOSurfaceLock(surface, 0, std::ptr::null_mut());
+        let p = pixels(surface).unwrap();
+        std::ptr::write_bytes(p.data as *mut u8, 9, 256);
+        ready_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        std::ptr::write_bytes(p.data.add(p.bytes_per_row) as *mut u8, 9, 256);
+        IOSurfaceUnlock(surface, 0, std::ptr::null_mut());
+    });
+    ready_rx.recv().unwrap();
+    assert_eq!(
+        unsafe { snapshot(surface, Some(&before)) }.err(),
+        Some(SnapshotError::Busy)
+    );
+    assert!(!snapshot_is_current(surface, &before));
+    assert_eq!(before.bytes(), &[3; 512]);
+    finish_tx.send(()).unwrap();
+    producer.join().unwrap();
+    let after = unsafe { snapshot(surface, Some(&before)).unwrap() };
+    assert_eq!(after.bytes(), &[9; 512]);
+    assert!(snapshot_is_current(surface, &after));
+    unsafe { corefoundation::api::CFRelease(surface) };
+}
+
+#[test]
+fn seed_wrap_does_not_reuse_an_old_snapshot() {
+    let surface = bgra(2, 1);
+    publish_pixels(surface, 1);
+    let before = unsafe { snapshot(surface, None).unwrap() };
+    state(surface)
+        .unwrap()
+        .seed
+        .store(u32::MAX, Ordering::Release);
+    publish_pixels(surface, 2);
+    assert_eq!(unsafe { IOSurfaceGetSeed(surface) }, 0);
+    assert!(!snapshot_is_current(surface, &before));
+    let after = unsafe { snapshot(surface, Some(&before)).unwrap() };
+    assert_eq!(after.bytes(), &[2; 8]);
+    state(surface)
+        .unwrap()
+        .cpu_access
+        .lock()
+        .unwrap()
+        .generation = Some(u64::MAX);
+    publish_pixels(surface, 3);
+    assert_eq!(
+        unsafe { snapshot(surface, Some(&after)) }.err(),
+        Some(SnapshotError::Unsupported)
+    );
+    unsafe { corefoundation::api::CFRelease(surface) };
+}
+
+#[test]
+fn untracked_initial_memory_is_not_eligible_for_deduplication() {
+    let surface = bgra(2, 1);
+    unsafe {
+        let before = snapshot(surface, None).unwrap();
+        assert!(!before.is_published());
+        // Compatibility fallback: initialization before any lock publication.
+        (IOSurfaceGetBaseAddress(surface) as *mut u8).write(17);
+        let after = snapshot(surface, Some(&before)).unwrap();
+        assert!(!before.same_pixels(&after));
+        assert_eq!(after.bytes()[0], 17);
+        assert_eq!(before.bytes()[0], 0);
+        corefoundation::api::CFRelease(surface);
+    }
+}
