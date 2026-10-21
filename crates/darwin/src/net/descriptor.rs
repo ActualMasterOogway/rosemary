@@ -1,5 +1,5 @@
 /// `int close(int fd)`
-pub(crate) unsafe extern "C" fn close(fd: i32) -> i32 {
+pub unsafe extern "C" fn close(fd: i32) -> i32 {
     // SAFETY: an integer descriptor; the call touches no caller memory.
     let rc = unsafe { libc::close(fd) };
     if rc == 0 || crate::errno::get() == libc::EBADF {
