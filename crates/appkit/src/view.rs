@@ -1747,6 +1747,10 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
     0
 }
 
+unsafe extern "C" fn accepts_first_mouse(_receiver: Id, _sel: Sel, _event: Id) -> u8 {
+    0
+}
+
 /// Whether `imp` is NSView's own `-acceptsFirstResponder`. It answers yes for
 /// every view, so it says nothing about whether a click should focus one.
 pub(crate) fn is_default_accepts_first_responder(imp: objc::class::Imp) -> bool {
@@ -1925,6 +1929,8 @@ pub(crate) fn install() {
         "wantsBestResolutionOpenGLSurface" => wants_best_resolution, c"c16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "acceptsFirstResponder" => yes, c"c16@0:8";
+        "acceptsFirstMouse:" => accepts_first_mouse, c"c24@0:8@16";
+        "mouseDownCanMoveWindow" => no, c"c16@0:8";
         "canBecomeKeyView" => yes, c"c16@0:8";
         "isOpaque" => yes, c"c16@0:8";
         "isFlipped" => no, c"c16@0:8";
@@ -2506,6 +2512,19 @@ mod tests {
             set_clips_to_bounds(view, set_clips, 0);
             assert_eq!(clips_to_bounds(view, get_clips), 0);
             assert_eq!(f(layer, get_masks), 0);
+        }
+        objc::arc::release(view);
+    }
+
+    #[test]
+    fn view_first_mouse_and_mouse_down_can_move_window() {
+        let view = view(rect(0.0, 0.0, 10.0, 10.0));
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> u8 = std::mem::transmute(objc::msg::entry());
+            let f_event: unsafe extern "C" fn(Id, Sel, Id) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(f_event(view, objc::sel::get("acceptsFirstMouse:"), std::ptr::null_mut()), 0);
+            assert_eq!(f(view, objc::sel::get("mouseDownCanMoveWindow")), 0);
         }
         objc::arc::release(view);
     }

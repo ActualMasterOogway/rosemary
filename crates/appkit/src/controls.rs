@@ -597,6 +597,8 @@ mod slot {
     /// Both `f64` bits.
     pub const SCROLLER_VALUE: usize = 0;
     pub const KNOB_PROPORTION: usize = 1;
+    pub const SCROLLER_STYLE: usize = 2;
+    pub const KNOB_STYLE: usize = 3;
 }
 
 const ROW: usize = 26;
@@ -2033,6 +2035,41 @@ unsafe extern "C" fn preferred_scroller_style(_class: Id, _sel: Sel) -> isize {
     0
 }
 
+unsafe extern "C" fn scroller_is_compatible_with_overlay_scrollers(
+    _class: Id,
+    _sel: Sel,
+) -> u8 {
+    0
+}
+
+/// `-[NSScroller scrollerStyle]`
+unsafe extern "C" fn scroller_style(receiver: Id, _sel: Sel) -> isize {
+    read(scrollers(), receiver, slot::SCROLLER_STYLE) as isize
+}
+
+/// `-[NSScroller setScrollerStyle:]`
+unsafe extern "C" fn scroller_set_style(receiver: Id, _sel: Sel, style: isize) {
+    write(scrollers(), receiver, slot::SCROLLER_STYLE, style as usize);
+}
+
+/// `-[NSScroller knobStyle]`
+unsafe extern "C" fn scroller_knob_style(receiver: Id, _sel: Sel) -> isize {
+    read(scrollers(), receiver, slot::KNOB_STYLE) as isize
+}
+
+/// `-[NSScroller setKnobStyle:]`
+unsafe extern "C" fn scroller_set_knob_style(receiver: Id, _sel: Sel, style: isize) {
+    write(scrollers(), receiver, slot::KNOB_STYLE, style as usize);
+}
+
+/// `-[NSScroller usableParts]`
+unsafe extern "C" fn scroller_usable_parts(_receiver: Id, _sel: Sel) -> usize {
+    2 // NSAllScrollerParts
+}
+
+/// `-[NSScroller checkSpaceForParts]`
+unsafe extern "C" fn scroller_check_space_for_parts(_receiver: Id, _sel: Sel) {}
+
 /// `-[NSScroller initWithFrame:]`, which is not the inherited one: a scroller
 /// constrains the frame it is given.
 ///
@@ -2366,6 +2403,7 @@ pub(crate) fn install() {
         "scrollerWidthForControlSize:scrollerStyle:" => scroller_width_for_control_size_and_style,
             c"d32@0:8Q16q24";
         "preferredScrollerStyle" => preferred_scroller_style, c"q16@0:8";
+        "isCompatibleWithOverlayScrollers" => scroller_is_compatible_with_overlay_scrollers, c"c16@0:8";
     });
     methods!(class, {
         "initWithFrame:" => scroller_init_with_frame,
@@ -2378,6 +2416,12 @@ pub(crate) fn install() {
         "knobProportion" => scroller_knob_proportion, c"d16@0:8";
         "rectForPart:" => scroller_rect_for_part,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}24@0:8Q16";
+        "scrollerStyle" => scroller_style, c"q16@0:8";
+        "setScrollerStyle:" => scroller_set_style, c"v24@0:8q16";
+        "knobStyle" => scroller_knob_style, c"q16@0:8";
+        "setKnobStyle:" => scroller_set_knob_style, c"v24@0:8q16";
+        "usableParts" => scroller_usable_parts, c"Q16@0:8";
+        "checkSpaceForParts" => scroller_check_space_for_parts, c"v16@0:8";
     });
 }
 
@@ -2619,6 +2663,37 @@ mod tests {
                 scroller_knob_proportion(object, objc::sel::get("knobProportion")),
                 0.3
             );
+        }
+        forget(object);
+        objc::arc::release(object);
+    }
+
+    #[test]
+    fn scroller_styles_and_usable_parts() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSScroller").expect("NSScroller");
+        let object = objc::object::create_instance(class, 0);
+        unsafe {
+            let f_get: unsafe extern "C" fn(Id, Sel) -> isize =
+                std::mem::transmute(objc::msg::entry());
+            let f_set: unsafe extern "C" fn(Id, Sel, isize) =
+                std::mem::transmute(objc::msg::entry());
+            let f_parts: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc::msg::entry());
+            let f_class_bool: unsafe extern "C" fn(Id, Sel) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+
+            let class_ptr = objc::class::ptr(class) as Id;
+            assert_eq!(f_class_bool(class_ptr, objc::sel::get("isCompatibleWithOverlayScrollers")), 0);
+            assert_eq!(f_get(object, objc::sel::get("scrollerStyle")), 0);
+            f_set(object, objc::sel::get("setScrollerStyle:"), 1);
+            assert_eq!(f_get(object, objc::sel::get("scrollerStyle")), 1);
+
+            assert_eq!(f_get(object, objc::sel::get("knobStyle")), 0);
+            f_set(object, objc::sel::get("setKnobStyle:"), 2);
+            assert_eq!(f_get(object, objc::sel::get("knobStyle")), 2);
+
+            assert_eq!(f_parts(object, objc::sel::get("usableParts")), 2);
         }
         forget(object);
         objc::arc::release(object);
