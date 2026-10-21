@@ -1166,10 +1166,39 @@ mod collection_tests {
                 40usize as CFTypeRef,
             ];
             let array = api::CFArrayCreate(std::ptr::null(), values.as_ptr(), 4, std::ptr::null());
+
+            // Normal range extraction
             let mut out = [std::ptr::null(); 2];
             api::CFArrayGetValues(array, 1, 2, out.as_mut_ptr());
             assert_eq!(out[0], 20usize as CFTypeRef);
             assert_eq!(out[1], 30usize as CFTypeRef);
+
+            // Zero-length range writes nothing
+            const SENTINEL: CFTypeRef = 0xdead_beef as CFTypeRef;
+            let mut sentinel_buf = [SENTINEL; 2];
+            api::CFArrayGetValues(array, 0, 0, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            api::CFArrayGetValues(array, 4, 0, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            // Zero-length range with null buffer is a safe no-op
+            api::CFArrayGetValues(array, 0, 0, std::ptr::null_mut());
+
+            // Negative location or length writes nothing
+            api::CFArrayGetValues(array, -1, 2, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            api::CFArrayGetValues(array, 1, -1, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            api::CFArrayGetValues(array, -1, 0, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+
+            // Range out of bounds writes nothing
+            api::CFArrayGetValues(array, 3, 2, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            api::CFArrayGetValues(array, 5, 1, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+            api::CFArrayGetValues(array, 5, 0, sentinel_buf.as_mut_ptr());
+            assert_eq!(sentinel_buf, [SENTINEL; 2]);
+
             api::CFRelease(array);
         }
     }

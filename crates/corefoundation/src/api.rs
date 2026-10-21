@@ -1248,29 +1248,42 @@ pub unsafe extern "C" fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex
 ///
 /// Under SysV AMD64 and AAPCS64, `CFRange` (two `CFIndex` fields) is passed
 /// flattened in two consecutive integer registers.
+///
+/// A range that is not inside the array copies nothing, for
+/// [`CFStringGetCharacters`]' reason: the caller sized its buffer from the range it
+/// asked for.
 pub unsafe extern "C" fn CFArrayGetValues(
     array: CFTypeRef,
     range_location: CFIndex,
     range_length: CFIndex,
     values: *mut CFTypeRef,
 ) {
-    if values.is_null() || range_length <= 0 {
+    if values.is_null() {
         return;
     }
+    let (Ok(start), Ok(count)) = (
+        usize::try_from(range_location),
+        usize::try_from(range_length),
+    ) else {
+        return;
+    };
     let Some(a) = (unsafe { collections::array(array) }) else {
         return;
     };
-    let start = range_location.max(0) as usize;
-    let len = range_length as usize;
-    for i in 0..len {
-        let index = start + i;
-        let val = if index < a.values.len() {
-            a.values[index]
-        } else {
-            std::ptr::null()
-        };
-        // SAFETY: caller guaranteed `values` points to at least `range_length` pointers.
-        unsafe { *values.add(i) = val };
+    let Some(slice) = start
+        .checked_add(count)
+        .filter(|&end| end <= a.values.len())
+        .and_then(|end| a.values.get(start..end))
+    else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    // SAFETY: caller guaranteed `values` points to at least `range_length` pointers,
+    // and `slice` has exact length `count`.
+    unsafe {
+        std::ptr::copy_nonoverlapping(slice.as_ptr(), values, count);
     }
 }
 
