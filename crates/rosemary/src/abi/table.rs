@@ -614,6 +614,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringCompare", I64, P, P, U64),
     sig!("CFCopyDescription", P, P),
     sig!("CFErrorCopyDescription", P, P),
+    sig!("CFErrorGetCode", I64, P),
     sig!("CFMakeCollectable", P, P),
     sig!("CFCopyTypeIDDescription", P, U64),
     sig!("CFStringCompareWithOptions", I64, P, P, I64, I64, U64),
