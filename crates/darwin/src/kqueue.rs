@@ -892,6 +892,23 @@ pub extern "C" fn kqueue() -> c_int {
     fd
 }
 
+/// Note that a kqueue descriptor was duplicated.
+pub fn duplicate(from: c_int, to: c_int) {
+    let mut map = queues().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(queue) = map.get(&from).cloned() {
+        map.insert(to, queue);
+    }
+}
+
+/// Note that a descriptor was closed, so any kqueue registered under this
+/// descriptor number is removed.
+pub fn forget(fd: c_int) {
+    queues()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&fd);
+}
+
 /// Wake a `kevent` blocked on `queue`.
 fn wake_fd(queue: c_int) {
     let one: u64 = 1;
@@ -2306,5 +2323,90 @@ mod tests {
         space::destroy(port);
         // SAFETY: this test's own descriptor.
         unsafe { libc::close(queue) };
+    }
+
+    #[test]
+    fn duplicated_kqueue_shares_state_and_wakes() {
+        let queue = kqueue();
+        assert!(queue >= 0);
+
+        let dup_fd = unsafe { crate::net::descriptor::dup(queue) };
+        assert!(dup_fd >= 0);
+        assert_ne!(queue, dup_fd);
+
+        let fcntl_fd =
+            unsafe { crate::fcntl::entry::fcntl(queue, crate::fcntl::cmd::F_DUPFD_CLOEXEC, 0) };
+        assert!(fcntl_fd >= 0);
+        assert_ne!(queue, fcntl_fd);
+
+        // Register EVFILT_USER on dup_fd
+        let change = Kevent {
+            ident: 0,
+            filter: EVFILT_USER,
+            flags: EV_ADD | EV_CLEAR | EV_RECEIPT,
+            fflags: 0,
+            data: 0,
+            udata: 0x42,
+        };
+        let mut receipt = Kevent::default();
+        let ret = unsafe {
+            kevent(
+                dup_fd,
+                &change,
+                1,
+                &mut receipt,
+                1,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(receipt.data, 0);
+
+        // Trigger on fcntl_fd
+        let trigger = Kevent {
+            ident: 0,
+            filter: EVFILT_USER,
+            flags: 0,
+            fflags: NOTE_TRIGGER,
+            data: 0,
+            udata: 0,
+        };
+        let ret = unsafe {
+            kevent(
+                fcntl_fd,
+                &trigger,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(ret, 0);
+
+        // Collect from original queue
+        let mut event = Kevent::default();
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let ret = unsafe {
+            kevent(
+                queue,
+                std::ptr::null(),
+                0,
+                &mut event,
+                1,
+                &timeout,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(event.filter, EVFILT_USER);
+        assert_eq!(event.udata, 0x42);
+
+        unsafe {
+            crate::net::descriptor::close(dup_fd);
+            crate::net::descriptor::close(fcntl_fd);
+            crate::net::descriptor::close(queue);
+        }
     }
 }
