@@ -707,6 +707,10 @@ pub fn mouse_moved_areas(window: Id) -> Vec<Id> {
             false => objc::arc::release(entry.area),
         }
     }
+    // The tree walk visits parents and backmost siblings first. Deliver to
+    // frontmost views first: a toolkit can discard a move at a screen
+    // position it already processed for another view.
+    out.reverse();
     out
 }
 
@@ -1256,6 +1260,64 @@ mod tests {
         assert!(held_by_drag(ACTIVE_ALWAYS, true));
         assert!(!held_by_drag(ACTIVE_ALWAYS, false));
         assert!(!held_by_drag(ENABLED_DURING_MOUSE_DRAG, true));
+    }
+
+    #[test]
+    fn overlapping_mouse_moves_reach_frontmost_views_first() {
+        crate::bootstrap();
+        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+        let view_class = objc::class::lookup(c"NSView").unwrap();
+        let views: Vec<Id> = (0..3)
+            .map(|_| {
+                let view = objc::object::create_instance(view_class, 0);
+                let rect = NSRect {
+                    origin: NSPoint::default(),
+                    size: NSSize {
+                        width: 100_000.0,
+                        height: 100_000.0,
+                    },
+                };
+                // SAFETY: the declared NSView initializer signature.
+                unsafe {
+                    let init: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+                        std::mem::transmute(objc::msg::entry());
+                    init(view, objc::sel::get("initWithFrame:"), rect)
+                }
+            })
+            .collect();
+        // A window without an SDL handle keeps this fixture headless.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+            send(window, objc::sel::get("setContentView:"), views[0]);
+            send(views[0], objc::sel::get("addSubview:"), views[1]);
+            send(views[0], objc::sel::get("addSubview:"), views[2]);
+        }
+        let areas: Vec<Id> = views
+            .iter()
+            .map(|view| {
+                let area = objc::object::create_instance(
+                    objc::class::lookup(c"NSTrackingArea").unwrap(),
+                    0,
+                );
+                unsafe {
+                    init_tracking_area(
+                        area,
+                        objc::sel::get("initWithRect:options:owner:userInfo:"),
+                        NSRect::default(),
+                        tracking::MOUSE_MOVED | tracking::ACTIVE_ALWAYS | tracking::IN_VISIBLE_RECT,
+                        *view,
+                        std::ptr::null_mut(),
+                    );
+                    let send: unsafe extern "C" fn(Id, Sel, Id) =
+                        std::mem::transmute(objc::msg::entry());
+                    send(*view, objc::sel::get("addTrackingArea:"), area);
+                }
+                area
+            })
+            .collect();
+        let delivered = mouse_moved_areas(window);
+        assert_eq!(delivered, vec![areas[2], areas[1], areas[0]]);
+        delivered.into_iter().for_each(objc::arc::release);
     }
 
     /// `NSTrackingAssumeInside` starts an area inside, so the first move that
