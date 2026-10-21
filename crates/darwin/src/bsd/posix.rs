@@ -6,6 +6,9 @@ extern "C" fn errc(_: c_int, _: c_int, _: *const c_char) {
 extern "C" fn warnc(_: c_int, _: *const c_char) {
     todo!()
 }
+extern "C" fn abort_report_np(_: *const c_char) -> ! {
+    todo!()
+}
 
 unsafe extern "C" {
     #[cfg(target_env = "gnu")]
@@ -394,6 +397,7 @@ exports::exports! {
     functions {
         "errc" => errc,
         "warnc" => warnc,
+        "abort_report_np" => abort_report_np,
         #[cfg(target_os = "linux")]
         "sigsetjmp" => sigsetjmp,
         "csops" => csops,
