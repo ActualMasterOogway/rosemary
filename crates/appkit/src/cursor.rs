@@ -535,8 +535,9 @@ struct Installed {
     holds: bool,
 }
 
-/// Every area in a view tree, in drawing order - parents before children and
-/// siblings in order - so the last one holding the pointer is the topmost.
+/// Every area in a view tree, in drawing order: parents before children,
+/// siblings in order, and a view's areas in the order they were added.
+/// [`installed`] reverses it.
 ///
 /// Areas on hidden views are listed as holding nothing: a view that is hidden
 /// with the pointer inside it is one the pointer has left.
@@ -570,7 +571,10 @@ unsafe fn installed_in(view: Id, key: bool, first: Id, out: &mut Vec<Installed>)
     }
 }
 
-/// The areas of `window`'s content view, retained; see [`Installed`].
+/// The areas of `window`'s content view, retained, frontmost first: children
+/// before parents, later siblings before earlier ones, and a view's newest area
+/// before its older ones. That is the order AppKit delivers tracking events in,
+/// so the first area holding the pointer is the topmost. See [`Installed`].
 fn installed(window: Id) -> Vec<Installed> {
     let key = crate::window::key_window() == window;
     let first = match key {
@@ -584,6 +588,7 @@ fn installed(window: Id) -> Vec<Installed> {
     let mut out = Vec::new();
     // SAFETY: null or the content view, which this crate made.
     unsafe { installed_in(crate::window::content_view_of(window), key, first, &mut out) };
+    out.reverse();
     out
 }
 
@@ -595,7 +600,8 @@ fn installed(window: Id) -> Vec<Installed> {
 /// takes its state with it, and a new one at the same address starts clean.
 ///
 /// - `NSTrackingMouseEnteredAndExited`: `-mouseEntered:` and `-mouseExited:` to
-///   the owner of every area the pointer crosses, exits first.
+///   the owner of every area the pointer crosses, exits first, each frontmost
+///   first.
 /// - `NSTrackingCursorUpdate`: `-cursorUpdate:` when the topmost such area
 ///   changes, to its owner; leaving the last one sends it to the view under the
 ///   pointer, whose inherited method walks up to the window and puts the arrow
@@ -645,7 +651,7 @@ pub fn update_tracking(window: Id, dragging: bool) {
         .iter()
         .filter(wants_cursor)
         .filter(|e| e.active && e.holds)
-        .rfind(|e| area_of(e.area).is_some_and(|a| !held_by_drag(a.options, dragging)))
+        .find(|e| area_of(e.area).is_some_and(|a| !held_by_drag(a.options, dragging)))
         .map(|e| e.area);
     let previous = areas
         .iter()
@@ -688,7 +694,8 @@ pub fn update_tracking(window: Id, dragging: bool) {
 
 /// The areas of `window` that `-mouseMoved:` goes to for a move with no
 /// button held: active, holding the pointer, and made with
-/// `NSTrackingMouseMoved`. Retained, for the caller to release.
+/// `NSTrackingMouseMoved`. Retained, for the caller to release, and frontmost
+/// first, which is the order AppKit sends the moves in.
 ///
 /// AppKit sends those moves to each area's owner, which is the only place Qt
 /// listens for them: its `QNSView` gives a helper object the area, and the
@@ -707,10 +714,6 @@ pub fn mouse_moved_areas(window: Id) -> Vec<Id> {
             false => objc::arc::release(entry.area),
         }
     }
-    // The tree walk visits parents and backmost siblings first. Deliver to
-    // frontmost views first: a toolkit can discard a move at a screen
-    // position it already processed for another view.
-    out.reverse();
     out
 }
 
