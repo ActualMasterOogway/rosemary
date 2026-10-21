@@ -1265,62 +1265,80 @@ mod tests {
         assert!(!held_by_drag(ENABLED_DURING_MOUSE_DRAG, true));
     }
 
+    /// Overlapping areas get `-mouseMoved:` frontmost first, as on macOS:
+    /// later siblings before earlier ones, children before parents, and a
+    /// view's newest area before its older ones.
     #[test]
     fn overlapping_mouse_moves_reach_frontmost_views_first() {
         crate::bootstrap();
-        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
-        let view_class = objc::class::lookup(c"NSView").unwrap();
-        let views: Vec<Id> = (0..3)
-            .map(|_| {
-                let view = objc::object::create_instance(view_class, 0);
-                let rect = NSRect {
-                    origin: NSPoint::default(),
-                    size: NSSize {
-                        width: 100_000.0,
-                        height: 100_000.0,
-                    },
-                };
-                // SAFETY: the declared NSView initializer signature.
-                unsafe {
-                    let init: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
-                        std::mem::transmute(objc::msg::entry());
-                    init(view, objc::sel::get("initWithFrame:"), rect)
-                }
-            })
-            .collect();
-        // A window without an SDL handle keeps this fixture headless.
-        unsafe {
-            let send: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
-            send(window, objc::sel::get("setContentView:"), views[0]);
-            send(views[0], objc::sel::get("addSubview:"), views[1]);
-            send(views[0], objc::sel::get("addSubview:"), views[2]);
-        }
-        let areas: Vec<Id> = views
-            .iter()
-            .map(|view| {
-                let area = objc::object::create_instance(
-                    objc::class::lookup(c"NSTrackingArea").unwrap(),
-                    0,
+        // SAFETY: each cast matches the method's declared prototype.
+        let send: unsafe extern "C" fn(Id, Sel, Id) =
+            unsafe { std::mem::transmute(objc::msg::entry()) };
+        let new_view = || {
+            let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+            let rect = NSRect {
+                origin: NSPoint::default(),
+                size: NSSize {
+                    width: 100.0,
+                    height: 100.0,
+                },
+            };
+            unsafe {
+                let init: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+                    std::mem::transmute(objc::msg::entry());
+                init(view, objc::sel::get("initWithFrame:"), rect)
+            }
+        };
+        let add_area = |view: Id| {
+            let area =
+                objc::object::create_instance(objc::class::lookup(c"NSTrackingArea").unwrap(), 0);
+            unsafe {
+                init_tracking_area(
+                    area,
+                    objc::sel::get("initWithRect:options:owner:userInfo:"),
+                    NSRect::default(),
+                    tracking::MOUSE_MOVED | tracking::ACTIVE_ALWAYS | tracking::IN_VISIBLE_RECT,
+                    view,
+                    std::ptr::null_mut(),
                 );
-                unsafe {
-                    init_tracking_area(
-                        area,
-                        objc::sel::get("initWithRect:options:owner:userInfo:"),
-                        NSRect::default(),
-                        tracking::MOUSE_MOVED | tracking::ACTIVE_ALWAYS | tracking::IN_VISIBLE_RECT,
-                        *view,
-                        std::ptr::null_mut(),
-                    );
-                    let send: unsafe extern "C" fn(Id, Sel, Id) =
-                        std::mem::transmute(objc::msg::entry());
-                    send(*view, objc::sel::get("addTrackingArea:"), area);
-                }
-                area
-            })
-            .collect();
+                send(view, objc::sel::get("addTrackingArea:"), area);
+            }
+            // The view holds it now.
+            objc::arc::release(area);
+            area
+        };
+
+        // root
+        // |- back      (one area, and a child with one)
+        // |  `- inner
+        // `- front     (two areas)
+        // A window without an SDL handle keeps this fixture headless.
+        let window = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+        let [root, back, inner, front] = [new_view(), new_view(), new_view(), new_view()];
+        unsafe {
+            send(window, objc::sel::get("setContentView:"), root);
+            send(root, objc::sel::get("addSubview:"), back);
+            send(back, objc::sel::get("addSubview:"), inner);
+            send(root, objc::sel::get("addSubview:"), front);
+        }
+        for view in [root, back, inner, front] {
+            objc::arc::release(view);
+        }
+        let root_area = add_area(root);
+        let back_area = add_area(back);
+        let inner_area = add_area(inner);
+        let front_older = add_area(front);
+        let front_newer = add_area(front);
+
+        crate::window::TEST_POINTER.set(Some(NSPoint { x: 10.0, y: 10.0 }));
         let delivered = mouse_moved_areas(window);
-        assert_eq!(delivered, vec![areas[2], areas[1], areas[0]]);
+        crate::window::TEST_POINTER.set(None);
+        assert_eq!(
+            delivered,
+            vec![front_newer, front_older, inner_area, back_area, root_area]
+        );
         delivered.into_iter().for_each(objc::arc::release);
+        objc::arc::release(window);
     }
 
     /// `NSTrackingAssumeInside` starts an area inside, so the first move that
