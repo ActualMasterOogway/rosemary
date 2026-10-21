@@ -181,9 +181,10 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
             && (entry.width, entry.height, entry.pixel_format) == (width, height, pixel_format)
     };
     debug_assert!(matches(&cache[at]));
-    // The first pass retires before it waits: a copy may have finished since
-    // the retirement above.
-    let mut retired = false;
+    // Whether the swapchain had no copy left to retire or wait for, so that
+    // only another thread can free a slot. Not on the first pass: a copy may
+    // have finished, or still be running, since the retirement above.
+    let mut idle = false;
     loop {
         // Every pass checks the ring under the lock it may then wait with, so
         // a slot returned while the lock was given up is found here rather
@@ -205,9 +206,9 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
             return objc::arc::autorelease(objc::arc::retain(slot.drawable as Id));
         }
         crate::stats::count(crate::stats::Counter::DrawablePressure);
-        if retired {
-            // Timed, because neither a finished copy nor a guest dropping a
-            // drawable it never presented signals the condition variable.
+        if idle {
+            // Timed, because a guest dropping a drawable it never presented
+            // does not signal the condition variable.
             cache = CACHE
                 .1
                 .wait_timeout(cache, RECLAIM_POLL)
@@ -217,14 +218,13 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         // A presented drawable whose copy is done comes back through the
         // swapchain, which locks the cache to return it.
         drop(cache);
-        crate::swapchain::retire_copied();
-        retired = true;
+        idle = !crate::swapchain::wait_copied(RECLAIM_POLL);
         cache = CACHE.0.lock().expect("drawable cache");
     }
 }
 
 /// How often a `nextDrawable` waiting on a full ring looks for a drawable the
-/// guest has let go of.
+/// guest has let go of, which is also as long as it waits on a copy at a time.
 const RECLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// Return to its ring every vended drawable the guest no longer holds.
