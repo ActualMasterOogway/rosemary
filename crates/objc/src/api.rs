@@ -107,7 +107,7 @@ pub unsafe extern "C" fn objc_getClassList(buffer: *mut *mut c_void, buffer_len:
     let count = (buffer_len as usize).min(classes.len());
     for (i, &cls) in classes.iter().take(count).enumerate() {
         unsafe {
-            *buffer.add(i) = crate::class::ptr(cls) as *mut c_void;
+            buffer.add(i).write(crate::class::ptr(cls) as *mut c_void);
         }
     }
     total
@@ -999,11 +999,55 @@ mod tests {
             "bootstrap must have registered at least NSObject"
         );
 
+        // Passing a null buffer with non-zero length also returns the total.
+        assert_eq!(
+            unsafe { objc_getClassList(std::ptr::null_mut(), total * 2) },
+            total
+        );
+
+        // A non-null buffer with zero or negative length is left untouched and returns total.
+        let canary = 0xdead_beef_usize as *mut c_void;
+        let mut canary_buf = [canary; 2];
+        assert_eq!(
+            unsafe { objc_getClassList(canary_buf.as_mut_ptr(), 0) },
+            total
+        );
+        assert_eq!(canary_buf[0], canary);
+        assert_eq!(
+            unsafe { objc_getClassList(canary_buf.as_mut_ptr(), -3) },
+            total
+        );
+        assert_eq!(canary_buf[0], canary);
+
+        // A small buffer (buffer_len < total) is filled up to buffer_len, but
+        // the function still returns the total number of registered classes.
+        let mut small_buf = [std::ptr::null_mut(); 1];
+        let returned = unsafe { objc_getClassList(small_buf.as_mut_ptr(), 1) };
+        assert_eq!(
+            returned, total,
+            "must return total registered classes even if bufferLen is smaller"
+        );
+        assert!(!small_buf[0].is_null());
+
+        // A sufficiently large buffer receives all registered classes.
         let mut buf = vec![std::ptr::null_mut(); total as usize];
         let returned = unsafe { objc_getClassList(buf.as_mut_ptr(), total) };
         assert_eq!(returned, total);
         assert!(!buf[0].is_null());
 
+        // objc_copyClassList with out_count == NULL succeeds and returns a nil-terminated list.
+        let list_null_count = unsafe { objc_copyClassList(std::ptr::null_mut()) };
+        assert!(!list_null_count.is_null());
+        unsafe {
+            assert!(!(*list_null_count).is_null());
+            assert!(
+                (*list_null_count.add(total as usize)).is_null(),
+                "must be nil-terminated"
+            );
+            crate::allocator::guest_free(list_null_count as *mut c_void);
+        }
+
+        // objc_copyClassList with valid out_count writes total and returns a nil-terminated list.
         let mut out_count = 0u32;
         let list = unsafe { objc_copyClassList(&mut out_count) };
         assert_eq!(out_count, total as u32);
