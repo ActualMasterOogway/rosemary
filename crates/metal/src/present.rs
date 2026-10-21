@@ -204,14 +204,30 @@ unsafe extern "C" fn next_drawable(receiver: Id, _sel: Sel) -> Id {
         drop(cache);
         crate::swapchain::retire_copied();
         cache = CACHE.0.lock().expect("drawable cache");
-        // Timed, because neither a finished copy nor a guest dropping a
-        // drawable it never presented signals the condition variable.
+        // Retirement may have completed and notified before we reacquired
+        // the lock. Check again before waiting or the notification is lost.
+        if drawable_available(&cache, &matches) {
+            continue;
+        }
+        // Timed, because a guest dropping an unpresented drawable has no
+        // completion signal. Hold the lock until the condvar releases it so
+        // completion cannot race between this check and the wait.
         cache = CACHE
             .1
             .wait_timeout(cache, RECLAIM_POLL)
             .expect("drawable cache")
             .0;
     }
+}
+
+fn drawable_available(cache: &[Cached], matches: &impl Fn(&Cached) -> bool) -> bool {
+    cache.iter().any(|entry| {
+        matches(entry)
+            && entry
+                .slots
+                .iter()
+                .any(|slot| slot.state == SlotState::Available)
+    })
 }
 
 /// How often a `nextDrawable` waiting on a full ring looks for a drawable the
@@ -1104,5 +1120,27 @@ mod drawable_pool_tests {
         };
         assert!(!slot.submit());
         assert_eq!(slot.state, SlotState::Submitted);
+    }
+
+    #[test]
+    fn retirement_does_not_wait_when_a_drawable_becomes_available() {
+        let mut cache = vec![Cached {
+            layer: 7,
+            width: 128,
+            height: 128,
+            pixel_format: 80,
+            stale: false,
+            slots: vec![CachedSlot {
+                drawable: 1,
+                state: SlotState::Submitted,
+            }],
+        }];
+        let correct_layer = |entry: &Cached| !entry.stale && entry.layer == 7;
+        assert!(!drawable_available(&cache, &correct_layer));
+        cache[0].slots[0].complete();
+        assert!(drawable_available(&cache, &correct_layer));
+        assert!(!drawable_available(&cache, &|entry: &Cached| entry.layer == 8));
+        cache[0].stale = true;
+        assert!(!drawable_available(&cache, &correct_layer));
     }
 }
