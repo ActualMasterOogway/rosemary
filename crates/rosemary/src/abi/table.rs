@@ -3913,6 +3913,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("dirfd", I32, P),
     sig!("fsctl", I32, P, U64, P, U32),
     sig!("gethostuuid", I32, P, P),
+    sig!("___gethostuuid", I32, P, P),
     sig!("uuid_generate", V, P),
     sig!("setxattr", I32, P, P, P, U64, U32, I32),
     sig!("removexattr", I32, P, P, I32),
