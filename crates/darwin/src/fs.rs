@@ -165,6 +165,39 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     })
 }
 
+/// `int unlinkat(int, const char *, int)`
+///
+/// Darwin spells `AT_FDCWD` and `AT_REMOVEDIR` its own way.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `dirfd` a directory descriptor or
+/// Darwin's `AT_FDCWD`.
+pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flag: c_int) -> c_int {
+    const DARWIN_AT_REMOVEDIR: c_int = 0x0080;
+    const DARWIN_AT_REMOVEDIR_DATALESS: c_int = 0x0100;
+    if flag & !(DARWIN_AT_REMOVEDIR | DARWIN_AT_REMOVEDIR_DATALESS) != 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let host_dirfd = match dirfd {
+        crate::stat::DARWIN_AT_FDCWD => libc::AT_FDCWD,
+        fd => fd,
+    };
+    let host_flag = if flag & (DARWIN_AT_REMOVEDIR | DARWIN_AT_REMOVEDIR_DATALESS) != 0 {
+        libc::AT_REMOVEDIR
+    } else {
+        0
+    };
+    crate::stat::with_fallback_at(host_dirfd, path, |path| {
+        if !crate::stat::may_write_at(host_dirfd, path) {
+            return (-1, false);
+        }
+        let rc = unsafe { libc::unlinkat(host_dirfd, path, host_flag) };
+        (rc, rc == 0)
+    })
+}
+
 /// `int mkdir(const char *, mode_t)`
 ///
 /// # Safety
@@ -182,6 +215,31 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: libc::mode_t) -> c_int
     let rc = unsafe { libc::mkdir(path.as_ptr(), mode) };
     if rc == 0 && crate::credentials::creates_as_another() {
         crate::credentials::created(libc::AT_FDCWD, &path);
+    }
+    rc
+}
+
+/// `int mkdirat(int, const char *, mode_t)`
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string and `dirfd` a directory descriptor or
+/// Darwin's `AT_FDCWD`.
+pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: libc::mode_t) -> c_int {
+    let host_dirfd = match dirfd {
+        crate::stat::DARWIN_AT_FDCWD => libc::AT_FDCWD,
+        fd => fd,
+    };
+    let Some(path) = host_at(host_dirfd, path) else {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    };
+    if !crate::stat::may_write_at(host_dirfd, path.as_ptr()) {
+        return -1;
+    }
+    let rc = unsafe { libc::mkdirat(host_dirfd, path.as_ptr(), mode) };
+    if rc == 0 && crate::credentials::creates_as_another() {
+        crate::credentials::created(host_dirfd, &path);
     }
     rc
 }
@@ -846,9 +904,11 @@ exports::exports! {
         "fsctl" => fsctl,
         "getcwd" => getcwd,
         "unlink" => unlink,
+        "unlinkat" => unlinkat,
         "rmdir" => rmdir,
         "remove" => remove,
         "mkdir" => mkdir,
+        "mkdirat" => mkdirat,
         "chmod" => chmod,
         "chown" => chown,
         "lchown" => lchown,
@@ -892,5 +952,32 @@ mod tests {
             -1
         );
         assert_eq!(crate::errno::get(), libc::ENOENT);
+    }
+
+    #[test]
+    fn mkdirat_and_unlinkat_translate_darwin_at_fdcwd_and_flags() {
+        let dir_name = format!("/tmp/rosemary-mkdirat-test-{}", std::process::id());
+        let c_dir = std::ffi::CString::new(dir_name.as_str()).unwrap();
+        unsafe {
+            assert_eq!(
+                mkdirat(crate::stat::DARWIN_AT_FDCWD, c_dir.as_ptr(), 0o755),
+                0
+            );
+            // Non-removedir unlinkat on directory should fail
+            assert_eq!(
+                unlinkat(crate::stat::DARWIN_AT_FDCWD, c_dir.as_ptr(), 0),
+                -1
+            );
+            // Darwin AT_REMOVEDIR (0x0080)
+            const DARWIN_AT_REMOVEDIR: c_int = 0x0080;
+            assert_eq!(
+                unlinkat(
+                    crate::stat::DARWIN_AT_FDCWD,
+                    c_dir.as_ptr(),
+                    DARWIN_AT_REMOVEDIR
+                ),
+                0
+            );
+        }
     }
 }
