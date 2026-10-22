@@ -1053,10 +1053,6 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
         return out;
     };
     let (points_wide, pixel_width, pixel_height) = pixels;
-    let density = match points_wide > 0 {
-        true => f64::from(pixel_width) / f64::from(points_wide),
-        false => 1.0,
-    };
     let whole = Rect {
         x: 0,
         y: 0,
@@ -1085,7 +1081,8 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
     };
     let geometry = Geometry {
         window_height: f64::from(points_high),
-        density,
+        host_points: (points_wide, points_high),
+        host_pixels: (pixel_width, pixel_height),
     };
     place_view(content, base, false, logical_clip, geometry, 0, &mut out);
     out
@@ -1104,8 +1101,8 @@ pub(crate) fn placed_rect_for_tests(window: Id, view: Id) -> Option<Rect> {
 struct Geometry {
     /// The window's height in points, which base coordinates count up from.
     window_height: f64,
-    /// Window pixels per point.
-    density: f64,
+    host_points: (i32, i32),
+    host_pixels: (i32, i32),
 }
 
 /// Place `view`, whose superview's rectangle in window base coordinates is
@@ -1134,12 +1131,22 @@ fn place_view(
         },
         size: frame.size,
     };
-    let density = geometry.density;
+    let pixels = crate::window::pixel_rect_from_surface(
+        NSRect {
+            origin: NSPoint {
+                x: in_window.origin.x,
+                y: geometry.window_height - (y + frame.size.height),
+            },
+            size: frame.size,
+        },
+        geometry.host_points,
+        geometry.host_pixels,
+    );
     let rect = Rect {
-        x: (in_window.origin.x * density).round() as i64,
-        y: ((geometry.window_height - (y + frame.size.height)) * density).round() as i64,
-        width: (frame.size.width * density).round() as i64,
-        height: (frame.size.height * density).round() as i64,
+        x: i64::from(pixels.x),
+        y: i64::from(pixels.y),
+        width: i64::from(pixels.w),
+        height: i64::from(pixels.h),
     };
     let clip = clip.intersection(&rect);
     let alpha = crate::view::effective_alpha(view);
@@ -1509,7 +1516,10 @@ fn blackout_software_exterior(
     for band in whole.subtract(&[allowed]) {
         for y in band.y as usize..(band.y + band.height) as usize {
             let start = y * pitch + band.x as usize * 4;
-            for pixel in pixels[start..start + band.width as usize * 4].chunks_exact_mut(4) {
+            for pixel in pixels[start..start + band.width as usize * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
                 pixel.copy_from_slice(&[0, 0, 0, 255]);
             }
         }
@@ -2372,7 +2382,8 @@ mod tests {
             whole,
             Geometry {
                 window_height: 100.0,
-                density: 1.0,
+                host_points: (200, 100),
+                host_pixels: (200, 100),
             },
             0,
             &mut placed,
@@ -2436,7 +2447,8 @@ mod tests {
             },
             Geometry {
                 window_height: 10.0,
-                density: 1.0,
+                host_points: (10, 10),
+                host_pixels: (10, 10),
             },
             0,
             &mut placed,
@@ -2567,7 +2579,7 @@ mod tests {
             height: clip.h.into(),
         };
         let mut pixels = vec![0u8; 1440 * 900 * 4];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[0, 0, 255, 255]);
         }
         blackout_software_exterior(&mut pixels, 1440 * 4, 1440, 900, allowed);

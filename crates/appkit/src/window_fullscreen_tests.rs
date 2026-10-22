@@ -1003,6 +1003,27 @@ fn fractional_fullscreen_frame_matches_content_view() {
     let sdl = window_of(object).sdl;
     let clip = presentation_clip(sdl).unwrap();
     let physical = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    let view = window_of(object).content_view;
+    let metal_frame = unsafe { crate::view::presentation_frame(view) }.unwrap();
+    let backing_frame = crate::backing::placed_rect_for_tests(object, view).unwrap();
+    // Compare actual view/Metal and software placement with the authoritative
+    // logical window rectangle, not with a second copy of the rounding math.
+    assert_eq!((metal_frame.x, metal_frame.width), (clip.x, clip.w as u32));
+    assert_eq!((metal_frame.y, metal_frame.height), (clip.y, clip.h as u32));
+    assert_eq!(
+        (
+            backing_frame.x,
+            backing_frame.y,
+            backing_frame.width,
+            backing_frame.height
+        ),
+        (
+            i64::from(metal_frame.x),
+            i64::from(metal_frame.y),
+            i64::from(metal_frame.width),
+            i64::from(metal_frame.height)
+        )
+    );
     assert!(clip.x >= 0 && clip.y >= 0);
     assert!(clip.x + clip.w <= physical.0 && clip.y + clip.h <= physical.1);
     assert!(

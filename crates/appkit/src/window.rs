@@ -590,30 +590,119 @@ pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
     ))
 }
 
-/// The host's half-open pixel rectangle, rounding both endpoints rather than
-/// rounding a fractional origin and size independently. Shared by every
-/// presentation backend through `presentation_clip`.
+/// Convert a top-origin AppKit rectangle to a half-open *unclipped* pixel
+/// rectangle. Every drawable and backing presenter uses this conversion so
+/// fractional origins and extents cannot disagree about the final edge.
+///
+/// A view can extend outside the physical window. Do not clamp here: Metal
+/// needs its full destination frame to map a clipped region back to the right
+/// source texels. Only `pixel_clip_from_surface` clamps to the host surface.
+pub(crate) fn pixel_rect_from_surface(
+    surface: NSRect,
+    (width, height): (i32, i32),
+    (pixels_w, pixels_h): (i32, i32),
+) -> sdl3::Rect {
+    let sx = f64::from(pixels_w) / f64::from(width.max(1));
+    let sy = f64::from(pixels_h) / f64::from(height.max(1));
+    let x0 = (surface.origin.x * sx).round() as i32;
+    let y0 = (surface.origin.y * sy).round() as i32;
+    let x1 = ((surface.origin.x + surface.size.width) * sx).round() as i32;
+    let y1 = ((surface.origin.y + surface.size.height) * sy).round() as i32;
+    sdl3::Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0).max(0),
+        h: y1.saturating_sub(y0).max(0),
+    }
+}
+
+/// The canonical host-clipped pixel rectangle: identical rounded endpoints
+/// to an unclipped drawable, intersected with SDL's physical pixel bounds.
 pub(crate) fn pixel_clip_from_surface(
     surface: NSRect,
     (width, height): (i32, i32),
     (pixels_w, pixels_h): (i32, i32),
 ) -> sdl3::Rect {
-    let scale_x = f64::from(pixels_w) / f64::from(width.max(1));
-    let scale_y = f64::from(pixels_h) / f64::from(height.max(1));
-    let x0 = (surface.origin.x * scale_x).round() as i32;
-    let y0 = (surface.origin.y * scale_y).round() as i32;
-    let x1 = ((surface.origin.x + surface.size.width) * scale_x).round() as i32;
-    let y1 = ((surface.origin.y + surface.size.height) * scale_y).round() as i32;
-    let x0 = x0.clamp(0, pixels_w);
-    let y0 = y0.clamp(0, pixels_h);
-    let x1 = x1.clamp(x0, pixels_w);
-    let y1 = y1.clamp(y0, pixels_h);
+    let pixels = pixel_rect_from_surface(surface, (width, height), (pixels_w, pixels_h));
+    let x0 = pixels.x.clamp(0, pixels_w);
+    let y0 = pixels.y.clamp(0, pixels_h);
+    let x1 = pixels.x.saturating_add(pixels.w).clamp(x0, pixels_w);
+    let y1 = pixels.y.saturating_add(pixels.h).clamp(y0, pixels_h);
     sdl3::Rect {
         x: x0,
         y: y0,
         w: x1 - x0,
         h: y1 - y0,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn physical_pixel_rects_share_independent_edge_rounding_at_one_and_two_x() {
+    let bounds = NSRect {
+        origin: NSPoint { x: 0.5, y: 0.5 },
+        size: NSSize {
+            width: 1438.5,
+            height: 898.5,
+        },
+    };
+    let uncut = pixel_rect_from_surface(bounds, (1440, 900), (1440, 900));
+    assert_eq!(
+        uncut,
+        sdl3::Rect {
+            x: 1,
+            y: 1,
+            w: 1438,
+            h: 898
+        }
+    );
+    assert_eq!(
+        pixel_clip_from_surface(bounds, (1440, 900), (1440, 900)),
+        uncut
+    );
+    let retina = pixel_rect_from_surface(bounds, (1440, 900), (2880, 1800));
+    assert_eq!(
+        retina,
+        sdl3::Rect {
+            x: 1,
+            y: 1,
+            w: 2877,
+            h: 1797
+        }
+    );
+    assert_eq!(
+        pixel_clip_from_surface(bounds, (1440, 900), (2880, 1800)),
+        retina
+    );
+    // An overhanging Metal child must keep its negative origin, even when
+    // its visible destination will subsequently be clipped to the window.
+    let outside = NSRect {
+        origin: NSPoint { x: -0.5, y: -0.5 },
+        size: NSSize {
+            width: 1441.0,
+            height: 901.0,
+        },
+    };
+    let raw = pixel_rect_from_surface(outside, (1440, 900), (1440, 900));
+    assert_eq!(
+        raw,
+        sdl3::Rect {
+            x: -1,
+            y: -1,
+            w: 1442,
+            h: 902
+        }
+    );
+    let visible = pixel_clip_from_surface(outside, (1440, 900), (1440, 900));
+    assert_eq!(
+        visible,
+        sdl3::Rect {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 900
+        }
+    );
 }
 
 /// Map a rectangle in AppKit window base coordinates onto the host surface.
@@ -1426,12 +1515,8 @@ fn mouse_confinement_in_surface(receiver: Id) -> Option<sdl3::Rect> {
         return None;
     }
     let mapped = rect_to_surface(receiver, rect)?;
-    Some(sdl3::Rect {
-        x: mapped.origin.x.round() as i32,
-        y: mapped.origin.y.round() as i32,
-        w: mapped.size.width.round() as i32,
-        h: mapped.size.height.round() as i32,
-    })
+    let points = sdl3::video::window_size(window_of(receiver).sdl)?;
+    Some(pixel_rect_from_surface(mapped, points, points))
 }
 
 fn apply_mouse_confinement(receiver: Id) {

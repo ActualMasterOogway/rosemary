@@ -833,6 +833,136 @@ fn a_shrunken_guest_fullscreen_is_presented_through_the_vulkan_swapchain() {
     objc::arc::pool_pop(pool);
 }
 
+/// A real fractional AppKit view with a CAMetalLayer must use the same
+/// half-open pixel edges as the logical window boundary. Validate the
+/// destination-to-source crop rather than merely masking the last pixel.
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "requires a non-Cocoa SDL host")]
+fn a_fractional_metal_layer_samples_exactly_its_rounded_destination_edges() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let window = objc::object::create_instance(class, appkit::window::INSTANCE_SIZE);
+    let rect = foundation::geometry::NSRect {
+        origin: foundation::geometry::NSPoint { x: 0.0, y: 0.0 },
+        size: foundation::geometry::NSSize {
+            width: 320.0,
+            height: 240.0,
+        },
+    };
+    let init: unsafe extern "C" fn(
+        objc::object::Id,
+        objc::sel::Sel,
+        foundation::geometry::NSRect,
+        usize,
+        usize,
+        u8,
+    ) -> objc::object::Id = unsafe { std::mem::transmute(objc::msg::entry()) };
+    if unsafe {
+        init(
+            window,
+            objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+            rect,
+            0,
+            0,
+            0,
+        )
+    } != window
+    {
+        return;
+    }
+    let sdl = unsafe { appkit::window::sdl_window(window) };
+    let points = sdl3::video::window_size(sdl).unwrap();
+    let physical = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    if points != physical {
+        // This fixture explicitly tests 1x; 2x is tested in AppKit.
+        objc::arc::release(window);
+        objc::arc::pool_pop(pool);
+        return;
+    }
+    assert!(points.0 >= 100 && points.1 >= 100);
+    let content: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel) -> objc::object::Id =
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    let parent = unsafe { content(window, objc::sel::get("contentView")) };
+    assert!(!parent.is_null());
+    let child_class = objc::class::lookup(c"NSView").unwrap();
+    let child = objc::object::create_instance(child_class, 0);
+    let w = f64::from(points.0);
+    let h = f64::from(points.1);
+    let frame = foundation::geometry::NSRect {
+        origin: foundation::geometry::NSPoint { x: 0.5, y: 1.0 },
+        size: foundation::geometry::NSSize {
+            width: w - 1.5,
+            height: h - 1.5,
+        },
+    };
+    let set_frame: unsafe extern "C" fn(
+        objc::object::Id,
+        objc::sel::Sel,
+        foundation::geometry::NSRect,
+    ) -> objc::object::Id = unsafe { std::mem::transmute(objc::msg::entry()) };
+    assert_eq!(
+        unsafe { set_frame(child, objc::sel::get("initWithFrame:"), frame) },
+        child
+    );
+    let add: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel, objc::object::Id) =
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    unsafe { add(parent, objc::sel::get("addSubview:"), child) };
+    let layer_class = objc::class::lookup(c"CAMetalLayer").unwrap();
+    let layer: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel) -> objc::object::Id =
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    let drawable = unsafe {
+        layer(
+            layer_class as *const objc::class::Class as objc::object::Id,
+            objc::sel::get("layer"),
+        )
+    };
+    assert!(!drawable.is_null());
+    unsafe { add(child, objc::sel::get("setLayer:"), drawable) };
+    let mapped = crate::present::layer_frame(drawable).expect("fractional CAMetalLayer placement");
+    // The view starts at half a point and ends at (host_width - 1). These
+    // independently rounded endpoints form [1,host_width-1), not [1,host_width).
+    assert_eq!(
+        (mapped.x, mapped.y, mapped.width, mapped.height),
+        (1, 1, (points.0 - 2) as u32, (points.1 - 2) as u32)
+    );
+    let extent = vk::Extent2D {
+        width: physical.0 as u32,
+        height: physical.1 as u32,
+    };
+    let destination = clamp(&mapped, extent).expect("fractional view intersects its host");
+    assert_eq!(
+        (
+            destination[0].x,
+            destination[0].y,
+            destination[1].x,
+            destination[1].y
+        ),
+        (1, 1, points.0 - 1, points.1 - 1)
+    );
+    let crop = clamp_to(
+        &mapped,
+        extent,
+        Some(sdl3::Rect {
+            x: 2,
+            y: 2,
+            w: points.0 - 3,
+            h: points.1 - 3,
+        }),
+    )
+    .expect("fractional clipped Metal layer");
+    let source = source_of(crop, &mapped, (mapped.width * 2, mapped.height * 2));
+    assert_eq!(
+        (source[0].x, source[0].y, source[1].x, source[1].y),
+        (2, 2, (mapped.width * 2) as i32, (mapped.height * 2) as i32)
+    );
+    // Earlier origin+width rounding returned 319 rather than 318 for the
+    // 320-point host, incorrectly mapping the final crop to source x=636.
+    objc::arc::release(child);
+    objc::arc::release(window);
+    objc::arc::pool_pop(pool);
+}
+
 #[test]
 fn fullscreen_logical_clip_preserves_metal_blit_source_coordinates() {
     let extent = vk::Extent2D {
