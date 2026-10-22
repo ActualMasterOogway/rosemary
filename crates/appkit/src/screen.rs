@@ -2006,6 +2006,16 @@ fn clear_relative_pointer_lock(window: sdl3::Window) {
     }
 }
 
+/// Drop a destroyed window's saved rectangle without touching SDL. Its focus
+/// and close events arrive once the window has left [`crate::window::sdl_windows`],
+/// so [`release_relative_pointer`] cannot find it, and SDL reuses the address.
+pub(crate) fn forget_relative_pointer(window: sdl3::Window) {
+    PREVIOUS_MOUSE_RECTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(id, _)| *id != window as usize);
+}
+
 pub(crate) fn release_relative_pointer(window_id: u32) {
     if !sdl3::video::is_x11() {
         return;

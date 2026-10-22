@@ -382,6 +382,7 @@ fn destroy_sdl_window(sdl: sdl3::Window) {
         .unwrap_or_else(|e| e.into_inner())
         .retain(|window| *window != sdl as usize);
     crate::backing::forget_window(sdl);
+    crate::screen::forget_relative_pointer(sdl);
     crate::decor::destroyed(sdl);
     for hook in DESTROY_HOOKS
         .lock()
