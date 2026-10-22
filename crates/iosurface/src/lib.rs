@@ -662,6 +662,30 @@ pub unsafe fn snapshot(
     object: CFTypeRef,
     previous: Option<&Snapshot>,
 ) -> Result<Snapshot, SnapshotError> {
+    // SAFETY: the caller retains the surface and must respect the CPU lock contract.
+    unsafe { snapshot_impl(object, previous, false) }
+}
+
+/// Recompare live bytes for an explicit layer contents assignment, even when
+/// the publication generation is unchanged. This also handles guests which
+/// edit their surface through IOSurfaceGetBaseAddress without CPU locks.
+/// Such unsynchronized writers are not safe to read concurrently.
+///
+/// # Safety
+/// The caller retains `object`. Concurrent writes must be synchronized.
+pub unsafe fn snapshot_revalidated(
+    object: CFTypeRef,
+    previous: Option<&Snapshot>,
+) -> Result<Snapshot, SnapshotError> {
+    // SAFETY: as documented for snapshot_revalidated.
+    unsafe { snapshot_impl(object, previous, true) }
+}
+
+unsafe fn snapshot_impl(
+    object: CFTypeRef,
+    previous: Option<&Snapshot>,
+    revalidate: bool,
+) -> Result<Snapshot, SnapshotError> {
     let s = state(object).ok_or(SnapshotError::Unsupported)?;
     let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
     if access.locks != 0 {
@@ -689,7 +713,8 @@ pub unsafe fn snapshot(
     }
     let compatible = previous
         .filter(|p| p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format);
-    if generation != 0
+    if !revalidate
+        && generation != 0
         && let Some(p) = compatible.filter(|p| {
             p.published
                 && p.generation == generation

@@ -234,6 +234,25 @@ fn snapshots_own_visible_bytes_and_detect_reused_surfaces() {
 }
 
 #[test]
+fn explicit_snapshot_revalidation_detects_lockless_changes() {
+    let image = bgra(2, 2);
+    publish_pixels(image, 1);
+    let before = unsafe { snapshot(image, None).unwrap() };
+    // A guest is allowed to hold a base address even if it does not honor
+    // the CPU lock protocol. The setter must not misclassify such bytes.
+    unsafe { std::ptr::write_bytes(IOSurfaceGetBaseAddress(image) as *mut u8, 3, 8) };
+    let cached = unsafe { snapshot(image, Some(&before)).unwrap() };
+    assert!(cached.same_pixels(&before));
+    let updated = unsafe { snapshot_revalidated(image, Some(&before)).unwrap() };
+    assert!(!updated.same_pixels(&before));
+    assert_eq!(&updated.bytes()[..8], &[3; 8]);
+    assert!(snapshot_is_current(image, &updated));
+    let same = unsafe { snapshot_revalidated(image, Some(&updated)).unwrap() };
+    assert!(same.same_pixels(&updated));
+    unsafe { corefoundation::api::CFRelease(image) };
+}
+
+#[test]
 fn active_producers_cannot_be_observed_halfway_through_a_publication() {
     let surface = bgra(64, 2);
     publish_pixels(surface, 3);

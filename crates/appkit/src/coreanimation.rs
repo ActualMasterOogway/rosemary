@@ -494,8 +494,9 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
     }
     let (old, unchanged) = with_node(receiver, |node| {
         // SAFETY: the replacement was retained before entering the table.
-        let snapshot =
-            unsafe { iosurface::snapshot(retained as CFTypeRef, node.surface_snapshot.as_ref()) };
+        let snapshot = unsafe {
+            iosurface::snapshot_revalidated(retained as CFTypeRef, node.surface_snapshot.as_ref())
+        };
         let unchanged = node.active_contents_reads == 0
             && snapshot.as_ref().is_ok_and(|new| {
                 node.surface_snapshot
@@ -532,7 +533,7 @@ pub(crate) fn surface_contents_changed(view: Id, rect: Rect, clip: Rect) -> bool
     scan_surface_tree(root, &mapping, clip, darwin::mach::media_time())
 }
 
-fn surface_publication_changed(layer: Id) -> bool {
+fn surface_publication_changed(layer: Id, drawable: impl FnOnce(usize) -> bool) -> bool {
     let Some((contents, snapshot, retry)) = read_node(layer, |node| {
         node.map(|node| {
             (
@@ -549,6 +550,7 @@ fn surface_publication_changed(layer: Id) -> bool {
             || snapshot.as_ref().is_some_and(|snapshot| {
                 !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
             }))
+        && drawable(contents.0)
 }
 
 fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool {
@@ -559,7 +561,16 @@ fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool 
     let whole = mapping.to_pixels(mapping.view_bounds);
     if !whole.is_empty()
         && !whole.intersection(&clip).is_empty()
-        && surface_publication_changed(root)
+        && surface_publication_changed(root, |contents| {
+            contents_intersects_clip(
+                contents,
+                root,
+                presented.gravity,
+                whole,
+                (mapping.scale_x, mapping.scale_y),
+                clip,
+            )
+        })
     {
         return true;
     }
@@ -612,8 +623,16 @@ fn scan_surface_layer(
     // Keep the old publication so it is rediscovered when pixels become drawable.
     if opacity > 0.0
         && !pixels.is_empty()
-        && (!contents_stay_in_bounds(presented.gravity) || !pixels.intersection(&clip).is_empty())
-        && surface_publication_changed(layer)
+        && surface_publication_changed(layer, |contents| {
+            contents_intersects_clip(
+                contents,
+                layer,
+                presented.gravity,
+                pixels,
+                (mapping.scale_x, mapping.scale_y),
+                clip,
+            )
+        })
     {
         return true;
     }
@@ -1723,6 +1742,46 @@ fn place(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> (f64, f64, 
     (x, y, width, height)
 }
 
+/// Use the same gravity and pixel-edge rounding as draw_contents, without
+/// snapshotting the IOSurface just to check whether it can paint any pixels.
+fn contents_intersects_clip(
+    contents: usize,
+    layer: Id,
+    gravity: Gravity,
+    bounds: Rect,
+    scale: (f64, f64),
+    clip: Rect,
+) -> bool {
+    if let Some(source) = iosurface::pixels(contents as CFTypeRef) {
+        let contents_scale = crate::layer::contents_scale_of(layer);
+        return source_area(
+            gravity,
+            bounds,
+            source.width as f64 / contents_scale * scale.0,
+            source.height as f64 / contents_scale * scale.1,
+        )
+        .is_some_and(|area| !area.intersection(&clip).is_empty());
+    }
+    // Non-IOSurface contents have no publication to check; avoid assuming a
+    // drawable size for formats that do not provide this metadata.
+    !contents_stay_in_bounds(gravity) || !bounds.intersection(&clip).is_empty()
+}
+
+/// The exact integer pixel rectangle which draw_contents can sample.
+fn source_area(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> Option<Rect> {
+    let (x, y, width, height) = place(gravity, bounds, width, height);
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let area = Rect {
+        x: x.round() as i64,
+        y: y.round() as i64,
+        width: ((x + width).round() - x.round()) as i64,
+        height: ((y + height).round() - y.round()) as i64,
+    };
+    (!area.is_empty()).then_some(area)
+}
+
 fn contents_stay_in_bounds(gravity: Gravity) -> bool {
     matches!(gravity, Gravity::Resize | Gravity::ResizeAspect)
 }
@@ -1748,6 +1807,19 @@ fn draw_contents(
     if contents_stay_in_bounds(gravity) && bounds.intersection(&clip).is_empty() {
         return;
     }
+    if !contents_stay_in_bounds(gravity) {
+        // The view may be recomposed for unrelated damage. Do not refresh an
+        // offscreen surface's snapshot if none of its placed pixels can draw.
+        let intersects = read_node(layer, |node| {
+            node.is_some_and(|node| {
+                let held = HeldContents::new(node.contents);
+                contents_intersects_clip(held.0, layer, gravity, bounds, scale, clip)
+            })
+        });
+        if !intersects {
+            return;
+        }
+    }
     let contents_scale = crate::layer::contents_scale_of(layer);
     with_contents(layer, |source| {
         let (x, y, width, height) = place(
@@ -1756,17 +1828,15 @@ fn draw_contents(
             source.width as f64 / contents_scale * scale.0,
             source.height as f64 / contents_scale * scale.1,
         );
-        if width <= 0.0 || height <= 0.0 {
+        let Some(area) = source_area(
+            gravity,
+            bounds,
+            source.width as f64 / contents_scale * scale.0,
+            source.height as f64 / contents_scale * scale.1,
+        ) else {
             return;
-        }
-        let area = Rect {
-            x: x.round() as i64,
-            y: y.round() as i64,
-            width: ((x + width).round() - x.round()) as i64,
-            height: ((y + height).round() - y.round()) as i64,
-        }
-        .intersection(&clip)
-        .intersection(&Rect {
+        };
+        let area = area.intersection(&clip).intersection(&Rect {
             x: 0,
             y: 0,
             width: i64::from(store.width),
@@ -2975,6 +3045,175 @@ mod tests {
             &store.pixels[(7 * 8 + 7) * 4..(7 * 8 + 8) * 4],
             &[0, 255, 0, 255]
         );
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn offscreen_right_gravity_does_not_invalidate_visible_view() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(20.0, 0.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        with_node(child, |node| node.gravity = Gravity::Right);
+        let surface = surface();
+        publish(surface, [1; 8]);
+        replace_contents(child, surface as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        publish(surface, [2; 8]);
+        for _ in 0..5 {
+            assert!(
+                !surface_contents_changed(view, whole, whole),
+                "offscreen publication damaged view"
+            );
+            render(view, &mut store, whole, whole, Pass::Sublayers);
+        }
+        // Moving an existing publication on-screen must not require another setContents.
+        send::<NSRect, ()>(child, "setFrame:", rect(7.0, 0.0, 2.0, 1.0));
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [2; 8]);
+        unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn offscreen_gravities_skip_unpaintable_publications() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(20.0, 20.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let image = surface();
+        publish(image, [1; 8]);
+        replace_contents(child, image as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        publish(image, [2; 8]);
+        for gravity in [
+            Gravity::Resize,
+            Gravity::ResizeAspect,
+            Gravity::ResizeAspectFill,
+            Gravity::Center,
+            Gravity::Top,
+            Gravity::Bottom,
+            Gravity::Left,
+            Gravity::Right,
+            Gravity::TopLeft,
+            Gravity::TopRight,
+            Gravity::BottomLeft,
+            Gravity::BottomRight,
+        ] {
+            with_node(child, |node| node.gravity = gravity);
+            assert!(!surface_contents_changed(view, whole, whole), "{gravity:?}");
+            render(view, &mut store, whole, whole, Pass::Sublayers);
+            assert!(!surface_contents_changed(view, whole, whole), "{gravity:?}");
+        }
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [2; 8]);
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn repeated_set_contents_detects_lockless_base_address_changes() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let image = surface();
+        publish(image, [1; 8]);
+        assert!(!replace_contents(layer, image as Id));
+        assert_eq!(layer_image(layer), [1; 8]);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                [3; 8].as_ptr(),
+                iosurface::IOSurfaceGetBaseAddress(image) as *mut u8,
+                8,
+            );
+        }
+        assert!(
+            !replace_contents(layer, image as Id),
+            "a different image must trigger damage"
+        );
+        assert_eq!(layer_image(layer), [3; 8]);
+        assert!(
+            replace_contents(layer, image as Id),
+            "truly identical image can be deduplicated"
+        );
+        // The same guarantee applies when replacing with a different surface object.
+        let next = surface();
+        publish(next, [3; 8]);
+        assert!(replace_contents(layer, next as Id));
+        unsafe {
+            corefoundation::api::CFRelease(image);
+            corefoundation::api::CFRelease(next);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn public_set_contents_redraws_lockless_base_address_updates() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let image = surface();
+        publish(image, [1; 8]);
+        send::<Id, ()>(child, "setContents:", image as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(layer_image(child), [1; 8]);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                [3; 8].as_ptr(),
+                iosurface::IOSurfaceGetBaseAddress(image) as *mut u8,
+                8,
+            );
+        }
+        send::<Id, ()>(child, "setContents:", image as Id);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(layer_image(child), [3; 8]);
+        assert!(!surface_contents_changed(view, whole, whole));
         unsafe { corefoundation::api::CFRelease(image) };
         objc::arc::pool_pop(pool);
     }
