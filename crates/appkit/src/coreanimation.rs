@@ -571,8 +571,7 @@ fn surface_tree_changed(layer: Id, depth: usize) -> bool {
     (!busy
         && (retry
             || snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.is_published()
-                    && !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
+                !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
             })))
         || children
             .into_iter()
@@ -2425,6 +2424,46 @@ mod tests {
         unsafe {
             corefoundation::api::CFRelease(a);
             corefoundation::api::CFRelease(b);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn initial_unpublished_surface_is_redrawn_after_first_cpu_publication() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let initial = surface();
+        let first = [0, 0, 255, 255, 0, 255, 0, 255];
+        let second = [255, 0, 0, 255, 255, 0, 0, 255];
+
+        // The constructor populated visible bytes without ever publishing.
+        assert!(!replace_contents(layer, initial as Id, true));
+        assert_eq!(layer_image(layer), first);
+        assert!(!surface_tree_changed(layer, 0));
+
+        // The producer keeps its contents pointer and publishes its first frame.
+        publish(initial, second);
+        assert!(
+            surface_tree_changed(layer, 0),
+            "first publication must invalidate"
+        );
+        assert_eq!(layer_image(layer), second);
+        assert!(!surface_tree_changed(layer, 0));
+
+        // A no-op publication is still a publication, but never compared
+        // for deduplication against a previously untracked initial image.
+        let another = surface();
+        assert!(!replace_contents(layer, another as Id, true));
+        assert_eq!(layer_image(layer), first);
+        publish(another, first);
+        assert!(surface_tree_changed(layer, 0));
+        assert_eq!(layer_image(layer), first);
+        assert!(!surface_tree_changed(layer, 0));
+        unsafe {
+            corefoundation::api::CFRelease(initial);
+            corefoundation::api::CFRelease(another);
         }
         objc::arc::pool_pop(pool);
     }

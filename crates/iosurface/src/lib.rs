@@ -731,6 +731,8 @@ pub unsafe fn snapshot(
 }
 
 /// Metadata only: an active CPU access or a later publication needs a redraw.
+/// An initial generation-zero snapshot can be current without being eligible
+/// for content deduplication; its first completed CPU publication invalidates it.
 /// The caller retains `object` for this call.
 pub fn snapshot_is_current(object: CFTypeRef, snapshot: &Snapshot) -> bool {
     let Some(s) = state(object) else {
@@ -738,7 +740,6 @@ pub fn snapshot_is_current(object: CFTypeRef, snapshot: &Snapshot) -> bool {
     };
     let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
     access.locks == 0
-        && snapshot.published
         && access.generation == Some(snapshot.generation)
         && Arc::ptr_eq(&s.snapshot_identity, &snapshot.identity)
 }

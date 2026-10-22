@@ -309,3 +309,32 @@ fn untracked_initial_memory_is_not_eligible_for_deduplication() {
         corefoundation::api::CFRelease(surface);
     }
 }
+
+#[test]
+fn first_cpu_publication_advances_an_untracked_snapshot() {
+    let surface = bgra(2, 1);
+    let other = bgra(2, 1);
+    let first = unsafe { snapshot(surface, None).unwrap() };
+    assert!(!first.is_published());
+    assert!(snapshot_is_current(surface, &first));
+    assert!(!snapshot_is_current(other, &first));
+
+    // An in-progress writer cannot expose a partial first publication.
+    unsafe { assert_eq!(IOSurfaceLock(surface, 0, std::ptr::null_mut()), SUCCESS) };
+    assert!(!snapshot_is_current(surface, &first));
+    unsafe { assert_eq!(IOSurfaceUnlock(surface, 0, std::ptr::null_mut()), SUCCESS) };
+    assert!(!snapshot_is_current(surface, &first));
+
+    // No visible bytes changed, yet the initial snapshot must be retired.
+    let published = unsafe { snapshot(surface, Some(&first)).unwrap() };
+    assert!(published.is_published());
+    assert!(!first.same_pixels(&published));
+    assert_eq!(first.bytes(), published.bytes());
+    assert!(snapshot_is_current(surface, &published));
+    publish_pixels(surface, 13);
+    assert!(!snapshot_is_current(surface, &published));
+    unsafe {
+        corefoundation::api::CFRelease(surface);
+        corefoundation::api::CFRelease(other);
+    }
+}
