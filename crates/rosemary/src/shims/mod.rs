@@ -109,20 +109,6 @@ fn foundation_variadic(name: &str) -> Option<Shim> {
     }
 }
 
-/// Run the shim for `symbol`, if there is one.
-///
-/// `None` means "not shimmed" and the caller should carry on with the table;
-/// `Some(Err(..))` means the shim itself refused, which is a different thing
-/// and must not fall through to a passthrough call.
-pub fn dispatch(
-    symbol: &str,
-    ctx: &mut RegisterContext,
-    mem: &mut dyn GuestMemory,
-    callbacks: &dyn crate::abi::Callbacks,
-) -> Option<Result<()>> {
-    resolve(symbol).map(|shim| shim.call(symbol, ctx, mem, callbacks))
-}
-
 /// A shim of either shape, as [`resolve`] finds it.
 #[derive(Clone, Copy)]
 pub enum Resolved {
