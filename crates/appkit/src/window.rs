@@ -1166,7 +1166,7 @@ unsafe extern "C" fn set_mouse_confinement_rect(receiver: Id, _sel: Sel, rect: N
         return;
     }
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
-        sdl3::video::set_mouse_rect(sdl, None);
+        crate::screen::set_pointer_confinement(sdl, None);
         return;
     }
     // SAFETY: as above.
@@ -1175,7 +1175,7 @@ unsafe extern "C" fn set_mouse_confinement_rect(receiver: Id, _sel: Sel, rect: N
         .height;
     // Window coordinates rise from the bottom of the frame; SDL's fall from its top.
     let top = height - (rect.origin.y + rect.size.height);
-    sdl3::video::set_mouse_rect(
+    crate::screen::set_pointer_confinement(
         sdl,
         Some(sdl3::Rect {
             x: rect.origin.x.round() as i32,

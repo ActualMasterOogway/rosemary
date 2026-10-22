@@ -1770,7 +1770,7 @@ pub fn confine_pointer(window: Id) {
         return;
     }
     if let Some(rect) = content_rect(window, sdl) {
-        sdl3::video::set_mouse_rect(sdl, Some(rect));
+        set_pointer_confinement(sdl, Some(rect));
     }
     sdl3::video::set_mouse_grab(sdl, true);
 }
@@ -2007,6 +2007,22 @@ fn clear_relative_pointer_lock(window: sdl3::Window) {
     if let Some(rect) = original {
         sdl3::video::set_mouse_rect(window, rect);
     }
+}
+
+/// Confine `window`'s pointer to `rect`, or lift it for `None`. While a
+/// relative lock holds the pointer, the rectangle replaces the one saved for
+/// when the lock lifts instead, or the next refresh would discard it.
+pub(crate) fn set_pointer_confinement(window: sdl3::Window, rect: Option<sdl3::Rect>) {
+    if let Some(saved) = PREVIOUS_MOUSE_RECTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter_mut()
+        .find(|(id, _)| *id == window as usize)
+    {
+        saved.1 = rect;
+        return;
+    }
+    sdl3::video::set_mouse_rect(window, rect);
 }
 
 /// Drop a destroyed window's saved rectangle without touching SDL. Its focus
