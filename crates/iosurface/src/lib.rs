@@ -116,6 +116,8 @@ struct CpuAccess {
     locks: usize,
     /// Independent of the public 32-bit seed, which can wrap.
     generation: Option<u64>,
+    /// One immutable image per surface publication, shared across layers.
+    cached: Option<Snapshot>,
 }
 
 impl Drop for State {
@@ -322,6 +324,7 @@ pub unsafe extern "C" fn IOSurfaceCreate(properties: CFTypeRef) -> CFTypeRef {
                 cpu_access: Mutex::new(CpuAccess {
                     locks: 0,
                     generation: Some(0),
+                    cached: None,
                 }),
                 snapshot_identity: Arc::new(()),
                 values: Mutex::new(Vec::new()),
@@ -651,6 +654,44 @@ pub enum SnapshotError {
     Unsupported,
 }
 
+/// Generation-only tracking for a surface too large to snapshot as owned pixels.
+#[derive(Clone)]
+pub struct Publication {
+    identity: Arc<()>,
+    generation: u64,
+}
+
+/// Capture completed publication metadata without copying the pixel buffer.
+/// The caller holds a reference to `object`.
+pub fn publication(object: CFTypeRef) -> Result<Publication, SnapshotError> {
+    let s = state(object).ok_or(SnapshotError::Unsupported)?;
+    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+    if access.locks != 0 {
+        return Err(SnapshotError::Busy);
+    }
+    if s.bytes_per_element != 4
+        || s.element_width != 1
+        || s.element_height != 1
+        || !matches!(s.pixel_format, PIXEL_FORMAT_BGRA | 0x52474241)
+    {
+        return Err(SnapshotError::Unsupported);
+    }
+    Ok(Publication {
+        identity: s.snapshot_identity.clone(),
+        generation: access.generation.ok_or(SnapshotError::Unsupported)?,
+    })
+}
+
+pub fn publication_is_current(object: CFTypeRef, publication: &Publication) -> bool {
+    let Some(s) = state(object) else {
+        return false;
+    };
+    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+    access.locks == 0
+        && access.generation == Some(publication.generation)
+        && Arc::ptr_eq(&s.snapshot_identity, &publication.identity)
+}
+
 /// Copy a surface while excluding the start of another CPU lock. This gate
 /// does not serialize guest locks with one another or claim GPU exclusion.
 ///
@@ -687,7 +728,7 @@ unsafe fn snapshot_impl(
     revalidate: bool,
 ) -> Result<Snapshot, SnapshotError> {
     let s = state(object).ok_or(SnapshotError::Unsupported)?;
-    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+    let mut access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
     if access.locks != 0 {
         return Err(SnapshotError::Busy);
     }
@@ -713,15 +754,18 @@ unsafe fn snapshot_impl(
     }
     let compatible = previous
         .filter(|p| p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format);
-    if !revalidate
-        && generation != 0
-        && let Some(p) = compatible.filter(|p| {
+    let shared = access
+        .cached
+        .as_ref()
+        .filter(|p| p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format);
+    if !revalidate && generation != 0 {
+        if let Some(p) = [shared, compatible].into_iter().flatten().find(|p| {
             p.published
                 && p.generation == generation
                 && Arc::ptr_eq(&p.identity, &s.snapshot_identity)
-        })
-    {
-        return Ok(p.clone());
+        }) {
+            return Ok(p.clone());
+        }
     }
     let row = |y: usize| {
         // SAFETY: bounds checked above; the gate prevents a new CPU lock and
@@ -731,6 +775,7 @@ unsafe fn snapshot_impl(
         }
     };
     let bytes = if let Some(p) = compatible
+        .or(shared)
         .filter(|p| (0..s.height).all(|y| row(y) == &p.bytes[y * row_bytes..(y + 1) * row_bytes]))
     {
         p.bytes.clone()
@@ -744,7 +789,7 @@ unsafe fn snapshot_impl(
         }
         bytes.into()
     };
-    Ok(Snapshot {
+    let result = Snapshot {
         identity: s.snapshot_identity.clone(),
         generation,
         published: generation != 0,
@@ -752,7 +797,9 @@ unsafe fn snapshot_impl(
         height: s.height,
         pixel_format: s.pixel_format,
         bytes,
-    })
+    };
+    access.cached = Some(result.clone());
+    Ok(result)
 }
 
 /// Metadata only: an active CPU access or a later publication needs a redraw.

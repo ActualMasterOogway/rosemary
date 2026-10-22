@@ -357,3 +357,43 @@ fn first_cpu_publication_advances_an_untracked_snapshot() {
         corefoundation::api::CFRelease(other);
     }
 }
+
+#[test]
+fn one_immutable_snapshot_is_shared_across_layers() {
+    let surface = bgra(512, 512);
+    publish_pixels(surface, 7);
+    let first = unsafe { snapshot(surface, None).unwrap() };
+    let others: Vec<_> = (0..6)
+        .map(|_| unsafe { snapshot(surface, None).unwrap() })
+        .collect();
+    for item in &others {
+        assert!(Arc::ptr_eq(&first.bytes, &item.bytes));
+    }
+    // Revalidation of a second layer must share rather than allocate a copy.
+    let explicit = unsafe { snapshot_revalidated(surface, None).unwrap() };
+    assert!(Arc::ptr_eq(&first.bytes, &explicit.bytes));
+    publish_pixels(surface, 9);
+    let next = unsafe { snapshot(surface, Some(&first)).unwrap() };
+    assert!(!Arc::ptr_eq(&first.bytes, &next.bytes));
+    let later = unsafe { snapshot(surface, Some(&first)).unwrap() };
+    assert!(Arc::ptr_eq(&next.bytes, &later.bytes));
+    assert_eq!(first.bytes()[..4], [7; 4]);
+    assert_eq!(later.bytes()[..4], [9; 4]);
+    unsafe { corefoundation::api::CFRelease(surface) };
+}
+
+#[test]
+fn oversized_surface_still_tracks_publications_without_owned_bytes() {
+    let surface = bgra(4096, 2160);
+    assert_eq!(
+        unsafe { snapshot(surface, None) }.err(),
+        Some(SnapshotError::Unsupported)
+    );
+    let first = publication(surface).unwrap();
+    assert!(publication_is_current(surface, &first));
+    publish_pixels(surface, 4);
+    assert!(!publication_is_current(surface, &first));
+    let second = publication(surface).unwrap();
+    assert!(publication_is_current(surface, &second));
+    unsafe { corefoundation::api::CFRelease(surface) };
+}

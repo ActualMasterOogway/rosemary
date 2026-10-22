@@ -127,6 +127,7 @@ struct Node {
     contents_revision: u64,
     active_contents_reads: usize,
     surface_snapshot: Option<iosurface::Snapshot>,
+    surface_publication: Option<iosurface::Publication>,
     surface_retry: bool,
     gravity: Gravity,
     /// `contents` as premultiplied BGRA, for the kinds that are not already:
@@ -152,6 +153,7 @@ impl Default for Node {
             contents_revision: 0,
             active_contents_reads: 0,
             surface_snapshot: None,
+            surface_publication: None,
             surface_retry: false,
             gravity: Gravity::Resize,
             decoded: None,
@@ -487,82 +489,128 @@ unsafe extern "C" fn set_contents(receiver: Id, _sel: Sel, contents: Id) {
 }
 
 fn replace_contents(receiver: Id, contents: Id) -> bool {
-    let retained = objc::arc::retain(contents) as usize;
-    if iosurface::is_surface(contents as CFTypeRef) {
-        // SAFETY: a live surface.
-        unsafe { iosurface::IOSurfaceIncrementUseCount(contents as CFTypeRef) };
-    }
-    let (old, unchanged) = with_node(receiver, |node| {
-        // SAFETY: the replacement was retained before entering the table.
-        let snapshot = unsafe {
-            iosurface::snapshot_revalidated(retained as CFTypeRef, node.surface_snapshot.as_ref())
-        };
-        let unchanged = node.active_contents_reads == 0
-            && snapshot.as_ref().is_ok_and(|new| {
-                node.surface_snapshot
-                    .as_ref()
-                    .is_some_and(|old| new.same_pixels(old))
-            });
-        node.surface_retry = matches!(snapshot, Err(iosurface::SnapshotError::Busy));
-        match snapshot {
-            Ok(snapshot) => node.surface_snapshot = Some(snapshot),
-            Err(iosurface::SnapshotError::Busy) => {}
-            Err(iosurface::SnapshotError::Unsupported) => node.surface_snapshot = None,
-        }
+    // Reserve a revision before doing any expensive pixel work, but do not
+    // block unrelated layers on the global NODES mutex while comparing bytes.
+    let mut held = HeldContents::new(contents as usize);
+    let (revision, previous) = with_node(receiver, |node| {
         node.contents_revision = node.contents_revision.wrapping_add(1);
+        (node.contents_revision, node.surface_snapshot.clone())
+    });
+    // SAFETY: held retains the object for the entire CPU comparison.
+    let snapshot =
+        unsafe { iosurface::snapshot_revalidated(held.0 as CFTypeRef, previous.as_ref()) };
+    let publication = if matches!(snapshot, Err(iosurface::SnapshotError::Unsupported)) {
+        iosurface::publication(held.0 as CFTypeRef)
+    } else {
+        Err(iosurface::SnapshotError::Unsupported)
+    };
+    #[cfg(test)]
+    tests::pause_after_setter_snapshot();
+    let (old, unchanged, committed) = with_node(receiver, |node| {
+        if node.contents_revision != revision {
+            // A newer assignment superseded this one while it was comparing.
+            return (0, false, false);
+        }
+        let unchanged = node.active_contents_reads == 0
+            && snapshot
+                .as_ref()
+                .is_ok_and(|new| previous.as_ref().is_some_and(|old| new.same_pixels(old)));
+        node.surface_retry = matches!(snapshot, Err(iosurface::SnapshotError::Busy))
+            || matches!(publication, Err(iosurface::SnapshotError::Busy));
+        match snapshot {
+            Ok(snapshot) => {
+                node.surface_snapshot = Some(snapshot);
+                node.surface_publication = None;
+            }
+            Err(iosurface::SnapshotError::Busy) => {}
+            Err(iosurface::SnapshotError::Unsupported) => {
+                node.surface_snapshot = None;
+                node.surface_publication = publication.ok();
+            }
+        }
         node.decoded = None;
-        (std::mem::replace(&mut node.contents, retained), unchanged)
+        (
+            std::mem::replace(&mut node.contents, std::mem::replace(&mut held.0, 0)),
+            unchanged,
+            true,
+        )
     });
     let_go_of_contents(old);
-    if !unchanged {
+    // `held` releases the superseded assignment, or has been transferred to
+    // the layer without changing its IOSurface use-count.
+    drop(held);
+    if committed && !unchanged {
         changed(receiver);
     }
-    unchanged
+    committed && unchanged
 }
 
 /// Called before the compositor consumes window damage. Use the same pixel
 /// mapping as rendering so subpixel layers never cause unconsumable damage.
-pub(crate) fn surface_contents_changed(view: Id, rect: Rect, clip: Rect) -> bool {
+pub(crate) fn surface_contents_damage(view: Id, rect: Rect, clip: Rect) -> Vec<Rect> {
+    let mut damage = Vec::new();
     let root = crate::view::layer_of(view);
     if root.is_null() || crate::layer::is_metal(root) || clip.is_empty() {
-        return false;
+        return damage;
     }
     let Some(mapping) = Mapping::for_view(view, rect) else {
-        return false;
+        return damage;
     };
-    scan_surface_tree(root, &mapping, clip, darwin::mach::media_time())
+    scan_surface_tree(
+        root,
+        &mapping,
+        clip,
+        darwin::mach::media_time(),
+        &mut damage,
+    );
+    damage
 }
 
-fn surface_publication_changed(layer: Id, drawable: impl FnOnce(usize) -> bool) -> bool {
-    let Some((contents, snapshot, retry)) = read_node(layer, |node| {
+#[cfg(test)]
+fn surface_contents_changed(view: Id, rect: Rect, clip: Rect) -> bool {
+    !surface_contents_damage(view, rect, clip).is_empty()
+}
+
+fn surface_publication_damage(
+    layer: Id,
+    drawable: impl FnOnce(usize) -> Option<Rect>,
+) -> Option<Rect> {
+    let (contents, snapshot, publication, retry) = read_node(layer, |node| {
         node.map(|node| {
             (
                 HeldContents::new(node.contents),
                 node.surface_snapshot.clone(),
+                node.surface_publication.clone(),
                 node.surface_retry,
             )
         })
-    }) else {
-        return false;
-    };
-    !iosurface::cpu_access_active(contents.0 as CFTypeRef)
-        && (retry
-            || snapshot.as_ref().is_some_and(|snapshot| {
-                !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
-            }))
-        && drawable(contents.0)
+    })?;
+    if iosurface::cpu_access_active(contents.0 as CFTypeRef) {
+        return None;
+    }
+    if retry
+        || snapshot.as_ref().is_some_and(|snapshot| {
+            !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
+        })
+        || publication.as_ref().is_some_and(|publication| {
+            !iosurface::publication_is_current(contents.0 as CFTypeRef, publication)
+        })
+    {
+        drawable(contents.0)
+    } else {
+        None
+    }
 }
 
-fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool {
+fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64, damage: &mut Vec<Rect>) {
     let presented = presentation(root, now);
     if presented.hidden || presented.opacity <= 0.0 || clip.is_empty() {
-        return false;
+        return;
     }
     let whole = mapping.to_pixels(mapping.view_bounds);
     if !whole.is_empty()
-        && !whole.intersection(&clip).is_empty()
-        && surface_publication_changed(root, |contents| {
-            contents_intersects_clip(
+        && let Some(area) = surface_publication_damage(root, |contents| {
+            contents_damage(
                 contents,
                 root,
                 presented.gravity,
@@ -572,7 +620,7 @@ fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool 
             )
         })
     {
-        return true;
+        damage.push(area);
     }
     let clip = if presented.masks_to_bounds {
         clip.intersection(&whole)
@@ -580,13 +628,13 @@ fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool 
         clip
     };
     if clip.is_empty() {
-        return false;
+        return;
     }
     let origin = NSPoint {
         x: mapping.view_bounds.origin.x - presented.bounds_origin.x,
         y: mapping.view_bounds.origin.y - presented.bounds_origin.y,
     };
-    presented.sublayers.into_iter().any(|child| {
+    for child in presented.sublayers {
         scan_surface_layer(
             child as Id,
             mapping,
@@ -595,8 +643,9 @@ fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool 
             presented.opacity,
             now,
             0,
-        )
-    })
+            damage,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -608,23 +657,22 @@ fn scan_surface_layer(
     opacity: f64,
     now: f64,
     depth: usize,
-) -> bool {
+    damage: &mut Vec<Rect>,
+) {
     if layer.is_null() || depth > 64 || clip.is_empty() {
-        return false;
+        return;
     }
     let presented = presentation(layer, now);
     if presented.hidden {
-        return false;
+        return;
     }
     let frame = presented.frame_at(origin);
     let pixels = mapping.to_pixels(frame);
     let opacity = opacity * presented.opacity;
-    // draw_contents returns before taking a new snapshot on empty bounds.
-    // Keep the old publication so it is rediscovered when pixels become drawable.
     if opacity > 0.0
         && !pixels.is_empty()
-        && surface_publication_changed(layer, |contents| {
-            contents_intersects_clip(
+        && let Some(area) = surface_publication_damage(layer, |contents| {
+            contents_damage(
                 contents,
                 layer,
                 presented.gravity,
@@ -634,7 +682,7 @@ fn scan_surface_layer(
             )
         })
     {
-        return true;
+        damage.push(area);
     }
     let clip = if presented.masks_to_bounds {
         clip.intersection(&pixels)
@@ -645,10 +693,18 @@ fn scan_surface_layer(
         x: frame.origin.x - presented.bounds_origin.x,
         y: frame.origin.y - presented.bounds_origin.y,
     };
-    presented
-        .sublayers
-        .into_iter()
-        .any(|child| scan_surface_layer(child as Id, mapping, inner, clip, opacity, now, depth + 1))
+    for child in presented.sublayers {
+        scan_surface_layer(
+            child as Id,
+            mapping,
+            inner,
+            clip,
+            opacity,
+            now,
+            depth + 1,
+            damage,
+        );
+    }
 }
 
 // Synthetic root for tests that inspect a CALayer without an attached NSView.
@@ -674,7 +730,15 @@ fn surface_tree_changed(layer: Id, _depth: usize) -> bool {
         scale_y: 1.0,
         flipped: false,
     };
-    scan_surface_tree(layer, &mapping, whole, darwin::mach::media_time())
+    let mut damage = Vec::new();
+    scan_surface_tree(
+        layer,
+        &mapping,
+        whole,
+        darwin::mach::media_time(),
+        &mut damage,
+    );
+    !damage.is_empty()
 }
 
 unsafe extern "C" fn contents_gravity(receiver: Id, _sel: Sel) -> Id {
@@ -1628,6 +1692,7 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
                 with_node(layer, |node| {
                     if node.contents_revision == revision {
                         node.surface_snapshot = Some(snapshot.clone());
+                        node.surface_publication = None;
                         node.surface_retry = false;
                     }
                 });
@@ -1651,12 +1716,8 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
                 });
             }
             Err(iosurface::SnapshotError::Unsupported) => {
-                with_node(layer, |node| {
-                    if node.contents_revision == revision {
-                        node.surface_snapshot = None;
-                        node.surface_retry = false;
-                    }
-                });
+                // Large packed IOSurfaces still need generation tracking, even
+                // when retaining their full pixel image would be excessive.
                 None
             }
         };
@@ -1687,13 +1748,33 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
         let bytes = unsafe {
             std::slice::from_raw_parts(surface.data, surface.bytes_per_row * surface.height)
         };
-        return Some(f(Source {
+        let publication = match iosurface::publication(contents as CFTypeRef) {
+            Ok(publication) => Some(publication),
+            Err(iosurface::SnapshotError::Busy) => {
+                with_node(layer, |node| {
+                    if node.contents_revision == revision {
+                        node.surface_retry = true;
+                    }
+                });
+                return None;
+            }
+            Err(iosurface::SnapshotError::Unsupported) => None,
+        };
+        let drawn = f(Source {
             width: surface.width,
             height: surface.height,
             stride: surface.bytes_per_row,
             bytes,
             swap,
-        }));
+        });
+        with_node(layer, |node| {
+            if node.contents_revision == revision {
+                node.surface_snapshot = None;
+                node.surface_publication = publication;
+                node.surface_retry = false;
+            }
+        });
+        return Some(drawn);
     }
     if !cached {
         let decoded = decode_contents(contents)?;
@@ -1744,14 +1825,14 @@ fn place(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> (f64, f64, 
 
 /// Use the same gravity and pixel-edge rounding as draw_contents, without
 /// snapshotting the IOSurface just to check whether it can paint any pixels.
-fn contents_intersects_clip(
+fn contents_damage(
     contents: usize,
     layer: Id,
     gravity: Gravity,
     bounds: Rect,
     scale: (f64, f64),
     clip: Rect,
-) -> bool {
+) -> Option<Rect> {
     if let Some(source) = iosurface::pixels(contents as CFTypeRef) {
         let contents_scale = crate::layer::contents_scale_of(layer);
         return source_area(
@@ -1760,11 +1841,11 @@ fn contents_intersects_clip(
             source.width as f64 / contents_scale * scale.0,
             source.height as f64 / contents_scale * scale.1,
         )
-        .is_some_and(|area| !area.intersection(&clip).is_empty());
+        .map(|area| area.intersection(&clip))
+        .filter(|area| !area.is_empty());
     }
-    // Non-IOSurface contents have no publication to check; avoid assuming a
-    // drawable size for formats that do not provide this metadata.
-    !contents_stay_in_bounds(gravity) || !bounds.intersection(&clip).is_empty()
+    // No IOSurface publication exists for other kinds of contents.
+    None
 }
 
 /// The exact integer pixel rectangle which draw_contents can sample.
@@ -1813,7 +1894,7 @@ fn draw_contents(
         let intersects = read_node(layer, |node| {
             node.is_some_and(|node| {
                 let held = HeldContents::new(node.contents);
-                contents_intersects_clip(held.0, layer, gravity, bounds, scale, clip)
+                contents_damage(held.0, layer, gravity, bounds, scale, clip).is_some()
             })
         });
         if !intersects {
@@ -2183,6 +2264,22 @@ mod tests {
 
     pub(super) fn pause_after_snapshot() {
         SNAPSHOT_PAUSE.with(|pause| {
+            if let Some((ready, resume)) = pause.borrow().as_ref() {
+                ready.wait();
+                resume.wait();
+            }
+        });
+    }
+
+    thread_local! {
+        static SETTER_PAUSE: std::cell::RefCell<Option<(
+            std::sync::Arc<std::sync::Barrier>,
+            std::sync::Arc<std::sync::Barrier>,
+        )>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn pause_after_setter_snapshot() {
+        SETTER_PAUSE.with(|pause| {
             if let Some((ready, resume)) = pause.borrow().as_ref() {
                 ready.wait();
                 resume.wait();
@@ -3243,6 +3340,164 @@ mod tests {
         assert_eq!(layer_image(child), [2; 8]);
         assert!(!surface_tree_changed(root, 0));
         unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn small_surface_publication_damages_only_its_pixel_rectangle() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(3.0, 1.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let image = surface();
+        publish(image, [1; 8]);
+        replace_contents(child, image as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        publish(image, [2; 8]);
+        assert_eq!(
+            surface_contents_damage(view, whole, whole),
+            vec![Rect {
+                x: 3,
+                y: 6,
+                width: 2,
+                height: 1
+            }]
+        );
+        let smaller_clip = Rect {
+            x: 4,
+            y: 6,
+            width: 2,
+            height: 1,
+        };
+        assert_eq!(
+            surface_contents_damage(view, whole, smaller_clip),
+            vec![Rect {
+                x: 4,
+                y: 6,
+                width: 1,
+                height: 1
+            }]
+        );
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(surface_contents_damage(view, whole, whole).is_empty());
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn an_oversized_surface_publication_invalidates_after_a_render() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let number = |value: i64| {
+            corefoundation::collections::new_number(corefoundation::collections::Number::Integer(
+                value,
+            ))
+        };
+        let key = |value: &str| corefoundation::base::interned_name(value) as usize as CFTypeRef;
+        let options = corefoundation::collections::new_dictionary(
+            &[
+                (key("IOSurfaceWidth"), number(4096)),
+                (key("IOSurfaceHeight"), number(2160)),
+                (key("IOSurfaceBytesPerElement"), number(4)),
+                (
+                    key("IOSurfacePixelFormat"),
+                    number(i64::from(iosurface::PIXEL_FORMAT_BGRA)),
+                ),
+            ],
+            corefoundation::callbacks::Policy::from_key_callbacks(),
+            corefoundation::callbacks::Policy::from_type_callbacks(),
+            false,
+        );
+        let image = unsafe { iosurface::IOSurfaceCreate(options) };
+        assert!(!image.is_null());
+        assert!(matches!(
+            unsafe { iosurface::snapshot(image, None) },
+            Err(iosurface::SnapshotError::Unsupported)
+        ));
+        replace_contents(child, image as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(surface_contents_damage(view, whole, whole).is_empty());
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceLock(image, 0, std::ptr::null_mut()), 0);
+            let bytes = iosurface::IOSurfaceGetBaseAddress(image) as *mut u8;
+            bytes.write(255);
+            assert_eq!(
+                iosurface::IOSurfaceUnlock(image, 0, std::ptr::null_mut()),
+                0
+            );
+        }
+        assert_eq!(surface_contents_damage(view, whole, whole), vec![whole]);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(surface_contents_damage(view, whole, whole).is_empty());
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn superseded_snapshot_assignment_never_overwrites_newer_layer_contents() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let first = surface();
+        let later = surface();
+        publish(first, [1; 8]);
+        publish(later, [2; 8]);
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let address = layer as usize;
+        let old_image = first as usize;
+        let thread_ready = ready.clone();
+        let thread_resume = resume.clone();
+        let old = std::thread::spawn(move || {
+            SETTER_PAUSE.with(|pause| *pause.borrow_mut() = Some((thread_ready, thread_resume)));
+            replace_contents(address as Id, old_image as Id)
+        });
+        ready.wait();
+        assert!(
+            NODES.try_lock().is_ok(),
+            "setter held global NODES while snapshotting"
+        );
+        assert!(!replace_contents(layer, later as Id));
+        resume.wait();
+        assert!(!old.join().unwrap());
+        assert_eq!(layer_image(layer), [2; 8]);
+        assert_eq!(
+            read_node(layer, |node| node.unwrap().contents),
+            later as usize
+        );
+        unsafe {
+            corefoundation::api::CFRelease(first);
+            corefoundation::api::CFRelease(later);
+        }
         objc::arc::pool_pop(pool);
     }
 
