@@ -106,6 +106,9 @@ const _: () = assert!(core::mem::offset_of!(DarwinSockaddrUn, path) == HEADER);
 pub struct HostAddr {
     storage: libc::sockaddr_storage,
     len: libc::socklen_t,
+    /// The `AF_UNIX` path this address was built from, which keeps open what
+    /// a long one is spelled through.
+    unix: Option<crate::sockpath::HostPath>,
 }
 
 impl HostAddr {
@@ -116,6 +119,7 @@ impl HostAddr {
             // `AF_UNSPEC`.
             storage: unsafe { core::mem::zeroed() },
             len: STORAGE as libc::socklen_t,
+            unix: None,
         }
     }
 
@@ -143,6 +147,12 @@ impl HostAddr {
         unsafe { &*self.as_ptr().cast::<[u8; STORAGE]>() }
     }
 
+    /// The host path of the file a guest's `AF_UNIX` address names,
+    /// NUL-terminated, which `sun_path` may only reach indirectly.
+    pub fn unix_file(&self) -> Option<&[u8]> {
+        self.unix.as_ref().map(|path| path.file.as_slice())
+    }
+
     /// The host's family and, where it keeps one, `sa_len`, for `len` bytes.
     fn set_header(&mut self, family: i32, len: usize) {
         self.storage.ss_family = family as _;
@@ -155,21 +165,22 @@ impl HostAddr {
     }
 }
 
-/// A guest's `sockaddr` as this host's, or `None` for a family this host has not
-/// got or a length that is not an address.
+/// A guest's `sockaddr` as this host's, or the errno to fail with:
+/// `EAFNOSUPPORT` for a family this host has not got, `EINVAL` for a length
+/// that is not an address, or why a socket path could not be spelled.
 ///
 /// # Safety
 ///
 /// `addr` is `len` readable bytes, or is null with `len` zero.
-pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
+pub unsafe fn to_host(addr: *const c_void, len: u32) -> Result<HostAddr, i32> {
     if addr.is_null() || (len as usize) < HEADER || len as usize > STORAGE {
-        return None;
+        return Err(libc::EINVAL);
     }
     let len = len as usize;
     // SAFETY: the caller's `len` readable bytes, which `len` was just checked
     // against `STORAGE`.
     let guest = unsafe { DarwinSockaddr::read(addr, len) };
-    let host_family = family_to_host(i32::from(guest.family))?;
+    let host_family = family_to_host(i32::from(guest.family)).ok_or(libc::EAFNOSUPPORT)?;
     let mut out = HostAddr::empty();
     out.len = len as libc::socklen_t;
     // Everything past the header is laid out alike on both sides, for the
@@ -179,23 +190,22 @@ pub unsafe fn to_host(addr: *const c_void, len: u32) -> Option<HostAddr> {
         // SAFETY: `DarwinSockaddrUn` is `repr(C)` of plain bytes, and `guest`
         // is at least as large.
         let un = unsafe { &*(&raw const guest).cast::<DarwinSockaddrUn>() };
-        // FIXME (ACCURACY): a path the prefix pushes past `sun_path` is refused
-        // as an unknown family rather than with ENAMETOOLONG.
-        let path = crate::sockpath::to_host(&un.path[..(len - HEADER).min(un.path.len())]).ok()?;
+        let path = crate::sockpath::to_host(&un.path[..(len - HEADER).min(un.path.len())])?;
         // SAFETY: the storage this value owns is a `sockaddr_un`'s size or more.
         let host_un = unsafe { &mut *(&raw mut out.storage).cast::<libc::sockaddr_un>() };
-        if path.len() > host_un.sun_path.len() {
-            return None;
+        if path.bytes.len() > host_un.sun_path.len() {
+            return Err(libc::ENAMETOOLONG);
         }
         host_un.sun_path.fill(0);
-        for (slot, byte) in host_un.sun_path.iter_mut().zip(&path) {
+        for (slot, byte) in host_un.sun_path.iter_mut().zip(&path.bytes) {
             *slot = *byte as _;
         }
-        out.len =
-            (core::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len()) as libc::socklen_t;
+        out.len = (core::mem::offset_of!(libc::sockaddr_un, sun_path) + path.bytes.len())
+            as libc::socklen_t;
+        out.unix = Some(path);
     }
     out.set_header(host_family, out.len as usize);
-    Some(out)
+    Ok(out)
 }
 
 impl HostAddr {

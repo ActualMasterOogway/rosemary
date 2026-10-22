@@ -125,9 +125,12 @@ unsafe fn with_address(
     len: u32,
     call: unsafe extern "C" fn(i32, *const libc::sockaddr, libc::socklen_t) -> i32,
 ) -> i32 {
-    let Some(host) = (unsafe { addr::to_host(address, len) }) else {
-        crate::errno::set(libc::EAFNOSUPPORT);
-        return -1;
+    let host = match unsafe { addr::to_host(address, len) } {
+        Ok(host) => host,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
     };
     // SAFETY: an address this function owns, with the length it was built with.
     unsafe { call(fd, host.as_ptr(), host.len()) }
@@ -139,17 +142,19 @@ unsafe fn with_address(
 ///
 /// `address` is `len` readable bytes.
 unsafe extern "C" fn bind(fd: i32, address: *const c_void, len: u32) -> i32 {
-    let Some(host) = (unsafe { addr::to_host(address, len) }) else {
-        crate::errno::set(libc::EAFNOSUPPORT);
-        return -1;
+    let host = match unsafe { addr::to_host(address, len) } {
+        Ok(host) => host,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
     };
     // SAFETY: an address this function owns, with the length it was built with.
     let rc = unsafe { libc::bind(fd, host.as_ptr(), host.len()) };
-    // SAFETY: the address's own bytes, `len` of them.
-    let family = unsafe { (*host.as_ptr()).sa_family } as i32;
-    if rc == 0 && family == libc::AF_UNIX {
-        let path = core::mem::offset_of!(libc::sockaddr_un, sun_path);
-        crate::sockpath::bound(&host.as_bytes()[path..host.len() as usize]);
+    if rc == 0
+        && let Some(file) = host.unix_file()
+    {
+        crate::sockpath::bound(file);
     }
     rc
 }
@@ -396,9 +401,12 @@ unsafe extern "C" fn sendto(
         let sent = unsafe { libc::sendto(fd, buf, len, host_flags, core::ptr::null(), 0) };
         return half_close_if_asked(fd, flags, sent);
     }
-    let Some(host) = (unsafe { addr::to_host(address, addrlen) }) else {
-        crate::errno::set(libc::EAFNOSUPPORT);
-        return -1;
+    let host = match unsafe { addr::to_host(address, addrlen) } {
+        Ok(host) => host,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
     };
     // SAFETY: the caller's buffer and an address this function owns.
     let sent = unsafe { libc::sendto(fd, buf, len, host_flags, host.as_ptr(), host.len()) };
@@ -482,8 +490,10 @@ fn say_control_refused(refused: super::control::Untranslatable) {
 
 /// The two halves `sendmsg` and `recvmsg` share: a guest `msghdr` as the host's.
 ///
-/// `None` when the message carries ancillary data this host cannot be given -
-/// see [`super::control`], which owns that decision and the conversion behind it. `control` is the host buffer the returned
+/// `Err(EOPNOTSUPP)` when the message carries ancillary data this host cannot
+/// be given - see [`super::control`], which owns that decision and the
+/// conversion behind it - and the errno for a name that does not convert.
+/// `control` is the host buffer the returned
 /// `msghdr` points into, so the caller has to keep it alive across the call.
 ///
 /// # Safety
@@ -494,7 +504,7 @@ unsafe fn msghdr_to_host(
     name: &mut Option<HostAddr>,
     control: &mut Vec<u8>,
     sending: bool,
-) -> Option<libc::msghdr> {
+) -> Result<libc::msghdr, i32> {
     let g = unsafe { guest.read() };
     if sending && !g.control.is_null() && g.controllen != 0 {
         // SAFETY: the guest's control buffer, with the length it gave for it.
@@ -502,7 +512,7 @@ unsafe fn msghdr_to_host(
             Ok(host) => *control = host,
             Err(refused) => {
                 say_control_refused(refused);
-                return None;
+                return Err(libc::EOPNOTSUPP);
             }
         }
     }
@@ -526,7 +536,7 @@ unsafe fn msghdr_to_host(
         host.msg_control = control.as_mut_ptr().cast();
         host.msg_controllen = control.len() as _;
     }
-    Some(host)
+    Ok(host)
 }
 
 /// `ssize_t sendmsg(int, const struct msghdr *, int)`
@@ -546,10 +556,12 @@ unsafe extern "C" fn sendmsg(fd: i32, message: *const c_void, flags: i32) -> isi
     }
     let mut name = None;
     let mut control = Vec::new();
-    let Some(host) = (unsafe { msghdr_to_host(message.cast(), &mut name, &mut control, true) })
-    else {
-        crate::errno::set(libc::EOPNOTSUPP);
-        return -1;
+    let host = match unsafe { msghdr_to_host(message.cast(), &mut name, &mut control, true) } {
+        Ok(host) => host,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
     };
     // SAFETY: a `msghdr` this function built, pointing at the caller's own
     // iovecs - which `struct iovec` has the same layout for on both platforms -
@@ -575,10 +587,12 @@ unsafe extern "C" fn recvmsg(fd: i32, message: *mut c_void, flags: i32) -> isize
     }
     let mut name = None;
     let mut sent_control = Vec::new();
-    let Some(mut host) = (unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) })
-    else {
-        crate::errno::set(libc::EOPNOTSUPP);
-        return -1;
+    let mut host = match unsafe { msghdr_to_host(guest, &mut name, &mut sent_control, false) } {
+        Ok(host) => host,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
     };
     // The name is written by the kernel, so it needs room rather than a copy of
     // what the guest had there.
@@ -1089,7 +1103,7 @@ mod tests {
         let mut control = Vec::new();
         // SAFETY: guest is initialized and its output buffers are writable.
         let host = unsafe { super::msghdr_to_host(&guest, &mut name, &mut control, false) };
-        assert!(host.is_some());
+        assert!(host.is_ok());
         assert!(name.is_none());
         assert!(control.is_empty());
     }
