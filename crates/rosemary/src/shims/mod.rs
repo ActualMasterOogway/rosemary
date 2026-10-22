@@ -41,9 +41,7 @@ pub mod zlib;
 
 #[cfg(target_os = "macos")]
 pub mod cfuuid;
-#[cfg(target_os = "macos")]
 pub mod coremedia;
-#[cfg(target_os = "macos")]
 pub mod iokit;
 #[cfg(target_os = "macos")]
 pub mod machthread;
@@ -72,6 +70,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
         .or_else(|| coregraphics::shim_for(name))
         .or_else(|| appkit::shim_for(name))
         .or_else(|| opengl::shim_for(name))
+        .or_else(|| coremedia::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -79,8 +78,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
 /// and no Mach.
 #[cfg(target_os = "macos")]
 fn macos_shim_for(name: &str) -> Option<Shim> {
-    coremedia::shim_for(name)
-        .or_else(|| cfuuid::shim_for(name))
+    cfuuid::shim_for(name)
         .or_else(|| machthread::shim_for(name))
         .or_else(|| crate::gui::hook::shim_for(name))
 }
@@ -97,15 +95,8 @@ fn callback_shim_for(name: &str) -> Option<CallbackShim> {
         .or_else(|| macos_callback_shim_for(name))
 }
 
-/// The macOS-only families that may call into the guest.
-#[cfg(target_os = "macos")]
 fn macos_callback_shim_for(name: &str) -> Option<CallbackShim> {
     iokit::shim_for(name).or_else(|| coremedia::callback_shim_for(name))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_callback_shim_for(_name: &str) -> Option<CallbackShim> {
-    None
 }
 
 /// The two variadics whose format string is an `NSString`, and so are Foundation's.
