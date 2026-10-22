@@ -917,22 +917,235 @@ fn gl_debug() -> bool {
 static BOUND: std::sync::Mutex<Vec<(std::thread::ThreadId, usize, usize)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Record that this thread now has `window` bound through `receiver`.
-fn note_bound(receiver: Id, window: sdl3::Window) {
+/// Physical SDL family retirement waits until every thread that had an old
+/// GL drawable bound relinquishes that drawable. The SDL Vulkan lifetime
+/// barrier also covers GL because SDL destroys native popup children
+/// recursively when their parent allocation is freed.
+struct RetiredDrawable {
+    thread: std::thread::ThreadId,
+    window: usize,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+static RETIRED_DRAWABLES: std::sync::Mutex<Vec<RetiredDrawable>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Called before remapping a parent or child SDL window. Hold the old native
+/// family until GL render threads acknowledge the drawable transition.
+pub(crate) fn protect_remade_family(root: sdl3::Window) {
+    let family = sdl3::video::window_family(root);
+    let keys: std::collections::HashSet<usize> = family.iter().map(|w| *w as usize).collect();
+    #[cfg(test)]
+    if TEST_PAUSE_NATIVE_BIND.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        TEST_PROTECTION_WANTS_GATE.store(true, std::sync::atomic::Ordering::Release);
+    }
+    let bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let mut retired = RETIRED_DRAWABLES.lock().unwrap_or_else(|e| e.into_inner());
+    for &(thread, window, _) in bound.iter() {
+        if !keys.contains(&window) {
+            continue;
+        }
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if sdl3::video::vulkan::hold_window_until(root, done.clone()) {
+            retired.push(RetiredDrawable {
+                thread,
+                window,
+                done,
+            });
+        }
+    }
+}
+
+/// Ack only after SDL_GL_MakeCurrent has switched to the new drawable or
+/// SDL_GL_MakeCurrent(NULL,NULL) has released the old drawable. This is
+/// invoked with BOUND held, serializing against a pending parent recreation.
+fn release_retired_drawables(thread: std::thread::ThreadId, new: Option<usize>) {
+    let mut retired = RETIRED_DRAWABLES.lock().unwrap_or_else(|e| e.into_inner());
+    retired.retain(|item| {
+        let release = item.thread == thread && new != Some(item.window);
+        if release {
+            item.done.store(true, std::sync::atomic::Ordering::Release);
+        }
+        !release
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn retired_drawable_count_for_tests() -> usize {
+    RETIRED_DRAWABLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
+}
+
+/// Record a completed native binding while the retirement gate is held.
+fn note_bound_locked(
+    bound: &mut Vec<(std::thread::ThreadId, usize, usize)>,
+    receiver: Id,
+    window: sdl3::Window,
+) {
     let me = std::thread::current().id();
-    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
     bound.retain(|(thread, _, _)| *thread != me);
     bound.push((me, window as usize, receiver as usize));
+    release_retired_drawables(me, Some(window as usize));
+}
+
+/// Native binding and publication must be indivisible to a family retirement.
+fn bind_native_context(
+    receiver: Id,
+    window: sdl3::Window,
+    native: sdl3::GlContext,
+) -> Option<bool> {
+    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let already =
+        sdl3::video::gl_current_context() == native && sdl3::video::gl_current_window() == window;
+    if !already && !sdl3::video::gl_make_current(window, native) {
+        return None;
+    }
+    #[cfg(test)]
+    pause_native_bind_for_test(window);
+    note_bound_locked(&mut bound, receiver, window);
+    Some(already)
+}
+
+#[cfg(test)]
+static TEST_PAUSE_NATIVE_BIND: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_NATIVE_BIND_PAUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_PROTECTION_WANTS_GATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn test_pause_binding(window: sdl3::Window) {
+    use std::sync::atomic::Ordering;
+    TEST_PROTECTION_WANTS_GATE.store(false, Ordering::Release);
+    TEST_NATIVE_BIND_PAUSED.store(false, Ordering::Release);
+    TEST_PAUSE_NATIVE_BIND.store(window as usize, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn test_binding_paused() -> bool {
+    TEST_NATIVE_BIND_PAUSED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn test_protection_waiting() -> bool {
+    TEST_PROTECTION_WANTS_GATE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn test_resume_binding() {
+    TEST_PAUSE_NATIVE_BIND.store(0, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+fn pause_native_bind_for_test(window: sdl3::Window) {
+    use std::sync::atomic::Ordering;
+    if TEST_PAUSE_NATIVE_BIND.load(Ordering::Acquire) != window as usize {
+        return;
+    }
+    TEST_NATIVE_BIND_PAUSED.store(true, Ordering::Release);
+    while TEST_PAUSE_NATIVE_BIND.load(Ordering::Acquire) == window as usize {
+        std::thread::yield_now();
+    }
+    TEST_NATIVE_BIND_PAUSED.store(false, Ordering::Release);
+}
+
+/// Reapply the guest's swap interval after changing a native GL drawable.
+fn restore_popup_swap_interval(receiver: Id, native: sdl3::GlContext, window: sdl3::Window) {
+    let interval = shared_of(context_of(receiver))
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .swap_interval
+        .or_else(swap_interval);
+    if let Some(interval) = interval
+        && sdl3::video::gl_set_swap_interval(interval)
+    {
+        APPLIED_INTERVAL.set((native, window, Some(interval)));
+    } else {
+        APPLIED_INTERVAL.set((std::ptr::null_mut(), std::ptr::null_mut(), None));
+    }
+}
+
+/// Move an already-current GL popup to its replacement SDL drawable.
+/// Only its owning thread may call SDL_GL_MakeCurrent. A context current on
+/// another thread is repaired from that thread's next GL/AppKit boundary.
+pub(crate) fn popup_rehomed(old: sdl3::Window, new: sdl3::Window) {
+    if sdl3::video::gl_current_window() != old {
+        return;
+    }
+    let native = sdl3::video::gl_current_context();
+    if native.is_null() {
+        return;
+    }
+    let me = std::thread::current().id();
+    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let receiver = bound
+        .iter()
+        .find(|(thread, window, _)| *thread == me && *window == old as usize)
+        .map(|(_, _, context)| *context as Id);
+    let Some(receiver) = receiver else {
+        return;
+    };
+    if sdl3::video::gl_make_current(new, native) {
+        note_bound_locked(&mut bound, receiver, new);
+        drop(bound);
+        restore_popup_swap_interval(receiver, native, new);
+        chrome_blit::fit_viewport(drawable_window(context_of(receiver)), new, native);
+    } else {
+        eprintln!("rosemary: OpenGL popup rebind failed: {}", sdl3::error());
+    }
+}
+
+/// Restore a context whose SDL drawable was replaced from its owning thread.
+/// This also handles the case where the parent was rebuilt on the SDL event
+/// thread while the guest kept its GL context current on a render thread.
+fn restore_current_drawable(receiver: Id) {
+    if CURRENT.get() != receiver {
+        return;
+    }
+    let context = context_of(receiver);
+    let window = drawable(context);
+    if window.is_null() || sdl3::video::gl_current_window() == window {
+        return;
+    }
+    let cell = shared_of(context);
+    let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
+    let me = std::thread::current().id();
+    let native = if state.owner == Some(me) {
+        context.sdl
+    } else if let Some((_, native)) = state.siblings.iter().find(|(thread, _)| *thread == me) {
+        *native
+    } else {
+        return;
+    };
+    if native.is_null() {
+        return;
+    }
+    drop(state);
+    if bind_native_context(receiver, window, native).is_some() {
+        restore_popup_swap_interval(receiver, native, window);
+        chrome_blit::fit_viewport(drawable_window(context), window, native);
+    } else {
+        eprintln!(
+            "rosemary: OpenGL drawable restore failed: {}",
+            sdl3::error()
+        );
+    }
 }
 
 /// Unbind whatever SDL has current on this thread.
 fn unbind_here() {
-    sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut());
     let me = std::thread::current().id();
-    BOUND
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|(thread, _, _)| *thread != me);
+    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    if sdl3::video::gl_make_current(std::ptr::null_mut(), std::ptr::null_mut()) {
+        bound.retain(|(thread, _, _)| *thread != me);
+        release_retired_drawables(me, None);
+    }
 }
 
 /// Wait for any other thread that has `window` bound through a context other
@@ -1048,6 +1261,10 @@ const HANDOFF: std::time::Duration = std::time::Duration::from_secs(2);
 /// threads itself, which is a thing the GL underneath has no call for - so the
 /// handover has to happen somewhere, and this is the somewhere that is safe.
 pub fn release_for_other_threads() {
+    let current = CURRENT.get();
+    if !current.is_null() {
+        restore_current_drawable(current);
+    }
     let lingering = LINGERING.get();
     if !lingering.is_null() {
         let cell = shared_of(context_of(lingering));
@@ -1165,15 +1382,12 @@ unsafe extern "C" fn make_current_context(receiver: Id, _sel: Sel) {
 
     // Still bound from before this thread's last clear - see
     // `clear_current_context` - so there is nothing to ask the driver for.
-    let bound =
-        sdl3::video::gl_current_context() == sdl && sdl3::video::gl_current_window() == window;
-    if !bound && !sdl3::video::gl_make_current(window, sdl) {
+    let bound = bind_native_context(receiver, window, sdl).unwrap_or_else(|| {
         objc::fail!(
             "-[NSOpenGLContext makeCurrentContext]: SDL could not make the context current: {}",
             sdl3::error()
-        );
-    }
-    note_bound(receiver, window);
+        )
+    });
     chrome_blit::fit_viewport(drawable_window(context), window, sdl);
 
     if holds_primary {
@@ -1829,6 +2043,7 @@ pub fn present_single_buffered() {
 
 /// `-flushBuffer`: the swap that puts a frame on the screen.
 unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
+    restore_current_drawable(receiver);
     let window = drawable(context_of(receiver));
     if !window.is_null() {
         // A fullscreen resize may happen while the context remains current.
