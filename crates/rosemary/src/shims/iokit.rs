@@ -6,6 +6,7 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 
 use super::host::builtin_or_host;
 use super::set_int_return;
+use crate::shims::bind;
 
 /// `kern_return_t IOServiceAddMatchingNotification( IONotificationPortRef, const
 /// io_name_t, CFDictionaryRef, IOServiceMatchingCallback, void *, io_iterator_t *)`
@@ -48,7 +49,9 @@ pub type Shim = crate::signal::Shim;
 
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
-        "IOServiceAddMatchingNotification" => Some(add_matching_notification),
+        "IOServiceAddMatchingNotification" => {
+            Some(bind!(callback "IOServiceAddMatchingNotification" => add_matching_notification))
+        }
         _ => None,
     }
 }

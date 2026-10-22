@@ -1,5 +1,6 @@
 use microlift::arch::x86_64::context::RegisterContext;
 
+use crate::shims::bind;
 use crate::{
     abi::{GuestMemory, Result},
     shims::host::builtin_or_host,
@@ -56,13 +57,15 @@ fn create_from_uuid_bytes(
     Ok(())
 }
 
-pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
+pub type Shim = crate::shims::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
     match name {
-        "CFUUIDGetUUIDBytes" => Some(get_uuid_bytes),
-        "CFUUIDCreateFromUUIDBytes" => Some(create_from_uuid_bytes),
+        "CFUUIDGetUUIDBytes" => Some(bind!("CFUUIDGetUUIDBytes" => get_uuid_bytes)),
+        "CFUUIDCreateFromUUIDBytes" => {
+            Some(bind!("CFUUIDCreateFromUUIDBytes" => create_from_uuid_bytes))
+        }
         _ => None,
     }
 }

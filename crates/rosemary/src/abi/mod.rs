@@ -308,7 +308,7 @@ fn call_route(
     callbacks: &dyn Callbacks,
 ) -> Result<()> {
     match route {
-        Route::Shim(shim) => shim.call(symbol, ctx, mem, callbacks),
+        Route::Shim(shim) => shim.call(ctx, mem, callbacks),
         Route::Call(abi) => marshal::call_with(symbol, abi, host, ctx, mem, callbacks),
         Route::Unsatisfied => Err(AbiError::Unsatisfied {
             symbol: symbol.to_string(),

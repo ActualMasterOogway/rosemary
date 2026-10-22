@@ -4,6 +4,7 @@ use crate::abi::{Callbacks, GuestMemory, Result};
 
 use super::coregraphics::CgPoint;
 use super::host::builtin_or_host;
+use crate::shims::bind;
 
 /// The function `symbol` forwards to, as `F`.
 ///
@@ -245,13 +246,19 @@ pub type Shim = super::coregraphics::Shim;
 /// shims.
 pub fn shim_for(name: &str) -> Option<Shim> {
     Some(match name {
-        "CMTimeMake" => time_make,
-        "CMTimeGetSeconds" => time_get_seconds,
-        "CMSampleBufferGetPresentationTimeStamp" => presentation_time_stamp,
-        "VTCompressionSessionCompleteFrames" => complete_frames,
-        "VTCompressionSessionEncodeFrame" => encode_frame,
-        "CVImageBufferGetEncodedSize" => encoded_size,
-        "CAFrameRateRangeMake" => frame_rate_range_make,
+        "CMTimeMake" => bind!("CMTimeMake" => time_make),
+        "CMTimeGetSeconds" => bind!("CMTimeGetSeconds" => time_get_seconds),
+        "CMSampleBufferGetPresentationTimeStamp" => {
+            bind!("CMSampleBufferGetPresentationTimeStamp" => presentation_time_stamp)
+        }
+        "VTCompressionSessionCompleteFrames" => {
+            bind!("VTCompressionSessionCompleteFrames" => complete_frames)
+        }
+        "VTCompressionSessionEncodeFrame" => {
+            bind!("VTCompressionSessionEncodeFrame" => encode_frame)
+        }
+        "CVImageBufferGetEncodedSize" => bind!("CVImageBufferGetEncodedSize" => encoded_size),
+        "CAFrameRateRangeMake" => bind!("CAFrameRateRangeMake" => frame_rate_range_make),
         _ => return None,
     })
 }
@@ -259,7 +266,9 @@ pub fn shim_for(name: &str) -> Option<Shim> {
 /// Whether `name` is this module's one callback-carrying shim.
 pub fn callback_shim_for(name: &str) -> Option<crate::signal::Shim> {
     match name {
-        "VTDecompressionSessionCreate" => Some(decompression_session_create),
+        "VTDecompressionSessionCreate" => {
+            Some(bind!(callback "VTDecompressionSessionCreate" => decompression_session_create))
+        }
         _ => None,
     }
 }
