@@ -92,7 +92,6 @@ rosemary server --stop         # ask this prefix's server to exit
 | `ROSEMARY_EXE` | (set by the launcher) | The path that starts another copy of Rosemary. Under the bundled glibc the kernel reports the bundled dynamic loader as this process's executable, so the runtime re-launches itself (`rosemary server`, a guest spawning a Mach-O) through this instead. |
 | `ROSEMARY_METAL_PRESENTATION_MODE` | unset | Set the presentation mode used by Vulkan in Rosemary's Metal translation. Valid values are `immediate`, `fifo`, `fifo_relaxed`, and `mailbox`. |
 | `ROSEMARY_SCREEN_REFRESH_RATE` | unset | Hertz that guests are told the display refreshes at, in place of the host's mode: `NSScreen`/`UIScreen` `maximumFramesPerSecond` and the refresh-interval properties. |
-| `ROSEMARY_DEDUP_IOSURFACE_CONTENTS` | unset | Experimental: any value enables comparison of CPU-published IOSurface contents against owned snapshots, avoiding damage for identical layer images. Producers must bracket writes with `IOSurfaceLock`/`IOSurfaceUnlock`. Supports packed BGRA/RGBA surfaces up to 32 MiB of visible pixels; unsupported surfaces keep the existing rendering path. Leave unset to disable. |
 
 ## Prefixes
 

@@ -480,29 +480,22 @@ impl Drop for HeldContents {
     }
 }
 
-fn dedup_surfaces() -> bool {
-    std::env::var_os("ROSEMARY_DEDUP_IOSURFACE_CONTENTS").is_some()
-}
-
 /// `-setContents:`. A surface shown by a layer is in use for as long as it is
 /// shown, as the window server's use of one is on a Mac.
 unsafe extern "C" fn set_contents(receiver: Id, _sel: Sel, contents: Id) {
-    replace_contents(receiver, contents, dedup_surfaces());
+    replace_contents(receiver, contents);
 }
 
-fn replace_contents(receiver: Id, contents: Id, dedup: bool) -> bool {
+fn replace_contents(receiver: Id, contents: Id) -> bool {
     let retained = objc::arc::retain(contents) as usize;
     if iosurface::is_surface(contents as CFTypeRef) {
         // SAFETY: a live surface.
         unsafe { iosurface::IOSurfaceIncrementUseCount(contents as CFTypeRef) };
     }
     let (old, unchanged) = with_node(receiver, |node| {
-        let snapshot = if dedup {
-            // SAFETY: the replacement was retained before entering the table.
-            unsafe { iosurface::snapshot(retained as CFTypeRef, node.surface_snapshot.as_ref()) }
-        } else {
-            Err(iosurface::SnapshotError::Unsupported)
-        };
+        // SAFETY: the replacement was retained before entering the table.
+        let snapshot =
+            unsafe { iosurface::snapshot(retained as CFTypeRef, node.surface_snapshot.as_ref()) };
         let unchanged = node.active_contents_reads == 0
             && snapshot.as_ref().is_ok_and(|new| {
                 node.surface_snapshot
@@ -529,7 +522,7 @@ fn replace_contents(receiver: Id, contents: Id, dedup: bool) -> bool {
 /// Called while walking attached view trees, before consuming window damage.
 /// A write completed after setContents must not disappear behind deduplication.
 pub(crate) fn surface_contents_changed(layer: Id) -> bool {
-    dedup_surfaces() && !crate::layer::is_metal(layer) && surface_tree_changed(layer, 0)
+    !crate::layer::is_metal(layer) && surface_tree_changed(layer, 0)
 }
 
 fn surface_tree_changed(layer: Id, depth: usize) -> bool {
@@ -1466,55 +1459,33 @@ fn decode_contents(contents: usize) -> Option<(usize, usize, Vec<u8>)> {
 
 /// Run `f` over `layer`'s contents, if it has any this can draw.
 fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
-    with_contents_mode(layer, f, dedup_surfaces())
-}
-
-fn with_contents_mode<T>(layer: Id, f: impl FnOnce(Source) -> T, dedup: bool) -> Option<T> {
-    let (held, cached, previous, revision, _reading) = if dedup {
-        with_node(layer, |node| {
-            let cached = node
-                .decoded
-                .as_ref()
-                .is_some_and(|(object, ..)| *object == node.contents);
-            let reading = (node.contents != 0).then(|| {
-                node.active_contents_reads += 1;
-                // Retain while the compositor uses the layer outside NODES.
-                objc::arc::retain(layer);
-                ContentsRead {
-                    layer,
-                    revision: node.contents_revision,
-                }
-            });
-            (
-                HeldContents::new(node.contents),
-                cached,
-                node.surface_snapshot.clone(),
-                node.contents_revision,
-                reading,
-            )
-        })
-    } else {
-        read_node(layer, |node| {
-            node.map_or((HeldContents(0), false, None, 0, None), |node| {
-                let cached = node
-                    .decoded
-                    .as_ref()
-                    .is_some_and(|(object, ..)| *object == node.contents);
-                (
-                    HeldContents::new(node.contents),
-                    cached,
-                    node.surface_snapshot.clone(),
-                    node.contents_revision,
-                    None,
-                )
-            })
-        })
-    };
+    let (held, cached, previous, revision, _reading) = with_node(layer, |node| {
+        let cached = node
+            .decoded
+            .as_ref()
+            .is_some_and(|(object, ..)| *object == node.contents);
+        let reading = (node.contents != 0).then(|| {
+            node.active_contents_reads += 1;
+            // Retain while the compositor uses the layer outside NODES.
+            objc::arc::retain(layer);
+            ContentsRead {
+                layer,
+                revision: node.contents_revision,
+            }
+        });
+        (
+            HeldContents::new(node.contents),
+            cached,
+            node.surface_snapshot.clone(),
+            node.contents_revision,
+            reading,
+        )
+    });
     let contents = held.0;
     if contents == 0 {
         return None;
     }
-    if dedup && iosurface::is_surface(contents as CFTypeRef) {
+    if iosurface::is_surface(contents as CFTypeRef) {
         // SAFETY: held pins both the allocation and its compositor use count.
         let snapshot = unsafe { iosurface::snapshot(contents as CFTypeRef, previous.as_ref()) };
         #[cfg(test)]
@@ -2387,7 +2358,7 @@ mod tests {
     }
 
     fn layer_image(layer: Id) -> Vec<u8> {
-        with_contents_mode(layer, |source| source.bytes[..8].to_vec(), true).unwrap()
+        with_contents(layer, |source| source.bytes[..8].to_vec()).unwrap()
     }
 
     #[test]
@@ -2402,9 +2373,9 @@ mod tests {
         let blue = [255, 0, 0, 255, 255, 0, 0, 255];
         publish(a, red);
         publish(b, red);
-        assert!(!replace_contents(layer, a as Id, true));
+        assert!(!replace_contents(layer, a as Id));
         assert_eq!(layer_image(layer), red);
-        assert!(replace_contents(layer, b as Id, true));
+        assert!(replace_contents(layer, b as Id));
         assert!(!surface_tree_changed(layer, 0));
 
         // A producer changes the newly installed surface after deduplication.
@@ -2415,13 +2386,13 @@ mod tests {
 
         // Two live buffers can now agree while the last published image differs.
         publish(b, red);
-        assert!(!replace_contents(layer, a as Id, true));
+        assert!(!replace_contents(layer, a as Id));
         assert_eq!(layer_image(layer), red);
-        assert!(!replace_contents(layer, b as Id, false));
+        assert!(replace_contents(layer, b as Id));
         assert!(read_node(layer, |node| node
             .unwrap()
             .surface_snapshot
-            .is_none()));
+            .is_some()));
         unsafe {
             corefoundation::api::CFRelease(a);
             corefoundation::api::CFRelease(b);
@@ -2440,7 +2411,7 @@ mod tests {
         let second = [255, 0, 0, 255, 255, 0, 0, 255];
 
         // The constructor populated visible bytes without ever publishing.
-        assert!(!replace_contents(layer, initial as Id, true));
+        assert!(!replace_contents(layer, initial as Id));
         assert_eq!(layer_image(layer), first);
         assert!(!surface_tree_changed(layer, 0));
 
@@ -2456,7 +2427,7 @@ mod tests {
         // A no-op publication is still a publication, but never compared
         // for deduplication against a previously untracked initial image.
         let another = surface();
-        assert!(!replace_contents(layer, another as Id, true));
+        assert!(!replace_contents(layer, another as Id));
         assert_eq!(layer_image(layer), first);
         publish(another, first);
         assert!(surface_tree_changed(layer, 0));
@@ -2477,12 +2448,12 @@ mod tests {
         let layer: Id = send(class, "layer", ());
         let surface = surface();
         publish(surface, [7; 8]);
-        assert!(!replace_contents(layer, surface as Id, true));
+        assert!(!replace_contents(layer, surface as Id));
         publish(surface, [9; 8]);
-        assert!(!replace_contents(layer, surface as Id, true));
+        assert!(!replace_contents(layer, surface as Id));
         assert_eq!(layer_image(layer), [9; 8]);
         publish(surface, [9; 8]);
-        assert!(replace_contents(layer, surface as Id, true));
+        assert!(replace_contents(layer, surface as Id));
         unsafe { corefoundation::api::CFRelease(surface) };
         objc::arc::pool_pop(pool);
     }
@@ -2496,7 +2467,7 @@ mod tests {
         let old = surface();
         let next = surface();
         publish(old, [4; 8]);
-        replace_contents(layer, old as Id, true);
+        replace_contents(layer, old as Id);
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let next_address = next as usize;
@@ -2511,7 +2482,7 @@ mod tests {
             iosurface::IOSurfaceUnlock(next, 0, std::ptr::null_mut());
         });
         started_rx.recv().unwrap();
-        assert!(!replace_contents(layer, next as Id, true));
+        assert!(!replace_contents(layer, next as Id));
         unsafe { corefoundation::api::CFRelease(old) };
         assert_eq!(layer_image(layer), [4; 8]);
         assert!(!surface_tree_changed(layer, 0)); // Still locked: no complete image.
@@ -2539,7 +2510,7 @@ mod tests {
         let blue = [255, 0, 0, 255, 255, 0, 0, 255];
         publish(a, red);
         publish(b, red);
-        assert!(!replace_contents(layer, a as Id, true));
+        assert!(!replace_contents(layer, a as Id));
         publish(a, blue);
         let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
         let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -2548,10 +2519,10 @@ mod tests {
         let address = layer as usize;
         let painter = std::thread::spawn(move || {
             SNAPSHOT_PAUSE.with(|pause| *pause.borrow_mut() = Some((thread_ready, thread_resume)));
-            with_contents_mode(address as Id, |source| source.bytes[..8].to_vec(), true).unwrap()
+            with_contents(address as Id, |source| source.bytes[..8].to_vec()).unwrap()
         });
         ready.wait();
-        let suppressed = replace_contents(layer, b as Id, true);
+        let suppressed = replace_contents(layer, b as Id);
         resume.wait();
         let rendered = painter.join().unwrap();
         assert_eq!(rendered, blue);
@@ -2576,7 +2547,7 @@ mod tests {
         send::<Id, ()>(parent, "addSublayer:", child);
         let surface = surface();
         publish(surface, [1; 8]);
-        replace_contents(child, surface as Id, true);
+        replace_contents(child, surface as Id);
         assert_eq!(layer_image(child), [1; 8]);
         with_node(child, |node| node.hidden = true);
         publish(surface, [2; 8]);
@@ -2612,7 +2583,7 @@ mod tests {
         send::<Id, ()>(root, "addSublayer:", child);
         let image = surface();
         publish(image, [1; 8]);
-        replace_contents(child, image as Id, true);
+        replace_contents(child, image as Id);
         let whole = Rect {
             x: 0,
             y: 0,
@@ -2634,11 +2605,6 @@ mod tests {
         send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
         assert!(surface_tree_changed(root, 0));
         render(view, &mut store, whole, whole, Pass::Sublayers);
-        // The ordinary renderer snapshots only with the option enabled.
-        // A direct read exercises the same snapshot path in opt-out test runs.
-        if !dedup_surfaces() {
-            assert_eq!(layer_image(child), [2; 8]);
-        }
         assert!(!surface_tree_changed(root, 0));
         assert_eq!(layer_image(child), [2; 8]);
 
@@ -2652,9 +2618,6 @@ mod tests {
         send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
         assert!(surface_tree_changed(root, 0));
         render(view, &mut store, whole, whole, Pass::Sublayers);
-        if !dedup_surfaces() {
-            assert_eq!(layer_image(child), [3; 8]);
-        }
         assert!(!surface_tree_changed(root, 0));
         assert_eq!(layer_image(child), [3; 8]);
 
@@ -2699,7 +2662,7 @@ mod tests {
         send::<Id, ()>(zero, "addSublayer:", child);
         let image = surface();
         publish(image, [1; 8]);
-        replace_contents(child, image as Id, true);
+        replace_contents(child, image as Id);
         assert_eq!(layer_image(child), [1; 8]);
         publish(image, [2; 8]);
         assert!(surface_tree_changed(root, 0));
