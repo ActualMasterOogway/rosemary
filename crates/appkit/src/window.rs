@@ -47,6 +47,8 @@ pub struct Window {
     fullscreen_restore: NSRect,
     /// Suppress reentrant toggles from fullscreen lifecycle callbacks.
     fullscreen_transition: usize,
+    /// Guest confinement is measured in AppKit coordinates, not SDL coordinates.
+    mouse_confinement: NSRect,
     miniaturized: usize,
     /// `-representedFilename`, an owned `NSString` or null for the empty
     /// string AppKit answers before one is set.
@@ -606,6 +608,7 @@ fn set_fullscreen_frame(object: Id, rect: NSRect) {
     trace!("{object:p} fullscreen logical frame {rect:?}; host {host:?}");
     fit_content_view(object);
     crate::screen::confine_pointer(object);
+    apply_mouse_confinement(object);
     let content = window_of(object).content_view;
     unsafe {
         crate::view::update_tracking_areas(content);
@@ -1068,6 +1071,7 @@ fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
             sdl3::video::raise_window(new);
         }
     }
+    apply_mouse_confinement(receiver);
     true
 }
 
@@ -1277,30 +1281,43 @@ unsafe extern "C" fn content_layout_rect(receiver: Id, _sel: Sel) -> NSRect {
 ///
 /// SDL2 sends it unasked-about whenever `NSAppKitVersionNumber` says 10.13, to
 /// implement a grabbed or confined window.
+/// Recompute guest confinement whenever the AppKit frame moves within SDL's surface.
+fn mouse_confinement_in_surface(receiver: Id) -> Option<sdl3::Rect> {
+    let rect = window_of(receiver).mouse_confinement;
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return None;
+    }
+    let mapped = rect_to_surface(receiver, rect)?;
+    Some(sdl3::Rect {
+        x: mapped.origin.x.round() as i32,
+        y: mapped.origin.y.round() as i32,
+        w: mapped.size.width.round() as i32,
+        h: mapped.size.height.round() as i32,
+    })
+}
+
+fn apply_mouse_confinement(receiver: Id) {
+    let sdl = window_of(receiver).sdl;
+    if sdl.is_null() {
+        return;
+    }
+    if let Some(rect) = mouse_confinement_in_surface(receiver) {
+        crate::screen::set_pointer_confinement(sdl, Some(rect));
+    }
+}
+
+/// `-setMouseConfinementRect:` (10.13): keep guest coordinates across resizing.
 unsafe extern "C" fn set_mouse_confinement_rect(receiver: Id, _sel: Sel, rect: NSRect) {
-    // SAFETY: the receiver is a window of this crate's.
-    let sdl = unsafe { sdl_window(receiver) };
+    window_of(receiver).mouse_confinement = rect;
+    let sdl = window_of(receiver).sdl;
     if sdl.is_null() {
         return;
     }
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         crate::screen::set_pointer_confinement(sdl, None);
-        return;
+    } else {
+        apply_mouse_confinement(receiver);
     }
-    // Preserve main's X11 pointer-lock-aware confinement lifetime while
-    // applying the logical-to-physical fullscreen surface mapping.
-    let Some(mapped) = rect_to_surface(receiver, rect) else {
-        return;
-    };
-    crate::screen::set_pointer_confinement(
-        sdl,
-        Some(sdl3::Rect {
-            x: mapped.origin.x.round() as i32,
-            y: mapped.origin.y.round() as i32,
-            w: rect.size.width.round() as i32,
-            h: rect.size.height.round() as i32,
-        }),
-    );
 }
 
 /// The spellings that take the style explicitly, on the class and - for some
@@ -2320,19 +2337,54 @@ unsafe extern "C" fn accepts_responder_change(_receiver: Id, _sel: Sel) -> u8 {
 /// The one window operation in this file that is not bookkeeping: a game asks
 /// for it from a menu item or a keystroke, and a window that stayed the same
 /// size would look like the request was lost.
+#[cfg(test)]
+thread_local! {
+    static REJECT_NEXT_FULLSCREEN_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn request_host_fullscreen(sdl: sdl3::Window, wanted: bool) -> bool {
+    #[cfg(test)]
+    if REJECT_NEXT_FULLSCREEN_REQUEST.with(|reject| reject.replace(false)) {
+        return false;
+    }
+    sdl3::video::set_window_fullscreen(sdl, wanted)
+}
+
+/// Failure is a delegate method taking NSWindow*, not an NSNotification.
+fn report_fullscreen_failure(receiver: Id, entering: bool) {
+    let delegate = window_of(receiver).delegate;
+    if delegate.is_null() {
+        return;
+    }
+    let sel = objc::sel::get(if entering {
+        "windowDidFailToEnterFullScreen:"
+    } else {
+        "windowDidFailToExitFullScreen:"
+    });
+    let method = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel));
+    if let Some(method) = method {
+        // SAFETY: these NSWindowDelegate callbacks take the window itself.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+            f(delegate, sel, receiver);
+        }
+    }
+}
+
 unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
     let window = window_of(receiver);
     if window.sdl.is_null() || window.fullscreen_transition != 0 {
         return;
     }
-    let sdl = window.sdl;
     let wanted = window.fullscreen == 0;
+    let was_shown = window.shown != 0;
     if wanted {
         window.fullscreen_restore = unsafe { frame(receiver, objc::sel::get("frame")) };
     }
     window.fullscreen_transition = 1;
-    // Native will-enter observers still see a windowed frame and style;
-    // will-exit observers still see the current fullscreen frame.
+    // Lifecycle observers may release the window or replace its SDL surface.
+    // Retain AppKit ownership across callbacks and reacquire the live host handle.
+    objc::arc::retain(receiver);
     crate::event::post_for(
         receiver,
         if wanted {
@@ -2341,14 +2393,18 @@ unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
             WILL_EXIT_FULL_SCREEN
         },
     );
-    if sdl3::video::set_window_fullscreen(sdl, wanted) {
+    let live = window_of(receiver).sdl;
+    let cancelled = live.is_null() || (was_shown && window_of(receiver).shown == 0);
+    if !cancelled && request_host_fullscreen(live, wanted) {
         window_of(receiver).fullscreen = wanted as usize;
     } else {
         window_of(receiver).fullscreen_transition = 0;
         if wanted {
             window_of(receiver).fullscreen_restore = NSRect::default();
         }
+        report_fullscreen_failure(receiver, wanted);
     }
+    objc::arc::release(receiver);
 }
 
 /// The `NSWindowCollectionBehavior` bits that decide full screen.
@@ -2445,6 +2501,10 @@ pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
         window.fullscreen_transition = 0;
     }
     refit_inset(receiver);
+    if entered {
+        crate::screen::confine_pointer(receiver);
+        apply_mouse_confinement(receiver);
+    }
     if entered && !fullscreen && window_of(receiver).fullscreen_restore.size.width > 0.0 {
         let restore = std::mem::take(&mut window_of(receiver).fullscreen_restore);
         // SDL's restore state and AppKit's restore frame are separate: a

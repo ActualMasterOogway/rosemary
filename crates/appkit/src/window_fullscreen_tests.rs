@@ -499,3 +499,251 @@ fn native_fullscreen_oracle() {
     );
     objc::arc::pool_pop(pool);
 }
+
+thread_local! {
+    static FAILED_TRANSITIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    static RECREATE_ON_NEXT_ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RELEASE_CALLBACK_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+unsafe extern "C" fn recreate_on_will_enter(receiver: Id, _sel: Sel, _notification: Id) {
+    if RECREATE_ON_NEXT_ENTER.with(|recreate| recreate.replace(false)) {
+        assert!(rebuild_for_opengl(receiver));
+    }
+}
+
+unsafe extern "C" fn release_on_will_enter(receiver: Id, _sel: Sel, _notification: Id) {
+    // The callback consumes the guest-owned reference while the toggle runs.
+    RELEASE_CALLBACK_SEEN.set(true);
+    objc::arc::release(receiver);
+}
+
+unsafe extern "C" fn did_fail_enter(receiver: Id, _sel: Sel, window: Id) {
+    assert_eq!(receiver, window);
+    FAILED_TRANSITIONS.with(|count| count.update(|(enter, exit)| (enter + 1, exit)));
+}
+
+unsafe extern "C" fn did_fail_exit(receiver: Id, _sel: Sel, window: Id) {
+    assert_eq!(receiver, window);
+    FAILED_TRANSITIONS.with(|count| count.update(|(enter, exit)| (enter, exit + 1)));
+}
+
+#[test]
+#[ignore = "requires an X11/Wayland window manager; see tests/fixtures/fullscreen-native.md"]
+fn fullscreen_window_replacement_confinement_and_failures() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"NativeFullscreenLifecycleRegressionWindow",
+        0,
+    )
+    .unwrap();
+    class.add_method(
+        objc::sel::get("windowWillEnterFullScreen:"),
+        recreate_on_will_enter as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    class.add_method(
+        objc::sel::get("windowDidFailToEnterFullScreen:"),
+        did_fail_enter as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    class.add_method(
+        objc::sel::get("windowDidFailToExitFullScreen:"),
+        did_fail_exit as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    objc::class::register_pair(class);
+    let object = objc::object::create_instance(class, 0);
+    window_of(object).delegate = object;
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 90.0, y: 110.0 },
+                size: NSSize {
+                    width: 700.0,
+                    height: 480.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            object,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::CLOSABLE | style::RESIZABLE,
+        )
+    };
+    let original = window_of(object).sdl;
+    sdl3::video::show_window(original);
+    window_of(object).shown = 1;
+    let restore = unsafe { frame(object, objc::sel::get("frame")) };
+    let pump = || {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+    };
+    let settle = |predicate: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            pump();
+            if predicate() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fullscreen did not settle"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+
+    RECREATE_ON_NEXT_ENTER.with(|flag| flag.set(true));
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let replacement = window_of(object).sdl;
+    assert_ne!(replacement, original, "will-enter must rebuild SDL surface");
+    assert_eq!(window_of(object).fullscreen, 1);
+    settle(&|| window_of(object).reported_fullscreen != 0);
+    assert!(is_fullscreen(replacement));
+    assert_eq!(FAILED_TRANSITIONS.get(), (0, 0));
+    let host = host_frame(object).unwrap();
+
+    let confinement = NSRect {
+        origin: NSPoint { x: 19.0, y: 12.0 },
+        size: NSSize {
+            width: 80.0,
+            height: 100.0,
+        },
+    };
+    unsafe {
+        set_mouse_confinement_rect(
+            object,
+            objc::sel::get("setMouseConfinementRect:"),
+            confinement,
+        )
+    };
+    let before = mouse_confinement_in_surface(object).unwrap();
+    let logical = NSRect {
+        origin: NSPoint {
+            x: host.origin.x,
+            y: host.origin.y + 31.0,
+        },
+        size: NSSize {
+            width: host.size.width,
+            height: host.size.height - 31.0,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), logical) };
+    let after = mouse_confinement_in_surface(object).unwrap();
+    assert_eq!(after.x, before.x);
+    assert_eq!(after.y, before.y - 31);
+    assert_eq!((after.w, after.h), (80, 100));
+    assert_eq!(window_of(object).mouse_confinement, confinement);
+
+    REJECT_NEXT_FULLSCREEN_REQUEST.with(|flag| flag.set(true));
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(is_fullscreen(window_of(object).sdl));
+    assert_eq!(window_of(object).fullscreen_transition, 0);
+    assert_eq!(FAILED_TRANSITIONS.get(), (0, 1));
+    assert_eq!(unsafe { frame(object, objc::sel::get("frame")) }, logical);
+
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    settle(&|| window_of(object).reported_fullscreen == 0 && host_frame(object) == Some(restore));
+    assert_eq!(window_of(object).mouse_confinement, confinement);
+    let restored = mouse_confinement_in_surface(object).unwrap();
+    assert_eq!(restored.y, restore.size.height.round() as i32 - 112);
+    assert_eq!(unsafe { frame(object, objc::sel::get("frame")) }, restore);
+
+    REJECT_NEXT_FULLSCREEN_REQUEST.with(|flag| flag.set(true));
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(!is_fullscreen(window_of(object).sdl));
+    assert_eq!(window_of(object).fullscreen_transition, 0);
+    assert_eq!(window_of(object).fullscreen_restore, NSRect::default());
+    assert_eq!(FAILED_TRANSITIONS.get(), (1, 1));
+
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    settle(&|| window_of(object).reported_fullscreen != 0);
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    settle(&|| window_of(object).reported_fullscreen == 0 && host_frame(object) == Some(restore));
+    objc::arc::release(object);
+    pump();
+
+    // A will-enter callback can also drop the caller's last NSWindow reference.
+    // toggleFullScreen: must not dereference the object after it is finalized.
+    let releasing_class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"NativeFullscreenReleaseRegressionWindow",
+        0,
+    )
+    .unwrap();
+    releasing_class.add_method(
+        objc::sel::get("windowWillEnterFullScreen:"),
+        release_on_will_enter as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    objc::class::register_pair(releasing_class);
+    let released = objc::object::create_instance(releasing_class, 0);
+    window_of(released).delegate = released;
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            released,
+            NSRect {
+                origin: NSPoint { x: 110.0, y: 120.0 },
+                size: NSSize {
+                    width: 500.0,
+                    height: 360.0,
+                },
+            },
+        )
+    });
+    sdl3::video::show_window(window_of(released).sdl);
+    window_of(released).shown = 1;
+    unsafe {
+        toggle_full_screen(
+            released,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(RELEASE_CALLBACK_SEEN.get());
+    pump();
+    objc::arc::pool_pop(pool);
+}

@@ -41,6 +41,13 @@ readback, logical content size, Metal presentation coordinates, software backing
 placement, IME placement, inverse pointer mapping, all 14 restored frames and
 subsequent ordinary resizes. Four additional callback cases cover will-enter
 frame changes and will-exit frame shortening, origin moves, and oversized frames.
+A separate isolated lifecycle regression verifies that replacing the SDL window
+inside will-enter uses the replacement, retaining the NSWindow across callbacks
+prevents deallocation during the transition, failed entry/exit attempts notify
+the correct delegate with an NSWindow argument, and guest confinement follows
+logical fullscreen resizing and window restoration. SDL transition failures are
+injected only by the test binary.
+
 These are selected transition behaviors from native cases 3, 5, 25 and 30;
 the entire 70-case native matrix is not replayed by the Linux test.
 

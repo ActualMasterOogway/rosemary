@@ -29,7 +29,10 @@ xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' bash -euo pipefail -c '
     for binary in "$@"; do
         "$binary" --test-threads=1
         case "$binary" in
-            */appkit-*) "$binary" native_fullscreen_oracle --ignored --test-threads=1 --nocapture ;;
+            */appkit-*)
+                "$binary" native_fullscreen_oracle --ignored --test-threads=1 --nocapture
+                "$binary" fullscreen_window_replacement_confinement_and_failures --ignored --test-threads=1 --nocapture
+                ;;
         esac
     done
 ' bash "${bins[@]}"
