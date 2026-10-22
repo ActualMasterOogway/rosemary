@@ -536,46 +536,47 @@ fn surface_tree_changed(layer: Id, depth: usize) -> bool {
     if layer.is_null() || depth > 64 {
         return false;
     }
-    let Some((contents, snapshot, retry, children)) = read_node(layer, |node| {
-        node.filter(|node| {
-            !node.hidden
-                && (if node
-                    .animations
-                    .iter()
-                    .any(|(_, animation)| animation.spec.key_path == "opacity")
-                {
-                    presented(
-                        &node.animations,
-                        "opacity",
-                        node.opacity,
-                        darwin::mach::media_time(),
-                    ) > 0.0
-                } else {
-                    node.opacity > 0.0
-                })
+    let bounds = crate::layer::bounds_of(layer).size;
+    let now = darwin::mach::media_time();
+    let Some((contents, snapshot, retry, children, drawable, masks_to_bounds)) =
+        read_node(layer, |node| {
+            node.filter(|node| {
+                !node.hidden && presented(&node.animations, "opacity", node.opacity, now) > 0.0
+            })
+            .map(|node| {
+                // The view root is drawn in view bounds, not CALayer bounds.
+                // Sublayer contents are not sampled when either presented
+                // dimension is empty, even if their surface was republished.
+                let drawable = depth == 0
+                    || (presented(&node.animations, "bounds.size.width", bounds.width, now) > 0.0
+                        && presented(&node.animations, "bounds.size.height", bounds.height, now)
+                            > 0.0);
+                (
+                    HeldContents::new(node.contents),
+                    node.surface_snapshot.clone(),
+                    node.surface_retry,
+                    node.sublayers.clone(),
+                    drawable,
+                    node.masks_to_bounds,
+                )
+            })
         })
-        .map(|node| {
-            (
-                HeldContents::new(node.contents),
-                node.surface_snapshot.clone(),
-                node.surface_retry,
-                node.sublayers.clone(),
-            )
-        })
-    }) else {
+    else {
         return false;
     };
-    // No pixels can be read until a producer finishes its CPU publication.
-    // Repeatedly redrawing the old image while locked wastes every pump.
-    let busy = iosurface::cpu_access_active(contents.0 as CFTypeRef);
-    (!busy
+    // A nondrawable layer may still have visible children unless it clips them.
+    // Keep its old snapshot so resizing can detect and show later publications.
+    let changed = drawable
+        && !iosurface::cpu_access_active(contents.0 as CFTypeRef)
         && (retry
             || snapshot.as_ref().is_some_and(|snapshot| {
                 !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
-            })))
-        || children
-            .into_iter()
-            .any(|child| surface_tree_changed(child as Id, depth + 1))
+            }));
+    changed
+        || ((!masks_to_bounds || drawable || depth == 0)
+            && children
+                .into_iter()
+                .any(|child| surface_tree_changed(child as Id, depth + 1)))
 }
 
 unsafe extern "C" fn contents_gravity(receiver: Id, _sel: Sel) -> Id {
@@ -2571,6 +2572,7 @@ mod tests {
         let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
         let parent: Id = send(class, "layer", ());
         let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
         send::<Id, ()>(parent, "addSublayer:", child);
         let surface = surface();
         publish(surface, [1; 8]);
@@ -2593,6 +2595,121 @@ mod tests {
         assert_eq!(layer_image(child), [3; 8]);
         assert!(!surface_tree_changed(parent, 0));
         unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn zero_sized_sublayers_do_not_repeatedly_invalidate_a_visible_view() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 0.0, 0.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let image = surface();
+        publish(image, [1; 8]);
+        replace_contents(child, image as Id, true);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Background);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_tree_changed(root, 0));
+
+        publish(image, [2; 8]);
+        for _ in 0..5 {
+            // An invisible layer must not re-invalidate the parent every pump.
+            assert!(!surface_tree_changed(root, 0));
+            render(view, &mut store, whole, whole, Pass::Background);
+            render(view, &mut store, whole, whole, Pass::Sublayers);
+        }
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        assert!(surface_tree_changed(root, 0));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        // The ordinary renderer snapshots only with the option enabled.
+        // A direct read exercises the same snapshot path in opt-out test runs.
+        if !dedup_surfaces() {
+            assert_eq!(layer_image(child), [2; 8]);
+        }
+        assert!(!surface_tree_changed(root, 0));
+        assert_eq!(layer_image(child), [2; 8]);
+
+        // A zero width or height is independently sufficient to suppress
+        // publication damage until the missing dimension becomes positive.
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 0.0, 1.0));
+        publish(image, [3; 8]);
+        assert!(!surface_tree_changed(root, 0));
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 0.0));
+        assert!(!surface_tree_changed(root, 0));
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        assert!(surface_tree_changed(root, 0));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        if !dedup_surfaces() {
+            assert_eq!(layer_image(child), [3; 8]);
+        }
+        assert!(!surface_tree_changed(root, 0));
+        assert_eq!(layer_image(child), [3; 8]);
+
+        // The model width is still zero, but animation makes it drawable.
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 0.0, 1.0));
+        publish(image, [4; 8]);
+        assert!(!surface_tree_changed(root, 0));
+        with_node(child, |node| {
+            node.animations.push((
+                "animated-width".into(),
+                Running {
+                    object: 0,
+                    spec: Spec {
+                        key_path: "bounds.size.width".into(),
+                        from: Some(0.0),
+                        to: Some(2.0),
+                        duration: 10.0,
+                        ..Spec::default()
+                    },
+                    start: darwin::mach::media_time() - 5.0,
+                },
+            ));
+        });
+        assert!(surface_tree_changed(root, 0));
+        with_node(child, |node| node.animations.clear());
+
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn zero_sized_unmasked_parents_still_track_drawable_descendants() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let root: Id = send(class, "layer", ());
+        let zero: Id = send(class, "layer", ());
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(zero, "setFrame:", rect(0.0, 0.0, 0.0, 0.0));
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", zero);
+        send::<Id, ()>(zero, "addSublayer:", child);
+        let image = surface();
+        publish(image, [1; 8]);
+        replace_contents(child, image as Id, true);
+        assert_eq!(layer_image(child), [1; 8]);
+        publish(image, [2; 8]);
+        assert!(surface_tree_changed(root, 0));
+        with_node(zero, |node| node.masks_to_bounds = true);
+        assert!(!surface_tree_changed(root, 0));
+        with_node(zero, |node| node.masks_to_bounds = false);
+        assert!(surface_tree_changed(root, 0));
+        assert_eq!(layer_image(child), [2; 8]);
+        assert!(!surface_tree_changed(root, 0));
+        unsafe { corefoundation::api::CFRelease(image) };
         objc::arc::pool_pop(pool);
     }
 
