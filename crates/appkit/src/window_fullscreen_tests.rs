@@ -999,6 +999,22 @@ fn fractional_fullscreen_frame_matches_content_view() {
         view_size, logical.size,
         "NSWindow frame and NSView frame disagree in fullscreen"
     );
+    let surface = surface_frame(object).unwrap();
+    let inside = (
+        (surface.origin.x + 0.5) as f32,
+        (surface.origin.y + 0.5) as f32,
+    );
+    let outside = (
+        (surface.origin.x + surface.size.width + 0.5) as f32,
+        inside.1,
+    );
+    assert!(accepts_surface_point(object, inside.0, inside.1));
+    assert!(!accepts_surface_point(object, outside.0, outside.1));
+    assert!(!accepts_surface_point(
+        object,
+        inside.0,
+        (surface.origin.y - 0.5) as f32
+    ));
     objc::arc::release(object);
     objc::arc::pool_pop(pool);
 }
@@ -1085,7 +1101,63 @@ fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport()
     assert!(updated[0] >= 0 && updated[1] >= 0);
     assert!(updated[0] + updated[2] <= pixel_width);
     assert!(updated[1] + updated[3] <= pixel_height);
+
+    // SDL preserves glViewport when an existing context is rebound to B.
+    // This must be recognized as our previous fit, not as a guest override.
+    let other = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            other,
+            NSRect {
+                origin: NSPoint { x: 100.0, y: 130.0 },
+                size: NSSize {
+                    width: 420.0,
+                    height: 300.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            other,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::RESIZABLE,
+        )
+    };
+    assert!(rebuild_for_opengl(other));
+    let other_sdl = window_of(other).sdl;
+    sdl3::video::show_window(other_sdl);
+    assert!(sdl3::video::gl_make_current(other_sdl, gl));
+    assert_eq!(
+        viewport(),
+        updated,
+        "the driver changed context viewport on rebind"
+    );
+    crate::opengl::fit_viewport_for_test(other, other_sdl, gl);
+    let on_other = viewport();
+    assert_ne!(
+        on_other, updated,
+        "AppKit failed to update viewport when context changed window"
+    );
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    assert_eq!(
+        viewport(),
+        updated,
+        "AppKit did not refit on return to previous window"
+    );
+
     unsafe { set(7, 11, 17, 19) };
+    assert!(sdl3::video::gl_make_current(other_sdl, gl));
+    crate::opengl::fit_viewport_for_test(other, other_sdl, gl);
+    assert_eq!(
+        viewport(),
+        [7, 11, 17, 19],
+        "rebind overwrote guest-owned viewport"
+    );
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    assert_eq!(viewport(), [7, 11, 17, 19]);
     let shorter = NSRect {
         origin: NSPoint {
             y: fractional.origin.y + 31.0,
@@ -1103,11 +1175,91 @@ fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport()
         [7, 11, 17, 19],
         "overwrote the guest's viewport"
     );
+    // The default framebuffer must be clipped at presentation, not by
+    // glViewport: glClear disregards a viewport and guest code can set its own.
+    let gl_clear_color = sdl3::video::gl_proc_address(c"glClearColor").unwrap();
+    let gl_clear_color: unsafe extern "C" fn(f32, f32, f32, f32) =
+        unsafe { std::mem::transmute(gl_clear_color) };
+    let gl_clear = sdl3::video::gl_proc_address(c"glClear").unwrap();
+    let gl_clear: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(gl_clear) };
+    let gl_read = sdl3::video::gl_proc_address(c"glReadPixels").unwrap();
+    let gl_read: unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut std::ffi::c_void) =
+        unsafe { std::mem::transmute(gl_read) };
+    let gl_scissor = sdl3::video::gl_proc_address(c"glScissor").unwrap();
+    let gl_scissor: unsafe extern "C" fn(i32, i32, i32, i32) =
+        unsafe { std::mem::transmute(gl_scissor) };
+    let gl_enable = sdl3::video::gl_proc_address(c"glEnable").unwrap();
+    let gl_enable: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(gl_enable) };
+    let gl_disable = sdl3::video::gl_proc_address(c"glDisable").unwrap();
+    let gl_disable: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(gl_disable) };
+    let read = |x, y| {
+        let mut pixel = [0u8; 4];
+        unsafe { gl_read(x, y, 1, 1, 0x1908, 0x1401, pixel.as_mut_ptr().cast()) };
+        pixel
+    };
+    unsafe {
+        gl_clear_color(1.0, 0.0, 0.0, 1.0);
+        gl_clear(0x4000)
+    };
+    assert_eq!(
+        read(5, 5),
+        [255, 0, 0, 255],
+        "glClear ignores a narrow guest viewport"
+    );
+    crate::opengl::mask_logical_frame_for_test(object, sdl);
+    assert_eq!(
+        read(5, 5),
+        [0, 0, 0, 255],
+        "logical-frame exterior was not masked"
+    );
+    assert_eq!(
+        read(5, 100),
+        [255, 0, 0, 255],
+        "mask damaged interior pixels"
+    );
+    assert_eq!(viewport(), [7, 11, 17, 19], "mask changed guest viewport");
+    // Draw another color using a guest-defined scissor, then mask again.
+    unsafe {
+        gl_enable(0x0C11);
+        gl_scissor(0, 100, 200, 100);
+        gl_clear_color(0.0, 1.0, 0.0, 1.0);
+        gl_clear(0x4000);
+    }
+    let mut guest_scissor = [0; 4];
+    unsafe { get(0x0C10, guest_scissor.as_mut_ptr()) };
+    crate::opengl::mask_logical_frame_for_test(object, sdl);
+    let mut after_mask_scissor = [0; 4];
+    unsafe { get(0x0C10, after_mask_scissor.as_mut_ptr()) };
+    assert_eq!(
+        after_mask_scissor, guest_scissor,
+        "mask changed guest scissor"
+    );
+    assert_eq!(read(5, 5), [0, 0, 0, 255]);
+    assert_eq!(
+        read(5, 140),
+        [0, 255, 0, 255],
+        "guest drawing inside logical frame was lost"
+    );
+    unsafe { gl_disable(0x0C11) };
+    // Restoration lifts the logical mask; formerly excluded pixels are usable.
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), host) };
+    unsafe {
+        gl_clear_color(1.0, 0.0, 0.0, 1.0);
+        gl_clear(0x4000)
+    };
+    crate::opengl::mask_logical_frame_for_test(object, sdl);
+    assert_eq!(
+        read(5, 5),
+        [255, 0, 0, 255],
+        "restored full frame remained masked"
+    );
+
     assert!(sdl3::video::gl_make_current(
         std::ptr::null_mut(),
         std::ptr::null_mut()
     ));
     sdl3::video::gl_destroy_context(gl);
+    objc::arc::release(other);
     objc::arc::release(object);
     objc::arc::pool_pop(pool);
 }

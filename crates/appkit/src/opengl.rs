@@ -1841,6 +1841,9 @@ unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
             );
         }
         chrome_blit::draw(window);
+        if sdl3::video::gl_current_window() == window {
+            chrome_blit::mask_outside_logical_frame(drawable_window(context_of(receiver)), window);
+        }
         sdl3::video::swap_window(window);
     }
 }
@@ -1973,6 +1976,11 @@ pub(crate) fn fit_viewport_for_test(object: Id, window: sdl3::Window, context: s
     chrome_blit::fit_viewport(object, window, context);
 }
 
+#[cfg(test)]
+pub(crate) fn mask_logical_frame_for_test(object: Id, window: sdl3::Window) {
+    chrome_blit::mask_outside_logical_frame(object, window);
+}
+
 /// The chrome `crate::decor` paints, put over the top of a GL window's
 /// default framebuffer just before it is swapped.
 ///
@@ -2013,6 +2021,10 @@ mod chrome_blit {
     const COLOR_CLEAR_VALUE: u32 = 0x0C22;
     const COLOR_WRITEMASK: u32 = 0x0C23;
     const RASTERIZER_DISCARD: u32 = 0x8C89;
+    const DRAW_BUFFER: u32 = 0x0C01;
+    const DOUBLEBUFFER: u32 = 0x0C32;
+    const BACK: u32 = 0x0405;
+    const FRONT: u32 = 0x0404;
 
     #[allow(non_snake_case)]
     struct Gl {
@@ -2037,6 +2049,7 @@ mod chrome_blit {
         ClearColor: unsafe extern "C" fn(f32, f32, f32, f32),
         Clear: unsafe extern "C" fn(u32),
         Scissor: unsafe extern "C" fn(i32, i32, i32, i32),
+        DrawBuffer: unsafe extern "C" fn(u32),
     }
 
     impl Gl {
@@ -2069,6 +2082,7 @@ mod chrome_blit {
                 ClearColor: get(c"glClearColor")?,
                 Clear: get(c"glClear")?,
                 Scissor: get(c"glScissor")?,
+                DrawBuffer: get(c"glDrawBuffer")?,
             })
         }
     }
@@ -2095,6 +2109,7 @@ mod chrome_blit {
         window: usize,
         // Last viewport applied by AppKit, not a guest-supplied viewport.
         applied: (i32, i32, i32, i32),
+        guest_owned: bool,
     }
 
     static FITTED: std::sync::Mutex<Vec<ViewportFit>> = std::sync::Mutex::new(Vec::new());
@@ -2162,11 +2177,20 @@ mod chrome_blit {
         unsafe { get(VIEWPORT, actual.as_mut_ptr()) };
         let current = (actual[0], actual[1], actual[2], actual[3]);
         let mut fitted = FITTED.lock().unwrap_or_else(|e| e.into_inner());
+        // A viewport belongs to the context and survives SDL window rebinding.
         let item = fitted
             .iter_mut()
-            .find(|item| item.context == context as usize && item.window == window as usize);
+            .find(|item| item.context == context as usize);
         if let Some(item) = item {
-            if item.applied == target || current != item.applied {
+            let inherited_ours = !item.guest_owned && current == item.applied;
+            if !inherited_ours {
+                item.guest_owned = true;
+            }
+            let switched_window = item.window != window as usize;
+            if switched_window {
+                item.window = window as usize;
+            }
+            if !inherited_ours || current == target {
                 return;
             }
             unsafe { set(target.0, target.1, target.2, target.3) };
@@ -2184,7 +2208,100 @@ mod chrome_blit {
                 context: context as usize,
                 window: window as usize,
                 applied: target,
+                guest_owned: false,
             });
+        }
+    }
+
+    /// Suppress physical-container pixels outside the logical fullscreen window.
+    /// A viewport cannot constrain glClear or a guest-selected viewport; mask
+    /// only at presentation and restore the guest's GL state in full.
+    pub(super) fn mask_outside_logical_frame(object: objc::object::Id, window: sdl3::Window) {
+        if object.is_null()
+            || crate::window::fullscreen_frame(object).is_none()
+            || unsafe { crate::window::sdl_window(object) } != window
+        {
+            return;
+        }
+        let (Some(surface), Some((width, height)), Some(pixels)) = (
+            crate::window::surface_frame(object),
+            sdl3::video::window_size(window),
+            sdl3::video::window_size_in_pixels(window),
+        ) else {
+            return;
+        };
+        let (x, y, w, h) = logical_viewport(
+            surface,
+            foundation::geometry::NSSize {
+                width: f64::from(width),
+                height: f64::from(height),
+            },
+            pixels,
+            0.0,
+        );
+        if (x, y, w, h) == (0, 0, pixels.0, pixels.1) {
+            return;
+        }
+        static GL: std::sync::OnceLock<Option<Gl>> = std::sync::OnceLock::new();
+        let Some(gl) = GL.get_or_init(Gl::load) else {
+            return;
+        };
+        let bands = [
+            (0, 0, x, pixels.1),
+            (x + w, 0, pixels.0 - x - w, pixels.1),
+            (x, 0, w, y),
+            (x, y + h, w, pixels.1 - y - h),
+        ];
+        // SAFETY: all entrypoints refer to the current context. The default
+        // framebuffer is bound only temporarily and all changed state restored.
+        unsafe {
+            let mut prev_draw = 0;
+            let mut prev_scissor = [0; 4];
+            let mut prev_color_mask = [0u8; 4];
+            let mut prev_clear = [0f32; 4];
+            (gl.GetIntegerv)(DRAW_FRAMEBUFFER_BINDING, &mut prev_draw);
+            (gl.GetIntegerv)(SCISSOR_BOX, prev_scissor.as_mut_ptr());
+            (gl.GetBooleanv)(COLOR_WRITEMASK, prev_color_mask.as_mut_ptr());
+            (gl.GetFloatv)(COLOR_CLEAR_VALUE, prev_clear.as_mut_ptr());
+            let scissor = (gl.IsEnabled)(SCISSOR_TEST) != 0;
+            let discard = (gl.IsEnabled)(RASTERIZER_DISCARD) != 0;
+            (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, 0);
+            let mut prev_buffer = 0;
+            let mut double = 0;
+            (gl.GetIntegerv)(DRAW_BUFFER, &mut prev_buffer);
+            (gl.GetIntegerv)(DOUBLEBUFFER, &mut double);
+            (gl.DrawBuffer)(if double != 0 { BACK } else { FRONT });
+            (gl.Enable)(SCISSOR_TEST);
+            (gl.Disable)(RASTERIZER_DISCARD);
+            (gl.ColorMask)(1, 1, 1, 1);
+            (gl.ClearColor)(0.0, 0.0, 0.0, 1.0);
+            for (bx, by, bw, bh) in bands {
+                if bw > 0 && bh > 0 {
+                    (gl.Scissor)(bx, by, bw, bh);
+                    (gl.Clear)(COLOR_BUFFER_BIT);
+                }
+            }
+            (gl.ClearColor)(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
+            (gl.ColorMask)(
+                prev_color_mask[0],
+                prev_color_mask[1],
+                prev_color_mask[2],
+                prev_color_mask[3],
+            );
+            (gl.Scissor)(
+                prev_scissor[0],
+                prev_scissor[1],
+                prev_scissor[2],
+                prev_scissor[3],
+            );
+            if !scissor {
+                (gl.Disable)(SCISSOR_TEST);
+            }
+            if discard {
+                (gl.Enable)(RASTERIZER_DISCARD);
+            }
+            (gl.DrawBuffer)(prev_buffer as u32);
+            (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, prev_draw as u32);
         }
     }
 

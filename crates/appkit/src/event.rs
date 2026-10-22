@@ -254,6 +254,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // delegate may refuse and `-close` does the rest.
         Event::WindowClosed { window } => {
             crate::screen::release_relative_pointer(window);
+            LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+                captures.remove(&window);
+            });
             if crate::decor::window_closed(window) {
                 return;
             }
@@ -368,6 +371,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // Control may be let go where this pump never hears of it.
             if !gained {
                 leave_edit_chord(0);
+                LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+                    captures.remove(&window);
+                });
             }
             let object = object_for(window);
             if !gained {
@@ -532,6 +538,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // when it broke the link, which is what CoreGraphics does and what
             // SDL, still tracking a position inside the window, does not.
             let (x, y) = track_pointer(id, x, y);
+            if !mouse_inside_logical_window(id, x, y) && !capture_allows_drag(id, buttons) {
+                crate::cursor::forget_tracking(object_for(id));
+                return;
+            }
             // Before the drop below: a cursor rectangle applies whether or not
             // anything asked for `-mouseMoved:`, and AppKit re-decides the
             // pointer on every move rather than only when a rectangle changes.
@@ -590,6 +600,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // where its cursor froze, not where SDL's integrated position is.
             let (cx, cy) = track_pointer(id, x, y);
             if crate::decor::pointer_button(id, button, down, clicks, cx, cy) {
+                // A release consumed by chrome must still end any previous
+                // guest capture; otherwise later motion could leak past the edge.
+                if !down {
+                    capture_mouse_button(id, button, false, false);
+                }
                 return;
             }
             let kind = crate::button::event_kind(button, down);
@@ -601,6 +616,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 crate::window::end_drag();
             }
             let (x, y) = track_pointer(id, x, y);
+            if !capture_mouse_button(id, button, down, mouse_inside_logical_window(id, x, y)) {
+                return;
+            }
             // A Control-click during an editing chord is a Control-click.
             if down {
                 leave_edit_chord(sdl3::video::keyboard_modifiers());
@@ -623,6 +641,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // was last over - which is where the wheel turned.
         Event::MouseWheel { window: id, x, y } => {
             let at = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+            if !mouse_inside_logical_window(id, at.0, at.1) {
+                return;
+            }
             send(id, Some(at), |window, location| Fields {
                 kind: kind::SCROLL_WHEEL,
                 modifiers: current_modifiers(),
@@ -825,6 +846,44 @@ fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
     let menu = crate::menu::main_menu();
     let event = nsevent::make(fields);
     offer(window, event) || offer(menu, event)
+}
+
+// Only the physical SDL container receives host mouse input. Mouse-downs
+// within the logical AppKit window establish capture: subsequent drags and
+// their matching mouse-up must still reach the guest across its boundary.
+// Store capture per SDL window and per button (SDL button masks).
+thread_local! {
+    static LOGICAL_MOUSE_CAPTURE: std::cell::RefCell<std::collections::HashMap<u32, u32>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn mouse_inside_logical_window(id: u32, x: f32, y: f32) -> bool {
+    let object = object_for(id);
+    !object.is_null() && window::accepts_surface_point(object, x, y)
+}
+
+fn capture_mouse_button(id: u32, button: u8, down: bool, inside: bool) -> bool {
+    LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+        let held = captures.entry(id).or_default();
+        let mask = sdl3::mouse::mask(button);
+        let delivery = inside || (!down && *held & mask != 0);
+        if down {
+            if inside {
+                *held |= mask;
+            }
+        } else {
+            *held &= !mask;
+        }
+        if *held == 0 {
+            captures.remove(&id);
+        }
+        delivery
+    })
+}
+
+fn capture_allows_drag(id: u32, buttons: u32) -> bool {
+    LOGICAL_MOUSE_CAPTURE
+        .with_borrow(|captures| captures.get(&id).is_some_and(|held| *held & buttons != 0))
 }
 
 /// A pointer position SDL reports against the window's top-left, in the
@@ -1543,6 +1602,22 @@ fn delegate_selector(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_window_capture_keeps_drag_and_matching_release_but_not_stray_input() {
+        let window = 0x8675309;
+        let left = sdl3::mouse::LEFT;
+        let right = sdl3::mouse::RIGHT;
+        assert!(!capture_mouse_button(window, left, true, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(capture_mouse_button(window, left, true, true));
+        assert!(capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(right)));
+        assert!(!capture_mouse_button(window, right, false, false));
+        assert!(capture_mouse_button(window, left, false, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_mouse_button(window, left, false, false));
+    }
 
     #[test]
     fn a_programmatic_warp_updates_the_reported_pointer() {

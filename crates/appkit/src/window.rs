@@ -571,6 +571,23 @@ pub(crate) fn rect_to_surface(object: Id, rect: NSRect) -> Option<NSRect> {
     })
 }
 
+/// Whether a host-SDL point actually belongs to the guest's logical window.
+/// SDL's fullscreen container may be larger than the NSWindow. The same
+/// half-open edges are used for hit testing at windowed and fullscreen sizes.
+pub(crate) fn accepts_surface_point(object: Id, x: f32, y: f32) -> bool {
+    if fullscreen_frame(object).is_none() {
+        return true;
+    }
+    surface_frame(object).is_some_and(|surface| {
+        let x = f64::from(x);
+        let y = f64::from(y);
+        x >= surface.origin.x
+            && y >= surface.origin.y
+            && x < surface.origin.x + surface.size.width
+            && y < surface.origin.y + surface.size.height
+    })
+}
+
 /// The reverse mapping used by mouse events and cursor tracking.
 pub(crate) fn point_from_surface(object: Id, x: f64, y: f64) -> Option<NSPoint> {
     let surface = surface_frame(object)?;
