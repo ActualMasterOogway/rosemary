@@ -1456,6 +1456,43 @@ mod tests {
         unsafe { libc::close(file) };
     }
 
+    /// The name a Unix socket was bound by comes back from `getsockname` in
+    /// Darwin's shape and the guest's spelling, with Darwin's length.
+    #[test]
+    fn getsockname_reports_a_unix_socket_by_the_path_it_was_bound_to() {
+        let path = std::env::temp_dir().join(format!("gsn-{}.sock", std::process::id()));
+        let path = path.as_os_str().as_encoded_bytes();
+        let mut guest = [0u8; 106];
+        guest[0] = guest.len() as u8;
+        guest[1] = addr::family::UNIX as u8;
+        guest[2..2 + path.len()].copy_from_slice(path);
+
+        // SAFETY: three integers.
+        let fd = unsafe { socket(addr::family::UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        // SAFETY: a Darwin `sockaddr_un` this test owns, with its length.
+        assert_eq!(
+            unsafe { bind(fd, guest.as_ptr().cast(), guest.len() as u32) },
+            0
+        );
+        let mut back = [0xffu8; 106];
+        let mut len = back.len() as u32;
+        // SAFETY: a writable buffer and its length.
+        assert_eq!(
+            unsafe { getsockname(fd, back.as_mut_ptr().cast(), &mut len) },
+            0
+        );
+        assert_eq!(back[1], addr::family::UNIX as u8);
+        assert_eq!(&back[2..2 + path.len()], path);
+        assert_eq!(back[2 + path.len()], 0);
+        assert_eq!(len as usize, 2 + path.len() + 1);
+        assert_eq!(back[0] as u32, len);
+
+        // SAFETY: a descriptor this test owns and no longer uses.
+        unsafe { libc::close(fd) };
+        let _ = std::fs::remove_file(std::str::from_utf8(path).unwrap());
+    }
+
     #[test]
     fn a_socket_of_a_family_this_host_lacks_is_refused_rather_than_opened() {
         // Darwin's `AF_LINK`.

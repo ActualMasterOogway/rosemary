@@ -106,8 +106,7 @@ const _: () = assert!(core::mem::offset_of!(DarwinSockaddrUn, path) == HEADER);
 pub struct HostAddr {
     storage: libc::sockaddr_storage,
     len: libc::socklen_t,
-    /// The `AF_UNIX` path this address was built from, which keeps open what
-    /// a long one is spelled through.
+    /// The `AF_UNIX` path this address was built from.
     unix: Option<crate::sockpath::HostPath>,
 }
 
@@ -258,12 +257,26 @@ pub unsafe fn from_host(host: &HostAddr, addr: *mut c_void, len: *mut u32) {
     }
     // SAFETY: the caller's own slot.
     let capacity = unsafe { *len } as usize;
-    let real = host.len as usize;
+    let mut real = host.len as usize;
     // SAFETY: `host` holds `STORAGE` bytes and `len` no more than that.
-    let Some((darwin, copied)) = (unsafe { darwin_from_host(host.as_ptr().cast(), host.len) })
+    let Some((mut darwin, mut copied)) =
+        (unsafe { darwin_from_host(host.as_ptr().cast(), host.len) })
     else {
         return;
     };
+    if i32::from(host.storage.ss_family) == libc::AF_UNIX
+        && let Some(path) = host.as_bytes().get(HEADER..real)
+        && let Some(guest) = crate::sockpath::to_guest(path)
+    {
+        // The host path is the prefix's, or an alias for it; the guest named
+        // the socket by its own path and must get that back.
+        darwin.data.fill(0);
+        let kept = guest.len().min(darwin.data.len() - 1);
+        darwin.data[..kept].copy_from_slice(&guest[..kept]);
+        real = HEADER + guest.len() + 1;
+        copied = HEADER + kept + 1;
+        darwin.len = copied.min(u8::MAX as usize) as u8;
+    }
 
     let written = capacity.min(copied);
     // SAFETY: `written` is no more than the caller's capacity and no more than
