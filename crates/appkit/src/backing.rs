@@ -1049,21 +1049,43 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
         height: i64::from(pixel_height),
     };
     let content = crate::window::content_view_of(window);
+    let Some(surface) = crate::window::surface_frame(window) else {
+        return out;
+    };
+    let logical_clip = Rect {
+        x: (surface.origin.x * density).round() as i64,
+        y: (surface.origin.y * density).round() as i64,
+        width: (surface.size.width * density).round() as i64,
+        height: (surface.size.height * density).round() as i64,
+    }
+    .intersection(&whole);
     // The window's base coordinates: not flipped, origin at the bottom, and
     // taller than the content by the chrome above it.
     let base = NSRect {
-        origin: NSPoint::default(),
+        origin: NSPoint {
+            x: surface.origin.x,
+            y: f64::from(points_high) - surface.origin.y - surface.size.height,
+        },
         size: NSSize {
-            width: f64::from(points_wide),
-            height: (f64::from(points_high) - crate::window::content_inset(window)).max(0.0),
+            width: surface.size.width,
+            height: (surface.size.height - crate::window::content_inset(window)).max(0.0),
         },
     };
     let geometry = Geometry {
         window_height: f64::from(points_high),
         density,
     };
-    place_view(content, base, false, whole, geometry, 0, &mut out);
+    place_view(content, base, false, logical_clip, geometry, 0, &mut out);
     out
+}
+
+#[cfg(test)]
+pub(crate) fn placed_rect_for_tests(window: Id, view: Id) -> Option<Rect> {
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    place_tree(window, sdl)
+        .into_iter()
+        .find(|placed| placed.view == view)
+        .map(|placed| placed.rect)
 }
 
 #[derive(Clone, Copy)]
@@ -1296,13 +1318,33 @@ fn compose_window(window: Id) {
     // With none set it is `windowBackgroundColor`, AppKit's default; a layer
     // view's hole is the layer's either way.
     let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let logical = crate::window::surface_frame(window)
+        .map(|surface| {
+            let density = sdl3::video::window_pixel_density(sdl) as f64;
+            Rect {
+                x: (surface.origin.x * density).round() as i64,
+                y: (surface.origin.y * density).round() as i64,
+                width: (surface.size.width * density).round() as i64,
+                height: (surface.size.height * density).round() as i64,
+            }
+        })
+        .unwrap_or(whole);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
-        for pixel in store.pixels[base..base + region.width as usize * 4]
+        let pixels = store.pixels[base..base + region.width as usize * 4]
             .as_chunks_mut::<4>()
-            .0
-        {
-            *pixel = background;
+            .0;
+        // Outside AppKit's logical window is the fullscreen container,
+        // not more of the window's default background.
+        // FIXME (ACCURACY): the native probe did not measure this area's color.
+        if row < logical.y || row >= logical.y + logical.height {
+            pixels.fill([0, 0, 0, 255]);
+        } else {
+            let left = (logical.x - region.x).clamp(0, region.width) as usize;
+            let right = (logical.x + logical.width - region.x).clamp(0, region.width) as usize;
+            pixels[..left].fill([0, 0, 0, 255]);
+            pixels[left..right].fill(background);
+            pixels[right..].fill([0, 0, 0, 255]);
         }
     }
     let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());

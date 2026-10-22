@@ -832,14 +832,13 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
         return None;
     }
     let rect = rect_in_window(view);
-    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
-    let (_, window_height) = sdl3::video::window_size(sdl)?;
+    let mapped = crate::window::rect_to_surface(window, rect)?;
+    let (x, top, size) = (mapped.origin.x, mapped.origin.y, mapped.size);
     let (pixel_width, pixel_height) = sdl3::video::window_size_in_pixels(sdl)?;
     let density = sdl3::video::window_pixel_density(sdl) as f64;
     let density = if density > 0.0 { density } else { 1.0 };
     // AppKit counts up from the bottom of the window's content rect; a
     // swapchain image counts down from the top of it.
-    let top = f64::from(window_height) - (y + size.height);
     let frame = Frame {
         window: sdl,
         x: (x * density).round() as i32,
@@ -855,13 +854,13 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
     // autoresizing would have made of it.
     match frame.width == 0 || frame.height == 0 {
         true => {
-            let inset = (crate::window::content_inset(window) * density).round() as u32;
-            let inset = inset.min(frame.window_height);
+            let surface = crate::window::surface_frame(window)?;
+            let inset = crate::window::content_inset(window).min(surface.size.height);
             Some(Frame {
-                x: 0,
-                y: inset as i32,
-                width: frame.window_width,
-                height: frame.window_height - inset,
+                x: (surface.origin.x * density).round() as i32,
+                y: ((surface.origin.y + inset) * density).round() as i32,
+                width: (surface.size.width * density).round().max(0.0) as u32,
+                height: ((surface.size.height - inset) * density).round().max(0.0) as u32,
                 ..frame
             })
         }
@@ -890,9 +889,8 @@ pub unsafe fn input_frame(view: Id) -> Option<(sdl3::Window, sdl3::Rect)> {
         return None;
     }
     let rect = rect_in_window(view);
-    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
-    let (_, window_height) = sdl3::video::window_size(sdl)?;
-    let top = f64::from(window_height) - (y + size.height);
+    let mapped = crate::window::rect_to_surface(window, rect)?;
+    let (x, top, size) = (mapped.origin.x, mapped.origin.y, mapped.size);
     Some((
         sdl,
         sdl3::Rect {

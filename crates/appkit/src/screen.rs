@@ -1776,12 +1776,13 @@ pub fn confine_pointer(window: Id) {
 }
 
 /// The content area of `window` in SDL window coordinates.
-fn content_rect(window: Id, sdl: sdl3::Window) -> Option<sdl3::Rect> {
-    let (w, h) = sdl3::video::window_size(sdl)?;
+fn content_rect(window: Id, _sdl: sdl3::Window) -> Option<sdl3::Rect> {
+    let surface = crate::window::surface_frame(window)?;
+    let (w, h) = (surface.size.width as i32, surface.size.height as i32);
     let inset = crate::window::content_inset(window).ceil() as i32;
     (w > 0 && h > inset).then_some(sdl3::Rect {
-        x: 0,
-        y: inset,
+        x: surface.origin.x.round() as i32,
+        y: surface.origin.y.round() as i32 + inset,
         w,
         h: h - inset,
     })

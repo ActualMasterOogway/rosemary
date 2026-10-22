@@ -645,7 +645,8 @@ pub fn window_geometry_changed(object: Id) {
     // taking it on the thread that runs this - and a context handed back and
     // forth is the one thing the GL under this runtime cannot do. A window that
     // came back the size it asked for has nothing to say.
-    if let Some((width, height)) = sdl3::video::window_size(sdl)
+    if window::fullscreen_frame(object).is_none()
+        && let Some((width, height)) = sdl3::video::window_size(sdl)
         && window::requested_size(object) != Some((width, height))
     {
         deliver(sdl3::video::Event::WindowResized {
@@ -816,6 +817,9 @@ fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
 /// The base coordinate system is the whole frame, so a titlebar this runtime
 /// draws is above the content view's top.
 fn location(window: Id, x: f32, y: f32) -> NSPoint {
+    if let Some(point) = window::point_from_surface(window, f64::from(x), f64::from(y)) {
+        return point;
+    }
     let content = window::content_view_of(window);
     let height = match content.is_null() {
         true => 0.0,
