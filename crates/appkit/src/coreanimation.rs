@@ -1916,12 +1916,12 @@ fn contents_damage(
 ) -> Option<Rect> {
     if let Some(source) = iosurface::pixels(contents as CFTypeRef) {
         let contents_scale = crate::layer::contents_scale_of(layer);
-        return source_area(
+        return source_area(place(
             gravity,
             bounds,
             source.width as f64 / contents_scale * scale.0,
             source.height as f64 / contents_scale * scale.1,
-        )
+        ))
         .map(|area| area.intersection(&clip))
         .filter(|area| !area.is_empty());
     }
@@ -1929,9 +1929,9 @@ fn contents_damage(
     None
 }
 
-/// The exact integer pixel rectangle which draw_contents can sample.
-fn source_area(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> Option<Rect> {
-    let (x, y, width, height) = place(gravity, bounds, width, height);
+/// The exact integer pixel rectangle which draw_contents can sample, for an
+/// image placed by `place`.
+fn source_area((x, y, width, height): (f64, f64, f64, f64)) -> Option<Rect> {
     if width <= 0.0 || height <= 0.0 {
         return None;
     }
@@ -1983,18 +1983,14 @@ fn draw_contents(
     }
     let contents_scale = crate::layer::contents_scale_of(layer);
     with_contents(layer, |source| {
-        let (x, y, width, height) = place(
+        let placed = place(
             gravity,
             bounds,
             source.width as f64 / contents_scale * scale.0,
             source.height as f64 / contents_scale * scale.1,
         );
-        let Some(area) = source_area(
-            gravity,
-            bounds,
-            source.width as f64 / contents_scale * scale.0,
-            source.height as f64 / contents_scale * scale.1,
-        ) else {
+        let (x, y, width, height) = placed;
+        let Some(area) = source_area(placed) else {
             return;
         };
         let area = area.intersection(&clip).intersection(&Rect {
