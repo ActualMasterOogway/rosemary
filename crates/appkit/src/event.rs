@@ -23,8 +23,8 @@ pub fn pump(app: Id) {
     while let Some(event) = sdl3::video::poll() {
         deliver(event);
     }
-    // Copied out first: a guard in the loop's head would be held across every
-    // hook, and a hook that runs guest code can turn this pump again.
+    service_presentation();
+    // General pump hooks may run guest code and are not modal-safe.
     let hooks = PUMP_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for hook in hooks {
         hook();
@@ -33,7 +33,73 @@ pub fn pump(app: Id) {
     crate::backing::pump();
 }
 
+/// Service SDL surface work and publication on the video thread. Both the
+/// regular pump and a synchronous modal loop need these SDL-only operations.
+fn service_presentation() {
+    sdl3::video::vulkan::service_surface_requests();
+    let windows = window::sdl_windows();
+    sdl3::video::publish_presentation_windows(&windows);
+    // SDL_GetDisplayForWindow and SDL_GetDesktopDisplayMode require the
+    // main thread. Publish their results for Metal's asynchronous presenter.
+    // Mode change events invalidate immediately; poll less frequently as a
+    // fallback for compositors that do not emit them.
+    static LAST_REFRESH: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if refresh_due(&LAST_REFRESH, std::time::Duration::from_millis(250)) {
+        sdl3::video::publish_window_refresh_rates(&windows);
+    }
+    static LAST_MODE_REFRESH: std::sync::Mutex<Option<std::time::Instant>> =
+        std::sync::Mutex::new(None);
+    if refresh_due(&LAST_MODE_REFRESH, std::time::Duration::from_secs(2)) {
+        sdl3::video::refresh_window_display_modes(&windows);
+    }
+}
+
+/// Keep completed host presentation moving without delivering guest input or
+/// running the general callbacks, which may call back into guest code.
+pub(crate) fn service_modal_presentation() {
+    service_presentation();
+    // Copy before callbacks, since these can reenter the modal loop.
+    let hooks = MODAL_PRESENTATION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    for hook in hooks {
+        hook();
+    }
+}
+
+/// Never keep a timer guard across guest callbacks or a nested event pump.
+/// A timer's deadline is updated atomically, but SDL queries run unlocked.
+fn refresh_due(
+    timer: &std::sync::Mutex<Option<std::time::Instant>>,
+    interval: std::time::Duration,
+) -> bool {
+    let mut last = timer.lock().expect("refresh timer");
+    if last.is_none_or(|t| t.elapsed() >= interval) {
+        *last = Some(std::time::Instant::now());
+        true
+    } else {
+        false
+    }
+}
+
 static PUMP_HOOKS: std::sync::Mutex<Vec<fn()>> = std::sync::Mutex::new(Vec::new());
+static MODAL_PRESENTATION_HOOKS: std::sync::Mutex<Vec<fn()>> = std::sync::Mutex::new(Vec::new());
+
+/// Register a video-thread-only completion hook for nested modal dialogs.
+/// Continue registering the same callback with add_pump_hook for regular
+/// event turns, retaining existing normal-pump hook ordering.
+pub fn add_modal_presentation_hook(hook: fn()) {
+    let mut hooks = MODAL_PRESENTATION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !hooks
+        .iter()
+        .any(|existing| std::ptr::fn_addr_eq(*existing, hook))
+    {
+        hooks.push(hook);
+    }
+}
 
 /// Run `hook` on every turn of the main thread's event pump, after input is
 /// delivered and before stores are presented.
@@ -291,6 +357,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // mapping the pointer against the origin it asked for.
         Event::WindowMoved { window } => {
             crate::screen::refresh_relative_pointer(window);
+            sdl3::video::invalidate_presentation_window(window, &window::sdl_windows());
             let object = object_for(window);
             if !window::fullscreen_state_pending(object)
                 && !window::redundant_fullscreen_geometry(object, None)
@@ -298,12 +365,20 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 post(window, window::DID_MOVE);
             }
         }
-        Event::WindowDisplayChanged { window } => post(window, window::DID_CHANGE_SCREEN),
+        Event::DisplayModeChanged { display: _ } => {
+            sdl3::video::refresh_window_display_modes(&window::sdl_windows());
+        }
+        Event::WindowDisplayChanged { window } => {
+            sdl3::video::invalidate_presentation_window(window, &window::sdl_windows());
+            sdl3::video::window_display_changed(window, &window::sdl_windows());
+            post(window, window::DID_CHANGE_SCREEN);
+        }
         Event::WindowResized {
             window,
             width,
             height,
         } => {
+            sdl3::video::invalidate_presentation_window(window, &window::sdl_windows());
             // The content view follows the window, as it does on
             // `-setContentView:` and for the same reason: a view that kept its
             // old size after a resize would draw into part of the window and
@@ -337,6 +412,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // another scale, but its backing store does not. AppKit tells guests to
         // recompute pixel-sized viewports with this notification.
         Event::WindowBackingChanged { window } => {
+            sdl3::video::invalidate_presentation_window(window, &window::sdl_windows());
             post(window, window::DID_CHANGE_BACKING_PROPERTIES);
         }
         Event::WindowMouse { window, entered } => {
@@ -1631,6 +1707,59 @@ mod tests {
     }
 
     #[test]
+    fn reentrant_event_pump_hook_returns_before_refresh_deadlines() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NESTED: AtomicUsize = AtomicUsize::new(0);
+        fn reenter() {
+            if NESTED.fetch_add(1, Ordering::SeqCst) == 0 {
+                // The nested pump runs immediately, so neither refresh
+                // deadline is due. This used to deadlock on LAST_REFRESH.
+                pump(std::ptr::null_mut());
+            }
+        }
+        crate::bootstrap();
+        NESTED.store(0, Ordering::SeqCst);
+        // Arm both static refresh timers before installing the hook.
+        pump(std::ptr::null_mut());
+        add_pump_hook(reenter);
+        pump(std::ptr::null_mut());
+        PUMP_HOOKS
+            .lock()
+            .expect("pump hooks")
+            .retain(|f| !std::ptr::fn_addr_eq(*f, reenter as fn()));
+        assert!(
+            NESTED.load(Ordering::SeqCst) >= 2,
+            "the actual AppKit event pump did not reenter its hooks"
+        );
+    }
+
+    #[test]
+    fn nested_pump_when_both_refresh_deadlines_are_in_future_never_deadlocks() {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        // Simulate two nested pumps including the not-due branch which used
+        // to retain both guards until all AppKit hooks returned.
+        let refresh = Mutex::new(Some(Instant::now()));
+        let mode = Mutex::new(Some(Instant::now()));
+        fn nested(refresh: &Mutex<Option<Instant>>, mode: &Mutex<Option<Instant>>, depth: usize) {
+            assert!(!refresh_due(refresh, Duration::from_secs(60)));
+            assert!(!refresh_due(mode, Duration::from_secs(60)));
+            if depth > 0 {
+                nested(refresh, mode, depth - 1);
+            }
+            assert!(
+                refresh.try_lock().is_ok(),
+                "refresh timer retained during guest hook"
+            );
+            assert!(
+                mode.try_lock().is_ok(),
+                "mode timer retained during guest hook"
+            );
+        }
+        nested(&refresh, &mode, 3);
+    }
+
+    #[test]
     fn a_programmatic_warp_updates_the_reported_pointer() {
         let previous = pointer_position();
         warp_pointer(320.0, 240.0);
@@ -1675,5 +1804,115 @@ mod tests {
                 assert!(!delegate_selector(name).is_empty(), "{name}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod modal_presentation_tests {
+    use super::*;
+    use crate::dialog::{Request, deliver_modal, modal_window, run};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static PRESENTATION_TURNS: AtomicUsize = AtomicUsize::new(0);
+    static GENERAL_PUMP_TURNS: AtomicUsize = AtomicUsize::new(0);
+    static DISPLAY_WINDOW: AtomicUsize = AtomicUsize::new(0);
+    static SURFACE_PRESENTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn completed_presentation() {
+        let turns = PRESENTATION_TURNS.fetch_add(1, Ordering::SeqCst) + 1;
+        let window = modal_window().expect("presentation served while dialog remains modal");
+        assert!(
+            sdl3::may_pump(),
+            "presentation must stay on SDL video thread"
+        );
+        if turns == 2 || turns == 3 {
+            let display = DISPLAY_WINDOW.load(Ordering::SeqCst) as sdl3::Window;
+            assert!(
+                sdl3::video::present_window(display, |surface| {
+                    assert!(surface.width > 0 && surface.height > 0);
+                    assert!(!surface.pixels.is_null());
+                    // Exercise the same video-thread SDL surface update used by
+                    // completed Metal CPU readbacks while the dialog stays open.
+                    unsafe { *surface.pixels = 0x5a };
+                    true
+                }),
+                "completed presentation starved inside modal dialog"
+            );
+            SURFACE_PRESENTS.fetch_add(1, Ordering::SeqCst);
+        }
+        if turns == 4 {
+            assert!(deliver_modal(&sdl3::video::Event::WindowClosed {
+                window: sdl3::video::window_id(window),
+            }));
+        }
+    }
+
+    fn general_guest_pump_hook() {
+        GENERAL_PUMP_TURNS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn modal_dialog_keeps_presentation_serviced_without_running_guest_pump_hooks() {
+        // Rust libtest may schedule graphical cases on different OS threads.
+        // SDL attaches video ownership to the first thread in the process,
+        // so execute this real modal/SDL assertion in its own fresh process.
+        if std::env::var_os("ROSEMARY_ISOLATED_VIDEO_TEST").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "event::modal_presentation_tests::modal_dialog_keeps_presentation_serviced_without_running_guest_pump_hooks",
+                    "--test-threads=1",
+                ])
+                .env("ROSEMARY_ISOLATED_VIDEO_TEST", "1")
+                .output()
+                .expect("start isolated modal SDL test");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "modal SDL subprocess failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        crate::bootstrap();
+        assert!(sdl3::video::init_video());
+        let display = sdl3::video::create_window(c"independent modal display", 96, 72, 0)
+            .expect("independent SDL output window");
+        sdl3::video::show_window(display);
+        DISPLAY_WINDOW.store(display as usize, Ordering::SeqCst);
+        PRESENTATION_TURNS.store(0, Ordering::SeqCst);
+        SURFACE_PRESENTS.store(0, Ordering::SeqCst);
+        GENERAL_PUMP_TURNS.store(0, Ordering::SeqCst);
+        add_modal_presentation_hook(completed_presentation);
+        add_pump_hook(general_guest_pump_hook);
+        let result = run(&Request {
+            title: "Modal presentation test".into(),
+            message: "Keep presenting".into(),
+            buttons: vec!["OK".into()],
+            ..Request::default()
+        });
+        MODAL_PRESENTATION_HOOKS
+            .lock()
+            .expect("presentation hooks")
+            .retain(|hook| !std::ptr::fn_addr_eq(*hook, completed_presentation as fn()));
+        PUMP_HOOKS
+            .lock()
+            .expect("general hooks")
+            .retain(|hook| !std::ptr::fn_addr_eq(*hook, general_guest_pump_hook as fn()));
+        assert_eq!(
+            result,
+            Some(0),
+            "real modal alert never reached scripted answer"
+        );
+        assert_eq!(PRESENTATION_TURNS.load(Ordering::SeqCst), 4);
+        assert_eq!(SURFACE_PRESENTS.load(Ordering::SeqCst), 2);
+        sdl3::video::destroy_window(display);
+        DISPLAY_WINDOW.store(0, Ordering::SeqCst);
+        assert_eq!(
+            GENERAL_PUMP_TURNS.load(Ordering::SeqCst),
+            0,
+            "modal presentation must not invoke arbitrary guest pump hooks"
+        );
     }
 }

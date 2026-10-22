@@ -833,8 +833,9 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
     }
     let rect = rect_in_window(view);
     let mapped = crate::window::rect_to_surface(window, rect)?;
-    let host_points = sdl3::video::window_size(sdl)?;
-    let host_pixels = sdl3::video::window_size_in_pixels(sdl)?;
+    let snapshot = sdl3::video::presentation_window(sdl)?;
+    let host_points = snapshot.logical_size;
+    let host_pixels = snapshot.pixel_size;
     let mut rounded = crate::window::pixel_rect_from_surface(mapped, host_points, host_pixels);
     // A view's source extent uses exactly the same separately rounded pixel
     // edges as the destination clip; the *unclipped* rectangle is needed for
@@ -2423,6 +2424,12 @@ mod tests {
     #[test]
     fn a_subviews_frame_reaches_the_window_in_pixels() {
         crate::bootstrap();
+        // SDL belongs to the video thread. Concurrent window tests can claim
+        // it first; on another thread the presentation cache cannot be built.
+        // Run this graphical integration test in a single-threaded harness.
+        if !sdl3::may_pump() {
+            return;
+        }
         let window =
             objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
         // SAFETY: `-initWithContentRect:styleMask:backing:defer:` is
