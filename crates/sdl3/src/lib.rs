@@ -261,6 +261,7 @@ struct Api {
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetWindowMouseGrab: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowMouseRect: Option<unsafe extern "C" fn(Window, *const Rect) -> bool>,
+    SDL_GetWindowMouseRect: Option<unsafe extern "C" fn(Window) -> *const Rect>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
     SDL_GetKeyFromScancode: Option<unsafe extern "C" fn(u32, u16, bool) -> u32>,
     SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
@@ -492,6 +493,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetWindowRelativeMouseMode,
             SDL_SetWindowMouseGrab,
             SDL_SetWindowMouseRect,
+            SDL_GetWindowMouseRect,
             SDL_GetModState,
             SDL_GetKeyFromScancode,
             SDL_SetHint,
@@ -1634,6 +1636,7 @@ pub mod video {
         pub const RESIZABLE: u64 = 0x0000_0020;
         pub const MINIMIZED: u64 = 0x0000_0040;
         pub const MAXIMIZED: u64 = 0x0000_0080;
+        pub const INPUT_FOCUS: u64 = 0x0000_0200;
         pub const HIGH_PIXEL_DENSITY: u64 = 0x0000_2000;
         pub const ALWAYS_ON_TOP: u64 = 0x0001_0000;
         pub const UTILITY: u64 = 0x0002_0000;
@@ -3463,6 +3466,15 @@ pub mod video {
         let ptr = rect.as_ref().map_or(std::ptr::null(), |r| r as *const Rect);
         // SAFETY: a window from SDL, and null or a rectangle SDL copies.
         unsafe { f(window, ptr) }
+    }
+
+    /// The current pointer-confinement rectangle, if any. SDL owns the
+    /// returned memory, so copy the rectangle before returning it to a caller.
+    pub fn get_mouse_rect(window: Window) -> Option<Rect> {
+        let f = api()?.SDL_GetWindowMouseRect?;
+        // SAFETY: this is a valid SDL window, and the returned pointer, if
+        // non-null, refers to SDL-owned memory valid through this call.
+        unsafe { f(window).as_ref().copied() }
     }
 
     /// Whether `window` is holding the pointer, asked of SDL rather than
