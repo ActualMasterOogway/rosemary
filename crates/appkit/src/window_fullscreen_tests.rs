@@ -933,3 +933,181 @@ fn fullscreen_transition_posts_geometry_before_did_notifications() {
     SHORTEN_INSIDE_DID_ENTER.set(false);
     objc::arc::pool_pop(pool);
 }
+
+#[test]
+#[ignore = "requires Xvfb/xfwm4"]
+fn fractional_fullscreen_frame_matches_content_view() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            object,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::RESIZABLE,
+        );
+    }
+    sdl3::video::show_window(window_of(object).sdl);
+    window_of(object).shown = 1;
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).reported_fullscreen == 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let host = host_frame(object).unwrap();
+    let logical = NSRect {
+        origin: NSPoint {
+            x: host.origin.x + 0.5,
+            y: host.origin.y + 0.5,
+        },
+        size: NSSize {
+            width: host.size.width - 0.5,
+            height: host.size.height - 0.5,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), logical) };
+    assert_eq!(unsafe { frame(object, objc::sel::get("frame")) }, logical);
+    let view_size = crate::view::frame_of(window_of(object).content_view).size;
+    eprintln!(
+        "REVIEWER_FRACTIONAL logical={:?} content_view={:?}",
+        logical.size, view_size
+    );
+    assert_eq!(
+        view_size, logical.size,
+        "NSWindow frame and NSView frame disagree in fullscreen"
+    );
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}
+
+#[test]
+#[ignore = "requires Xvfb/xfwm4 and Mesa OpenGL"]
+fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            object,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::RESIZABLE,
+        )
+    };
+    assert!(rebuild_for_opengl(object));
+    let sdl = window_of(object).sdl;
+    sdl3::video::show_window(sdl);
+    window_of(object).shown = 1;
+    let gl = sdl3::video::gl_create_context(sdl).expect("OpenGL context");
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    let get = sdl3::video::gl_proc_address(c"glGetIntegerv").unwrap();
+    let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(get) };
+    let set = sdl3::video::gl_proc_address(c"glViewport").unwrap();
+    let set: unsafe extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(set) };
+    let viewport = || {
+        let mut actual = [0; 4];
+        unsafe { get(0x0BA2, actual.as_mut_ptr()) };
+        actual
+    };
+    // Normal NSOpenGLContext setup fits the windowed content first.
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).reported_fullscreen == 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(std::time::Instant::now() < deadline, "fullscreen timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    let previous = viewport();
+    let host = host_frame(object).unwrap();
+    let fractional = NSRect {
+        origin: NSPoint {
+            x: host.origin.x + 0.5,
+            y: host.origin.y + 0.5,
+        },
+        size: NSSize {
+            width: host.size.width - 0.5,
+            height: host.size.height - 0.5,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), fractional) };
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    let updated = viewport();
+    assert_ne!(
+        updated, previous,
+        "GL viewport was not updated on fullscreen frame change"
+    );
+    let (pixel_width, pixel_height) = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    assert!(updated[0] >= 0 && updated[1] >= 0);
+    assert!(updated[0] + updated[2] <= pixel_width);
+    assert!(updated[1] + updated[3] <= pixel_height);
+    unsafe { set(7, 11, 17, 19) };
+    let shorter = NSRect {
+        origin: NSPoint {
+            y: fractional.origin.y + 31.0,
+            ..fractional.origin
+        },
+        size: NSSize {
+            height: fractional.size.height - 31.0,
+            ..fractional.size
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), shorter) };
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    assert_eq!(
+        viewport(),
+        [7, 11, 17, 19],
+        "overwrote the guest's viewport"
+    );
+    assert!(sdl3::video::gl_make_current(
+        std::ptr::null_mut(),
+        std::ptr::null_mut()
+    ));
+    sdl3::video::gl_destroy_context(gl);
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}

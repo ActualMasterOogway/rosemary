@@ -681,12 +681,16 @@ pub(crate) fn fit_content_view(object: Id) {
     if window.sdl.is_null() || window.content_view.is_null() {
         return;
     }
-    let size =
-        fullscreen_frame(object).map(|rect| (rect.size.width as i32, rect.size.height as i32));
-    let Some((width, height)) = size.or_else(|| sdl3::video::window_size(window.sdl)) else {
+    let size = fullscreen_frame(object).map(|rect| rect.size).or_else(|| {
+        sdl3::video::window_size(window.sdl).map(|(width, height)| NSSize {
+            width: f64::from(width),
+            height: f64::from(height),
+        })
+    });
+    let Some(size) = size else {
         return;
     };
-    fit_content_view_to(object, width, height);
+    fit_content_view_to(object, size);
 }
 
 /// SDL has reported the window's size, so it is the one to answer with again.
@@ -697,7 +701,7 @@ pub(crate) fn size_settled(object: Id) {
 }
 
 /// The content view sized to a window `width` by `height`, titlebar included.
-fn fit_content_view_to(object: Id, width: i32, height: i32) {
+fn fit_content_view_to(object: Id, size: NSSize) {
     let window = window_of(object);
     if window.content_view.is_null() {
         return;
@@ -705,8 +709,8 @@ fn fit_content_view_to(object: Id, width: i32, height: i32) {
     let frame = NSRect {
         origin: NSPoint::default(),
         size: NSSize {
-            width: f64::from(width),
-            height: (f64::from(height) - content_inset(object)).max(0.0),
+            width: size.width,
+            height: (size.height - content_inset(object)).max(0.0),
         },
     };
     // Sent rather than written, so a view that tracks its own size hears
@@ -1370,7 +1374,13 @@ unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
     if sdl3::video::window_size(sdl) != Some((width.max(1), height.max(1))) {
         window.size_pending = 1;
     }
-    fit_content_view_to(receiver, width.max(1), height.max(1));
+    fit_content_view_to(
+        receiver,
+        NSSize {
+            width: f64::from(width.max(1)),
+            height: f64::from(height.max(1)),
+        },
+    );
 }
 
 unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _display: u8) {
@@ -1455,7 +1465,7 @@ unsafe extern "C" fn set_content_size(receiver: Id, _sel: Sel, size: NSSize) {
         if sdl3::video::window_size(sdl) != Some((width, height)) {
             window.size_pending = 1;
         }
-        fit_content_view_to(receiver, width, height);
+        fit_content_view_to(receiver, size);
     }
 }
 

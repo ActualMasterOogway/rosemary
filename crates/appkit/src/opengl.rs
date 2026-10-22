@@ -1831,6 +1831,15 @@ pub fn present_single_buffered() {
 unsafe extern "C" fn flush_buffer(receiver: Id, _sel: Sel) {
     let window = drawable(context_of(receiver));
     if !window.is_null() {
+        // A fullscreen resize may happen while the context remains current.
+        // Preserve explicit guest viewports; update only an auto-fitted one.
+        if CURRENT.get() == receiver && sdl3::video::gl_current_window() == window {
+            chrome_blit::fit_viewport(
+                drawable_window(context_of(receiver)),
+                window,
+                sdl3::video::gl_current_context(),
+            );
+        }
         chrome_blit::draw(window);
         sdl3::video::swap_window(window);
     }
@@ -1959,6 +1968,11 @@ pub(crate) fn install() {
     });
 }
 
+#[cfg(test)]
+pub(crate) fn fit_viewport_for_test(object: Id, window: sdl3::Window, context: sdl3::GlContext) {
+    chrome_blit::fit_viewport(object, window, context);
+}
+
 /// The chrome `crate::decor` paints, put over the top of a GL window's
 /// default framebuffer just before it is swapped.
 ///
@@ -2073,57 +2087,104 @@ mod chrome_blit {
         static CACHED: RefCell<Vec<Cached>> = const { RefCell::new(Vec::new()) };
     }
 
-    /// The contexts whose first viewport has been fitted to a window's
-    /// content, as (context, window) addresses.
-    static FITTED: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    const VIEWPORT: u32 = 0x0BA2;
 
-    /// Give a context made current on a decorated window, the first time,
-    /// a viewport of the content rather than of the whole frame.
-    ///
-    /// GL starts a context's viewport at its drawable's size, and a guest
-    /// that never sets one relies on that matching its view - which, under
-    /// the chrome, it no longer does.
+    #[derive(Clone, Copy)]
+    struct ViewportFit {
+        context: usize,
+        window: usize,
+        // Last viewport applied by AppKit, not a guest-supplied viewport.
+        applied: (i32, i32, i32, i32),
+    }
+
+    static FITTED: std::sync::Mutex<Vec<ViewportFit>> = std::sync::Mutex::new(Vec::new());
+
+    /// GL uses bottom-left pixel coordinates, whereas `surface_frame` is
+    /// top-left in logical points. Round *edges*, not sizes, so half-points
+    /// retain their physical pixel at Retina density.
+    fn logical_viewport(
+        surface: foundation::geometry::NSRect,
+        host: foundation::geometry::NSSize,
+        pixels: (i32, i32),
+        inset: f64,
+    ) -> (i32, i32, i32, i32) {
+        let sx = f64::from(pixels.0) / host.width.max(1.0);
+        let sy = f64::from(pixels.1) / host.height.max(1.0);
+        let x0 = (surface.origin.x * sx).round() as i32;
+        let x1 = ((surface.origin.x + surface.size.width) * sx).round() as i32;
+        let y0 = ((host.height - surface.origin.y - surface.size.height) * sy).round() as i32;
+        let y1 = ((host.height - surface.origin.y - inset) * sy).round() as i32;
+        let x0 = x0.clamp(0, pixels.0);
+        let x1 = x1.clamp(x0, pixels.0);
+        let y0 = y0.clamp(0, pixels.1);
+        let y1 = y1.clamp(y0, pixels.1);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// Initialize GL's default viewport for AppKit's drawable, and adjust it
+    /// when AppKit's logical content changes without rebinding the context.
+    /// If the guest explicitly replaces that viewport, leave its GL state alone.
     pub(super) fn fit_viewport(
         object: objc::object::Id,
         window: sdl3::Window,
         context: sdl3::GlContext,
     ) {
-        // SAFETY: null or a window this crate made.
-        if unsafe { crate::window::sdl_window(object) } != window {
-            // The hidden window a context waits in before it has a view.
+        if context.is_null() || unsafe { crate::window::sdl_window(object) } != window {
             return;
         }
-        let inset = crate::window::content_inset(object);
-        if inset <= 0.0 {
-            return;
-        }
-        {
-            let mut fitted = FITTED.lock().unwrap_or_else(|e| e.into_inner());
-            let key = (context as usize, window as usize);
-            if fitted.contains(&key) {
-                return;
-            }
-            fitted.push(key);
-        }
-        let (Some((points, _)), Some((width, height))) = (
+        let (Some(surface), Some((width, height)), Some(pixels)) = (
+            crate::window::surface_frame(object),
             sdl3::video::window_size(window),
             sdl3::video::window_size_in_pixels(window),
         ) else {
             return;
         };
-        let density = match points > 0 {
-            true => f64::from(width) / f64::from(points),
-            false => 1.0,
-        };
-        let Some(viewport) = sdl3::video::gl_proc_address(c"glViewport") else {
+        let target = logical_viewport(
+            surface,
+            foundation::geometry::NSSize {
+                width: f64::from(width),
+                height: f64::from(height),
+            },
+            pixels,
+            crate::window::content_inset(object),
+        );
+        let (Some(get), Some(set)) = (
+            sdl3::video::gl_proc_address(c"glGetIntegerv"),
+            sdl3::video::gl_proc_address(c"glViewport"),
+        ) else {
             return;
         };
-        let inset = (inset * density).round() as i32;
-        // SAFETY: `glViewport(GLint, GLint, GLsizei, GLsizei)` on the context
-        // just made current.
-        unsafe {
-            let f: unsafe extern "C" fn(i32, i32, i32, i32) = std::mem::transmute(viewport);
-            f(0, 0, width, (height - inset).max(0));
+        // SAFETY: both GL entrypoints have stable C signatures and the context
+        // supplied to this function is bound on the calling thread.
+        let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(get) };
+        let set: unsafe extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(set) };
+        let mut actual = [0i32; 4];
+        unsafe { get(VIEWPORT, actual.as_mut_ptr()) };
+        let current = (actual[0], actual[1], actual[2], actual[3]);
+        let mut fitted = FITTED.lock().unwrap_or_else(|e| e.into_inner());
+        let item = fitted
+            .iter_mut()
+            .find(|item| item.context == context as usize && item.window == window as usize);
+        if let Some(item) = item {
+            if item.applied == target || current != item.applied {
+                return;
+            }
+            unsafe { set(target.0, target.1, target.2, target.3) };
+            item.applied = target;
+        } else {
+            // On a new context the GL default viewport is the entire surface.
+            // It is not a guest custom viewport unless it differs already.
+            if current != (0, 0, pixels.0, pixels.1) {
+                return;
+            }
+            if current != target {
+                unsafe { set(target.0, target.1, target.2, target.3) };
+            }
+            fitted.push(ViewportFit {
+                context: context as usize,
+                window: window as usize,
+                applied: target,
+            });
         }
     }
 
@@ -2343,6 +2404,45 @@ mod chrome_blit {
             (gl.PixelStorei)(UNPACK_SKIP_PIXELS, unpack[3]);
             (gl.BindFramebuffer)(READ_FRAMEBUFFER, read as u32);
             (gl.BindFramebuffer)(DRAW_FRAMEBUFFER, draw as u32);
+        }
+    }
+    #[cfg(test)]
+    mod viewport_tests {
+        use super::*;
+        use foundation::geometry::{NSPoint, NSRect, NSSize};
+
+        #[test]
+        fn fractional_edges_preserve_retina_pixels() {
+            let host = NSSize {
+                width: 1440.0,
+                height: 900.0,
+            };
+            let rect = NSRect {
+                origin: NSPoint { x: 0.5, y: 0.5 },
+                size: NSSize {
+                    width: 1439.0,
+                    height: 899.0,
+                },
+            };
+            assert_eq!(
+                logical_viewport(rect, host, (1440, 900), 0.0),
+                (1, 1, 1439, 899)
+            );
+            assert_eq!(
+                logical_viewport(rect, host, (2880, 1800), 0.0),
+                (1, 1, 2878, 1798)
+            );
+            let changed = NSRect {
+                origin: rect.origin,
+                size: NSSize {
+                    width: 1439.5,
+                    height: 899.5,
+                },
+            };
+            assert_eq!(
+                logical_viewport(changed, host, (2880, 1800), 0.0),
+                (1, 0, 2879, 1799)
+            );
         }
     }
 }
