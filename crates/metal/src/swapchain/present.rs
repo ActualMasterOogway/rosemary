@@ -55,6 +55,23 @@ pub(super) fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentMo
     }
 }
 
+/// Match DXVK's Presenter::pickImageCount: IMMEDIATE uses the surface
+/// minimum, and queued modes request one more, subject to the WSI maximum.
+/// Rosemary does not expose DXVK's separate caller-requested image count.
+pub(super) fn desired_image_count(mode: vk::PresentModeKHR, minimum: u32, maximum: u32) -> u32 {
+    // DXVK Presenter::pickImageCount: IMMEDIATE needs no extra queued image.
+    let requested = if mode == vk::PresentModeKHR::IMMEDIATE {
+        minimum
+    } else {
+        minimum.saturating_add(1)
+    };
+    if maximum == 0 {
+        requested
+    } else {
+        requested.min(maximum)
+    }
+}
+
 /// `OPAQUE` where the surface offers it, which is what a game's window is -
 /// unless the window's corners are to be `see_through`, which takes
 /// `PRE_MULTIPLIED` wherever it is offered.
