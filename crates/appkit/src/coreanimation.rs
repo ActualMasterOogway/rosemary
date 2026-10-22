@@ -126,6 +126,9 @@ struct Node {
     contents: usize,
     contents_revision: u64,
     active_contents_reads: usize,
+    /// Advance after each completed compositor contents read, including draws
+    /// which began before an overlapping setContents: assignment.
+    completed_contents_reads: u64,
     surface_snapshot: Option<iosurface::Snapshot>,
     surface_publication: Option<iosurface::Publication>,
     surface_retry: bool,
@@ -152,6 +155,7 @@ impl Default for Node {
             contents: 0,
             contents_revision: 0,
             active_contents_reads: 0,
+            completed_contents_reads: 0,
             surface_snapshot: None,
             surface_publication: None,
             surface_retry: false,
@@ -452,6 +456,7 @@ impl Drop for ContentsRead {
                 .and_then(|nodes| nodes.get_mut(&(self.layer as usize)))
                 .is_some_and(|node| {
                     node.active_contents_reads -= 1;
+                    node.completed_contents_reads = node.completed_contents_reads.wrapping_add(1);
                     node.contents_revision != self.revision
                 })
         };
@@ -492,9 +497,13 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
     // Reserve a revision before doing any expensive pixel work, but do not
     // block unrelated layers on the global NODES mutex while comparing bytes.
     let mut held = HeldContents::new(contents as usize);
-    let (revision, previous) = with_node(receiver, |node| {
+    let (revision, previous, completed_reads) = with_node(receiver, |node| {
         node.contents_revision = node.contents_revision.wrapping_add(1);
-        (node.contents_revision, node.surface_snapshot.clone())
+        (
+            node.contents_revision,
+            node.surface_snapshot.clone(),
+            node.completed_contents_reads,
+        )
     });
     // SAFETY: held retains the object for the entire CPU comparison.
     let snapshot =
@@ -512,6 +521,7 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
             return (0, false, false);
         }
         let unchanged = node.active_contents_reads == 0
+            && node.completed_contents_reads == completed_reads
             && snapshot
                 .as_ref()
                 .is_ok_and(|new| previous.as_ref().is_some_and(|old| new.same_pixels(old)));
@@ -1883,23 +1893,22 @@ fn draw_contents(
     let gravity = read_node(layer, |node| {
         node.map_or(Gravity::Resize, |node| node.gravity)
     });
-    // These gravities can only paint within bounds; no snapshot is needed
-    // until the layer intersects its pixel-space clip.
-    if contents_stay_in_bounds(gravity) && bounds.intersection(&clip).is_empty() {
-        return;
-    }
-    if !contents_stay_in_bounds(gravity) {
-        // The view may be recomposed for unrelated damage. Do not refresh an
-        // offscreen surface's snapshot if none of its placed pixels can draw.
-        let intersects = read_node(layer, |node| {
-            node.is_some_and(|node| {
-                let held = HeldContents::new(node.contents);
-                contents_damage(held.0, layer, gravity, bounds, scale, clip).is_some()
-            })
-        });
-        if !intersects {
+    // Do not advance the snapshot of a surface unless its *source image*
+    // intersects the pixels actually being repainted. Checking layer bounds
+    // alone is insufficient for aspect-fit letterboxing and overhang gravity.
+    let held = read_node(layer, |node| {
+        node.map(|node| HeldContents::new(node.contents))
+    });
+    if let Some(held) = held {
+        if iosurface::is_surface(held.0 as CFTypeRef) {
+            if contents_damage(held.0, layer, gravity, bounds, scale, clip).is_none() {
+                return;
+            }
+        } else if contents_stay_in_bounds(gravity) && bounds.intersection(&clip).is_empty() {
             return;
         }
+    } else if contents_stay_in_bounds(gravity) && bounds.intersection(&clip).is_empty() {
+        return;
     }
     let contents_scale = crate::layer::contents_scale_of(layer);
     with_contents(layer, |source| {
@@ -2810,6 +2819,177 @@ mod tests {
             corefoundation::api::CFRelease(a);
             corefoundation::api::CFRelease(b);
         }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn completed_draw_during_setter_comparison_prevents_false_deduplication() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let previous = surface();
+        let replacement = surface();
+        let red = [0, 0, 255, 255, 0, 0, 255, 255];
+        let blue = [255, 0, 0, 255, 255, 0, 0, 255];
+        publish(previous, red);
+        publish(replacement, red);
+        assert!(!replace_contents(layer, previous as Id));
+        assert_eq!(layer_image(layer), red);
+        let before = read_node(layer, |node| node.unwrap().completed_contents_reads);
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (thread_ready, thread_resume) = (ready.clone(), resume.clone());
+        let (address, replacement_address) = (layer as usize, replacement as usize);
+        let setter = std::thread::spawn(move || {
+            SETTER_PAUSE.with(|pause| *pause.borrow_mut() = Some((thread_ready, thread_resume)));
+            replace_contents(address as Id, replacement_address as Id)
+        });
+        ready.wait();
+        // The setter has already compared red against red, and is paused.
+        // A complete compositor read of blue invalidates that comparison.
+        publish(previous, blue);
+        assert_eq!(layer_image(layer), blue);
+        assert!(read_node(layer, |node| node.unwrap().completed_contents_reads) > before);
+        resume.wait();
+        assert!(
+            !setter.join().unwrap(),
+            "an intervening completed draw must force damage"
+        );
+        assert_eq!(
+            read_node(layer, |node| node.unwrap().contents),
+            replacement as usize
+        );
+        assert_eq!(layer_image(layer), red);
+        unsafe {
+            corefoundation::api::CFRelease(previous);
+            corefoundation::api::CFRelease(replacement);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn completed_window_draw_during_setter_comparison_requires_repaint() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        send::<NSRect, ()>(layer, "setFrame:", rect(0.0, 0.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", layer);
+        let a = surface();
+        let b = surface();
+        let red = [0, 0, 255, 255, 0, 0, 255, 255];
+        let blue = [255, 0, 0, 255, 255, 0, 0, 255];
+        publish(a, red);
+        publish(b, red);
+        assert!(!replace_contents(layer, a as Id));
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        let color = |store: &Store| -> [u8; 8] {
+            store.pixels[(7 * 8 * 4)..(7 * 8 * 4 + 8)]
+                .try_into()
+                .unwrap()
+        };
+        assert_eq!(color(&store), red);
+
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (thread_ready, thread_resume) = (ready.clone(), resume.clone());
+        let (layer_addr, b_addr) = (layer as usize, b as usize);
+        let setter = std::thread::spawn(move || {
+            SETTER_PAUSE.with(|pause| *pause.borrow_mut() = Some((thread_ready, thread_resume)));
+            replace_contents(layer_addr as Id, b_addr as Id)
+        });
+        ready.wait();
+        publish(a, blue);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(color(&store), blue);
+        resume.wait();
+        assert!(
+            !setter.join().unwrap(),
+            "rendered blue must be repainted with B red"
+        );
+        assert_eq!(read_node(layer, |node| node.unwrap().contents), b as usize);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(color(&store), red);
+        unsafe {
+            corefoundation::api::CFRelease(a);
+            corefoundation::api::CFRelease(b);
+        }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn clipped_aspect_render_preserves_undrawn_surface_publication() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        with_node(child, |node| node.gravity = Gravity::ResizeAspect);
+        let image = surface();
+        let red = [0, 0, 255, 255, 0, 0, 255, 255];
+        let blue = [255, 0, 0, 255, 255, 0, 0, 255];
+        publish(image, red);
+        assert!(!replace_contents(child, image as Id));
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let top_row = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 1,
+        };
+        let image_rect = Rect {
+            x: 0,
+            y: 2,
+            width: 8,
+            height: 4,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        let pixel = |store: &Store| -> [u8; 4] {
+            store.pixels[(3 * 8 + 4) * 4..(3 * 8 + 5) * 4]
+                .try_into()
+                .unwrap()
+        };
+        assert_eq!(pixel(&store), [0, 0, 255, 255]);
+        publish(image, blue);
+        assert_eq!(
+            surface_contents_damage(view, whole, whole),
+            vec![image_rect]
+        );
+        // A publication arriving after the scan but before another partial
+        // view redraw must not be consumed if its pixels are still clipped.
+        render(view, &mut store, whole, top_row, Pass::Sublayers);
+        assert_eq!(pixel(&store), [0, 0, 255, 255]);
+        assert_eq!(
+            surface_contents_damage(view, whole, whole),
+            vec![image_rect]
+        );
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(pixel(&store), [255, 0, 0, 255]);
+        assert!(surface_contents_damage(view, whole, whole).is_empty());
+        unsafe { corefoundation::api::CFRelease(image) };
         objc::arc::pool_pop(pool);
     }
 
