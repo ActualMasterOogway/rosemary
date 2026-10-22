@@ -1910,7 +1910,10 @@ static PREVIOUS_MOUSE_RECTS: std::sync::Mutex<Vec<(usize, Option<sdl3::Rect>)>> 
     std::sync::Mutex::new(Vec::new());
 
 fn lock_relative_pointer(window: sdl3::Window, point: (f32, f32)) {
+    // Recentring and edge holds also use relative mode while associated, and
+    // the paths that end them never lift a lock: only disassociation gets one.
     if !sdl3::video::is_x11()
+        || mouse_is_associated()
         || sdl3::video::window_flags(window) & sdl3::video::flags::INPUT_FOCUS == 0
     {
         return;
