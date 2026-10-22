@@ -39,7 +39,6 @@ pub mod sysvsem;
 pub mod vmmap;
 pub mod zlib;
 
-#[cfg(target_os = "macos")]
 pub mod cfuuid;
 pub mod coremedia;
 pub mod iokit;
@@ -71,6 +70,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
         .or_else(|| appkit::shim_for(name))
         .or_else(|| opengl::shim_for(name))
         .or_else(|| coremedia::shim_for(name))
+        .or_else(|| cfuuid::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -78,8 +78,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
 /// and no Mach.
 #[cfg(target_os = "macos")]
 fn macos_shim_for(name: &str) -> Option<Shim> {
-    cfuuid::shim_for(name)
-        .or_else(|| machthread::shim_for(name))
+    machthread::shim_for(name)
         .or_else(|| crate::gui::hook::shim_for(name))
 }
 

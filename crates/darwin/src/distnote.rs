@@ -10,7 +10,7 @@
 //! removed by the first post that finds it so.
 //!
 //! What a message *is* belongs to Foundation; this moves bytes.
-//! 
+//!
 //! FIXME (ACCURACY): make an actual `distnoted` rather than implement it here weirdly
 
 use std::os::unix::net::UnixDatagram;

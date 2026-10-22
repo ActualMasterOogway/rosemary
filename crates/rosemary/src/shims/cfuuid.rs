@@ -1,8 +1,9 @@
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{GuestMemory, Result};
-
-use super::host::host_or_refuse;
+use crate::{
+    abi::{GuestMemory, Result},
+    shims::host::builtin_or_host,
+};
 
 /// Sixteen bytes as the two ABIs carry them: a pair of doublewords.
 ///
@@ -22,7 +23,7 @@ fn get_uuid_bytes(
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let host = host_or_refuse(symbol)?;
+    let host = builtin_or_host(symbol)?;
     // SAFETY: the symbol [`shim_for`] matched, which is
     // `CFUUIDBytes (*)(CFUUIDRef)`, resolved out of a CoreFoundation this
     // process has loaded. The `CFUUIDRef` is a host object the guest received
@@ -41,7 +42,7 @@ fn create_from_uuid_bytes(
     ctx: &mut RegisterContext,
     _mem: &mut dyn GuestMemory,
 ) -> Result<()> {
-    let host = host_or_refuse(symbol)?;
+    let host = builtin_or_host(symbol)?;
     // SAFETY: as above, for `CFUUIDRef (*)(CFAllocatorRef, CFUUIDBytes)`.
     let f: extern "C" fn(u64, Bytes) -> u64 =
         unsafe { core::mem::transmute::<u64, extern "C" fn(u64, Bytes) -> u64>(host) };
