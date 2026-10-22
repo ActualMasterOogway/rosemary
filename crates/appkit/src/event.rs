@@ -253,6 +253,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // title bar's close button is on a Mac: `-performClose:`, so the
         // delegate may refuse and `-close` does the rest.
         Event::WindowClosed { window } => {
+            crate::screen::release_relative_pointer(window);
             if crate::decor::window_closed(window) {
                 return;
             }
@@ -282,7 +283,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // this runtime reports (see `window::global_position`), because a
         // program that only listens for the moves it makes itself would keep
         // mapping the pointer against the origin it asked for.
-        Event::WindowMoved { window } => post(window, window::DID_MOVE),
+        Event::WindowMoved { window } => {
+            crate::screen::refresh_relative_pointer(window);
+            post(window, window::DID_MOVE);
+        }
         Event::WindowDisplayChanged { window } => post(window, window::DID_CHANGE_SCREEN),
         Event::WindowResized { window, .. } => {
             // The content view follows the window, as it does on
@@ -295,6 +299,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 window::size_settled(object);
                 window::fit_content_view(object);
                 crate::screen::confine_pointer(object);
+                crate::screen::refresh_relative_pointer(window);
             }
             // A resized view's tracking rectangle is the wrong shape, and
             // AppKit asks for a new one here rather than resizing the old.
@@ -351,6 +356,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             let object = object_for(window);
             if !gained {
                 crate::screen::forget_recentring();
+                crate::screen::release_relative_pointer(window);
             }
             if !object.is_null() && gained {
                 window::set_key_window(object);
@@ -358,6 +364,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 // made while the guest was disassociated never entered it.
                 crate::screen::apply_mouse_association();
                 crate::screen::confine_pointer(object);
+                crate::screen::refresh_relative_pointer(window);
             }
             match gained {
                 true => announce_key(object),
@@ -463,6 +470,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             buttons,
         } => {
             crate::cursor::mouse_moved();
+            // A physical X11 pointer that starts outside its 1-pixel barrier
+            // can move on one axis until it crosses the region again. The
+            // repair affects only cursor position, not the SDL raw deltas.
+            crate::screen::refresh_relative_pointer(id);
             if take_warp_echo(x, y) {
                 return;
             }
