@@ -397,3 +397,67 @@ fn oversized_surface_still_tracks_publications_without_owned_bytes() {
     assert!(publication_is_current(surface, &second));
     unsafe { corefoundation::api::CFRelease(surface) };
 }
+
+#[test]
+fn read_only_locks_do_not_hold_back_a_snapshot() {
+    let surface = bgra(2, 1);
+    publish_pixels(surface, 5);
+    unsafe {
+        assert_eq!(
+            IOSurfaceLock(surface, LOCK_READ_ONLY, std::ptr::null_mut()),
+            SUCCESS
+        );
+        let held = snapshot(surface, None).unwrap();
+        assert_eq!(held.bytes(), &[5; 8]);
+        assert!(snapshot_is_current(surface, &held));
+        assert!(!cpu_access_active(surface));
+        assert_eq!(
+            IOSurfaceUnlock(surface, LOCK_READ_ONLY, std::ptr::null_mut()),
+            SUCCESS
+        );
+        assert!(snapshot_is_current(surface, &held));
+        corefoundation::api::CFRelease(surface);
+    }
+}
+
+#[test]
+fn mismatched_unlock_options_do_not_strand_a_writer() {
+    let surface = bgra(2, 1);
+    unsafe {
+        assert_eq!(IOSurfaceLock(surface, 0, std::ptr::null_mut()), SUCCESS);
+        assert_eq!(
+            IOSurfaceUnlock(surface, LOCK_READ_ONLY, std::ptr::null_mut()),
+            SUCCESS
+        );
+        assert!(!cpu_access_active(surface));
+        assert!(snapshot(surface, None).is_ok());
+        corefoundation::api::CFRelease(surface);
+    }
+}
+
+#[test]
+fn a_writer_locking_mid_copy_discards_the_copy_without_waiting() {
+    let surface = bgra(2, 1);
+    publish_pixels(surface, 1);
+    let s = state(surface).unwrap();
+    let gate = open_gate(s).unwrap();
+    // The copy runs outside the mutex: a writer's lock does not block on it.
+    publish_pixels(surface, 2);
+    assert_eq!(gate.close(s).err(), Some(SnapshotError::Busy));
+    let after = unsafe { snapshot(surface, None).unwrap() };
+    assert_eq!(after.bytes(), &[2; 8]);
+    unsafe { corefoundation::api::CFRelease(surface) };
+}
+
+#[test]
+fn the_cached_image_goes_with_its_last_holder() {
+    let surface = bgra(64, 64);
+    publish_pixels(surface, 8);
+    let first = unsafe { snapshot(surface, None).unwrap() };
+    let bytes = Arc::downgrade(&first.bytes);
+    drop(first);
+    assert!(bytes.upgrade().is_none());
+    let again = unsafe { snapshot(surface, None).unwrap() };
+    assert_eq!(again.bytes()[..4], [8; 4]);
+    unsafe { corefoundation::api::CFRelease(surface) };
+}

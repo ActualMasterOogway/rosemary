@@ -16,7 +16,7 @@
 use std::alloc::Layout;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use corefoundation::base::{CFTypeID, CFTypeRef};
 use objc::class::Class;
@@ -107,17 +107,25 @@ struct State {
     use_count: AtomicI32,
     seed: AtomicU32,
     cpu_access: Mutex<CpuAccess>,
-    snapshot_identity: Arc<()>,
     /// `IOSurfaceSetValue`'s pairs, both retained.
     values: Mutex<Vec<(usize, usize)>>,
 }
 
 struct CpuAccess {
     locks: usize,
+    /// Locks without kIOSurfaceLockReadOnly. Only a writer can leave a
+    /// publication half done, so readers never hold a snapshot back.
+    writers: usize,
+    /// Advanced as each writer locks, so a copy made outside this mutex can
+    /// tell whether a writer started while it ran.
+    write_epoch: u64,
     /// Independent of the public 32-bit seed, which can wrap.
     generation: Option<u64>,
+    /// Replaced when a revalidation finds bytes written without a lock, which
+    /// leave the generation alone, so older snapshots stop matching.
+    identity: Arc<()>,
     /// One immutable image per surface publication, shared across layers.
-    cached: Option<Snapshot>,
+    cached: Option<CachedSnapshot>,
 }
 
 impl Drop for State {
@@ -323,10 +331,12 @@ pub unsafe extern "C" fn IOSurfaceCreate(properties: CFTypeRef) -> CFTypeRef {
                 seed: AtomicU32::new(0),
                 cpu_access: Mutex::new(CpuAccess {
                     locks: 0,
+                    writers: 0,
+                    write_epoch: 0,
                     generation: Some(0),
+                    identity: Arc::new(()),
                     cached: None,
                 }),
-                snapshot_identity: Arc::new(()),
                 values: Mutex::new(Vec::new()),
             },
         );
@@ -355,7 +365,7 @@ pub unsafe extern "C" fn IOSurfaceGetTypeID() -> CFTypeID {
 }
 
 /// `IOReturn IOSurfaceLock(IOSurfaceRef, IOSurfaceLockOptions, uint32_t *seed)`.
-pub unsafe extern "C" fn IOSurfaceLock(surface: CFTypeRef, _options: u32, seed: *mut u32) -> i32 {
+pub unsafe extern "C" fn IOSurfaceLock(surface: CFTypeRef, options: u32, seed: *mut u32) -> i32 {
     let Some(state) = state(surface) else {
         return BAD_ARGUMENT;
     };
@@ -364,6 +374,10 @@ pub unsafe extern "C" fn IOSurfaceLock(surface: CFTypeRef, _options: u32, seed: 
         return BAD_ARGUMENT;
     };
     access.locks = locks;
+    if options & LOCK_READ_ONLY == 0 {
+        access.writers += 1;
+        access.write_epoch = access.write_epoch.wrapping_add(1);
+    }
     if !seed.is_null() {
         // SAFETY: the caller's out-pointer.
         unsafe { *seed = state.seed.load(Ordering::Acquire) };
@@ -383,8 +397,13 @@ pub unsafe extern "C" fn IOSurfaceUnlock(surface: CFTypeRef, options: u32, seed:
     }
     access.locks -= 1;
     if options & LOCK_READ_ONLY == 0 {
+        access.writers = access.writers.saturating_sub(1);
         state.seed.fetch_add(1, Ordering::AcqRel);
         access.generation = access.generation.and_then(|n| n.checked_add(1));
+    }
+    if access.locks == 0 {
+        // Unlock options that did not match the lock's must not strand a writer.
+        access.writers = 0;
     }
     if !seed.is_null() {
         // SAFETY: the caller's out-pointer.
@@ -661,14 +680,35 @@ pub struct Publication {
     generation: u64,
 }
 
-/// Capture completed publication metadata without copying the pixel buffer.
-/// The caller holds a reference to `object`.
-pub fn publication(object: CFTypeRef) -> Result<Publication, SnapshotError> {
-    let s = state(object).ok_or(SnapshotError::Unsupported)?;
-    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
-    if access.locks != 0 {
-        return Err(SnapshotError::Busy);
+/// The surface's last image, held weakly so a pooled surface no layer shows
+/// does not pin a full frame for the rest of its life.
+struct CachedSnapshot {
+    generation: u64,
+    published: bool,
+    width: usize,
+    height: usize,
+    pixel_format: u32,
+    bytes: Weak<[u8]>,
+}
+
+impl CachedSnapshot {
+    fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            generation: snapshot.generation,
+            published: snapshot.published,
+            width: snapshot.width,
+            height: snapshot.height,
+            pixel_format: snapshot.pixel_format,
+            bytes: Arc::downgrade(&snapshot.bytes),
+        }
     }
+}
+
+const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+
+/// The visible row length and image size of a packed 32-bit surface, the
+/// only kind whose publications are tracked.
+fn packed_layout(s: &State) -> Result<(usize, usize), SnapshotError> {
     if s.bytes_per_element != 4
         || s.element_width != 1
         || s.element_height != 1
@@ -676,24 +716,153 @@ pub fn publication(object: CFTypeRef) -> Result<Publication, SnapshotError> {
     {
         return Err(SnapshotError::Unsupported);
     }
+    let row_bytes = s.width.checked_mul(4).ok_or(SnapshotError::Unsupported)?;
+    let length = row_bytes
+        .checked_mul(s.height)
+        .ok_or(SnapshotError::Unsupported)?;
+    let end = s
+        .bytes_per_row
+        .checked_mul(s.height)
+        .and_then(|n| n.checked_add(s.offset))
+        .ok_or(SnapshotError::Unsupported)?;
+    if row_bytes > s.bytes_per_row || end > s.alloc_size {
+        return Err(SnapshotError::Unsupported);
+    }
+    Ok((row_bytes, length))
+}
+
+/// Capture completed publication metadata without copying the pixel buffer.
+/// The caller holds a reference to `object`.
+pub fn publication(object: CFTypeRef) -> Result<Publication, SnapshotError> {
+    let s = state(object).ok_or(SnapshotError::Unsupported)?;
+    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+    if access.writers != 0 {
+        return Err(SnapshotError::Busy);
+    }
+    packed_layout(s)?;
     Ok(Publication {
-        identity: s.snapshot_identity.clone(),
+        identity: access.identity.clone(),
         generation: access.generation.ok_or(SnapshotError::Unsupported)?,
     })
 }
 
-pub fn publication_is_current(object: CFTypeRef, publication: &Publication) -> bool {
+fn is_current(object: CFTypeRef, identity: &Arc<()>, generation: u64) -> bool {
     let Some(s) = state(object) else {
         return false;
     };
     let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
-    access.locks == 0
-        && access.generation == Some(publication.generation)
-        && Arc::ptr_eq(&s.snapshot_identity, &publication.identity)
+    access.writers == 0
+        && access.generation == Some(generation)
+        && Arc::ptr_eq(&access.identity, identity)
 }
 
-/// Copy a surface while excluding the start of another CPU lock. This gate
-/// does not serialize guest locks with one another or claim GPU exclusion.
+pub fn publication_is_current(object: CFTypeRef, publication: &Publication) -> bool {
+    is_current(object, &publication.identity, publication.generation)
+}
+
+/// What a snapshot needs from the gate. The compare and copy then run without
+/// the mutex, so a guest's IOSurfaceLock never waits behind them.
+struct Gate {
+    generation: u64,
+    epoch: u64,
+    identity: Arc<()>,
+    row_bytes: usize,
+    length: usize,
+    cached: Option<Snapshot>,
+}
+
+fn open_gate(s: &State) -> Result<Gate, SnapshotError> {
+    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+    if access.writers != 0 {
+        return Err(SnapshotError::Busy);
+    }
+    let generation = access.generation.ok_or(SnapshotError::Unsupported)?;
+    let (row_bytes, length) = packed_layout(s)?;
+    if length > MAX_SNAPSHOT_BYTES {
+        return Err(SnapshotError::Unsupported);
+    }
+    let cached = access.cached.as_ref().and_then(|c| {
+        Some(Snapshot {
+            identity: access.identity.clone(),
+            generation: c.generation,
+            published: c.published,
+            width: c.width,
+            height: c.height,
+            pixel_format: c.pixel_format,
+            bytes: c.bytes.upgrade()?,
+        })
+    });
+    Ok(Gate {
+        generation,
+        epoch: access.write_epoch,
+        identity: access.identity.clone(),
+        row_bytes,
+        length,
+        cached,
+    })
+}
+
+impl Gate {
+    fn fits(&self, s: &State, p: &Snapshot) -> bool {
+        p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format
+    }
+
+    fn row<'a>(&self, s: &'a State, y: usize) -> &'a [u8] {
+        // SAFETY: packed_layout bounds-checked every visible row, and the
+        // caller retains the surface, which owns the memory.
+        unsafe {
+            std::slice::from_raw_parts(s.memory.add(s.offset + y * s.bytes_per_row), self.row_bytes)
+        }
+    }
+
+    fn matches(&self, s: &State, p: &Snapshot) -> bool {
+        (0..s.height)
+            .all(|y| self.row(s, y) == &p.bytes[y * self.row_bytes..(y + 1) * self.row_bytes])
+    }
+
+    fn copy(&self, s: &State) -> Result<Arc<[u8]>, SnapshotError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(self.length)
+            .map_err(|_| SnapshotError::Unsupported)?;
+        for y in 0..s.height {
+            bytes.extend_from_slice(self.row(s, y));
+        }
+        Ok(bytes.into())
+    }
+
+    fn snapshot(&self, s: &State, bytes: Arc<[u8]>) -> Snapshot {
+        Snapshot {
+            identity: self.identity.clone(),
+            generation: self.generation,
+            published: self.generation != 0,
+            width: s.width,
+            height: s.height,
+            pixel_format: s.pixel_format,
+            bytes,
+        }
+    }
+
+    /// Reacquire the mutex once the bytes were read. A writer that locked in
+    /// the meantime may have torn them, and the read is thrown away.
+    fn close<'a>(
+        &self,
+        s: &'a State,
+    ) -> Result<std::sync::MutexGuard<'a, CpuAccess>, SnapshotError> {
+        let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
+        if access.write_epoch != self.epoch
+            || access.generation != Some(self.generation)
+            || !Arc::ptr_eq(&access.identity, &self.identity)
+        {
+            return Err(SnapshotError::Busy);
+        }
+        Ok(access)
+    }
+}
+
+/// Copy a surface's last complete CPU publication. A writer that locks while
+/// the bytes are read makes this Busy rather than waiting on it; this does
+/// not serialize guest locks with one another or claim GPU exclusion.
 ///
 /// # Safety
 /// The caller retains `object`. CPU producers must bracket writes with
@@ -728,98 +897,50 @@ unsafe fn snapshot_impl(
     revalidate: bool,
 ) -> Result<Snapshot, SnapshotError> {
     let s = state(object).ok_or(SnapshotError::Unsupported)?;
-    let mut access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
-    if access.locks != 0 {
-        return Err(SnapshotError::Busy);
-    }
-    let generation = access.generation.ok_or(SnapshotError::Unsupported)?;
-    if s.bytes_per_element != 4
-        || s.element_width != 1
-        || s.element_height != 1
-        || !matches!(s.pixel_format, PIXEL_FORMAT_BGRA | 0x52474241)
-    {
-        return Err(SnapshotError::Unsupported);
-    }
-    let row_bytes = s.width.checked_mul(4).ok_or(SnapshotError::Unsupported)?;
-    let length = row_bytes
-        .checked_mul(s.height)
-        .ok_or(SnapshotError::Unsupported)?;
-    let end = s
-        .bytes_per_row
-        .checked_mul(s.height)
-        .and_then(|n| n.checked_add(s.offset))
-        .ok_or(SnapshotError::Unsupported)?;
-    if row_bytes > s.bytes_per_row || end > s.alloc_size || length > 32 * 1024 * 1024 {
-        return Err(SnapshotError::Unsupported);
-    }
-    let compatible = previous
-        .filter(|p| p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format);
-    let shared = access
-        .cached
-        .as_ref()
-        .filter(|p| p.width == s.width && p.height == s.height && p.pixel_format == s.pixel_format);
-    if !revalidate && generation != 0 {
-        if let Some(p) = [shared, compatible].into_iter().flatten().find(|p| {
-            p.published
-                && p.generation == generation
-                && Arc::ptr_eq(&p.identity, &s.snapshot_identity)
-        }) {
-            return Ok(p.clone());
-        }
-    }
-    let row = |y: usize| {
-        // SAFETY: bounds checked above; the gate prevents a new CPU lock and
-        // there are no outstanding locks. The retained surface owns memory.
-        unsafe {
-            std::slice::from_raw_parts(s.memory.add(s.offset + y * s.bytes_per_row), row_bytes)
-        }
+    let gate = open_gate(s)?;
+    let compatible = previous.filter(|p| gate.fits(s, p));
+    let shared = gate.cached.as_ref().filter(|p| gate.fits(s, p));
+    let current = |p: &&Snapshot| {
+        p.published && p.generation == gate.generation && Arc::ptr_eq(&p.identity, &gate.identity)
     };
-    let bytes = if let Some(p) = compatible
-        .or(shared)
-        .filter(|p| (0..s.height).all(|y| row(y) == &p.bytes[y * row_bytes..(y + 1) * row_bytes]))
-    {
-        p.bytes.clone()
-    } else {
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| SnapshotError::Unsupported)?;
-        for y in 0..s.height {
-            bytes.extend_from_slice(row(y));
-        }
-        bytes.into()
+    let reusable = [shared, compatible].into_iter().flatten().find(current);
+    if !revalidate && let Some(p) = reusable {
+        return Ok(p.clone());
+    }
+    let (bytes, stale) = match compatible.or(shared).filter(|p| gate.matches(s, p)) {
+        Some(p) => (p.bytes.clone(), false),
+        None => (gate.copy(s)?, reusable.is_some()),
     };
-    let result = Snapshot {
-        identity: s.snapshot_identity.clone(),
-        generation,
-        published: generation != 0,
-        width: s.width,
-        height: s.height,
-        pixel_format: s.pixel_format,
-        bytes,
-    };
-    access.cached = Some(result.clone());
+    let mut result = gate.snapshot(s, bytes);
+    let mut access = gate.close(s)?;
+    if stale {
+        // Bytes written without a lock left the generation alone, so every
+        // snapshot of the old image would otherwise still look current.
+        access.identity = Arc::new(());
+        result.identity = access.identity.clone();
+    }
+    access.cached = Some(CachedSnapshot::of(&result));
     Ok(result)
 }
 
-/// Metadata only: an active CPU access or a later publication needs a redraw.
+/// Metadata only: an active CPU writer or a later publication needs a redraw.
 /// An initial generation-zero snapshot can be current without being eligible
 /// for content deduplication; its first completed CPU publication invalidates it.
 /// The caller retains `object` for this call.
 pub fn snapshot_is_current(object: CFTypeRef, snapshot: &Snapshot) -> bool {
-    let Some(s) = state(object) else {
-        return false;
-    };
-    let access = s.cpu_access.lock().unwrap_or_else(|e| e.into_inner());
-    access.locks == 0
-        && access.generation == Some(snapshot.generation)
-        && Arc::ptr_eq(&s.snapshot_identity, &snapshot.identity)
+    is_current(object, &snapshot.identity, snapshot.generation)
 }
 
-/// A CPU producer has an outstanding IOSurfaceLock, so there is no new
-/// complete image to render yet. This does not describe GPU write activity.
+/// A CPU producer has an outstanding write lock, so there is no new complete
+/// image to render yet. Read-only locks and GPU writes are not counted.
 pub fn cpu_access_active(object: CFTypeRef) -> bool {
-    state(object).is_some_and(|s| s.cpu_access.lock().unwrap_or_else(|e| e.into_inner()).locks != 0)
+    state(object).is_some_and(|s| {
+        s.cpu_access
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .writers
+            != 0
+    })
 }
 
 /// Whether `object` is an `IOSurfaceRef`.
