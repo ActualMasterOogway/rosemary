@@ -1152,6 +1152,8 @@ fn opaque_views(placed: &[Placed]) -> Vec<usize> {
 /// Bring a window's composite up to date with its views: recompose what was
 /// drawn over, and everywhere a view appeared, moved or went away.
 fn compose_window(window: Id) {
+    // First, so it drops last: after every lock below is released.
+    let _owed = crate::coreanimation::defer_releases();
     // SAFETY: a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };
     let Some((width, height)) = sdl3::video::window_size_in_pixels(sdl) else {

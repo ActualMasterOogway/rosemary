@@ -464,7 +464,7 @@ impl Drop for ContentsRead {
             // The setter's damage may have been consumed by this very draw.
             changed(self.layer);
         }
-        objc::arc::release(self.layer);
+        give_back(self.layer as usize, false);
     }
 }
 
@@ -483,7 +483,56 @@ impl HeldContents {
 
 impl Drop for HeldContents {
     fn drop(&mut self) {
-        let_go_of_contents(self.0);
+        give_back(self.0, true);
+    }
+}
+
+thread_local! {
+    /// References the compositor let go of while `defer_releases` was active.
+    static OWED: std::cell::RefCell<Option<Vec<(usize, bool)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Release a reference the compositor held, unless the release is deferred:
+/// a last release runs -dealloc, guest code included, which can reach backing
+/// state whose locks the compositor holds while it renders.
+fn give_back(object: usize, contents: bool) {
+    let queued = OWED.with_borrow_mut(|owed| {
+        owed.as_mut()
+            .map(|owed| owed.push((object, contents)))
+            .is_some()
+    });
+    if queued {
+        return;
+    }
+    match contents {
+        true => let_go_of_contents(object),
+        false => objc::arc::release(object as Id),
+    }
+}
+
+/// Hold this thread's compositor releases until the guard drops.
+pub(crate) struct DeferReleases {
+    outermost: bool,
+}
+
+pub(crate) fn defer_releases() -> DeferReleases {
+    let outermost = OWED.with_borrow_mut(|owed| {
+        let outermost = owed.is_none();
+        owed.get_or_insert_with(Vec::new);
+        outermost
+    });
+    DeferReleases { outermost }
+}
+
+impl Drop for DeferReleases {
+    fn drop(&mut self) {
+        if !self.outermost {
+            return;
+        }
+        for (object, contents) in OWED.with_borrow_mut(Option::take).unwrap_or_default() {
+            give_back(object, contents);
+        }
     }
 }
 
@@ -3775,6 +3824,24 @@ mod tests {
             corefoundation::api::CFRelease(old);
             corefoundation::api::CFRelease(next);
         }
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn compositor_releases_wait_until_the_outermost_deferral_ends() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let object = objc::object::create_instance(objc::class::lookup(c"NSObject").unwrap(), 0);
+        objc::arc::retain(object);
+        let before = objc::arc::retain_count(object);
+        {
+            let _outer = defer_releases();
+            give_back(object as usize, false);
+            drop(defer_releases());
+            assert_eq!(objc::arc::retain_count(object), before);
+        }
+        assert_eq!(objc::arc::retain_count(object), before - 1);
+        objc::arc::release(object);
         objc::arc::pool_pop(pool);
     }
 }
