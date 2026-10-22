@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use corefoundation::base::CFTypeRef;
 use foundation::geometry::{NSPoint, NSRect, NSSize};
@@ -208,6 +209,7 @@ pub(crate) fn forget(layer: Id) {
         objc::arc::release(running.object as Id);
     }
     objc::arc::release(node.background_object as Id);
+    count_surface_layers(0, node.contents);
     let_go_of_contents(node.contents);
 }
 
@@ -424,6 +426,20 @@ unsafe extern "C" fn set_opacity(receiver: Id, _sel: Sel, value: f32) {
     changed(receiver);
 }
 
+/// Layers whose contents are an IOSurface. The compositor scans layer trees
+/// for surface publications on every pump, which is wasted while this is 0.
+static SURFACE_LAYERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Called as a layer's contents change, while both objects are still alive.
+fn count_surface_layers(shown: usize, dropped: usize) {
+    if iosurface::is_surface(shown as CFTypeRef) {
+        SURFACE_LAYERS.fetch_add(1, Ordering::Relaxed);
+    }
+    if iosurface::is_surface(dropped as CFTypeRef) {
+        SURFACE_LAYERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Stop showing `contents`: its use count and the layer's reference go.
 fn let_go_of_contents(contents: usize) {
     if contents == 0 {
@@ -608,6 +624,9 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
             true,
         )
     });
+    if committed {
+        count_surface_layers(contents as usize, old);
+    }
     let_go_of_contents(old);
     // `held` releases the superseded assignment, or has been transferred to
     // the layer without changing its IOSurface use-count.
@@ -622,6 +641,9 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
 /// mapping as rendering so subpixel layers never cause unconsumable damage.
 pub(crate) fn surface_contents_damage(view: Id, rect: Rect, clip: Rect) -> Vec<Rect> {
     let mut damage = Vec::new();
+    if SURFACE_LAYERS.load(Ordering::Relaxed) == 0 {
+        return damage;
+    }
     let root = crate::view::layer_of(view);
     if root.is_null() || crate::layer::is_metal(root) || clip.is_empty() {
         return damage;
@@ -649,14 +671,15 @@ fn surface_publication_damage(
     drawable: impl FnOnce(usize) -> Option<Rect>,
 ) -> Option<Rect> {
     let (contents, snapshot, publication, retry) = read_node(layer, |node| {
-        node.map(|node| {
-            (
-                HeldContents::new(node.contents),
-                node.surface_snapshot.clone(),
-                node.surface_publication.clone(),
-                node.surface_retry,
-            )
-        })
+        node.filter(|node| iosurface::is_surface(node.contents as CFTypeRef))
+            .map(|node| {
+                (
+                    HeldContents::new(node.contents),
+                    node.surface_snapshot.clone(),
+                    node.surface_publication.clone(),
+                    node.surface_retry,
+                )
+            })
     })?;
     if iosurface::cpu_access_active(contents.0 as CFTypeRef) {
         return None;
