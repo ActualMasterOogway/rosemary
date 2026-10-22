@@ -472,7 +472,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // A physical X11 pointer that starts outside its 1-pixel barrier
             // can move on one axis until it crosses the region again. The
             // repair affects only cursor position, not the SDL raw deltas.
-            crate::screen::refresh_relative_pointer(id);
+            crate::screen::repair_relative_pointer(id);
             if take_warp_echo(x, y) {
                 return;
             }

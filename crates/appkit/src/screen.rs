@@ -1990,6 +1990,25 @@ pub(crate) fn refresh_relative_pointer(window_id: u32) {
     lock_at_frozen_pointer(window);
 }
 
+/// [`refresh_relative_pointer`] for real motion, which only needs to repair a
+/// window already locked: found in the lock table rather than by listing every
+/// window, so an unlocked one costs nothing per report.
+pub(crate) fn repair_relative_pointer(window_id: u32) {
+    if mouse_is_associated() {
+        return;
+    }
+    let locked = PREVIOUS_MOUSE_RECTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(window, _)| *window as sdl3::Window)
+        .find(|window| sdl3::video::window_id(*window) == window_id);
+    let Some(window) = locked else {
+        return;
+    };
+    lock_at_frozen_pointer(window);
+}
+
 /// Lock `window` where the disassociated guest's cursor is frozen.
 fn lock_at_frozen_pointer(window: sdl3::Window) {
     let Some(frozen) = crate::event::frozen_pointer() else {
