@@ -32,6 +32,7 @@ xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' bash -euo pipefail -c '
             */appkit-*)
                 "$binary" native_fullscreen_oracle --ignored --test-threads=1 --nocapture
                 "$binary" fullscreen_window_replacement_confinement_and_failures --ignored --test-threads=1 --nocapture
+                "$binary" fullscreen_transition_posts_geometry_before_did_notifications --ignored --test-threads=1 --nocapture
                 ;;
         esac
     done

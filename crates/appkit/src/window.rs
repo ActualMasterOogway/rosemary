@@ -47,6 +47,11 @@ pub struct Window {
     fullscreen_restore: NSRect,
     /// Suppress reentrant toggles from fullscreen lifecycle callbacks.
     fullscreen_transition: usize,
+    /// Expected SDL host geometry after a fullscreen transition. Some window
+    /// managers queue its move/resize events after the state notification.
+    fullscreen_announced_frame: NSRect,
+    fullscreen_announced_move: usize,
+    fullscreen_announced_resize: usize,
     /// Guest confinement is measured in AppKit coordinates, not SDL coordinates.
     mouse_confinement: NSRect,
     miniaturized: usize,
@@ -2332,11 +2337,6 @@ unsafe extern "C" fn accepts_responder_change(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
 
-/// `-toggleFullScreen:`, which SDL does have.
-///
-/// The one window operation in this file that is not bookkeeping: a game asks
-/// for it from a menu item or a keystroke, and a window that stayed the same
-/// size would look like the request was lost.
 #[cfg(test)]
 thread_local! {
     static REJECT_NEXT_FULLSCREEN_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -2371,6 +2371,8 @@ fn report_fullscreen_failure(receiver: Id, entering: bool) {
     }
 }
 
+/// `-toggleFullScreen:` requests an SDL transition. Keep the window alive
+/// across its synchronous AppKit will-notification and handle host rejection.
 unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
     let window = window_of(receiver);
     if window.sdl.is_null() || window.fullscreen_transition != 0 {
@@ -2478,6 +2480,44 @@ unsafe extern "C" fn deminiaturize(receiver: Id, sel: Sel, sender: Id) {
     unsafe { make_key_and_order_front(receiver, sel, sender) };
 }
 
+/// A host resize/move can be queued before the matching window-state event.
+/// The fullscreen transition itself posts the native-ordered geometry notices.
+pub(crate) fn fullscreen_state_pending(receiver: Id) -> bool {
+    if receiver.is_null() || window_of(receiver).sdl.is_null() {
+        return false;
+    }
+    is_fullscreen(window_of(receiver).sdl) != (window_of(receiver).reported_fullscreen != 0)
+}
+
+/// Suppress the host's redundant post-transition event, not a later real move.
+/// Keep the remembered frame while it matches: some WMs send multiple echoes.
+pub(crate) fn redundant_fullscreen_geometry(receiver: Id, resize: Option<(i32, i32)>) -> bool {
+    if receiver.is_null() {
+        return false;
+    }
+    let window = window_of(receiver);
+    let expected = window.fullscreen_announced_frame;
+    let redundant = if let Some((width, height)) = resize {
+        if window.fullscreen_announced_resize == 0 {
+            return false;
+        }
+        expected.size.width == f64::from(width) && expected.size.height == f64::from(height)
+    } else {
+        if window.fullscreen_announced_move == 0 {
+            return false;
+        }
+        host_frame(receiver).is_some_and(|host| host.origin == expected.origin)
+    };
+    if !redundant {
+        if resize.is_some() {
+            window_of(receiver).fullscreen_announced_resize = 0;
+        } else {
+            window_of(receiver).fullscreen_announced_move = 0;
+        }
+    }
+    redundant
+}
+
 /// Follow the window manager minimizing or restoring a window, from the
 /// event pump; answers the notification to post, if any.
 pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
@@ -2505,11 +2545,31 @@ pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
         crate::screen::confine_pointer(receiver);
         apply_mouse_confinement(receiver);
     }
-    if entered && !fullscreen && window_of(receiver).fullscreen_restore.size.width > 0.0 {
+    let restore_target = window_of(receiver).fullscreen_restore;
+    if entered && !fullscreen && restore_target.size.width > 0.0 {
         let restore = std::mem::take(&mut window_of(receiver).fullscreen_restore);
         // SDL's restore state and AppKit's restore frame are separate: a
         // request from a will-enter callback must not overwrite the latter.
         unsafe { set_frame(receiver, objc::sel::get("setFrame:"), restore) };
+    }
+    if entered && !changed {
+        // Native AppKit settles geometry before -windowDidEnter/ExitFullScreen:.
+        // SDL can deliver its resize/move events only after its state event, so
+        // announce the settled AppKit geometry now and discard their later echoes.
+        let host_target = if !fullscreen && restore_target.size.width > 0.0 {
+            restore_target
+        } else {
+            host_frame(receiver).unwrap_or_default()
+        };
+        let window = window_of(receiver);
+        window.fullscreen_announced_frame = host_target;
+        window.fullscreen_announced_resize = 1;
+        window.fullscreen_announced_move = 1;
+        fit_content_view(receiver);
+        crate::event::post_for(receiver, DID_RESIZE);
+        if !fullscreen {
+            crate::event::post_for(receiver, DID_MOVE);
+        }
     }
     match (changed, minimized, entered, fullscreen) {
         (true, true, ..) => Some(DID_MINIATURIZE),

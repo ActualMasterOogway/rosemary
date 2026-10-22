@@ -747,3 +747,189 @@ fn fullscreen_window_replacement_confinement_and_failures() {
     pump();
     objc::arc::pool_pop(pool);
 }
+
+thread_local! {
+    static FULLSCREEN_LIFECYCLE: std::cell::RefCell<Vec<(&'static str, NSRect, NSSize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SHORTEN_INSIDE_DID_ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+unsafe extern "C" fn record_fullscreen_lifecycle(receiver: Id, selector: Sel, _note: Id) {
+    let name = if selector == objc::sel::get("windowWillEnterFullScreen:") {
+        "willEnter"
+    } else if selector == objc::sel::get("windowDidEnterFullScreen:") {
+        "didEnter"
+    } else if selector == objc::sel::get("windowWillExitFullScreen:") {
+        "willExit"
+    } else if selector == objc::sel::get("windowDidExitFullScreen:") {
+        "didExit"
+    } else if selector == objc::sel::get("windowDidResize:") {
+        "didResize"
+    } else if selector == objc::sel::get("windowDidMove:") {
+        "didMove"
+    } else {
+        panic!("unexpected fullscreen callback selector");
+    };
+    let frame = unsafe { frame(receiver, objc::sel::get("frame")) };
+    let content = crate::view::frame_of(window_of(receiver).content_view).size;
+    FULLSCREEN_LIFECYCLE.with_borrow_mut(|events| events.push((name, frame, content)));
+    if name == "didEnter" && SHORTEN_INSIDE_DID_ENTER.get() {
+        let host = host_frame(receiver).unwrap();
+        unsafe {
+            set_frame(
+                receiver,
+                objc::sel::get("setFrame:"),
+                NSRect {
+                    origin: NSPoint {
+                        x: host.origin.x,
+                        y: host.origin.y + 31.0,
+                    },
+                    size: NSSize {
+                        width: host.size.width,
+                        height: host.size.height - 31.0,
+                    },
+                },
+            );
+        }
+    }
+}
+
+/// The host may queue resize/move after the fullscreen state event. AppKit
+/// nevertheless sends the settled geometry callbacks before did-enter/did-exit.
+#[test]
+#[ignore = "requires an X11/Wayland window manager; see tests/fixtures/fullscreen-native.md"]
+fn fullscreen_transition_posts_geometry_before_did_notifications() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"NativeFullscreenNotificationOrderWindow",
+        0,
+    )
+    .unwrap();
+    for selector in [
+        "windowWillEnterFullScreen:",
+        "windowDidEnterFullScreen:",
+        "windowWillExitFullScreen:",
+        "windowDidExitFullScreen:",
+        "windowDidResize:",
+        "windowDidMove:",
+    ] {
+        class.add_method(
+            objc::sel::get(selector),
+            record_fullscreen_lifecycle as objc::class::Imp,
+            c"v24@0:8@16",
+        );
+    }
+    objc::class::register_pair(class);
+    for shorten_in_did_enter in [false, true] {
+        SHORTEN_INSIDE_DID_ENTER.set(shorten_in_did_enter);
+        let object = objc::object::create_instance(class, 0);
+        window_of(object).delegate = object;
+        assert!(unsafe {
+            init_with_content_rect_for_tests(
+                object,
+                NSRect {
+                    origin: NSPoint { x: 80.0, y: 100.0 },
+                    size: NSSize {
+                        width: 720.0,
+                        height: 460.0,
+                    },
+                },
+            )
+        });
+        unsafe {
+            set_style_mask(
+                object,
+                objc::sel::get("setStyleMask:"),
+                style::TITLED | style::CLOSABLE | style::RESIZABLE,
+            )
+        };
+        let sdl = window_of(object).sdl;
+        sdl3::video::show_window(sdl);
+        window_of(object).shown = 1;
+        let pump = || {
+            while let Some(event) = sdl3::video::poll() {
+                crate::event::deliver(event);
+            }
+        };
+        let settle = |wanted: bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                pump();
+                if is_fullscreen(sdl) == wanted
+                    && (window_of(object).reported_fullscreen != 0) == wanted
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fullscreen did not settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // Catch trailing host geometry events, not just the first state event.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            pump();
+        };
+        pump();
+        let restored = unsafe { frame(object, objc::sel::get("frame")) };
+        FULLSCREEN_LIFECYCLE.with_borrow_mut(Vec::clear);
+        unsafe {
+            toggle_full_screen(
+                object,
+                objc::sel::get("toggleFullScreen:"),
+                std::ptr::null_mut(),
+            )
+        };
+        settle(true);
+        let entered = unsafe { frame(object, objc::sel::get("frame")) };
+        let seq = FULLSCREEN_LIFECYCLE.with_borrow(|events| events.clone());
+        let names = seq.iter().map(|(name, ..)| *name).collect::<Vec<_>>();
+        if shorten_in_did_enter {
+            assert_eq!(
+                names,
+                ["willEnter", "didResize", "didEnter", "didResize"],
+                "enter: {seq:?}"
+            );
+            assert_eq!(seq[1].1, seq[2].1);
+            assert_eq!(seq[3].1, entered);
+        } else {
+            assert_eq!(
+                names,
+                ["willEnter", "didResize", "didEnter"],
+                "enter: {seq:?}"
+            );
+            assert_eq!(seq[2].1, entered);
+        }
+        assert_eq!(seq[0].1, restored);
+        for (_, frame, content) in &seq[1..] {
+            assert_eq!(content.width, frame.size.width);
+            assert_eq!(content.height, frame.size.height - content_inset(object));
+        }
+        FULLSCREEN_LIFECYCLE.with_borrow_mut(Vec::clear);
+        unsafe {
+            toggle_full_screen(
+                object,
+                objc::sel::get("toggleFullScreen:"),
+                std::ptr::null_mut(),
+            )
+        };
+        settle(false);
+        let seq = FULLSCREEN_LIFECYCLE.with_borrow(|events| events.clone());
+        assert_eq!(
+            seq.iter().map(|(name, ..)| *name).collect::<Vec<_>>(),
+            ["willExit", "didResize", "didMove", "didExit"],
+            "exit: {seq:?}"
+        );
+        assert_eq!(seq[0].1, entered);
+        for (_, frame, content) in &seq[1..] {
+            assert_eq!(*frame, restored);
+            assert_eq!(content.width, frame.size.width);
+            assert_eq!(content.height, frame.size.height - content_inset(object));
+        }
+        objc::arc::release(object);
+        pump();
+    }
+    SHORTEN_INSIDE_DID_ENTER.set(false);
+    objc::arc::pool_pop(pool);
+}

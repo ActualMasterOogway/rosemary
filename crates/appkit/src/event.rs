@@ -271,10 +271,13 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         Event::WindowHitTest { window } => crate::decor::hit_test_pressed(window),
         Event::WindowState { window } => {
             let object = object_for(window);
-            if !object.is_null()
-                && let Some(name) = window::window_state_changed(object)
-            {
-                post(window, name);
+            if !object.is_null() {
+                // Synchronous resize/move delegates may release their window.
+                objc::arc::retain(object);
+                if let Some(name) = window::window_state_changed(object) {
+                    post_for(object, name);
+                }
+                objc::arc::release(object);
             }
         }
         // A program that keeps its own copy of where its window is - a Win32
@@ -285,10 +288,19 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // mapping the pointer against the origin it asked for.
         Event::WindowMoved { window } => {
             crate::screen::refresh_relative_pointer(window);
-            post(window, window::DID_MOVE);
+            let object = object_for(window);
+            if !window::fullscreen_state_pending(object)
+                && !window::redundant_fullscreen_geometry(object, None)
+            {
+                post(window, window::DID_MOVE);
+            }
         }
         Event::WindowDisplayChanged { window } => post(window, window::DID_CHANGE_SCREEN),
-        Event::WindowResized { window, .. } => {
+        Event::WindowResized {
+            window,
+            width,
+            height,
+        } => {
             // The content view follows the window, as it does on
             // `-setContentView:` and for the same reason: a view that kept its
             // old size after a resize would draw into part of the window and
@@ -310,7 +322,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // before the next cursor hit test chooses the wrong cursor.
             // SAFETY: null or the content view of a window this crate made.
             unsafe { crate::cursor::reset_rects_in_tree(content) };
-            post(window, window::DID_RESIZE);
+            if !window::fullscreen_state_pending(object)
+                && !window::redundant_fullscreen_geometry(object, Some((width, height)))
+            {
+                post(window, window::DID_RESIZE);
+            }
         }
         // The frame remains in points when a window crosses onto a display at
         // another scale, but its backing store does not. AppKit tells guests to
