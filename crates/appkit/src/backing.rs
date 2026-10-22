@@ -1028,6 +1028,21 @@ struct Placed {
     alpha: f64,
 }
 
+/// The single rounded rectangle accepted by backing, software overlay,
+/// OpenGL and Metal presentation. Avoid using point-density to reconstruct
+/// widths: physical X/Y scales and half-point edge rounding can differ.
+fn logical_pixel_bounds(sdl: sdl3::Window, whole: Rect) -> Rect {
+    crate::window::presentation_clip(sdl)
+        .map(|clip| Rect {
+            x: i64::from(clip.x),
+            y: i64::from(clip.y),
+            width: i64::from(clip.w),
+            height: i64::from(clip.h),
+        })
+        .unwrap_or(whole)
+        .intersection(&whole)
+}
+
 /// The shown views of a window, back to front, placed.
 fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
     let mut out = Vec::new();
@@ -1052,13 +1067,10 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
     let Some(surface) = crate::window::surface_frame(window) else {
         return out;
     };
-    let logical_clip = Rect {
-        x: (surface.origin.x * density).round() as i64,
-        y: (surface.origin.y * density).round() as i64,
-        width: (surface.size.width * density).round() as i64,
-        height: (surface.size.height * density).round() as i64,
-    }
-    .intersection(&whole);
+    // Use the exact edge rounding of every presentation backend. Rounding
+    // an origin and a size independently can admit one pixel past the logical
+    // right/bottom edge when the origin is fractional.
+    let logical_clip = logical_pixel_bounds(sdl, whole);
     // The window's base coordinates: not flipped, origin at the bottom, and
     // taller than the content by the chrome above it.
     let base = NSRect {
@@ -1318,17 +1330,7 @@ fn compose_window(window: Id) {
     // With none set it is `windowBackgroundColor`, AppKit's default; a layer
     // view's hole is the layer's either way.
     let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
-    let logical = crate::window::surface_frame(window)
-        .map(|surface| {
-            let density = sdl3::video::window_pixel_density(sdl) as f64;
-            Rect {
-                x: (surface.origin.x * density).round() as i64,
-                y: (surface.origin.y * density).round() as i64,
-                width: (surface.size.width * density).round() as i64,
-                height: (surface.size.height * density).round() as i64,
-            }
-        })
-        .unwrap_or(whole);
+    let logical = logical_pixel_bounds(sdl, whole);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
         let pixels = store.pixels[base..base + region.width as usize * 4]
@@ -1488,6 +1490,32 @@ fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect, 
     }
 }
 
+/// Black out obsolete host pixels outside the logical AppKit bounds without
+/// changing content/Metal layers within it. `pitch` includes SDL row padding.
+fn blackout_software_exterior(
+    pixels: &mut [u8],
+    pitch: usize,
+    width: usize,
+    height: usize,
+    allowed: Rect,
+) {
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: width as i64,
+        height: height as i64,
+    };
+    let allowed = whole.intersection(&allowed);
+    for band in whole.subtract(&[allowed]) {
+        for y in band.y as usize..(band.y + band.height) as usize {
+            let start = y * pitch + band.x as usize * 4;
+            for pixel in pixels[start..start + band.width as usize * 4].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+}
+
 fn present_dirty() {
     let presenter = *PRESENTER.lock().unwrap_or_else(|e| e.into_inner());
     let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1545,7 +1573,22 @@ fn present_dirty() {
                 width: columns as i64,
                 height: rows as i64,
             };
-            for piece in shown.subtract(&kept) {
+            let logical = logical_pixel_bounds(window, shown);
+            // SAFETY: SDL owns pitch * height bytes during this callback.
+            let pixels = unsafe {
+                std::slice::from_raw_parts_mut(
+                    surface.pixels,
+                    surface.pitch as usize * surface.height.max(0) as usize,
+                )
+            };
+            blackout_software_exterior(
+                pixels,
+                surface.pitch as usize,
+                surface.width.max(0) as usize,
+                surface.height.max(0) as usize,
+                logical,
+            );
+            for piece in logical.subtract(&kept) {
                 let (left, width) = (piece.x as usize, piece.width as usize);
                 for row in piece.y as usize..(piece.y + piece.height) as usize {
                     let from = (row * store.width as usize + left) * 4;
@@ -2493,6 +2536,68 @@ mod tests {
         );
         assert_eq!(mirrored.pixels, [255, 0, 0, 255, 0, 0, 255, 255]);
         FOCUS.with(|stack| stack.borrow_mut().clear());
+    }
+
+    #[test]
+    fn fractional_backing_fallback_uses_the_same_right_and_bottom_pixel_edges() {
+        let clip = crate::window::pixel_clip_from_surface(
+            NSRect {
+                origin: NSPoint { x: 0.5, y: 0.5 },
+                size: NSSize {
+                    width: 1438.5,
+                    height: 868.5,
+                },
+            },
+            (1440, 900),
+            (1440, 900),
+        );
+        assert_eq!(
+            clip,
+            sdl3::Rect {
+                x: 1,
+                y: 1,
+                w: 1438,
+                h: 868
+            }
+        );
+        let allowed = Rect {
+            x: clip.x.into(),
+            y: clip.y.into(),
+            width: clip.w.into(),
+            height: clip.h.into(),
+        };
+        let mut pixels = vec![0u8; 1440 * 900 * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 255, 255]);
+        }
+        blackout_software_exterior(&mut pixels, 1440 * 4, 1440, 900, allowed);
+        let at = |x: usize, y: usize| &pixels[(y * 1440 + x) * 4..(y * 1440 + x + 1) * 4];
+        assert_eq!(at(1, 1), &[0, 0, 255, 255]);
+        assert_eq!(at(1438, 868), &[0, 0, 255, 255]);
+        assert_eq!(at(1439, 868), &[0, 0, 0, 255], "rightmost pixel escaped");
+        assert_eq!(at(1438, 869), &[0, 0, 0, 255], "bottom pixel escaped");
+        assert_eq!(at(0, 1), &[0, 0, 0, 255]);
+        assert_eq!(at(1, 0), &[0, 0, 0, 255]);
+        let retina = crate::window::pixel_clip_from_surface(
+            NSRect {
+                origin: NSPoint { x: 0.25, y: 0.25 },
+                size: NSSize {
+                    width: 99.25,
+                    height: 79.25,
+                },
+            },
+            (100, 80),
+            (200, 160),
+        );
+        assert_eq!(
+            retina,
+            sdl3::Rect {
+                x: 1,
+                y: 1,
+                w: 198,
+                h: 158
+            }
+        );
     }
 
     #[test]

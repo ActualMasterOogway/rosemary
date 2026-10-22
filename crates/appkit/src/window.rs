@@ -391,6 +391,8 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
 
 /// Destroy an SDL window, telling everything keyed on it first.
 fn destroy_sdl_window(sdl: sdl3::Window) {
+    #[cfg(target_os = "linux")]
+    sdl3::x11_mask::forget(sdl);
     OPENGL_WINDOWS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -579,8 +581,23 @@ pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
             h: pixels_h,
         });
     };
-    let scale_x = f64::from(pixels_w) / f64::from(width);
-    let scale_y = f64::from(pixels_h) / f64::from(height);
+    Some(pixel_clip_from_surface(
+        surface,
+        (width, height),
+        (pixels_w, pixels_h),
+    ))
+}
+
+/// The host's half-open pixel rectangle, rounding both endpoints rather than
+/// rounding a fractional origin and size independently. Shared by every
+/// presentation backend through `presentation_clip`.
+pub(crate) fn pixel_clip_from_surface(
+    surface: NSRect,
+    (width, height): (i32, i32),
+    (pixels_w, pixels_h): (i32, i32),
+) -> sdl3::Rect {
+    let scale_x = f64::from(pixels_w) / f64::from(width.max(1));
+    let scale_y = f64::from(pixels_h) / f64::from(height.max(1));
     let x0 = (surface.origin.x * scale_x).round() as i32;
     let y0 = (surface.origin.y * scale_y).round() as i32;
     let x1 = ((surface.origin.x + surface.size.width) * scale_x).round() as i32;
@@ -589,12 +606,12 @@ pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
     let y0 = y0.clamp(0, pixels_h);
     let x1 = x1.clamp(x0, pixels_w);
     let y1 = y1.clamp(y0, pixels_h);
-    Some(sdl3::Rect {
+    sdl3::Rect {
         x: x0,
         y: y0,
         w: x1 - x0,
         h: y1 - y0,
-    })
+    }
 }
 
 /// Map a rectangle in AppKit window base coordinates onto the host surface.
@@ -649,6 +666,53 @@ fn constrain_fullscreen_frame(mut rect: NSRect, host: NSRect) -> NSRect {
     rect
 }
 
+/// Refresh the *already displayed* OpenGL surface's host-side boundary.
+/// A guest may stop swapping immediately after changing its NSWindow frame;
+/// its GL context can be current on another thread. Never issue GL commands
+/// here. On X11 an input-transparent shaped black child above the host window
+/// obscures out-of-bounds pixels immediately, including old front buffers.
+pub(crate) fn refresh_idle_opengl_clip(sdl: sdl3::Window) {
+    if sdl.is_null() || !draws_with_opengl(sdl) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !sdl3::video::is_x11() {
+            return;
+        }
+        let logical = if is_fullscreen(sdl) {
+            let clip = presentation_clip(sdl);
+            let points = sdl3::video::window_size(sdl);
+            let pixels = sdl3::video::window_size_in_pixels(sdl);
+            match (clip, points, pixels) {
+                (Some(clip), Some((w, h)), Some((pw, ph))) if pw > 0 && ph > 0 => {
+                    // X11 child coordinates are window points. Map *edges*
+                    // from the canonical pixel clip rather than rounding
+                    // origin and size independently.
+                    let x0 = (f64::from(clip.x) * f64::from(w) / f64::from(pw)).round() as i32;
+                    let x1 =
+                        (f64::from(clip.x + clip.w) * f64::from(w) / f64::from(pw)).round() as i32;
+                    let y0 = (f64::from(clip.y) * f64::from(h) / f64::from(ph)).round() as i32;
+                    let y1 =
+                        (f64::from(clip.y + clip.h) * f64::from(h) / f64::from(ph)).round() as i32;
+                    Some(sdl3::Rect {
+                        x: x0,
+                        y: y0,
+                        w: x1 - x0,
+                        h: y1 - y0,
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // If fullscreen ended, unmap the masking child immediately; the SDL
+        // fullscreen transition restores the physical window geometry.
+        let _ = sdl3::x11_mask::update(sdl, logical);
+    }
+}
+
 fn set_fullscreen_frame(object: Id, rect: NSRect) {
     let Some(host) = host_frame(object) else {
         return;
@@ -666,6 +730,10 @@ fn set_fullscreen_frame(object: Id, rect: NSRect) {
     window.requested = rect;
     window.size_pending = 0;
     trace!("{object:p} fullscreen logical frame {rect:?}; host {host:?}");
+    // Refresh the backing even when SDL's physical fullscreen extent stays
+    // unchanged; background and view clips may have changed in place.
+    crate::backing::window_background_changed(object);
+    refresh_idle_opengl_clip(window_of(object).sdl);
     fit_content_view(object);
     crate::screen::confine_pointer(object);
     apply_mouse_confinement(object);
@@ -2606,6 +2674,11 @@ pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
         window.fullscreen_transition = 0;
     }
     refit_inset(receiver);
+    // SDL can report the new fullscreen state before it settles physical
+    // window geometry. Recompute after clearing stale transition geometry.
+    if entered {
+        refresh_idle_opengl_clip(window_of(receiver).sdl);
+    }
     if entered {
         crate::screen::confine_pointer(receiver);
         apply_mouse_confinement(receiver);

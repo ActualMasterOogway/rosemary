@@ -7,6 +7,8 @@ pub mod keycodes;
 pub mod mouse;
 pub mod tray;
 pub mod wayland;
+#[cfg(target_os = "linux")]
+pub mod x11_mask;
 
 pub mod init {
     pub const VIDEO: u32 = 0x0000_0020;
@@ -269,6 +271,7 @@ struct Api {
     SDL_GetSystemTheme: Option<unsafe extern "C" fn() -> c_int>,
     SDL_GetCurrentVideoDriver: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_GetWindowProperties: Option<unsafe extern "C" fn(Window) -> PropertiesId>,
+    SDL_GetNumberProperty: Option<unsafe extern "C" fn(PropertiesId, *const c_char, i64) -> i64>,
     SDL_GetPointerProperty:
         Option<unsafe extern "C" fn(PropertiesId, *const c_char, *mut c_void) -> *mut c_void>,
 
@@ -501,6 +504,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetSystemTheme,
             SDL_GetCurrentVideoDriver,
             SDL_GetWindowProperties,
+            SDL_GetNumberProperty,
             SDL_GetPointerProperty,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
@@ -3374,6 +3378,31 @@ pub mod video {
         let name = unsafe { f() };
         // SAFETY: a NUL-terminated string SDL keeps for the process.
         !name.is_null() && unsafe { CStr::from_ptr(name) } == expected
+    }
+
+    /// X11's live display and native window handle. Borrowed from SDL; do
+    /// not close the display, and finish host requests before destroying SDL.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn x11_native_window(window: Window) -> Option<(*mut c_void, u64)> {
+        if !is_x11() {
+            return None;
+        }
+        let api = api()?;
+        let (props, pointer, number) = (
+            api.SDL_GetWindowProperties?,
+            api.SDL_GetPointerProperty?,
+            api.SDL_GetNumberProperty?,
+        );
+        let properties = unsafe { props(window) };
+        let display = unsafe {
+            pointer(
+                properties,
+                c"SDL.window.x11.display".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        let handle = unsafe { number(properties, c"SDL.window.x11.window".as_ptr(), 0) };
+        (!display.is_null() && handle != 0).then_some((display, handle as u64))
     }
 
     /// A window's `wl_display` and `wl_surface`, on Wayland.

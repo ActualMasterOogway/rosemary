@@ -1028,6 +1028,189 @@ fn fractional_fullscreen_frame_matches_content_view() {
     objc::arc::pool_pop(pool);
 }
 
+/// The front buffer can outlive the guest's next render. Changing the logical
+/// fullscreen frame must clip an *already swapped* full-display image with no
+/// GL calls on AppKit's event thread and without another guest swap.
+#[test]
+#[ignore = "requires Xvfb/xfwm4, ImageMagick and X11 Shape"]
+fn opengl_idle_front_buffer_is_clipped_without_guest_swap() {
+    crate::bootstrap();
+    assert!(sdl3::video::init_video());
+    assert!(
+        sdl3::video::is_x11(),
+        "the X11 idle-presentation regression requires SDL_VIDEODRIVER=x11"
+    );
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            object,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::RESIZABLE,
+        )
+    };
+    assert!(rebuild_for_opengl(object));
+    let sdl = window_of(object).sdl;
+    sdl3::video::show_window(sdl);
+    window_of(object).shown = 1;
+    let gl = sdl3::video::gl_create_context(sdl).unwrap();
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).reported_fullscreen == 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "fullscreen did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // SDL reports the fullscreen extent before Xfwm4 has always processed
+    // its X11 ConfigureNotify. Do not capture a still-windowed front buffer.
+    std::thread::sleep(std::time::Duration::from_millis(180));
+    while let Some(event) = sdl3::video::poll() {
+        crate::event::deliver(event);
+    }
+    let host = host_frame(object).unwrap();
+    let (width, height) = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    assert!(
+        sdl3::video::gl_make_current(sdl, gl),
+        "GL context unavailable after fullscreen"
+    );
+    let clear_color = sdl3::video::gl_proc_address(c"glClearColor").unwrap();
+    let clear_color: unsafe extern "C" fn(f32, f32, f32, f32) =
+        unsafe { std::mem::transmute(clear_color) };
+    let clear = sdl3::video::gl_proc_address(c"glClear").unwrap();
+    let clear: unsafe extern "C" fn(u32) = unsafe { std::mem::transmute(clear) };
+    let pixels = || {
+        let filename =
+            std::env::temp_dir().join(format!("rosemary-gl-idle-{}.png", std::process::id()));
+        let screenshot = std::process::Command::new("import")
+            .args(["-window", "root"])
+            .arg(&filename)
+            .status()
+            .expect("ImageMagick import");
+        assert!(screenshot.success());
+        let bytes = std::process::Command::new("magick")
+            .arg(&filename)
+            .args(["-depth", "8", "RGB:-"])
+            .output()
+            .expect("ImageMagick magick");
+        let _ = std::fs::remove_file(filename);
+        assert!(bytes.status.success());
+        assert_eq!(bytes.stdout.len(), width as usize * height as usize * 3);
+        bytes.stdout
+    };
+    let sample = |bytes: &[u8], x: i32, y: i32| {
+        let at = (y as usize * width as usize + x as usize) * 3;
+        bytes[at..at + 3].to_vec()
+    };
+    // Make sure the GLX drawable actually caught up with the earlier X11
+    // window resize. Repeated *pre-resize* guest swaps are fine; the point of
+    // the test is that there are absolutely no guest swaps *after* shrinking.
+    let mut full = Vec::new();
+    for try_at in 0..12 {
+        assert!(sdl3::video::gl_make_current(sdl, gl));
+        unsafe {
+            clear_color(1.0, 0.0, 0.0, 1.0);
+            clear(0x4000);
+        }
+        sdl3::video::swap_window(sdl);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        full = pixels();
+        if sample(&full, width / 2, height - 5) == [255, 0, 0] {
+            break;
+        }
+        if try_at == 11 {
+            eprintln!("OpenGL host drawable never settled after fullscreen");
+        }
+    }
+    assert_eq!(
+        sample(&full, width / 2, height - 5),
+        [255, 0, 0],
+        "the GLX front buffer never filled the SDL fullscreen window"
+    );
+    let logical = NSRect {
+        origin: NSPoint {
+            x: host.origin.x + 0.5,
+            y: host.origin.y + 31.5,
+        },
+        size: NSSize {
+            width: host.size.width - 1.5,
+            height: host.size.height - 31.5,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), logical) };
+    let clip = presentation_clip(sdl).unwrap();
+    assert!(clip.w < width && clip.h < height);
+    // No glClear, no -flushBuffer, no SDL_GL_SwapWindow after logical resize.
+    let after = pixels();
+    assert_eq!(sample(&after, width / 2, height / 2), [255, 0, 0]);
+    assert_eq!(
+        sample(&after, width / 2, height - 5),
+        [0, 0, 0],
+        "stale GL bottom edge escaped"
+    );
+    assert_eq!(
+        sample(&after, width - 1, height / 2),
+        [0, 0, 0],
+        "stale GL right edge escaped"
+    );
+    assert_eq!(
+        sample(&after, 0, height / 2),
+        [0, 0, 0],
+        "fractional left edge escaped"
+    );
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), host) };
+    // X11 does not promise that a window retains obscured front-buffer
+    // contents. The guest can redraw on expansion; make sure the overlay is
+    // gone and the entire restored drawable is visible after that new swap.
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    unsafe {
+        clear_color(1.0, 0.0, 0.0, 1.0);
+        clear(0x4000);
+    }
+    sdl3::video::swap_window(sdl);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let restored = pixels();
+    assert_eq!(
+        sample(&restored, width / 2, height - 5),
+        [255, 0, 0],
+        "blackout remained after restored guest presentation"
+    );
+    assert_eq!(sample(&restored, width - 1, height / 2), [255, 0, 0]);
+    // Ensure the host child mask did not steal input focus.
+    assert!(sdl3::video::window_flags(sdl) & sdl3::video::flags::FULLSCREEN != 0);
+    sdl3::video::gl_make_current(sdl, std::ptr::null_mut());
+    sdl3::video::gl_destroy_context(gl);
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}
+
 #[test]
 #[ignore = "requires Xvfb/xfwm4 and Mesa OpenGL"]
 fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport() {
