@@ -83,7 +83,11 @@ fn xlib() -> Option<&'static Xlib> {
                 if symbol.is_null() {
                     return None;
                 }
-                std::mem::transmute(symbol)
+                {
+                    // Function pointers have pointer-sized ABI on supported
+                    // X11 platforms; the inferred T is the exact Xlib field type.
+                    std::mem::transmute_copy::<*mut c_void, _>(&symbol)
+                }
             }};
         }
         Some(Xlib {
@@ -163,7 +167,7 @@ pub fn update(window: Window, clip: Option<Rect>) -> bool {
     if !map.contains_key(&(window as usize)) && bands(size, clip).is_empty() {
         return true;
     }
-    if !map.contains_key(&(window as usize)) {
+    if let std::collections::hash_map::Entry::Vacant(vacant) = map.entry(window as usize) {
         let mut event = 0;
         let mut error = 0;
         // SAFETY: SDL supplies a live X11 Display and native window; access is
@@ -200,16 +204,13 @@ pub fn update(window: Window, clip: Option<Rect>) -> bool {
         if overlay == 0 {
             return false;
         }
-        map.insert(
-            window as usize,
-            Mask {
-                display: display as usize,
-                overlay,
-                size,
-                clip: Rect::default(),
-                shown: false,
-            },
-        );
+        vacant.insert(Mask {
+            display: display as usize,
+            overlay,
+            size,
+            clip: Rect::default(),
+            shown: false,
+        });
     }
     let entry = map.get_mut(&(window as usize)).expect("just inserted");
     if entry.clip == clip && entry.size == size {

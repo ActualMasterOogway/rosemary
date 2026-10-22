@@ -2114,26 +2114,93 @@ mod chrome_blit {
 
     static FITTED: std::sync::Mutex<Vec<ViewportFit>> = std::sync::Mutex::new(Vec::new());
 
-    /// GL uses bottom-left pixel coordinates, whereas `surface_frame` is
-    /// top-left in logical points. Round *edges*, not sizes, so half-points
-    /// retain their physical pixel at Retina density.
+    #[cfg(test)]
+    #[test]
+    fn fractional_gl_mask_matches_canonical_appkit_pixels_exactly() {
+        use foundation::geometry::{NSPoint, NSRect, NSSize};
+        for (surface, host, pixels) in [
+            (
+                NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.5 },
+                    size: NSSize {
+                        width: 1440.0,
+                        height: 899.0,
+                    },
+                },
+                NSSize {
+                    width: 1440.0,
+                    height: 900.0,
+                },
+                (1440, 900),
+            ),
+            (
+                NSRect {
+                    origin: NSPoint { x: 0.5, y: 31.5 },
+                    size: NSSize {
+                        width: 1438.5,
+                        height: 868.0,
+                    },
+                },
+                NSSize {
+                    width: 1440.0,
+                    height: 900.0,
+                },
+                (1440, 900),
+            ),
+            (
+                NSRect {
+                    origin: NSPoint { x: 0.25, y: 0.25 },
+                    size: NSSize {
+                        width: 99.25,
+                        height: 79.25,
+                    },
+                },
+                NSSize {
+                    width: 100.0,
+                    height: 80.0,
+                },
+                (200, 160),
+            ),
+        ] {
+            let clip = crate::window::pixel_clip_from_surface(
+                surface,
+                (host.width as i32, host.height as i32),
+                pixels,
+            );
+            let gl = logical_viewport(surface, host, pixels, 0.0);
+            assert_eq!(gl, gl_rect_from_top_clip(clip, pixels.1));
+            assert_eq!(clip.y, pixels.1 - (gl.1 + gl.3));
+            assert_eq!(clip.y + clip.h, pixels.1 - gl.1);
+            assert_eq!(clip.x, gl.0);
+            assert_eq!(clip.x + clip.w, gl.0 + gl.2);
+        }
+    }
+
+    /// Convert the *already rounded* SDL/NSWindow top-origin pixel rectangle
+    /// into GL's bottom-origin coordinates. Rounding after reversing the Y
+    /// axis moves a half-point edge by a pixel because ties round toward +inf.
+    fn gl_rect_from_top_clip(clip: sdl3::Rect, pixel_height: i32) -> (i32, i32, i32, i32) {
+        (clip.x, pixel_height - clip.y - clip.h, clip.w, clip.h)
+    }
+
+    /// AppKit content view excludes a titlebar inset at the *top* of the
+    /// canonical logical frame. Round its end in top-origin coordinates too.
     fn logical_viewport(
         surface: foundation::geometry::NSRect,
         host: foundation::geometry::NSSize,
         pixels: (i32, i32),
         inset: f64,
     ) -> (i32, i32, i32, i32) {
-        let sx = f64::from(pixels.0) / host.width.max(1.0);
-        let sy = f64::from(pixels.1) / host.height.max(1.0);
-        let x0 = (surface.origin.x * sx).round() as i32;
-        let x1 = ((surface.origin.x + surface.size.width) * sx).round() as i32;
-        let y0 = ((host.height - surface.origin.y - surface.size.height) * sy).round() as i32;
-        let y1 = ((host.height - surface.origin.y - inset) * sy).round() as i32;
-        let x0 = x0.clamp(0, pixels.0);
-        let x1 = x1.clamp(x0, pixels.0);
-        let y0 = y0.clamp(0, pixels.1);
-        let y1 = y1.clamp(y0, pixels.1);
-        (x0, y0, x1 - x0, y1 - y0)
+        let clip = crate::window::pixel_clip_from_surface(
+            surface,
+            (host.width as i32, host.height as i32),
+            pixels,
+        );
+        let (x, y, w, h) = gl_rect_from_top_clip(clip, pixels.1);
+        let top = ((surface.origin.y + inset) * f64::from(pixels.1) / host.height.max(1.0)).round()
+            as i32;
+        let top = top.clamp(clip.y, clip.y + clip.h);
+        (x, y, w, (clip.y + clip.h - top).clamp(0, h))
     }
 
     /// Initialize GL's default viewport for AppKit's drawable, and adjust it
@@ -2223,22 +2290,13 @@ mod chrome_blit {
         {
             return;
         }
-        let (Some(surface), Some((width, height)), Some(pixels)) = (
-            crate::window::surface_frame(object),
-            sdl3::video::window_size(window),
+        let (Some(clip), Some(pixels)) = (
+            crate::window::presentation_clip(window),
             sdl3::video::window_size_in_pixels(window),
         ) else {
             return;
         };
-        let (x, y, w, h) = logical_viewport(
-            surface,
-            foundation::geometry::NSSize {
-                width: f64::from(width),
-                height: f64::from(height),
-            },
-            pixels,
-            0.0,
-        );
+        let (x, y, w, h) = gl_rect_from_top_clip(clip, pixels.1);
         if (x, y, w, h) == (0, 0, pixels.0, pixels.1) {
             return;
         }
@@ -2543,7 +2601,9 @@ mod chrome_blit {
             };
             assert_eq!(
                 logical_viewport(rect, host, (1440, 900), 0.0),
-                (1, 1, 1439, 899)
+                // Pixel Y=0 is included by the canonical top-origin clip:
+                // [1,900) maps to GL [0,899), not independently rounded [1,900).
+                (1, 0, 1439, 899)
             );
             assert_eq!(
                 logical_viewport(rect, host, (2880, 1800), 0.0),

@@ -1211,6 +1211,180 @@ fn opengl_idle_front_buffer_is_clipped_without_guest_swap() {
     objc::arc::pool_pop(pool);
 }
 
+/// Exercise the AppKit-level resize path under a real Wayland compositor.
+/// The guest deliberately performs no GL operation after the logical resize;
+/// the compositor must hide the stale exterior from the *old* front buffer.
+#[test]
+#[ignore = "requires nested Weston on Xvfb, Mesa EGL and ImageMagick"]
+fn wayland_idle_fullscreen_opengl_frame_is_masked_from_nswindow_resize() {
+    crate::bootstrap();
+    assert!(sdl3::video::init_video());
+    assert!(
+        sdl3::video::is_wayland(),
+        "requires SDL_VIDEODRIVER=wayland"
+    );
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    unsafe {
+        set_style_mask(
+            object,
+            objc::sel::get("setStyleMask:"),
+            style::TITLED | style::RESIZABLE,
+        )
+    };
+    assert!(rebuild_for_opengl(object));
+    let sdl = window_of(object).sdl;
+    sdl3::video::show_window(sdl);
+    window_of(object).shown = 1;
+    let gl = sdl3::video::gl_create_context(sdl).expect("EGL context");
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).reported_fullscreen == 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Weston did not settle fullscreen"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let host = host_frame(object).unwrap();
+    let (w, h) = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    assert_eq!(
+        (w, h),
+        (1440, 900),
+        "fixture expects a 1440×900 Weston output"
+    );
+    let color: unsafe extern "C" fn(f32, f32, f32, f32) =
+        unsafe { std::mem::transmute(sdl3::video::gl_proc_address(c"glClearColor").unwrap()) };
+    let clear: unsafe extern "C" fn(u32) =
+        unsafe { std::mem::transmute(sdl3::video::gl_proc_address(c"glClear").unwrap()) };
+    let capture = || {
+        let image = std::env::temp_dir().join(format!(
+            "rosemary-wayland-appkit-{}.png",
+            std::process::id()
+        ));
+        assert!(
+            std::process::Command::new("import")
+                .args(["-window", "root"])
+                .arg(&image)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let rgb = std::process::Command::new("magick")
+            .arg(&image)
+            .args(["-depth", "8", "RGB:-"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(image);
+        assert!(rgb.status.success());
+        assert_eq!(rgb.stdout.len(), (w * h * 3) as usize);
+        rgb.stdout
+    };
+    let sample = |pixels: &[u8], x: usize, y: usize| {
+        let at = (y * w as usize + x) * 3;
+        [pixels[at], pixels[at + 1], pixels[at + 2]]
+    };
+    let mut full = Vec::new();
+    let mut bottom = 0usize;
+    for _ in 0..10 {
+        assert!(sdl3::video::gl_make_current(sdl, gl));
+        unsafe {
+            color(1.0, 0.0, 0.0, 1.0);
+            clear(0x4000)
+        };
+        sdl3::video::swap_window(sdl);
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(65));
+        full = capture();
+        bottom = (0..h as usize)
+            .rev()
+            .find(|y| sample(&full, 450, *y) == [255, 0, 0])
+            .unwrap_or(0);
+        if bottom >= h as usize - 4 {
+            break;
+        }
+    }
+    assert!(
+        bottom >= h as usize - 4,
+        "guest never presented full-height red front buffer"
+    );
+    assert_eq!(sample(&full, 450, bottom - 5), [255, 0, 0]);
+    let shorter = NSRect {
+        origin: NSPoint {
+            x: host.origin.x + 1.0,
+            y: host.origin.y + 31.0,
+        },
+        size: NSSize {
+            width: host.size.width - 32.0,
+            height: host.size.height - 31.0,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), shorter) };
+    let logical = presentation_clip(sdl).unwrap();
+    assert!(logical.w < w && logical.h < h);
+    // No GL draw and no guest swap between setFrame: and the screenshot.
+    std::thread::sleep(std::time::Duration::from_millis(85));
+    let masked = capture();
+    assert_eq!(
+        sample(&masked, 450, 450),
+        [255, 0, 0],
+        "Wayland overlay damaged guest interior"
+    );
+    assert_eq!(
+        sample(&masked, 450, bottom - 5),
+        [0, 0, 0],
+        "idle guest's bottom edge escaped"
+    );
+    assert_eq!(
+        sample(&masked, w as usize - 8, 450),
+        [0, 0, 0],
+        "idle guest's right edge escaped"
+    );
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), host) };
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    unsafe {
+        color(1.0, 0.0, 0.0, 1.0);
+        clear(0x4000)
+    };
+    sdl3::video::swap_window(sdl);
+    std::thread::sleep(std::time::Duration::from_millis(90));
+    let restored = capture();
+    assert_eq!(
+        sample(&restored, 450, bottom - 5),
+        [255, 0, 0],
+        "restoration retained black mask"
+    );
+    sdl3::video::gl_make_current(sdl, std::ptr::null_mut());
+    sdl3::video::gl_destroy_context(gl);
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}
+
 #[test]
 #[ignore = "requires Xvfb/xfwm4 and Mesa OpenGL"]
 fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport() {

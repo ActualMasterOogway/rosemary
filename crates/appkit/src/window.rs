@@ -393,6 +393,8 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
 fn destroy_sdl_window(sdl: sdl3::Window) {
     #[cfg(target_os = "linux")]
     sdl3::x11_mask::forget(sdl);
+    #[cfg(target_os = "linux")]
+    sdl3::wayland_mask::forget(sdl);
     OPENGL_WINDOWS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -677,7 +679,7 @@ pub(crate) fn refresh_idle_opengl_clip(sdl: sdl3::Window) {
     }
     #[cfg(target_os = "linux")]
     {
-        if !sdl3::video::is_x11() {
+        if !sdl3::video::is_x11() && !sdl3::video::is_wayland() {
             return;
         }
         let logical = if is_fullscreen(sdl) {
@@ -709,7 +711,11 @@ pub(crate) fn refresh_idle_opengl_clip(sdl: sdl3::Window) {
         };
         // If fullscreen ended, unmap the masking child immediately; the SDL
         // fullscreen transition restores the physical window geometry.
-        let _ = sdl3::x11_mask::update(sdl, logical);
+        if sdl3::video::is_x11() {
+            let _ = sdl3::x11_mask::update(sdl, logical);
+        } else {
+            let _ = sdl3::wayland_mask::update(sdl, logical);
+        }
     }
 }
 

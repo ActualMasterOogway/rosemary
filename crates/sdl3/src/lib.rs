@@ -8,6 +8,8 @@ pub mod mouse;
 pub mod tray;
 pub mod wayland;
 #[cfg(target_os = "linux")]
+pub mod wayland_mask;
+#[cfg(target_os = "linux")]
 pub mod x11_mask;
 
 pub mod init {

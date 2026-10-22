@@ -35,6 +35,7 @@ xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' bash -euo pipefail -c '
                 "$binary" fullscreen_transition_posts_geometry_before_did_notifications --ignored --test-threads=1 --nocapture
                 "$binary" fractional_fullscreen_frame_matches_content_view --ignored --test-threads=1 --nocapture
                 "$binary" opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport --ignored --test-threads=1 --nocapture
+                "$binary" opengl_idle_front_buffer_is_clipped_without_guest_swap --ignored --test-threads=1 --nocapture
                 ;;
         esac
     done
