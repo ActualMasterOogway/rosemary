@@ -591,6 +591,297 @@ fn a_frame_off_the_edge_of_its_window_is_clipped_to_it() {
     assert!(clamp(&frame(10, 10, 0, 40), extent).is_none());
 }
 
+/// Actual WSI presentation with a shortened AppKit NSWindow inside a full-
+/// display SDL container. A pure clipping unit cannot validate Vulkan image
+/// layout changes needed for the new black-band clear and cropped transfer.
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "requires a Fedora X11 Vulkan window")]
+fn a_shrunken_guest_fullscreen_is_presented_through_the_vulkan_swapchain() {
+    if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
+        return;
+    }
+    let Ok(adapters) = crate::vulkan::adapters() else {
+        return;
+    };
+    let Some(gpu) = adapters.first().and_then(|adapter| adapter.gpu().ok()) else {
+        return;
+    };
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, appkit::window::INSTANCE_SIZE);
+    let mut frame = foundation::geometry::NSRect {
+        origin: foundation::geometry::NSPoint { x: 80.0, y: 90.0 },
+        size: foundation::geometry::NSSize {
+            width: 400.0,
+            height: 300.0,
+        },
+    };
+    let init: unsafe extern "C" fn(
+        objc::object::Id,
+        objc::sel::Sel,
+        foundation::geometry::NSRect,
+        usize,
+        usize,
+        u8,
+    ) -> objc::object::Id = unsafe { std::mem::transmute(objc::msg::entry()) };
+    assert_eq!(
+        unsafe {
+            init(
+                object,
+                objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+                frame,
+                9,
+                0,
+                0,
+            )
+        },
+        object
+    );
+    let sdl = unsafe { appkit::window::sdl_window(object) };
+    assert!(!sdl.is_null());
+    sdl3::video::show_window(sdl);
+    let toggle: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel, objc::object::Id) =
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    unsafe {
+        toggle(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sdl3::video::window_flags(sdl) & sdl3::video::flags::FULLSCREEN == 0 {
+        appkit::event::pump(std::ptr::null_mut());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fullscreen did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    appkit::event::pump(std::ptr::null_mut());
+    let get: unsafe extern "C" fn(
+        objc::object::Id,
+        objc::sel::Sel,
+    ) -> foundation::geometry::NSRect = unsafe { std::mem::transmute(objc::msg::entry_stret()) };
+    frame = unsafe { get(object, objc::sel::get("frame")) };
+    let host_frame = frame;
+    frame.origin.y += 31.0;
+    frame.size.height -= 31.0;
+    let set: unsafe extern "C" fn(objc::object::Id, objc::sel::Sel, foundation::geometry::NSRect) =
+        unsafe { std::mem::transmute(objc::msg::entry()) };
+    unsafe { set(object, objc::sel::get("setFrame:"), frame) };
+    let bounds = appkit::window::presentation_clip(sdl).unwrap();
+    let (w, h) = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    assert!(
+        bounds.h < h && bounds.h > 0,
+        "logical window did not shrink"
+    );
+    let full = appkit::view::Frame {
+        window: sdl,
+        x: 0,
+        y: 0,
+        width: w as u32,
+        height: h as u32,
+        window_width: w as u32,
+        window_height: h as u32,
+    };
+    let accepted = clamp(
+        &full,
+        vk::Extent2D {
+            width: w as u32,
+            height: h as u32,
+        },
+    )
+    .unwrap();
+    assert_eq!(accepted[1].y - accepted[0].y, bounds.h);
+    let source = gpu
+        .create_image(&ImageDescription {
+            image_type: vk::ImageType::TYPE_2D,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: vk::Format::B8G8R8A8_UNORM,
+            width: full.width,
+            height: full.height,
+            depth: 1,
+            levels: 1,
+            layers: 1,
+            samples: 1,
+            usage: gpu::USAGE_RENDER_TARGET,
+            cube: false,
+            components: vk::ComponentMapping::default(),
+        })
+        .unwrap();
+    // Give the oversized layer an unmistakable red drawable: pixel-level
+    // verification must not pass merely because an uninitialised source image
+    // happened to be black.
+    gpu.one_shot(|device, commands| unsafe {
+        device.cmd_clear_color_image(
+            commands,
+            source.image,
+            vk::ImageLayout::GENERAL,
+            &vk::ClearColorValue {
+                float32: [1.0, 0.0, 0.0, 1.0],
+            },
+            &[vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            }],
+        );
+    })
+    .expect("red source cleared through Vulkan");
+    for _ in 0..5 {
+        assert_eq!(present(gpu, 333, &full, &source, &[]), Ok(true));
+        // The second layer forces the accumulator/compositor path that GPU
+        // DMA-BUF overlays share, rather than only direct layer presentation.
+        assert_eq!(present(gpu, 334, &full, &source, &[]), Ok(true));
+    }
+    assert!(
+        SWAPCHAINS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|all| all.get(&(sdl as usize)))
+            .is_some_and(|chain| chain.composite.is_some())
+    );
+    // Optional pixel oracle for real X11 Vulkan hosts with ImageMagick.
+    // The test otherwise still executes Vulkan's recorded clear/blit/present.
+    if std::env::var_os("ROSEMARY_TEST_VULKAN_PIXELS").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        let image =
+            std::env::temp_dir().join(format!("rosemary-vulkan-clip-{}.png", std::process::id()));
+        let photographed = std::process::Command::new("import")
+            .args(["-window", "root"])
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(
+            photographed.success(),
+            "X11 screenshot could not be captured"
+        );
+        let rgb = std::process::Command::new("magick")
+            .arg(&image)
+            .args(["-depth", "8", "RGB:-"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&image);
+        assert!(rgb.status.success());
+        assert_eq!(rgb.stdout.len(), w as usize * h as usize * 3);
+        let sample = |x: usize, y: usize| {
+            let index = (y * w as usize + x) * 3;
+            &rgb.stdout[index..index + 3]
+        };
+        let x = w as usize / 2;
+        assert_eq!(
+            sample(x, h as usize - 5),
+            &[0, 0, 0],
+            "pixels beyond logical frame escaped"
+        );
+        assert_eq!(
+            sample(x, h as usize - 60),
+            &[255, 0, 0],
+            "valid Metal layer pixel not presented"
+        );
+    }
+    // Restoring the full logical NSWindow must reveal the source pixels in
+    // the previously excluded region, not leave a permanent black mask.
+    unsafe { set(object, objc::sel::get("setFrame:"), host_frame) };
+    let restored = appkit::window::presentation_clip(sdl).unwrap();
+    assert_eq!(
+        (restored.x, restored.y, restored.w, restored.h),
+        (0, 0, w, h)
+    );
+    for _ in 0..3 {
+        assert_eq!(present(gpu, 333, &full, &source, &[]), Ok(true));
+        assert_eq!(present(gpu, 334, &full, &source, &[]), Ok(true));
+    }
+    if std::env::var_os("ROSEMARY_TEST_VULKAN_PIXELS").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        let image = std::env::temp_dir().join(format!(
+            "rosemary-vulkan-restored-{}.png",
+            std::process::id()
+        ));
+        let screenshot = std::process::Command::new("import")
+            .args(["-window", "root"])
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(screenshot.success());
+        let rgb = std::process::Command::new("magick")
+            .arg(&image)
+            .args(["-depth", "8", "RGB:-"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&image);
+        assert!(rgb.status.success());
+        let offset = ((h as usize - 5) * w as usize + w as usize / 2) * 3;
+        assert_eq!(
+            &rgb.stdout[offset..offset + 3],
+            &[255, 0, 0],
+            "restoring the logical frame did not reveal its lower pixels"
+        );
+    }
+    SWAPCHAINS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|all| all.remove(&(sdl as usize)));
+    gpu.destroy_image(source);
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}
+
+#[test]
+fn fullscreen_logical_clip_preserves_metal_blit_source_coordinates() {
+    let extent = vk::Extent2D {
+        width: 100,
+        height: 80,
+    };
+    let frame = appkit::view::Frame {
+        window: std::ptr::null_mut(),
+        x: -10,
+        y: -5,
+        width: 120,
+        height: 90,
+        window_width: 100,
+        window_height: 80,
+    };
+    let allowed = sdl3::Rect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 49,
+    };
+    let clipped =
+        clamp_to(&frame, extent, Some(allowed)).expect("oversized layer intersects logical window");
+    assert_eq!(
+        (clipped[0].x, clipped[0].y, clipped[1].x, clipped[1].y),
+        (0, 0, 100, 49)
+    );
+    let source = source_of(clipped, &frame, (240, 180));
+    assert_eq!(
+        (source[0].x, source[0].y, source[1].x, source[1].y),
+        (20, 10, 220, 108)
+    );
+    assert!(
+        clamp_to(
+            &appkit::view::Frame {
+                y: 51,
+                height: 25,
+                ..frame
+            },
+            extent,
+            Some(allowed)
+        )
+        .is_none()
+    );
+    // The clipping region is computed in the destination coordinate space,
+    // not by moving or shortening Frame before deriving source coordinates.
+    assert_eq!(clamp_to(&frame, extent, None).unwrap()[1].y, 80);
+}
+
 /// The window's store is presented around the layers over it: a rectangle a
 /// `CAMetalLayer` owns keeps what that layer last presented there, and the
 /// rest of the store still reaches the window.

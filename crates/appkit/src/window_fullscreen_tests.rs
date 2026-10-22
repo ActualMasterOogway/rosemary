@@ -1000,6 +1000,15 @@ fn fractional_fullscreen_frame_matches_content_view() {
         "NSWindow frame and NSView frame disagree in fullscreen"
     );
     let surface = surface_frame(object).unwrap();
+    let sdl = window_of(object).sdl;
+    let clip = presentation_clip(sdl).unwrap();
+    let physical = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    assert!(clip.x >= 0 && clip.y >= 0);
+    assert!(clip.x + clip.w <= physical.0 && clip.y + clip.h <= physical.1);
+    assert!(
+        clip.w < physical.0 || clip.h < physical.1,
+        "fractional NSWindow remained the whole host surface"
+    );
     let inside = (
         (surface.origin.x + 0.5) as f32,
         (surface.origin.y + 0.5) as f32,

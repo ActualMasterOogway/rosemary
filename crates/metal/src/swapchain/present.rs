@@ -88,16 +88,35 @@ pub(super) fn clamp(
     frame: &appkit::view::Frame,
     extent: vk::Extent2D,
 ) -> Option<[vk::Offset3D; 2]> {
-    let left = frame.x.clamp(0, extent.width as i32);
-    let top = frame.y.clamp(0, extent.height as i32);
-    let right = frame
-        .x
-        .saturating_add(frame.width as i32)
-        .clamp(0, extent.width as i32);
-    let bottom = frame
+    let allowed = appkit::window::presentation_clip(frame.window);
+    clamp_to(frame, extent, allowed)
+}
+
+/// The intersection of the layer rectangle, the physical image and the
+/// accepted AppKit logical window. Keep the original Frame so source_of()
+/// samples the original texels instead of stretching a cropped image.
+pub(super) fn clamp_to(
+    frame: &appkit::view::Frame,
+    extent: vk::Extent2D,
+    allowed: Option<sdl3::Rect>,
+) -> Option<[vk::Offset3D; 2]> {
+    let clip = allowed.unwrap_or(sdl3::Rect {
+        x: 0,
+        y: 0,
+        w: extent.width as i32,
+        h: extent.height as i32,
+    });
+    let x0 = clip.x.clamp(0, extent.width as i32);
+    let y0 = clip.y.clamp(0, extent.height as i32);
+    let x1 = clip.x.saturating_add(clip.w).clamp(x0, extent.width as i32);
+    let y1 = clip
         .y
-        .saturating_add(frame.height as i32)
-        .clamp(0, extent.height as i32);
+        .saturating_add(clip.h)
+        .clamp(y0, extent.height as i32);
+    let left = frame.x.clamp(x0, x1);
+    let top = frame.y.clamp(y0, y1);
+    let right = frame.x.saturating_add(frame.width as i32).clamp(x0, x1);
+    let bottom = frame.y.saturating_add(frame.height as i32).clamp(y0, y1);
     (right > left && bottom > top).then_some([
         vk::Offset3D {
             x: left,
@@ -112,16 +131,23 @@ pub(super) fn clamp(
     ])
 }
 
-/// The whole of an image's level zero, as a blit's pair of offsets.
-pub(super) fn extent_of(image: &GpuImage) -> [vk::Offset3D; 2] {
-    [
-        vk::Offset3D { x: 0, y: 0, z: 0 },
-        vk::Offset3D {
-            x: image.width.max(1) as i32,
-            y: image.height.max(1) as i32,
-            z: 1,
-        },
-    ]
+/// Physical swapchain bounds intersected with the logical NSWindow.
+/// The accumulator may contain DMA-BUF overlay pixels beyond this area;
+/// only this region is transferred into the final presented image.
+pub(super) fn logical_image_clip(
+    window: sdl3::Window,
+    extent: vk::Extent2D,
+) -> Option<[vk::Offset3D; 2]> {
+    let full = appkit::view::Frame {
+        window,
+        x: 0,
+        y: 0,
+        width: extent.width,
+        height: extent.height,
+        window_width: extent.width,
+        window_height: extent.height,
+    };
+    clamp(&full, extent)
 }
 
 /// The part of a `width` by `height` source, which is scaled over the whole

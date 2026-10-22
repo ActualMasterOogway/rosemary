@@ -559,6 +559,44 @@ pub(crate) fn surface_frame(object: Id) -> Option<NSRect> {
     })
 }
 
+/// Pixel bounds of the guest's logical NSWindow inside its SDL host surface.
+/// The host may stay display-sized in fullscreen. Round each edge separately
+/// to preserve half-point boundaries and use the same extent for every
+/// presentation backend, including those outside AppKit.
+pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
+    let (width, height) = sdl3::video::window_size(sdl)?;
+    let (pixels_w, pixels_h) = sdl3::video::window_size_in_pixels(sdl)?;
+    if width <= 0 || height <= 0 || pixels_w <= 0 || pixels_h <= 0 {
+        return None;
+    }
+    let window = window_for(sdl);
+    let surface = (!window.is_null()).then(|| surface_frame(window)).flatten();
+    let Some(surface) = surface else {
+        return Some(sdl3::Rect {
+            x: 0,
+            y: 0,
+            w: pixels_w,
+            h: pixels_h,
+        });
+    };
+    let scale_x = f64::from(pixels_w) / f64::from(width);
+    let scale_y = f64::from(pixels_h) / f64::from(height);
+    let x0 = (surface.origin.x * scale_x).round() as i32;
+    let y0 = (surface.origin.y * scale_y).round() as i32;
+    let x1 = ((surface.origin.x + surface.size.width) * scale_x).round() as i32;
+    let y1 = ((surface.origin.y + surface.size.height) * scale_y).round() as i32;
+    let x0 = x0.clamp(0, pixels_w);
+    let y0 = y0.clamp(0, pixels_h);
+    let x1 = x1.clamp(x0, pixels_w);
+    let y1 = y1.clamp(y0, pixels_h);
+    Some(sdl3::Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
 /// Map a rectangle in AppKit window base coordinates onto the host surface.
 pub(crate) fn rect_to_surface(object: Id, rect: NSRect) -> Option<NSRect> {
     let surface = surface_frame(object)?;

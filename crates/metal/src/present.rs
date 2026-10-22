@@ -711,6 +711,58 @@ fn dump_frame(pixels: &[u8], width: u32, height: u32, format: vk::Format) {
     let _ = std::fs::write(directory.join(format!("frame-{frame:06}.ppm")), out);
 }
 
+/// Source interval surviving both physical SDL bounds and the smaller logical
+/// AppKit window. Return indices relative to the *original* source, not the
+/// cropped destination, so oversized/scaled child images do not shift.
+fn visible_source_span(
+    start: i64,
+    length: u32,
+    limit: i32,
+    offset: i32,
+    span: i32,
+) -> Option<(usize, usize)> {
+    let first = (i64::from(offset).max(0) - start).max(0);
+    let last = i64::from(length).min(
+        i64::from(limit.max(0)).min(i64::from(offset).saturating_add(i64::from(span.max(0))))
+            - start,
+    );
+    (first < last).then_some((first as usize, last as usize))
+}
+
+/// Clear stale pixels from the physical SDL surface outside the smaller
+/// AppKit logical window. Clipping the new frame alone would leave previous
+/// fullscreen pixels exposed in the host container after a shrink.
+fn mask_readback_surface(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    pitch: usize,
+    clip: sdl3::Rect,
+) -> bool {
+    let left = clip.x.max(0).min(width as i32) as usize;
+    let right = clip.x.saturating_add(clip.w).max(0).min(width as i32) as usize;
+    let top = clip.y.max(0).min(height as i32) as usize;
+    let bottom = clip.y.saturating_add(clip.h).max(0).min(height as i32) as usize;
+    if left == 0 && right == width && top == 0 && bottom == height {
+        return false;
+    }
+    let black = |row: &mut [u8], a: usize, b: usize| {
+        for pixel in row[a * 4..b * 4].chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 0, 255]);
+        }
+    };
+    for y in 0..height {
+        let row = &mut pixels[y * pitch..y * pitch + width * 4];
+        if y < top || y >= bottom {
+            black(row, 0, width);
+        } else {
+            black(row, 0, left);
+            black(row, right, width);
+        }
+    }
+    true
+}
+
 /// SDL's window surface is `SDL_PIXELFORMAT_XRGB8888` on every backend this
 /// runs on, which is B, G, R, X in memory. A drawable is usually
 /// `MTLPixelFormatBGRA8Unorm`, which is the same order, so the common case is
@@ -734,18 +786,46 @@ fn blit_to_window(
     // a Mac's content never shows the guest's.
     let opaque = sdl3::video::window_flags(window) & sdl3::video::flags::TRANSPARENT != 0;
     sdl3::video::present_window(window, |surface| {
+        let clip = appkit::window::presentation_clip(window).unwrap_or(sdl3::Rect {
+            x: 0,
+            y: 0,
+            w: surface.width,
+            h: surface.height,
+        });
+        let blanked =
+            if clip.x > 0 || clip.y > 0 || clip.w < surface.width || clip.h < surface.height {
+                // SAFETY: the SDL surface owns exactly `pitch * height` bytes for
+                // the duration of the present-window callback.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        surface.pixels,
+                        surface.pitch as usize * surface.height.max(0) as usize,
+                    )
+                };
+                mask_readback_surface(
+                    bytes,
+                    surface.width.max(0) as usize,
+                    surface.height.max(0) as usize,
+                    surface.pitch as usize,
+                    clip,
+                )
+            } else {
+                false
+            };
         let (left, top) = (i64::from(left), i64::from(top));
-        let visible = |start: i64, length: u32, limit: i32| {
-            let first = (-start).max(0);
-            let last = i64::from(length).min(i64::from(limit.max(0)) - start);
-            (first < last).then_some((first as usize, last as usize))
+        let Some((first_row, rows)) = visible_source_span(
+            top,
+            height.min(frame_height),
+            surface.height,
+            clip.y,
+            clip.h,
+        ) else {
+            return blanked;
         };
-        let Some((first_row, rows)) = visible(top, height.min(frame_height), surface.height) else {
-            return false;
-        };
-        let Some((first_column, columns)) = visible(left, width.min(frame_width), surface.width)
+        let Some((first_column, columns)) =
+            visible_source_span(left, width.min(frame_width), surface.width, clip.x, clip.w)
         else {
-            return false;
+            return blanked;
         };
         let count = columns - first_column;
         for row in first_row..rows {
@@ -1112,6 +1192,61 @@ fn blend_overlays<'a>(
 #[cfg(test)]
 mod drawable_pool_tests {
     use super::*;
+
+    #[test]
+    fn cpu_fallback_blacks_out_previous_frame_outside_logical_bounds() {
+        let pitch = 20usize;
+        let mut pixels = vec![170u8; pitch * 3];
+        assert!(mask_readback_surface(
+            &mut pixels,
+            4,
+            3,
+            pitch,
+            sdl3::Rect {
+                x: 1,
+                y: 0,
+                w: 3,
+                h: 2
+            }
+        ));
+        for y in 0..3usize {
+            for x in 0..4usize {
+                let from = y * pitch + x * 4;
+                let color = &pixels[from..from + 4];
+                if y < 2 && x >= 1 {
+                    assert_eq!(color, &[170; 4]);
+                } else {
+                    assert_eq!(color, &[0, 0, 0, 255]);
+                }
+            }
+            assert_eq!(&pixels[y * pitch + 16..y * pitch + 20], &[170; 4]);
+        }
+        assert!(!mask_readback_surface(
+            &mut pixels,
+            4,
+            3,
+            pitch,
+            sdl3::Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn cpu_metal_readback_keeps_original_source_offsets_across_logical_crop() {
+        // Source starts at (-2,-3) and extends past its 10x8 SDL container.
+        // The physical display is 10x8 but the logical window is y=0..5.
+        assert_eq!(visible_source_span(-2, 12, 10, 0, 10), Some((2, 12)));
+        assert_eq!(visible_source_span(-3, 12, 8, 0, 5), Some((3, 8)));
+        assert_eq!(visible_source_span(0, 8, 8, 5, 0), None);
+        // A later larger frame restores formerly excluded source rows.
+        assert_eq!(visible_source_span(-3, 12, 8, 0, 8), Some((3, 11)));
+        // Clip starts inside a shifted source: never rebase to the cropped edge.
+        assert_eq!(visible_source_span(4, 7, 20, 6, 4), Some((2, 6)));
+    }
 
     #[test]
     fn submitted_slot_is_not_available_until_completion() {

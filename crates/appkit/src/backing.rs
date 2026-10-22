@@ -1680,6 +1680,19 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
     let overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
     let mut composed: Option<Store> = None;
     let mut gpu = Vec::new();
+    let allowed = crate::window::presentation_clip(window)
+        .map(|clip| Rect {
+            x: i64::from(clip.x),
+            y: i64::from(clip.y),
+            width: i64::from(clip.w),
+            height: i64::from(clip.h),
+        })
+        .unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            width: i64::from(store.width),
+            height: i64::from(store.height),
+        });
     for (view, overlay) in overlays.iter() {
         let view = *view as Id;
         // SAFETY: an overlay is removed before its view is deallocated.
@@ -1693,15 +1706,21 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
         if frame.window != window {
             continue;
         }
+        let original = Rect {
+            x: i64::from(frame.x),
+            y: i64::from(frame.y),
+            width: i64::from(frame.width),
+            height: i64::from(frame.height),
+        };
+        if original.intersection(&allowed).is_empty() {
+            continue;
+        }
         if let Picture::Dmabuf(picture) = &overlay.picture {
             gpu.push(GpuOverlay {
                 picture: picture.clone(),
-                rect: Rect {
-                    x: i64::from(frame.x),
-                    y: i64::from(frame.y),
-                    width: i64::from(frame.width),
-                    height: i64::from(frame.height),
-                },
+                // Keep original placement for texture sampling; the final
+                // Vulkan presentation masks pixels beyond the logical window.
+                rect: original,
             });
             continue;
         }
@@ -1711,13 +1730,22 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
             pixels: store.pixels.clone(),
             dirty: false,
         });
-        blend_overlay(target, overlay, frame.x, frame.y, frame.width, frame.height);
+        blend_overlay_clipped(
+            target,
+            overlay,
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            allowed,
+        );
     }
     (composed, gpu)
 }
 
 /// Draw `overlay` scaled into the rectangle at `left`, `top` of `store`,
 /// source-over, nearest-neighbour.
+#[cfg(test)]
 fn blend_overlay(
     store: &mut Store,
     overlay: &Overlay,
@@ -1725,6 +1753,31 @@ fn blend_overlay(
     top: i32,
     width: u32,
     height: u32,
+) {
+    blend_overlay_clipped(
+        store,
+        overlay,
+        left,
+        top,
+        width,
+        height,
+        Rect {
+            x: 0,
+            y: 0,
+            width: i64::from(store.width),
+            height: i64::from(store.height),
+        },
+    );
+}
+
+fn blend_overlay_clipped(
+    store: &mut Store,
+    overlay: &Overlay,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    allowed: Rect,
 ) {
     let Picture::Pixels(pixels) = &overlay.picture else {
         return;
@@ -1738,10 +1791,23 @@ fn blend_overlay(
     {
         return;
     }
-    let x0 = left.max(0) as usize;
-    let y0 = top.max(0) as usize;
-    let x1 = (i64::from(left) + i64::from(width)).clamp(0, i64::from(store.width)) as usize;
-    let y1 = (i64::from(top) + i64::from(height)).clamp(0, i64::from(store.height)) as usize;
+    let clipped = Rect {
+        x: i64::from(left),
+        y: i64::from(top),
+        width: i64::from(width),
+        height: i64::from(height),
+    }
+    .intersection(&allowed)
+    .intersection(&Rect {
+        x: 0,
+        y: 0,
+        width: i64::from(store.width),
+        height: i64::from(store.height),
+    });
+    let x0 = clipped.x as usize;
+    let y0 = clipped.y as usize;
+    let x1 = (clipped.x + clipped.width) as usize;
+    let y1 = (clipped.y + clipped.height) as usize;
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -2446,6 +2512,39 @@ mod tests {
             &store.pixels[16..],
             &[1, 2, 3, 255, 1, 2, 3, 255, 9, 9, 9, 9, 9, 9, 9, 9]
         );
+    }
+
+    #[test]
+    fn an_oversized_overlay_is_clipped_without_rescaling_its_source() {
+        let mut store = store_of(6, 3);
+        let mut source = Vec::new();
+        for row in 0..3u8 {
+            for column in 0..6u8 {
+                source.extend_from_slice(&[column + 10, row + 20, 37, 255]);
+            }
+        }
+        let overlay = Overlay {
+            width: 6,
+            height: 3,
+            picture: Picture::Pixels(source),
+        };
+        let allowed = Rect {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 1,
+        };
+        blend_overlay_clipped(&mut store, &overlay, 0, 0, 6, 3, allowed);
+        for y in 0..3 {
+            for x in 0..6 {
+                let pixel = &store.pixels[(y * 6 + x) * 4..(y * 6 + x + 1) * 4];
+                if (2..5).contains(&x) && y == 1 {
+                    assert_eq!(pixel, &[(x as u8) + 10, 21, 37, 255]);
+                } else {
+                    assert_eq!(pixel, &[0, 0, 0, 0]);
+                }
+            }
+        }
     }
 
     #[test]
