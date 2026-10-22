@@ -94,7 +94,7 @@ pub fn run_alert_panel(
     // there is nothing left for it to convert. The buttons are the guest's own
     // `NSString`s, which outlive a modal call it is blocked in.
     let n = unsafe {
-        let f: unsafe extern "C" fn(u64, u64, u64, u64, u64, ...) -> i64 =
+        let f: unsafe extern "C" fn(u64, u64, u64, u64, u64) -> i64 =
             core::mem::transmute(host as usize);
         f(ctx.rdi, message, ctx.rdx, ctx.rcx, ctx.r8)
     };
