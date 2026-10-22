@@ -532,7 +532,21 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
                 node.surface_snapshot = Some(snapshot);
                 node.surface_publication = None;
             }
-            Err(iosurface::SnapshotError::Busy) => {}
+            Err(iosurface::SnapshotError::Busy) => {
+                // The last complete image stands in while the writer paints,
+                // but only one of the new surface's size and format: another
+                // would be placed by its own geometry while damage follows
+                // the new one's. With none, the live pixels draw instead.
+                let fits = iosurface::pixels(contents as CFTypeRef).is_some_and(|p| {
+                    node.surface_snapshot.as_ref().is_some_and(|s| {
+                        (s.width, s.height, s.pixel_format) == (p.width, p.height, p.pixel_format)
+                    })
+                });
+                if !fits {
+                    node.surface_snapshot = None;
+                }
+                node.surface_publication = None;
+            }
             Err(iosurface::SnapshotError::Unsupported) => {
                 node.surface_snapshot = None;
                 node.surface_publication = publication.ok();
@@ -1664,6 +1678,16 @@ fn decode_contents(contents: usize) -> Option<(usize, usize, Vec<u8>)> {
     Some((bitmap.width as usize, bitmap.height as usize, pixels))
 }
 
+fn snapshot_source(snapshot: &iosurface::Snapshot) -> Source<'_> {
+    Source {
+        width: snapshot.width,
+        height: snapshot.height,
+        stride: snapshot.width * 4,
+        bytes: snapshot.bytes(),
+        swap: snapshot.pixel_format != iosurface::PIXEL_FORMAT_BGRA,
+    }
+}
+
 /// Run `f` over `layer`'s contents, if it has any this can draw.
 fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
     let (held, cached, previous, revision, _reading) = with_node(layer, |node| {
@@ -1697,7 +1721,7 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
         let snapshot = unsafe { iosurface::snapshot(contents as CFTypeRef, previous.as_ref()) };
         #[cfg(test)]
         tests::pause_after_snapshot();
-        let image = match snapshot {
+        match snapshot {
             Ok(snapshot) => {
                 with_node(layer, |node| {
                     if node.contents_revision == revision {
@@ -1706,7 +1730,7 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
                         node.surface_retry = false;
                     }
                 });
-                Some(snapshot)
+                return Some(f(snapshot_source(&snapshot)));
             }
             Err(iosurface::SnapshotError::Busy) => {
                 with_node(layer, |node| {
@@ -1714,31 +1738,15 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
                         node.surface_retry = true;
                     }
                 });
-                // Keep the last committed image while a producer is painting.
-                return previous.map(|snapshot| {
-                    f(Source {
-                        width: snapshot.width,
-                        height: snapshot.height,
-                        stride: snapshot.width * 4,
-                        bytes: snapshot.bytes(),
-                        swap: snapshot.pixel_format != iosurface::PIXEL_FORMAT_BGRA,
-                    })
-                });
+                // Keep the last committed image while a producer is painting;
+                // with none yet, the live pixels below beat a blank layer.
+                if let Some(snapshot) = previous {
+                    return Some(f(snapshot_source(&snapshot)));
+                }
             }
-            Err(iosurface::SnapshotError::Unsupported) => {
-                // Large packed IOSurfaces still need generation tracking, even
-                // when retaining their full pixel image would be excessive.
-                None
-            }
-        };
-        if let Some(snapshot) = image {
-            return Some(f(Source {
-                width: snapshot.width,
-                height: snapshot.height,
-                stride: snapshot.width * 4,
-                bytes: snapshot.bytes(),
-                swap: snapshot.pixel_format != iosurface::PIXEL_FORMAT_BGRA,
-            }));
+            // Large packed IOSurfaces still need generation tracking, even
+            // when retaining their full pixel image would be excessive.
+            Err(iosurface::SnapshotError::Unsupported) => {}
         }
     }
     if let Some(surface) = iosurface::pixels(contents as CFTypeRef) {
@@ -1758,18 +1766,7 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
         let bytes = unsafe {
             std::slice::from_raw_parts(surface.data, surface.bytes_per_row * surface.height)
         };
-        let publication = match iosurface::publication(contents as CFTypeRef) {
-            Ok(publication) => Some(publication),
-            Err(iosurface::SnapshotError::Busy) => {
-                with_node(layer, |node| {
-                    if node.contents_revision == revision {
-                        node.surface_retry = true;
-                    }
-                });
-                return None;
-            }
-            Err(iosurface::SnapshotError::Unsupported) => None,
-        };
+        let publication = iosurface::publication(contents as CFTypeRef);
         let drawn = f(Source {
             width: surface.width,
             height: surface.height,
@@ -1780,8 +1777,10 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
         with_node(layer, |node| {
             if node.contents_revision == revision {
                 node.surface_snapshot = None;
-                node.surface_publication = publication;
-                node.surface_retry = false;
+                // A writer still holds the surface, so these pixels may be
+                // half painted: draw again once it unlocks.
+                node.surface_retry = matches!(publication, Err(iosurface::SnapshotError::Busy));
+                node.surface_publication = publication.ok();
             }
         });
         return Some(drawn);
@@ -2519,6 +2518,12 @@ mod tests {
 
     /// A 2x1 BGRA surface: a red pixel then a green one.
     fn surface() -> CFTypeRef {
+        surface_sized(2, 1)
+    }
+
+    /// A BGRA surface of two pixels, starting red then green.
+    fn surface_sized(width: i64, height: i64) -> CFTypeRef {
+        assert_eq!(width * height, 2);
         let number = |value: i64| {
             corefoundation::collections::new_number(corefoundation::collections::Number::Integer(
                 value,
@@ -2527,8 +2532,8 @@ mod tests {
         let key = |text: &str| corefoundation::base::interned_name(text) as usize as CFTypeRef;
         let options = corefoundation::collections::new_dictionary(
             &[
-                (key("IOSurfaceWidth"), number(2)),
-                (key("IOSurfaceHeight"), number(1)),
+                (key("IOSurfaceWidth"), number(width)),
+                (key("IOSurfaceHeight"), number(height)),
                 (key("IOSurfaceBytesPerElement"), number(4)),
                 (
                     key("IOSurfacePixelFormat"),
@@ -3716,5 +3721,60 @@ mod tests {
             place(Gravity::ResizeAspectFill, bounds, 10.0, 10.0),
             (10.0, -5.0, 100.0, 100.0)
         );
+    }
+
+    #[test]
+    fn a_locked_surface_with_no_complete_image_draws_its_live_pixels() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let image = surface();
+        // SAFETY: this test owns the 2x1 surface.
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceLock(image, 0, std::ptr::null_mut()), 0);
+            std::ptr::write_bytes(iosurface::IOSurfaceGetBaseAddress(image) as *mut u8, 6, 8);
+        }
+        assert!(!replace_contents(layer, image as Id));
+        // Live bytes, as before snapshots existed, rather than a blank layer.
+        assert_eq!(layer_image(layer), [6; 8]);
+        unsafe {
+            assert_eq!(
+                iosurface::IOSurfaceUnlock(image, 0, std::ptr::null_mut()),
+                0
+            )
+        };
+        assert!(surface_tree_changed(layer, 0));
+        assert_eq!(layer_image(layer), [6; 8]);
+        assert!(!surface_tree_changed(layer, 0));
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn a_busy_replacement_of_another_size_does_not_show_the_old_image() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let layer: Id = send(class, "layer", ());
+        let old = surface_sized(2, 1);
+        let next = surface_sized(1, 2);
+        publish(old, [4; 8]);
+        replace_contents(layer, old as Id);
+        assert_eq!(layer_image(layer), [4; 8]);
+        // SAFETY: this test owns the 1x2 surface.
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceLock(next, 0, std::ptr::null_mut()), 0);
+            std::ptr::write_bytes(iosurface::IOSurfaceGetBaseAddress(next) as *mut u8, 8, 4);
+        }
+        assert!(!replace_contents(layer, next as Id));
+        let (width, height) = with_contents(layer, |source| (source.width, source.height)).unwrap();
+        assert_eq!((width, height), (1, 2));
+        unsafe {
+            assert_eq!(iosurface::IOSurfaceUnlock(next, 0, std::ptr::null_mut()), 0);
+            corefoundation::api::CFRelease(old);
+            corefoundation::api::CFRelease(next);
+        }
+        objc::arc::pool_pop(pool);
     }
 }
