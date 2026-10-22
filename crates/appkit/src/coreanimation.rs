@@ -3662,10 +3662,16 @@ mod tests {
             replace_contents(address as Id, old_image as Id)
         });
         ready.wait();
-        assert!(
-            NODES.try_lock().is_ok(),
-            "setter held global NODES while snapshotting"
-        );
+        // Tests running in parallel take NODES briefly; the paused setter
+        // would hold it for good.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while NODES.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setter held global NODES while snapshotting"
+            );
+            std::thread::yield_now();
+        }
         assert!(!replace_contents(layer, later as Id));
         resume.wait();
         assert!(!old.join().unwrap());
