@@ -1152,6 +1152,8 @@ fn opaque_views(placed: &[Placed]) -> Vec<usize> {
 /// Bring a window's composite up to date with its views: recompose what was
 /// drawn over, and everywhere a view appeared, moved or went away.
 fn compose_window(window: Id) {
+    // First, so it drops last: after every lock below is released.
+    let _owed = crate::coreanimation::defer_releases();
     // SAFETY: a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };
     let Some((width, height)) = sdl3::video::window_size_in_pixels(sdl) else {
@@ -1159,6 +1161,10 @@ fn compose_window(window: Id) {
     };
     let (width, height) = (width.max(1) as u32, height.max(1) as u32);
     let placed = place_tree(window, sdl);
+    let surface_damage: Vec<Rect> = placed
+        .iter()
+        .flat_map(|p| crate::coreanimation::surface_contents_damage(p.view, p.rect, p.clip))
+        .collect();
     let now: Vec<(usize, Rect)> = placed.iter().map(|p| (p.view as usize, p.clip)).collect();
     let overlaid: Vec<usize> = OVERLAYS
         .lock()
@@ -1245,6 +1251,9 @@ fn compose_window(window: Id) {
         .entry(sdl as usize)
         .or_default();
     let mut region = std::mem::take(&mut state.damage);
+    for rect in &surface_damage {
+        region = region.union(rect);
+    }
     if resized {
         region = whole;
     }
