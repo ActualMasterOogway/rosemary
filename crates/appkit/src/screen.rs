@@ -1987,11 +1987,16 @@ pub(crate) fn refresh_relative_pointer(window_id: u32) {
     }) else {
         return;
     };
-    let Some((x, y)) = crate::event::frozen_pointer() else {
+    lock_at_frozen_pointer(window);
+}
+
+/// Lock `window` where the disassociated guest's cursor is frozen.
+fn lock_at_frozen_pointer(window: sdl3::Window) {
+    let Some(frozen) = crate::event::frozen_pointer() else {
         return;
     };
     let origin = crate::window::global_position(window).unwrap_or((0, 0));
-    lock_relative_pointer(window, (x - origin.0 as f32, y - origin.1 as f32));
+    lock_relative_pointer(window, local_warp_point(frozen, origin));
 }
 
 fn clear_relative_pointer_lock(window: sdl3::Window) {
@@ -2103,13 +2108,7 @@ pub fn apply_mouse_association() {
             changed = true;
         }
         if relative && sdl3::video::relative_mouse_mode(window) {
-            let point = crate::event::frozen_pointer()
-                .map(|(x, y)| {
-                    let origin = crate::window::global_position(window).unwrap_or((0, 0));
-                    (x - origin.0 as f32, y - origin.1 as f32)
-                })
-                .unwrap_or_else(crate::event::pointer_position);
-            lock_relative_pointer(window, point);
+            lock_at_frozen_pointer(window);
         }
     }
     if changed {

@@ -364,7 +364,6 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 // made while the guest was disassociated never entered it.
                 crate::screen::apply_mouse_association();
                 crate::screen::confine_pointer(object);
-                crate::screen::refresh_relative_pointer(window);
             }
             match gained {
                 true => announce_key(object),
