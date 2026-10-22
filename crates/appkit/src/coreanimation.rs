@@ -519,57 +519,143 @@ fn replace_contents(receiver: Id, contents: Id) -> bool {
     unchanged
 }
 
-/// Called while walking attached view trees, before consuming window damage.
-/// A write completed after setContents must not disappear behind deduplication.
-pub(crate) fn surface_contents_changed(layer: Id) -> bool {
-    !crate::layer::is_metal(layer) && surface_tree_changed(layer, 0)
-}
-
-fn surface_tree_changed(layer: Id, depth: usize) -> bool {
-    if layer.is_null() || depth > 64 {
+/// Called before the compositor consumes window damage. Use the same pixel
+/// mapping as rendering so subpixel layers never cause unconsumable damage.
+pub(crate) fn surface_contents_changed(view: Id, rect: Rect, clip: Rect) -> bool {
+    let root = crate::view::layer_of(view);
+    if root.is_null() || crate::layer::is_metal(root) || clip.is_empty() {
         return false;
     }
-    let bounds = crate::layer::bounds_of(layer).size;
-    let now = darwin::mach::media_time();
-    let Some((contents, snapshot, retry, children, drawable, masks_to_bounds)) =
-        read_node(layer, |node| {
-            node.filter(|node| {
-                !node.hidden && presented(&node.animations, "opacity", node.opacity, now) > 0.0
-            })
-            .map(|node| {
-                // The view root is drawn in view bounds, not CALayer bounds.
-                // Sublayer contents are not sampled when either presented
-                // dimension is empty, even if their surface was republished.
-                let drawable = depth == 0
-                    || (presented(&node.animations, "bounds.size.width", bounds.width, now) > 0.0
-                        && presented(&node.animations, "bounds.size.height", bounds.height, now)
-                            > 0.0);
-                (
-                    HeldContents::new(node.contents),
-                    node.surface_snapshot.clone(),
-                    node.surface_retry,
-                    node.sublayers.clone(),
-                    drawable,
-                    node.masks_to_bounds,
-                )
-            })
-        })
-    else {
+    let Some(mapping) = Mapping::for_view(view, rect) else {
         return false;
     };
-    // A nondrawable layer may still have visible children unless it clips them.
-    // Keep its old snapshot so resizing can detect and show later publications.
-    let changed = drawable
-        && !iosurface::cpu_access_active(contents.0 as CFTypeRef)
+    scan_surface_tree(root, &mapping, clip, darwin::mach::media_time())
+}
+
+fn surface_publication_changed(layer: Id) -> bool {
+    let Some((contents, snapshot, retry)) = read_node(layer, |node| {
+        node.map(|node| {
+            (
+                HeldContents::new(node.contents),
+                node.surface_snapshot.clone(),
+                node.surface_retry,
+            )
+        })
+    }) else {
+        return false;
+    };
+    !iosurface::cpu_access_active(contents.0 as CFTypeRef)
         && (retry
             || snapshot.as_ref().is_some_and(|snapshot| {
                 !iosurface::snapshot_is_current(contents.0 as CFTypeRef, snapshot)
-            }));
-    changed
-        || ((!masks_to_bounds || drawable || depth == 0)
-            && children
-                .into_iter()
-                .any(|child| surface_tree_changed(child as Id, depth + 1)))
+            }))
+}
+
+fn scan_surface_tree(root: Id, mapping: &Mapping, clip: Rect, now: f64) -> bool {
+    let presented = presentation(root, now);
+    if presented.hidden || presented.opacity <= 0.0 || clip.is_empty() {
+        return false;
+    }
+    let whole = mapping.to_pixels(mapping.view_bounds);
+    if !whole.is_empty()
+        && !whole.intersection(&clip).is_empty()
+        && surface_publication_changed(root)
+    {
+        return true;
+    }
+    let clip = if presented.masks_to_bounds {
+        clip.intersection(&whole)
+    } else {
+        clip
+    };
+    if clip.is_empty() {
+        return false;
+    }
+    let origin = NSPoint {
+        x: mapping.view_bounds.origin.x - presented.bounds_origin.x,
+        y: mapping.view_bounds.origin.y - presented.bounds_origin.y,
+    };
+    presented.sublayers.into_iter().any(|child| {
+        scan_surface_layer(
+            child as Id,
+            mapping,
+            origin,
+            clip,
+            presented.opacity,
+            now,
+            0,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_surface_layer(
+    layer: Id,
+    mapping: &Mapping,
+    origin: NSPoint,
+    clip: Rect,
+    opacity: f64,
+    now: f64,
+    depth: usize,
+) -> bool {
+    if layer.is_null() || depth > 64 || clip.is_empty() {
+        return false;
+    }
+    let presented = presentation(layer, now);
+    if presented.hidden {
+        return false;
+    }
+    let frame = presented.frame_at(origin);
+    let pixels = mapping.to_pixels(frame);
+    let opacity = opacity * presented.opacity;
+    // draw_contents returns before taking a new snapshot on empty bounds.
+    // Keep the old publication so it is rediscovered when pixels become drawable.
+    if opacity > 0.0
+        && !pixels.is_empty()
+        && (!contents_stay_in_bounds(presented.gravity) || !pixels.intersection(&clip).is_empty())
+        && surface_publication_changed(layer)
+    {
+        return true;
+    }
+    let clip = if presented.masks_to_bounds {
+        clip.intersection(&pixels)
+    } else {
+        clip
+    };
+    let inner = NSPoint {
+        x: frame.origin.x - presented.bounds_origin.x,
+        y: frame.origin.y - presented.bounds_origin.y,
+    };
+    presented
+        .sublayers
+        .into_iter()
+        .any(|child| scan_surface_layer(child as Id, mapping, inner, clip, opacity, now, depth + 1))
+}
+
+// Synthetic root for tests that inspect a CALayer without an attached NSView.
+#[cfg(test)]
+fn surface_tree_changed(layer: Id, _depth: usize) -> bool {
+    let bounds = NSRect {
+        origin: NSPoint::default(),
+        size: NSSize {
+            width: 8.0,
+            height: 8.0,
+        },
+    };
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: 8,
+        height: 8,
+    };
+    let mapping = Mapping {
+        view_bounds: bounds,
+        rect: whole,
+        scale_x: 1.0,
+        scale_y: 1.0,
+        flipped: false,
+    };
+    scan_surface_tree(layer, &mapping, whole, darwin::mach::media_time())
 }
 
 unsafe extern "C" fn contents_gravity(receiver: Id, _sel: Sel) -> Id {
@@ -1258,7 +1344,20 @@ struct Presented {
     hidden: bool,
     masks_to_bounds: bool,
     corner_radius: f64,
+    gravity: Gravity,
     sublayers: Vec<usize>,
+}
+
+impl Presented {
+    fn frame_at(&self, origin: NSPoint) -> NSRect {
+        NSRect {
+            origin: NSPoint {
+                x: origin.x + self.frame.origin.x,
+                y: origin.y + self.frame.origin.y,
+            },
+            size: self.frame.size,
+        }
+    }
 }
 
 fn presentation(layer: Id, now: f64) -> Presented {
@@ -1285,6 +1384,7 @@ fn presentation(layer: Id, now: f64) -> Presented {
             hidden: node.hidden,
             masks_to_bounds: node.masks_to_bounds,
             corner_radius: node.corner_radius,
+            gravity: node.gravity,
             sublayers: node.sublayers.clone(),
         }
     })
@@ -1300,6 +1400,20 @@ struct Mapping {
 }
 
 impl Mapping {
+    fn for_view(view: Id, rect: Rect) -> Option<Self> {
+        let view_bounds = crate::view::bounds_of(view);
+        if view_bounds.size.width <= 0.0 || view_bounds.size.height <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            view_bounds,
+            rect,
+            scale_x: rect.width as f64 / view_bounds.size.width,
+            scale_y: rect.height as f64 / view_bounds.size.height,
+            flipped: crate::view::is_flipped(view),
+        })
+    }
+
     /// A rectangle in the root layer's (the view's bounds') coordinates, in
     /// window pixels.
     fn to_pixels(&self, r: NSRect) -> Rect {
@@ -1609,6 +1723,10 @@ fn place(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> (f64, f64, 
     (x, y, width, height)
 }
 
+fn contents_stay_in_bounds(gravity: Gravity) -> bool {
+    matches!(gravity, Gravity::Resize | Gravity::ResizeAspect)
+}
+
 /// Draw `layer`'s contents into `store` for a layer at `bounds` in window
 /// pixels, `scale` window pixels to the point, within `clip`, source-over.
 fn draw_contents(
@@ -1619,12 +1737,17 @@ fn draw_contents(
     clip: Rect,
     opacity: f64,
 ) {
-    if opacity <= 0.0 || bounds.is_empty() {
+    if opacity <= 0.0 || bounds.is_empty() || clip.is_empty() {
         return;
     }
     let gravity = read_node(layer, |node| {
         node.map_or(Gravity::Resize, |node| node.gravity)
     });
+    // These gravities can only paint within bounds; no snapshot is needed
+    // until the layer intersects its pixel-space clip.
+    if contents_stay_in_bounds(gravity) && bounds.intersection(&clip).is_empty() {
+        return;
+    }
     let contents_scale = crate::layer::contents_scale_of(layer);
     with_contents(layer, |source| {
         let (x, y, width, height) = place(
@@ -1750,17 +1873,10 @@ pub(crate) fn render(view: Id, store: &mut Store, rect: Rect, clip: Rect, pass: 
     if root.is_null() || crate::layer::is_metal(root) {
         return false;
     }
-    let view_bounds = crate::view::bounds_of(view);
-    if view_bounds.size.width <= 0.0 || view_bounds.size.height <= 0.0 {
+    let Some(mapping) = Mapping::for_view(view, rect) else {
         return false;
-    }
-    let mapping = Mapping {
-        view_bounds,
-        rect,
-        scale_x: rect.width as f64 / view_bounds.size.width,
-        scale_y: rect.height as f64 / view_bounds.size.height,
-        flipped: crate::view::is_flipped(view),
     };
+    let view_bounds = mapping.view_bounds;
     let now = darwin::mach::media_time();
     let root_presented = presentation(root, now);
     if root_presented.hidden {
@@ -1838,13 +1954,7 @@ fn draw_layer(
     if presented.hidden {
         return animating;
     }
-    let frame = NSRect {
-        origin: NSPoint {
-            x: origin.x + presented.frame.origin.x,
-            y: origin.y + presented.frame.origin.y,
-        },
-        size: presented.frame.size,
-    };
+    let frame = presented.frame_at(origin);
     let pixels = mapping.to_pixels(frame);
     let opacity = opacity * presented.opacity;
     if let Some(color) = presented.background {
@@ -2644,6 +2754,227 @@ mod tests {
         assert!(surface_tree_changed(root, 0));
         with_node(child, |node| node.animations.clear());
 
+        unsafe { corefoundation::api::CFRelease(image) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn fractional_sublayers_follow_pixel_rounding_at_multiple_scales() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 0.1, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let surface = surface();
+        publish(surface, [1; 8]);
+        replace_contents(child, surface as Id);
+        let one = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let two = Rect {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        };
+        let mut store = Store::for_tests(16, 16);
+        render(view, &mut store, one, one, Pass::Sublayers);
+        publish(surface, [2; 8]);
+        for _ in 0..5 {
+            assert!(
+                !surface_contents_changed(view, one, one),
+                "fractional width rounds to zero at 1x"
+            );
+            render(view, &mut store, one, one, Pass::Sublayers);
+        }
+        for _ in 0..5 {
+            assert!(
+                !surface_contents_changed(view, two, two),
+                "fractional width rounds to zero at 2x"
+            );
+            render(view, &mut store, two, two, Pass::Sublayers);
+        }
+        // 0.4pt is still too small at 1x but rounds to one pixel at 2x.
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 0.4, 1.0));
+        assert!(!surface_contents_changed(view, one, one));
+        assert!(surface_contents_changed(view, two, two));
+        render(view, &mut store, two, two, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, two, two));
+        assert_eq!(layer_image(child), [2; 8]);
+
+        publish(surface, [3; 8]);
+        let clipped = Rect {
+            x: 4,
+            y: 0,
+            width: 4,
+            height: 8,
+        };
+        assert!(!surface_contents_changed(view, one, clipped));
+        assert!(!surface_contents_changed(
+            view,
+            two,
+            Rect {
+                x: 8,
+                y: 0,
+                width: 8,
+                height: 16
+            }
+        ));
+        assert!(surface_contents_changed(view, two, two));
+        render(view, &mut store, two, two, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, two, two));
+
+        // A fractional-height layer is independently undrawable at 1x.
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 1.0, 0.1));
+        publish(surface, [4; 8]);
+        for _ in 0..5 {
+            assert!(!surface_contents_changed(view, one, one));
+            render(view, &mut store, one, one, Pass::Sublayers);
+        }
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 1.0, 1.0));
+        assert!(surface_contents_changed(view, one, one));
+        render(view, &mut store, one, one, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, one, one));
+        assert_eq!(layer_image(child), [4; 8]);
+        unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn fractional_clipped_parents_preserve_descendant_publications() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let parent: Id = send(class, "layer", ());
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(parent, "setFrame:", rect(0.0, 0.0, 0.1, 2.0));
+        send::<NSRect, ()>(child, "setFrame:", rect(1.0, 0.0, 2.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", parent);
+        send::<Id, ()>(parent, "addSublayer:", child);
+        let surface = surface();
+        publish(surface, [1; 8]);
+        replace_contents(child, surface as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        publish(surface, [2; 8]);
+        with_node(parent, |node| node.masks_to_bounds = true);
+        for _ in 0..5 {
+            assert!(!surface_contents_changed(view, whole, whole));
+            render(view, &mut store, whole, whole, Pass::Sublayers);
+        }
+        // A subpixel parent does not clip descendants when masksToBounds is off.
+        with_node(parent, |node| node.masks_to_bounds = false);
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [2; 8]);
+
+        publish(surface, [3; 8]);
+        with_node(parent, |node| node.masks_to_bounds = true);
+        send::<NSRect, ()>(parent, "setFrame:", rect(0.0, 0.0, 1.0, 2.0));
+        // The child sits to the right of the parent's pixel clip.
+        assert!(!surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        send::<NSRect, ()>(parent, "setFrame:", rect(0.0, 0.0, 4.0, 2.0));
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [3; 8]);
+        unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn fractional_position_can_make_a_tiny_layer_drawable() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.1, 0.0, 0.1, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let surface = surface();
+        publish(surface, [1; 8]);
+        replace_contents(child, surface as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        publish(surface, [2; 8]);
+        assert!(!surface_contents_changed(view, whole, whole));
+        // Rounding two endpoints, rather than just the width, makes this 1px.
+        send::<NSRect, ()>(child, "setFrame:", rect(0.45, 0.0, 0.1, 1.0));
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [2; 8]);
+        unsafe { corefoundation::api::CFRelease(surface) };
+        objc::arc::pool_pop(pool);
+    }
+
+    #[test]
+    fn overflowing_contents_gravity_can_show_past_the_pixel_bounds() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 8.0, 8.0));
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let root: Id = send(view, "layer", ());
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let child: Id = send(class, "layer", ());
+        // Bounds round to [8, 9), outside the viewport. Right gravity
+        // puts the two-pixel IOSurface at [7, 9), so one pixel is visible.
+        send::<NSRect, ()>(child, "setFrame:", rect(7.6, 0.0, 1.0, 1.0));
+        send::<Id, ()>(root, "addSublayer:", child);
+        let image = surface();
+        publish(image, [0, 0, 255, 255, 0, 0, 255, 255]);
+        replace_contents(child, image as Id);
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        };
+        let mut store = Store::for_tests(8, 8);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        publish(image, [0, 255, 0, 255, 0, 255, 0, 255]);
+        assert!(!surface_contents_changed(view, whole, whole));
+        with_node(child, |node| node.gravity = Gravity::Right);
+        assert!(surface_contents_changed(view, whole, whole));
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert!(!surface_contents_changed(view, whole, whole));
+        assert_eq!(layer_image(child), [0, 255, 0, 255, 0, 255, 0, 255]);
+        // The overhanging left texel is now visible at the viewport's edge.
+        assert_eq!(
+            &store.pixels[(7 * 8 + 7) * 4..(7 * 8 + 8) * 4],
+            &[0, 255, 0, 255]
+        );
         unsafe { corefoundation::api::CFRelease(image) };
         objc::arc::pool_pop(pool);
     }

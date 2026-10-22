@@ -1161,7 +1161,7 @@ fn compose_window(window: Id) {
     let placed = place_tree(window, sdl);
     let surface_damage: Vec<Rect> = placed
         .iter()
-        .filter(|p| crate::coreanimation::surface_contents_changed(crate::view::layer_of(p.view)))
+        .filter(|p| crate::coreanimation::surface_contents_changed(p.view, p.rect, p.clip))
         .map(|p| p.clip)
         .collect();
     let now: Vec<(usize, Rect)> = placed.iter().map(|p| (p.view as usize, p.clip)).collect();
