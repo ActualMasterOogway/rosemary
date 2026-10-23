@@ -283,6 +283,12 @@ exports::exports! {
         "NSPointFromString" => geometry::NSPointFromString,
         "NSSizeFromString" => geometry::NSSizeFromString,
         "NSRectFromString" => geometry::NSRectFromString,
+        "NSFrameRect" => color::NSFrameRect,
+        "NSFrameRectWithWidth" => color::NSFrameRectWithWidth,
+        "NSEraseRect" => color::NSEraseRect,
+        "NSRectClip" => color::NSRectClip,
+        "NSRectFillUsingOperation" => color::NSRectFillUsingOperation,
+        "NSBeep" => application::NSBeep,
         // FIXME (PORTABILITY): this needs to be ported to macOS
         #[cfg(not(target_os = "macos"))]
         "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
