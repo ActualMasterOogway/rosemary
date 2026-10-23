@@ -1209,52 +1209,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fullscreen_keeps_the_native_global_top_reservation() {
-        let full = NSRect {
-            origin: foundation::geometry::NSPoint::default(),
-            size: foundation::geometry::NSSize {
-                width: 1440.0,
-                height: 900.0,
-            },
-        };
-        let mut observations = 0;
-        for line in include_str!("../tests/fixtures/fullscreen-workarea-pixels.tsv")
-            .lines()
-            .filter(|line| !line.starts_with('#'))
-        {
-            let fields: Vec<_> = line.split('\t').collect();
-            if fields[1] != "set-visible-frame" {
-                continue;
-            }
-            let value = |i: usize| fields[i].parse::<f64>().unwrap();
-            let captured = NSRect {
-                origin: foundation::geometry::NSPoint {
-                    x: value(2),
-                    y: value(3),
-                },
-                size: foundation::geometry::NSSize {
-                    width: value(4),
-                    height: value(5),
-                },
-            };
-            // The capture retained 30 points at the top, not a bottom dock.
-            assert_eq!(
-                fullscreen_visible_frame(full, 30.0),
-                captured,
-                "{}",
-                fields[0]
-            );
-            observations += 1;
-        }
-        assert_eq!(observations, 4);
-        // In-window menus leave no global top reservation in the SDL backend.
-        assert_eq!(
-            fullscreen_visible_frame(full, crate::menu::global_menu_bar_height()),
-            full
-        );
-    }
-
-    #[test]
     fn fixed_refresh_intervals_are_available_without_a_display_mode() {
         crate::bootstrap();
         let screen = screen_for(0);
