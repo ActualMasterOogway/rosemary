@@ -2414,6 +2414,11 @@ unsafe extern "C" fn set_with_object(_class: Id, _sel: Sel, object: Id) -> Id {
     unsafe { api::CFAutorelease(collections::new_set(values, Policy::from_type_callbacks())) as Id }
 }
 
+unsafe extern "C" fn empty_set(_class: Id, _sel: Sel) -> Id {
+    // SAFETY: a fresh object.
+    unsafe { api::CFAutorelease(collections::new_set(&[], Policy::from_type_callbacks())) as Id }
+}
+
 unsafe extern "C" fn set_with_capacity(_class: Id, _sel: Sel, _capacity: usize) -> Id {
     // SAFETY: a fresh object.
     unsafe { api::CFAutorelease(collections::new_set(&[], Policy::from_type_callbacks())) as Id }
@@ -2487,6 +2492,7 @@ unsafe extern "C" fn set_enumerate(
 pub(crate) fn install() {
     let set = objc::class::lookup(c"NSSet").expect("CoreFoundation registered NSSet");
     class_methods!(set, {
+        "set" => empty_set, c"@16@0:8";
         "setWithObject:" => set_with_object, c"@24@0:8@16";
         "setWithCapacity:" => set_with_capacity, c"@24@0:8Q16";
         "setWithArray:" => set_with_array, c"@24@0:8@16";
