@@ -1497,6 +1497,13 @@ fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect, 
     }
 }
 
+/// The part of the surface to keep when a logical frame excludes the rest, or
+/// `None` for a window without one: a windowed surface that outgrew its store
+/// during a resize is left as it was, not painted black.
+fn software_exterior(clip: Rect, whole: Rect, shown: Rect) -> Option<Rect> {
+    (clip != whole).then(|| clip.intersection(&shown))
+}
+
 /// Black out obsolete host pixels outside the logical AppKit bounds without
 /// changing content/Metal layers within it. `pitch` includes SDL row padding.
 fn blackout_software_exterior(
@@ -1583,21 +1590,30 @@ fn present_dirty() {
                 width: columns as i64,
                 height: rows as i64,
             };
-            let logical = logical_pixel_bounds(window, shown);
-            // SAFETY: SDL owns pitch * height bytes during this callback.
-            let pixels = unsafe {
-                std::slice::from_raw_parts_mut(
-                    surface.pixels,
-                    surface.pitch as usize * surface.height.max(0) as usize,
-                )
+            let whole = Rect {
+                x: 0,
+                y: 0,
+                width: i64::from(surface.width.max(0)),
+                height: i64::from(surface.height.max(0)),
             };
-            blackout_software_exterior(
-                pixels,
-                surface.pitch as usize,
-                surface.width.max(0) as usize,
-                surface.height.max(0) as usize,
-                logical,
-            );
+            let clip = logical_pixel_bounds(window, whole);
+            let logical = clip.intersection(&shown);
+            if let Some(allowed) = software_exterior(clip, whole, shown) {
+                // SAFETY: SDL owns pitch * height bytes during this callback.
+                let pixels = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        surface.pixels,
+                        surface.pitch as usize * surface.height.max(0) as usize,
+                    )
+                };
+                blackout_software_exterior(
+                    pixels,
+                    surface.pitch as usize,
+                    surface.width.max(0) as usize,
+                    surface.height.max(0) as usize,
+                    allowed,
+                );
+            }
             for piece in logical.subtract(&kept) {
                 let (left, width) = (piece.x as usize, piece.width as usize);
                 for row in piece.y as usize..(piece.y + piece.height) as usize {
@@ -2609,6 +2625,39 @@ mod tests {
                 w: 198,
                 h: 158
             }
+        );
+    }
+
+    #[test]
+    fn only_a_logical_frame_blacks_out_the_software_surface() {
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        // A windowed store lagging a grow-resize.
+        let shown = Rect {
+            x: 0,
+            y: 0,
+            width: 700,
+            height: 500,
+        };
+        assert_eq!(software_exterior(whole, whole, shown), None);
+        let clip = Rect {
+            x: 0,
+            y: 31,
+            width: 800,
+            height: 569,
+        };
+        assert_eq!(
+            software_exterior(clip, whole, shown),
+            Some(Rect {
+                x: 0,
+                y: 31,
+                width: 700,
+                height: 469,
+            })
         );
     }
 
