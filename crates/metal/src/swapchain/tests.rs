@@ -3197,6 +3197,14 @@ fn fifo_wsi_error_classes_do_not_retry_terminal_acquisition() {
     assert_eq!(terminal_fifo_failure(vk::Result::ERROR_DEVICE_LOST), 2);
 }
 
+#[test]
+fn a_fifo_window_that_keeps_timing_out_backs_off_to_a_bound() {
+    let waits: Vec<u64> = (1..=8)
+        .map(|timeouts| fifo_acquire_backoff(timeouts).as_millis() as u64)
+        .collect();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
+}
+
 /// Minimize a live FIFO window while its WSI reports no presentable area.
 /// Injected zero extent ensures deterministic behavior across X11/Wayland
 /// compositors, some of which retain the prior dimensions while minimized.

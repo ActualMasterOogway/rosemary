@@ -1414,6 +1414,7 @@ fn ensure_fifo_presentation_worker(window: usize, entry: &Arc<WindowSwapchain>) 
 
 fn fifo_presentation_worker(window: usize, entry: Arc<WindowSwapchain>) {
     let mut prepare_failures = 0u32;
+    let mut acquire_timeouts = 0u32;
     loop {
         // Wait without polling when clean. The writer sets fifo_dirty under
         // the same mutex before signaling us, so notifications are not lost.
@@ -1507,16 +1508,20 @@ fn fifo_presentation_worker(window: usize, entry: Arc<WindowSwapchain>) {
         let acquired = match injected {
             Some(error) => FifoAcquire::Terminal(error),
             None => crate::stats::timed(crate::stats::Counter::PresentAcquireMicros, || {
-                acquire_fifo_image(gpu, prepared.request)
+                acquire_fifo_image(gpu, prepared.request, acquire_timeouts == 0)
             }),
         };
         if matches!(acquired, FifoAcquire::TimedOut) {
             // Retain the dirty accumulator. Only this window waits; another
-            // window's presenter is completely independent.
+            // window's presenter is completely independent. Wait with the
+            // presentation lock released: a minimized or occluded window can
+            // time out indefinitely, and every producer needs that lock.
+            acquire_timeouts = acquire_timeouts.saturating_add(1);
             drop(_presenting);
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(fifo_acquire_backoff(acquire_timeouts));
             continue;
         }
+        acquire_timeouts = 0;
         let ready = match acquired {
             FifoAcquire::Ready(frame) => frame,
             FifoAcquire::TimedOut => unreachable!(),
@@ -2966,16 +2971,25 @@ impl Swapchain {
 /// returning images entirely; UINT64_MAX would block window teardown while
 /// the worker held the presentation mutex. Timeout leaves the acquisition
 /// semaphore untouched, and the dirty accumulator remains pending.
-fn acquire_fifo_image(gpu: &'static Gpu, request: AcquireRequest) -> FifoAcquire {
+/// Waits up to a frame for an image when `wait`, and otherwise only polls:
+/// the caller holds the window's presentation lock throughout.
+fn acquire_fifo_image(gpu: &'static Gpu, request: AcquireRequest, wait: bool) -> FifoAcquire {
     const TIMEOUT_NS: u64 = 20_000_000;
     let Some(api) = gpu.swapchain_api() else {
         return FifoAcquire::Terminal(vk::Result::ERROR_DEVICE_LOST);
     };
+    let timeout = if wait { TIMEOUT_NS } else { 0 };
     // SAFETY: the live window swapchain and its unused acquisition semaphore
     // remain owned by the worker while it holds the presentation mutex.
     classify_fifo_acquire(unsafe {
-        api.acquire_next_image(request.handle, TIMEOUT_NS, request.semaphore, request.fence)
+        api.acquire_next_image(request.handle, timeout, request.semaphore, request.fence)
     })
+}
+
+/// How long the FIFO worker sleeps, unlocked, after its `timeouts`th
+/// acquisition in a row that found no image.
+fn fifo_acquire_backoff(timeouts: u32) -> Duration {
+    Duration::from_millis(1 << timeouts.saturating_sub(1).min(5))
 }
 
 fn classify_fifo_acquire(outcome: Result<(u32, bool), vk::Result>) -> FifoAcquire {
