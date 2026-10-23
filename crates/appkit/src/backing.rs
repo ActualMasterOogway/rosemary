@@ -15,6 +15,9 @@ pub struct Store {
     /// Premultiplied B, G, R, A, top row first.
     pub pixels: Vec<u8>,
     dirty: bool,
+    /// Bumped by every change to what the store shows, so that a presenter
+    /// can tell whether a copy it took is still current without comparing it.
+    generation: u64,
 }
 
 impl Store {
@@ -30,7 +33,18 @@ impl Store {
             height,
             pixels: vec![0; width as usize * height as usize * 4],
             dirty: false,
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// What the store shows changed, and has to be presented again.
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Change the size, keeping what the top-left corner held.
@@ -50,6 +64,7 @@ impl Store {
             height,
             pixels,
             dirty: true,
+            generation: self.generation.wrapping_add(1),
         };
     }
 }
@@ -493,7 +508,7 @@ pub(crate) fn paint_coverage(left: i64, top: i64, width: usize, coverage: &[f32]
                 }
             }
         }
-        store.dirty = true;
+        store.touch();
         Rect {
             x: x0,
             y: y0,
@@ -618,7 +633,7 @@ pub(crate) fn draw_focused(draw: impl FnOnce(&mut [u8], u32, u32) -> Option<Rect
         store.resize(width, height);
         let drawn = draw(&mut store.pixels, store.width, store.height);
         if drawn.is_some_and(|r| !r.is_empty()) {
-            store.dirty = true;
+            store.touch();
         }
         drawn
     };
@@ -737,7 +752,7 @@ fn draw_into(
             }
         }
     }
-    store.dirty = true;
+    store.touch();
     Rect {
         x: x0,
         y: y0,
@@ -907,7 +922,7 @@ fn clear_focused_store() {
         .and_then(|stores| stores.get_mut(&(focus.view as usize)))
         .map(|store| {
             store.pixels.fill(0);
-            store.dirty = true;
+            store.touch();
             Rect {
                 x: focus.x as i64,
                 y: focus.y as i64,
@@ -1332,10 +1347,10 @@ fn compose_window(window: Id) {
     if region.is_empty() {
         if let Some(chrome) = chrome.as_ref().filter(|_| chrome_changed || resized) {
             copy_chrome(store, chrome);
-            store.dirty = true;
+            store.touch();
         }
         if holes_changed {
-            store.dirty = true;
+            store.touch();
         }
         return;
     }
@@ -1392,7 +1407,7 @@ fn compose_window(window: Id) {
     if let Some(chrome) = &chrome {
         copy_chrome(store, chrome);
     }
-    store.dirty = true;
+    store.touch();
 }
 
 /// Put a window's chrome over the top rows of its store.
@@ -1414,7 +1429,7 @@ pub fn present_again(sdl: sdl3::Window) {
         .as_mut()
         .and_then(|stores| stores.get_mut(&(sdl as usize)))
     {
-        store.dirty = true;
+        store.touch();
     }
 }
 
@@ -1522,7 +1537,7 @@ pub(crate) fn cpu_fallback_calls_for_tests(window: sdl3::Window) -> usize {
 pub(crate) fn queue_dirty_store_for_tests(window: sdl3::Window) {
     let (width, height) = sdl3::video::window_size_in_pixels(window).unwrap();
     let mut store = Store::new(width.max(1) as u32, height.max(1) as u32);
-    store.dirty = true;
+    store.touch();
     STORES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1850,6 +1865,8 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
             height: store.height,
             pixels: store.pixels.clone(),
             dirty: false,
+            // An overlay that changes damages the store under it.
+            generation: store.generation,
         });
         blend_overlay_clipped(
             target,
@@ -2621,6 +2638,7 @@ mod tests {
             height,
             pixels: vec![0; width as usize * height as usize * 4],
             dirty: false,
+            generation: 0,
         }
     }
 

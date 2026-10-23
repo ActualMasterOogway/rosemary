@@ -1534,6 +1534,7 @@ static STORE_IMAGES: std::sync::Mutex<Vec<(usize, StoreImage)>> = std::sync::Mut
 struct StoreUpload {
     window: usize,
     identity: u32,
+    generation: u64,
     store: appkit::backing::Store,
     holes: Vec<appkit::backing::Hole>,
     overlays: Vec<appkit::backing::GpuOverlay>,
@@ -1552,6 +1553,7 @@ impl StoreUpload {
         Self {
             window: window as usize,
             identity,
+            generation: store.generation(),
             store: owned,
             holes: holes.to_vec(),
             overlays: overlays
@@ -1571,10 +1573,12 @@ impl StoreUpload {
         holes: &[appkit::backing::Hole],
         overlays: &[appkit::backing::GpuOverlay],
     ) -> bool {
+        // Not the pixels, which would compare a whole store on the event
+        // thread for every finished upload.
         self.identity == identity
+            && self.generation == store.generation()
             && self.store.width == store.width
             && self.store.height == store.height
-            && self.store.pixels == store.pixels
             && self.holes.len() == holes.len()
             && self
                 .holes
