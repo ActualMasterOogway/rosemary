@@ -1814,12 +1814,21 @@ impl Swapchain {
 /// that needs a drawable to happen. Must not be called with the drawable
 /// cache locked: finishing a source takes that lock.
 pub(crate) fn retire_copied() {
-    let swapchains = SWAPCHAINS
+    retire_copied_in(&every_swapchain());
+}
+
+fn every_swapchain() -> Vec<Arc<WindowSwapchain>> {
+    SWAPCHAINS
         .lock()
         .expect("window swapchains")
         .as_ref()
         .map(|all| all.values().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Whether any of `swapchains` had a drawable to hand back.
+fn retire_copied_in(swapchains: &[Arc<WindowSwapchain>]) -> bool {
+    let mut any = false;
     for swapchain in swapchains {
         // Retiring copied drawables is opportunistic. A presentation may be
         // waiting for a swapchain image under this window's lock; do not make
@@ -1833,8 +1842,10 @@ pub(crate) fn retire_copied() {
             // Source ownership has already returned to its drawable cache.
             // Wake consumers only after releasing the swapchain state mutex.
             swapchain.gpu.presenter.notify_progress();
+            any = true;
         }
     }
+    any
 }
 
 /// [`retire_copied`], waiting up to `timeout` for a copy still running when
@@ -1843,41 +1854,37 @@ pub(crate) fn retire_copied() {
 /// knows to look at its ring again before waiting on anything else. Must not
 /// be called with the drawable cache locked.
 pub(crate) fn wait_copied(timeout: std::time::Duration) -> bool {
-    let entries = SWAPCHAINS
-        .lock()
-        .expect("window swapchains")
-        .as_ref()
-        .map(|all| all.values().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let entries = every_swapchain();
+    // Every window first: the ring being waited on may be another window's
+    // than the first one with a copy still running.
+    if retire_copied_in(&entries) {
+        return true;
+    }
     // Hold a single window's state while using its fences: resize and teardown
     // can destroy them, but cannot do so while this guard is held. Never hold
     // the global swapchain-map lock across a Vulkan wait.
-    for entry in entries {
-        let mut state = match entry.state.try_lock() {
+    for entry in &entries {
+        let state = match entry.state.try_lock() {
             Ok(state) => state,
             Err(TryLockError::WouldBlock) => continue,
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
-        if state.retire_copied() {
-            drop(state);
-            entry.gpu.presenter.notify_progress();
-            return true;
-        }
         let fences = state.copying();
         if fences.is_empty() {
             continue;
         }
+        // SAFETY: fences of this device's, each attached to a submission,
+        // and kept alive by the state guard.
         let waited = unsafe {
             state
                 .gpu
                 .device
                 .wait_for_fences(&fences, false, timeout.as_nanos() as u64)
         };
-        let retired = state.retire_copied();
         drop(state);
-        if retired {
-            entry.gpu.presenter.notify_progress();
-        }
+        retire_copied_in(&entries);
+        // A wait that failed outright did not wait, and the caller must not
+        // take it as having done so or it spins on a lost device.
         return matches!(waited, Ok(()) | Err(vk::Result::TIMEOUT));
     }
     false
