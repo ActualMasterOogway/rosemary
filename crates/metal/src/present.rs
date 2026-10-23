@@ -1827,7 +1827,7 @@ pub(crate) fn present_store(
     holes: &[appkit::backing::Hole],
     overlays: &[appkit::backing::GpuOverlay],
 ) -> appkit::backing::PresentOutcome {
-    use appkit::backing::PresentOutcome::{Deferred, Displayed, Fallback};
+    use appkit::backing::PresentOutcome::{Deferred, Displayed, DisplayedEarlier, Fallback};
     if forced_readback() {
         return store_failure_outcome(window);
     }
@@ -1894,16 +1894,23 @@ pub(crate) fn present_store(
     if state.closed || state.busy || state.pending.is_some() {
         return Deferred;
     }
-    if let Some((completed, outcome)) = state.completed.take() {
-        if outcome != Deferred && completed.matches(identity, store, holes, overlays) {
-            return outcome;
-        }
-    }
+    // A store that changes every pump never matches the upload that just
+    // finished, so that upload's outcome still has to count: the CPU path
+    // shows the current store, and what the GPU showed was this window's.
+    let earlier = match state.completed.take() {
+        Some((completed, outcome)) if completed.identity == identity => match outcome {
+            Fallback => return Fallback,
+            Displayed if completed.matches(identity, store, holes, overlays) => return Displayed,
+            Displayed => DisplayedEarlier,
+            _ => Deferred,
+        },
+        _ => Deferred,
+    };
     state.pending = Some(StoreUpload::snapshot(
         window, identity, store, holes, overlays,
     ));
     worker.wake.notify_one();
-    Deferred
+    earlier
 }
 
 /// Runs off the AppKit thread. Owns the CPU staging contents until one_shot

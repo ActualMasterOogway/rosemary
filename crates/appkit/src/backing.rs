@@ -207,6 +207,9 @@ static DRAWING: Mutex<Vec<Vec<usize>>> = Mutex::new(Vec::new());
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentOutcome {
     Displayed,
+    /// An earlier copy of the store reached the screen through the GPU, and
+    /// this one is still on its way there: keep the store dirty.
+    DisplayedEarlier,
     Fallback,
     Deferred,
 }
@@ -1622,6 +1625,11 @@ fn present_dirty() {
             backing.dirty = true;
             continue;
         }
+        if outcome == PresentOutcome::DisplayedEarlier {
+            presented_through_gpu(window, true);
+            backing.dirty = true;
+            continue;
+        }
         let presented = outcome == PresentOutcome::Displayed;
         presented_through_gpu(window, presented);
         if presented {
@@ -2319,10 +2327,10 @@ mod tests {
             _: &[Hole],
             _: &[GpuOverlay],
         ) -> PresentOutcome {
-            if window as usize == 0x71a1 {
-                PresentOutcome::Deferred
-            } else {
-                PresentOutcome::Displayed
+            match window as usize {
+                0x71a1 => PresentOutcome::Deferred,
+                0x71c3 => PresentOutcome::DisplayedEarlier,
+                _ => PresentOutcome::Displayed,
             }
         }
         let before_presenter = PRESENTER.lock().expect("presenter").replace(presenter);
@@ -2330,6 +2338,8 @@ mod tests {
         deferred.dirty = true;
         let mut independent = Store::new(2, 2);
         independent.dirty = true;
+        let mut uploading = Store::new(2, 2);
+        uploading.dirty = true;
         let before_stores = {
             let mut stores = STORES.lock().expect("stores");
             std::mem::replace(
@@ -2337,6 +2347,7 @@ mod tests {
                 Some(HashMap::from([
                     (0x71a1usize, deferred),
                     (0x71b2usize, independent),
+                    (0x71c3usize, uploading),
                 ])),
             )
         };
@@ -2352,13 +2363,21 @@ mod tests {
                 !stores[&0x71b2].dirty,
                 "ready B must be presented on this turn"
             );
+            assert!(
+                stores[&0x71c3].dirty,
+                "C's current store has not reached the screen yet"
+            );
         }
+        assert!(
+            shows_dmabufs(0x71c3 as sdl3::Window),
+            "C's earlier store was shown through the GPU"
+        );
         *STORES.lock().expect("stores") = before_stores;
         *PRESENTER.lock().expect("presenter") = before_presenter;
         GPU_WINDOWS
             .lock()
             .expect("gpu windows")
-            .retain(|(key, _)| *key != 0x71b2);
+            .retain(|(key, _)| *key != 0x71b2 && *key != 0x71c3);
     }
 
     fn set_thread_context_from_class(context: Id) {
