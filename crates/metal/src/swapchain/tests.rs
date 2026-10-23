@@ -1631,7 +1631,7 @@ fn fifo_out_of_date_queue_present_replays_static_layers() {
 
 #[test]
 #[cfg(not(target_os = "macos"))]
-fn fifo_window_resize_scales_snapshot_without_new_drawable() {
+fn fifo_window_resize_keeps_snapshot_without_new_drawable() {
     let Some((window, gpu, mut state, image, frame)) = v10_fifo_fixture() else {
         return;
     };
@@ -1682,9 +1682,17 @@ fn fifo_window_resize_scales_snapshot_without_new_drawable() {
         "fixture did not resize the actual Vulkan surface"
     );
     assert_ne!(retained.image, previous, "resized snapshot must be copied");
+    let resized = retained.image;
     state
         .flush_fifo(window)
         .expect("replay resized snapshot without guest frame");
+    let extent = state.extent;
+    state.rebuild(extent).expect("same-size WSI rebuild");
+    assert_eq!(
+        state.composite.as_ref().unwrap().image,
+        resized,
+        "a rebuild that changes nothing must keep the snapshot it has"
+    );
     drop(state);
     gpu.destroy_image(image);
     sdl3::video::destroy_window(window);

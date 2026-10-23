@@ -175,19 +175,6 @@ impl From<&GpuImage> for PresentSource {
     }
 }
 
-impl PresentSource {
-    fn extent(self) -> [vk::Offset3D; 2] {
-        [
-            vk::Offset3D { x: 0, y: 0, z: 0 },
-            vk::Offset3D {
-                x: self.width.max(1) as i32,
-                y: self.height.max(1) as i32,
-                z: 1,
-            },
-        ]
-    }
-}
-
 /// The compositor keeps its image and DMA fence alive across a WSI acquire.
 /// The Vulkan acquire itself must not hold the swapchain-state mutex.
 struct PreparedFifo {
@@ -2326,25 +2313,19 @@ impl Swapchain {
             && self.composite.is_some();
         let replace_composite = if keep_fifo {
             let old = self.composite.as_ref().expect("existing FIFO snapshot");
+            // The corners pass keeps the composite in its own format, never
+            // the swapchain's, so compare with what would be made.
+            let description =
+                Self::composite_description(chosen.format, extent, self.corners.is_some());
             if old.width == extent.width
                 && old.height == extent.height
-                && old.format == chosen.format
+                && old.format == description.format
             {
                 None
             } else {
-                let description =
-                    Self::composite_description(chosen.format, extent, self.corners.is_some());
                 let replacement = self.gpu.create_image(&description)?;
                 let copied = self.gpu.one_shot(|device, command_buffer| unsafe {
-                    blit(
-                        device,
-                        command_buffer,
-                        old.image,
-                        PresentSource::from(old).extent(),
-                        replacement.image,
-                        vk::ImageLayout::GENERAL,
-                        PresentSource::from(&replacement).extent(),
-                    );
+                    keep_top_left(device, command_buffer, old, &replacement);
                 });
                 if let Err(reason) = copied {
                     self.gpu.destroy_image(replacement);
@@ -2984,6 +2965,64 @@ fn acquire_fifo_image(gpu: &'static Gpu, request: AcquireRequest, wait: bool) ->
     classify_fifo_acquire(unsafe {
         api.acquire_next_image(request.handle, timeout, request.semaphore, request.fence)
     })
+}
+
+/// Copy what `old` held into `new` unscaled, from the top-left corner as the
+/// window's store keeps it across a resize, and clear the rest: stretched,
+/// the stale frame would be presented distorted until every layer redraws.
+///
+/// # Safety
+///
+/// Recording into `command_buffer`, with both images of `device`'s and in
+/// `GENERAL`.
+unsafe fn keep_top_left(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    old: &GpuImage,
+    new: &GpuImage,
+) {
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let kept = [
+        vk::Offset3D { x: 0, y: 0, z: 0 },
+        vk::Offset3D {
+            x: old.width.min(new.width).max(1) as i32,
+            y: old.height.min(new.height).max(1) as i32,
+            z: 1,
+        },
+    ];
+    unsafe {
+        device.cmd_clear_color_image(
+            command_buffer,
+            new.image,
+            vk::ImageLayout::GENERAL,
+            &vk::ClearColorValue { float32: [0.0; 4] },
+            &[range],
+        );
+        barrier(
+            device,
+            command_buffer,
+            new.image,
+            vk::ImageLayout::GENERAL,
+            vk::ImageLayout::GENERAL,
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        blit(
+            device,
+            command_buffer,
+            old.image,
+            kept,
+            new.image,
+            vk::ImageLayout::GENERAL,
+            kept,
+        );
+    }
 }
 
 /// How long the FIFO worker sleeps, unlocked, after its `timeouts`th
