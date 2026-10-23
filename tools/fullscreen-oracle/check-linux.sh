@@ -36,6 +36,9 @@ xvfb-run -a -s '-screen 0 1440x900x24 -nolisten tcp' bash -euo pipefail -c '
                 "$binary" fractional_fullscreen_frame_matches_content_view --ignored --test-threads=1 --nocapture
                 "$binary" opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport --ignored --test-threads=1 --nocapture
                 "$binary" opengl_idle_front_buffer_is_clipped_without_guest_swap --ignored --test-threads=1 --nocapture
+                xprop -root -f _NET_WORKAREA 32c -set _NET_WORKAREA \
+                    "0, 0, 1440, 869, 0, 0, 1440, 869, 0, 0, 1440, 869, 0, 0, 1440, 869"
+                "$binary" fullscreen_screen_visible_frame_ignores_desktop_panel --ignored --test-threads=1 --nocapture
                 ;;
         esac
     done

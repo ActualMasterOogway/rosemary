@@ -1989,3 +1989,198 @@ fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport()
     objc::arc::release(object);
     objc::arc::pool_pop(pool);
 }
+
+/// Run with a window manager reserving part of the desktop for a dock/panel.
+#[test]
+#[ignore = "requires a 1440x900 display, window manager and reserved desktop work area"]
+fn fullscreen_screen_visible_frame_ignores_desktop_panel() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let object = objc::object::create_instance(objc::class::lookup(c"NSWindow").unwrap(), 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    let sdl = window_of(object).sdl;
+    let display = sdl3::video::display_for_window(sdl).unwrap();
+    let bounds = sdl3::video::display_bounds(display).unwrap();
+    let usable = sdl3::video::display_usable_bounds(display).unwrap();
+    let desktop = crate::geometry::rect_from_sdl(usable.x, usable.y, usable.w, usable.h);
+    let whole = crate::geometry::rect_from_sdl(bounds.x, bounds.y, bounds.w, bounds.h);
+    assert_ne!(desktop, whole, "run with a reserved panel work area");
+    let screen = crate::screen::screen_object(c"NSScreen", display);
+    let visible = |screen| {
+        let method = objc::class::lookup(c"NSScreen")
+            .unwrap()
+            .method(objc::sel::get("visibleFrame"))
+            .unwrap();
+        // SAFETY: the registered NSScreen method returns NSRect.
+        let call: unsafe extern "C" fn(Id, Sel) -> NSRect =
+            unsafe { std::mem::transmute(method.implementation()) };
+        unsafe { call(screen, objc::sel::get("visibleFrame")) }
+    };
+    assert_eq!(visible(screen), desktop);
+    order_front(object, true);
+    let settle = |wanted| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            while let Some(event) = sdl3::video::poll() {
+                crate::event::deliver(event);
+            }
+            if is_fullscreen(sdl) == wanted
+                && (window_of(object).reported_fullscreen != 0) == wanted
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fullscreen did not settle"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    settle(true);
+    assert_eq!(visible(screen), whole);
+    assert_eq!(
+        whole.size,
+        NSSize {
+            width: 1440.0,
+            height: 900.0
+        },
+        "run tools/fullscreen-oracle/check-linux.sh for the native fixture extent"
+    );
+    let pixels = sdl3::video::window_size_in_pixels(sdl).unwrap();
+    let mut observations = 0;
+    for line in include_str!("../tests/fixtures/fullscreen-workarea-pixels.tsv")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
+        let fields: Vec<_> = line.split('\t').collect();
+        let value = |i: usize| fields[i].parse::<f64>().unwrap();
+        let requested = NSRect {
+            origin: NSPoint {
+                x: whole.origin.x + value(2),
+                y: whole.origin.y + value(3),
+            },
+            size: NSSize {
+                width: value(4),
+                height: value(5),
+            },
+        };
+        unsafe { set_frame(object, objc::sel::get("setFrame:"), requested) };
+        assert_eq!(unsafe { frame(object, objc::sel::get("frame")) }, requested);
+        assert_eq!(
+            crate::view::frame_of(window_of(object).content_view).size,
+            requested.size
+        );
+        let top = value(6);
+        let bottom = value(7);
+        assert_eq!(top + requested.size.height + bottom, whole.size.height);
+        let expected = sdl3::Rect {
+            x: 0,
+            y: (top * f64::from(pixels.1) / whole.size.height).round() as i32,
+            w: pixels.0,
+            h: (requested.size.height * f64::from(pixels.1) / whole.size.height).round() as i32,
+        };
+        assert_eq!(
+            presentation_clip(sdl),
+            Some(expected),
+            "native {} {}",
+            fields[0],
+            fields[1]
+        );
+        assert_eq!(
+            visible(screen),
+            whole,
+            "a smaller window must not change the Space's work area"
+        );
+        observations += 1;
+    }
+    assert_eq!(observations, 12);
+    // The screen's usable area must not depend on a guest's logical frame.
+    let shortened = NSRect {
+        size: NSSize {
+            width: whole.size.width,
+            height: whole.size.height - 50.0,
+        },
+        ..whole
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), shortened) };
+    assert_eq!(visible(screen), whole);
+    // A fullscreen window on this display must not change other displays.
+    for other in sdl3::video::displays()
+        .into_iter()
+        .filter(|id| *id != display)
+    {
+        let usable = sdl3::video::display_usable_bounds(other).unwrap();
+        assert_eq!(
+            visible(crate::screen::screen_object(c"NSScreen", other)),
+            crate::geometry::rect_from_sdl(usable.x, usable.y, usable.w, usable.h)
+        );
+    }
+    assert!(sdl3::video::minimize_window(sdl));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sdl3::video::window_flags(sdl) & sdl3::video::flags::MINIMIZED == 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "minimize did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        visible(screen),
+        desktop,
+        "minimized windows do not cover the desktop"
+    );
+    assert!(sdl3::video::restore_window(sdl));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while sdl3::video::window_flags(sdl) & sdl3::video::flags::MINIMIZED != 0 {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restore did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(true);
+    assert_eq!(visible(screen), whole);
+    unsafe { order_out(object, objc::sel::get("orderOut:"), std::ptr::null_mut()) };
+    assert_eq!(
+        visible(screen),
+        desktop,
+        "hidden windows do not cover the desktop"
+    );
+    order_front(object, true);
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    settle(false);
+    assert_eq!(visible(screen), desktop);
+    unsafe { close(object, objc::sel::get("close")) };
+    objc::arc::release(object);
+    objc::arc::pool_pop(pool);
+}

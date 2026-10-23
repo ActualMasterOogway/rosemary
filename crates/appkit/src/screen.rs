@@ -114,14 +114,40 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     }
 }
 
-/// `-visibleFrame`: the part not under the menu bar or the Dock.
-///
-/// SDL's usable bounds is the same question, and where it cannot answer the
-/// whole frame is the honest fallback - a program using it to place a window
-/// gets one that may sit under the menu bar, rather than one placed against a
-/// margin this runtime invented.
+/// A fullscreen Space hides desktop docks, but keeps its global menu area.
+/// This backend puts menus in each window instead, so that reservation is zero.
+fn fullscreen_visible_frame(mut frame: NSRect, menu_height: CGFloat) -> NSRect {
+    frame.size.height = (frame.size.height - menu_height.max(0.0)).max(0.0);
+    frame
+}
+
+fn fullscreen_on_display(display: u32) -> bool {
+    crate::window::all().into_iter().any(|window| {
+        if !crate::window::is_shown(window) {
+            return false;
+        }
+        // SAFETY: all() contains only windows allocated by this runtime.
+        let sdl = unsafe { crate::window::sdl_window(window) };
+        if sdl.is_null() {
+            return false;
+        }
+        let flags = sdl3::video::window_flags(sdl);
+        flags & sdl3::video::flags::FULLSCREEN != 0
+            && flags & (sdl3::video::flags::HIDDEN | sdl3::video::flags::MINIMIZED) == 0
+            && sdl3::video::display_for_window(sdl) == Some(display)
+    })
+}
+
+/// `-visibleFrame`: desktop panels constrain ordinary windows, not a fullscreen
+/// Space. SDL's usable bounds keep those reservations even when panels are
+/// covered; passing them to the guest can shrink its fullscreen window.
 unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
     let display = display_of(receiver);
+    if fullscreen_on_display(display) {
+        // SAFETY: the receiver is this runtime's NSScreen.
+        let full = unsafe { frame(receiver, sel) };
+        return fullscreen_visible_frame(full, crate::menu::global_menu_bar_height());
+    }
     match sdl3::video::display_usable_bounds(display) {
         Some(b) => crate::geometry::rect_from_sdl(b.x, b.y, b.w, b.h),
         // SAFETY: `-frame` is `NSRect (id, SEL)`.
@@ -1198,6 +1224,52 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_keeps_the_native_global_top_reservation() {
+        let full = NSRect {
+            origin: foundation::geometry::NSPoint::default(),
+            size: foundation::geometry::NSSize {
+                width: 1440.0,
+                height: 900.0,
+            },
+        };
+        let mut observations = 0;
+        for line in include_str!("../tests/fixtures/fullscreen-workarea-pixels.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let fields: Vec<_> = line.split('\t').collect();
+            if fields[1] != "set-visible-frame" {
+                continue;
+            }
+            let value = |i: usize| fields[i].parse::<f64>().unwrap();
+            let captured = NSRect {
+                origin: foundation::geometry::NSPoint {
+                    x: value(2),
+                    y: value(3),
+                },
+                size: foundation::geometry::NSSize {
+                    width: value(4),
+                    height: value(5),
+                },
+            };
+            // The capture retained 30 points at the top, not a bottom dock.
+            assert_eq!(
+                fullscreen_visible_frame(full, 30.0),
+                captured,
+                "{}",
+                fields[0]
+            );
+            observations += 1;
+        }
+        assert_eq!(observations, 4);
+        // In-window menus leave no global top reservation in the SDL backend.
+        assert_eq!(
+            fullscreen_visible_frame(full, crate::menu::global_menu_bar_height()),
+            full
+        );
+    }
 
     #[test]
     fn fixed_refresh_intervals_are_available_without_a_display_mode() {

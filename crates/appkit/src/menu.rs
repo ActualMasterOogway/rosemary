@@ -597,8 +597,12 @@ unsafe extern "C" fn zero_width(_receiver: Id, _sel: Sel) -> f64 {
 /// `-menuBarHeight`: zero, because menus are shown in each window's chrome and
 /// nothing is reserved across the top of the screen - which `-visibleFrame`
 /// already says by not subtracting a menu bar.
-unsafe extern "C" fn menu_bar_height(_receiver: Id, _sel: Sel) -> f64 {
+pub(crate) fn global_menu_bar_height() -> f64 {
     0.0
+}
+
+unsafe extern "C" fn menu_bar_height(_receiver: Id, _sel: Sel) -> f64 {
+    global_menu_bar_height()
 }
 
 pub(crate) fn install() {
