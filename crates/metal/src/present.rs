@@ -7,6 +7,11 @@ use crate::gpu::{self, Gpu, GpuImage, ImageDescription};
 use crate::object::{self, methods};
 use crate::resource::Texture;
 
+std::thread_local! {
+    /// Set on a device's presentation worker.
+    static ON_PRESENT_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// One device's presentation, in the order its drawables were handed over.
 ///
 /// Presenting waits: for a swapchain image to come back from the presentation
@@ -63,6 +68,12 @@ impl Presenter {
     /// timer remains bounded, but an unlocked presentation permit can advance
     /// a deferred drawable without waiting for the next 1 ms timeout.
     pub(crate) fn notify_progress(&self) {
+        // The worker's own release of a window cannot unblock what it just
+        // deferred. Counting it would skip the retry delay every time, and
+        // the worker would spin on a frame slot whose fence is pending.
+        if ON_PRESENT_WORKER.get() {
+            return;
+        }
         let _pending = self.pending.lock().expect("presentation queue");
         self.progress
             .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -640,6 +651,7 @@ fn presenter_retry_delay(streak: u32, busy: bool) -> std::time::Duration {
 }
 
 fn present_worker(gpu: &'static Gpu) {
+    ON_PRESENT_WORKER.set(true);
     let presenter = &gpu.presenter;
     let mut deferred_streak = 0u32;
     loop {
