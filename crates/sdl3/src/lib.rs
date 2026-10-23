@@ -2262,7 +2262,6 @@ pub mod video {
         }
 
         #[cfg(test)]
-        #[cfg(test)]
         pub fn test_publish_window_graphics_state(window: Window) {
             publish_window_graphics_state(window);
         }
@@ -2283,6 +2282,7 @@ pub mod video {
             );
         }
 
+        #[cfg(test)]
         pub fn test_insert_ready_surface(window: Window, instance: u64) {
             SURFACES
                 .lock()
