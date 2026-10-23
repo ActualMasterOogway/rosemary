@@ -33,6 +33,7 @@ pub mod color;
 mod controls;
 mod coreanimation;
 pub mod coretext;
+mod ctline;
 pub mod cursor;
 pub(crate) mod decode;
 pub mod decor;
@@ -94,6 +95,7 @@ pub fn bootstrap() {
         decor::install();
         classes::install();
         accessibility::install();
+        ctline::install();
         alert::install();
         panel::install();
         appearance::install();
@@ -346,6 +348,7 @@ exports::exports! {
         "CGLGetShareGroup" => opengl::CGLGetShareGroup,
     }
     groups {
+        ctline,
         pasteboard_manager,
         coretext,
         cgfont,
