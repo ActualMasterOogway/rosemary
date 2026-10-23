@@ -1859,23 +1859,7 @@ mod modal_presentation_tests {
         // Rust libtest may schedule graphical cases on different OS threads.
         // SDL attaches video ownership to the first thread in the process,
         // so execute this real modal/SDL assertion in its own fresh process.
-        if std::env::var_os("ROSEMARY_ISOLATED_VIDEO_TEST").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "event::modal_presentation_tests::modal_dialog_keeps_presentation_serviced_without_running_guest_pump_hooks",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_ISOLATED_VIDEO_TEST", "1")
-                .output()
-                .expect("start isolated modal SDL test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "modal SDL subprocess failed: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !sdl3::isolated::run_here() {
             return;
         }
         crate::bootstrap();

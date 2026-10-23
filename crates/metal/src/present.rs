@@ -866,23 +866,7 @@ fn cpu_readback_window_surface_requires_the_sdl_video_thread() {
     // SDL's video owner is a process-global OS thread, not a libtest worker.
     // Keep this actual SDL surface assertion while avoiding four-thread suite
     // interference with other graphical unit tests.
-    if std::env::var_os("ROSEMARY_ISOLATED_VIDEO_TEST").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "present::cpu_readback_window_surface_requires_the_sdl_video_thread",
-                "--test-threads=1",
-            ])
-            .env("ROSEMARY_ISOLATED_VIDEO_TEST", "1")
-            .output()
-            .expect("start isolated Metal SDL surface test");
-        assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "Metal SDL subprocess failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !sdl3::isolated::run_here() {
         return;
     }
     let Some(window) = sdl3::video::create_window(c"SDL CPU fallback", 64, 64, 0) else {
@@ -2446,23 +2430,7 @@ fn window_teardown_between_readback_identity_lookup_and_publish_never_queues_sta
 
     // SDL has one process-wide video owner, which must also perform real
     // window destruction. Isolate it from other libtest video owners.
-    if std::env::var_os("ROSEMARY_READBACK_LIFETIME_CHILD").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "present::window_teardown_between_readback_identity_lookup_and_publish_never_queues_stale_frame",
-                "--test-threads=1",
-            ])
-            .env("ROSEMARY_READBACK_LIFETIME_CHILD", "1")
-            .output()
-            .expect("run isolated SDL readback publication test");
-        assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "isolated readback teardown test failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !sdl3::isolated::run_here() {
         return;
     }
 

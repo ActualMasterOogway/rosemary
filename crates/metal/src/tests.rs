@@ -7,28 +7,15 @@ use super::*;
 static GPU_TEST_SUBPROCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 macro_rules! isolate_metal_fixture {
-    ($name:ident) => {
-        if std::env::var_os("ROSEMARY_ISOLATED_METAL_FIXTURE").is_none() {
+    () => {
+        let here = {
+            // A child that fails poisons this; the next must still run.
             let _serial = GPU_TEST_SUBPROCESS
                 .lock()
-                .expect("Metal test process isolation");
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    concat!("tests::", stringify!($name)),
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_ISOLATED_METAL_FIXTURE", "1")
-                .output()
-                .expect("launch isolated Metal fixture");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "Metal fixture {} failed in own process: stdout={} stderr={}",
-                stringify!($name),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
+                .unwrap_or_else(|e| e.into_inner());
+            sdl3::isolated::run_here()
+        };
+        if !here {
             return;
         }
     };
@@ -86,7 +73,7 @@ fn source_library(device: Id, source: &str) -> Id {
 
 #[test]
 fn every_export_resolves_with_both_spellings() {
-    isolate_metal_fixture!(every_export_resolves_with_both_spellings);
+    isolate_metal_fixture!();
     for name in names() {
         assert_ne!(symbol(&name), None);
         assert_eq!(symbol(&format!("_{name}")), symbol(&name));
@@ -95,7 +82,7 @@ fn every_export_resolves_with_both_spellings() {
 
 #[test]
 fn device_registers_the_metal_object_graph() {
-    isolate_metal_fixture!(device_registers_the_metal_object_graph);
+    isolate_metal_fixture!();
     bootstrap();
     for (class, selector) in [
         (c"RosemaryMTLDevice", "newLibraryWithSource:options:error:"),
@@ -141,7 +128,7 @@ fn device_registers_the_metal_object_graph() {
 /// unusable: a game asks before it decides which renderer to run.
 #[test]
 fn the_device_reports_the_mac_gpu_families() {
-    isolate_metal_fixture!(the_device_reports_the_mac_gpu_families);
+    isolate_metal_fixture!();
     bootstrap();
     // SAFETY: the same calls the guest makes; neither reads the receiver.
     unsafe {
@@ -177,7 +164,7 @@ fn the_device_reports_the_mac_gpu_families() {
 
 #[test]
 fn sample_counts_follow_the_vulkan_device() {
-    isolate_metal_fixture!(sample_counts_follow_the_vulkan_device);
+    isolate_metal_fixture!();
     for (count, sample) in [
         (1, ash::vk::SampleCountFlags::TYPE_1),
         (2, ash::vk::SampleCountFlags::TYPE_2),
@@ -216,7 +203,7 @@ fn sample_counts_follow_the_vulkan_device() {
 
 #[test]
 fn source_library_creation_reports_invalid_source() {
-    isolate_metal_fixture!(source_library_creation_reports_invalid_source);
+    isolate_metal_fixture!();
     let device = device_for_tests();
     let mut error = std::ptr::null_mut();
     // SAFETY: the same call the guest makes.
@@ -235,7 +222,7 @@ fn source_library_creation_reports_invalid_source() {
 
 #[test]
 fn a_translated_library_exposes_its_entry_points() {
-    isolate_metal_fixture!(a_translated_library_exposes_its_entry_points);
+    isolate_metal_fixture!();
     let device = device_for_tests();
     let library = source_library(device, TEST_KERNEL);
     assert!(!library.is_null());
@@ -269,7 +256,7 @@ fn constant_values() -> Id {
 
 #[test]
 fn function_constant_values_are_kept_by_index_name_and_range() {
-    isolate_metal_fixture!(function_constant_values_are_kept_by_index_name_and_range);
+    isolate_metal_fixture!();
     let values = constant_values();
     let flag = 1u8;
     let lanes = [7u32, 11];
@@ -303,7 +290,7 @@ fn function_constant_values_are_kept_by_index_name_and_range() {
 /// so Metal hands back the function the values would not have changed.
 #[test]
 fn a_library_without_function_constants_ignores_the_values() {
-    isolate_metal_fixture!(a_library_without_function_constants_ignores_the_values);
+    isolate_metal_fixture!();
     let device = device_for_tests();
     let library = source_library(device, TEST_KERNEL);
     let values = constant_values();
@@ -344,7 +331,7 @@ fn a_library_without_function_constants_ignores_the_values() {
 /// answer an object which cannot back any GPU work.
 #[test]
 fn a_device_without_vulkan_refuses_resources() {
-    isolate_metal_fixture!(a_device_without_vulkan_refuses_resources);
+    isolate_metal_fixture!();
     let device = device_for_tests();
     // SAFETY: the same calls the guest makes.
     unsafe {
@@ -357,7 +344,7 @@ fn a_device_without_vulkan_refuses_resources() {
 /// encode a dispatch against a Vulkan buffer, and read the result back.
 #[test]
 fn a_translated_kernel_runs_on_the_gpu() {
-    isolate_metal_fixture!(a_translated_kernel_runs_on_the_gpu);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -414,7 +401,7 @@ fn a_translated_kernel_runs_on_the_gpu() {
 /// already replaced, and one to a `-setBytes:` copy in between.
 #[test]
 fn rebinding_between_dispatches_reaches_each_buffer() {
-    isolate_metal_fixture!(rebinding_between_dispatches_reaches_each_buffer);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -462,7 +449,7 @@ fn rebinding_between_dispatches_reaches_each_buffer() {
 /// it must still all arrive, and a reused range must read back as zeros.
 #[test]
 fn a_private_buffer_is_filled_written_and_copied_by_the_device() {
-    isolate_metal_fixture!(a_private_buffer_is_filled_written_and_copied_by_the_device);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -525,7 +512,7 @@ fn a_private_buffer_is_filled_written_and_copied_by_the_device() {
 /// host what each wrote.
 #[test]
 fn a_large_shared_buffer_is_seen_through_its_host_pages() {
-    isolate_metal_fixture!(a_large_shared_buffer_is_seen_through_its_host_pages);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -623,7 +610,7 @@ unsafe fn copy_buffer_range(
 /// makes conditional on a feature.
 #[test]
 fn a_mirror_clamp_sampler_follows_the_device_feature() {
-    isolate_metal_fixture!(a_mirror_clamp_sampler_follows_the_device_feature);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -644,7 +631,7 @@ fn a_mirror_clamp_sampler_follows_the_device_feature() {
 /// store is valid and discarded instead of reaching an undefined descriptor.
 #[test]
 fn a_nil_buffer_store_is_discarded_with_robustness2() {
-    isolate_metal_fixture!(a_nil_buffer_store_is_discarded_with_robustness2);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -906,7 +893,7 @@ unsafe fn element_at(receiver: Id, index: u64) -> Id {
 /// resolve destination must hold the half rather than the clear.
 #[test]
 fn a_multisampled_depth_attachment_resolves_into_its_destination() {
-    isolate_metal_fixture!(a_multisampled_depth_attachment_resolves_into_its_destination);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -1104,7 +1091,7 @@ fn a_multisampled_depth_attachment_resolves_into_its_destination() {
 /// reads the result back.
 #[test]
 fn a_translated_triangle_draws_on_the_gpu() {
-    isolate_metal_fixture!(a_translated_triangle_draws_on_the_gpu);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -1255,7 +1242,7 @@ fn a_translated_triangle_draws_on_the_gpu() {
 /// made - by the time a command buffer reads them.
 #[test]
 fn replaced_texels_reach_the_next_command_buffer() {
-    isolate_metal_fixture!(replaced_texels_reach_the_next_command_buffer);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -1318,7 +1305,7 @@ fn replaced_texels_reach_the_next_command_buffer() {
 /// buffer in between, and lays the rows out at the guest's stride.
 #[test]
 fn get_bytes_reads_back_replaced_texels() {
-    isolate_metal_fixture!(get_bytes_reads_back_replaced_texels);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };
@@ -1412,7 +1399,7 @@ unsafe fn get_bytes(texture: Id, region: [u64; 4], bytes: &mut [u8], bytes_per_r
 /// submission must outlive that copy rather than be destroyed under it.
 #[test]
 fn a_texture_released_before_its_upload_runs_outlives_it() {
-    isolate_metal_fixture!(a_texture_released_before_its_upload_runs_outlives_it);
+    isolate_metal_fixture!();
     let Some(device) = gpu_device() else {
         return;
     };

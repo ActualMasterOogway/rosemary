@@ -3913,23 +3913,7 @@ mod tests {
     /// remade, even though SDL shows native child popups with their parent.
     #[test]
     fn hidden_popup_stays_hidden_across_parent_remake_until_order_front() {
-        if std::env::var_os("ROSEMARY_HIDDEN_POPUP_REHOME_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "window::tests::hidden_popup_stays_hidden_across_parent_remake_until_order_front",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_HIDDEN_POPUP_REHOME_CHILD", "1")
-                .output()
-                .expect("run SDL popup visibility test with isolated video-thread owner");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "SDL popup visibility: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
+        if !sdl3::isolated::run_here() {
             return;
         }
 
@@ -4034,23 +4018,7 @@ mod tests {
     /// is reparented by an unrelated parent window recreation.
     #[test]
     fn gl_popup_rehome_preserves_guest_context_and_surface_ownership() {
-        if std::env::var_os("ROSEMARY_GL_POPUP_REHOME_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "window::tests::gl_popup_rehome_preserves_guest_context_and_surface_ownership",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_GL_POPUP_REHOME_CHILD", "1")
-                .output()
-                .expect("run SDL/GL test with one video-thread owner");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "guest GL popup test: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !sdl3::isolated::run_here() {
             return;
         }
 
@@ -4204,23 +4172,7 @@ mod tests {
     /// and its publication to the cross-thread drawable registry.
     #[test]
     fn gl_popup_rehome_waits_for_inflight_native_binding() {
-        if std::env::var_os("ROSEMARY_GL_BIND_RACE_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "window::tests::gl_popup_rehome_waits_for_inflight_native_binding",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_GL_BIND_RACE_CHILD", "1")
-                .output()
-                .expect("start isolated native GL bind race test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "native GL bind race: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !sdl3::isolated::run_here() {
             return;
         }
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -4363,23 +4315,7 @@ mod tests {
     /// first AppKit GL boundary, with no guest makeCurrentContext call.
     #[test]
     fn gl_popup_rehome_restores_render_thread_before_flush() {
-        if std::env::var_os("ROSEMARY_GL_RENDER_REHOME_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "window::tests::gl_popup_rehome_restores_render_thread_before_flush",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_GL_RENDER_REHOME_CHILD", "1")
-                .output()
-                .expect("isolated SDL GL render thread test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "render-thread GL rehome: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !sdl3::isolated::run_here() {
             return;
         }
         crate::bootstrap();

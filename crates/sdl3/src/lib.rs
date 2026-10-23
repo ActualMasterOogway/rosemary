@@ -3,6 +3,8 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::OnceLock;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod isolated;
 pub mod keycodes;
 pub mod mouse;
 pub mod tray;
@@ -1602,23 +1604,7 @@ mod tests {
         // SDL's joystick event updates are global and compete with libtest
         // threads pumping SDL. Preserve the real state assertions in a
         // process where the test exclusively owns the SDL subsystem.
-        if std::env::var_os("ROSEMARY_SDL_JOYSTICK_TEST_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tests::a_virtual_joystick_attaches_and_reads_back",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_SDL_JOYSTICK_TEST_CHILD", "1")
-                .output()
-                .expect("start isolated SDL virtual joystick test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "isolated joystick fixture failed: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !crate::isolated::run_here() {
             return;
         }
         if !available() || !virtual_joystick::available() {
@@ -4208,23 +4194,7 @@ pub mod video {
     #[cfg(test)]
     #[test]
     fn destroyed_window_cannot_requeue_vulkan_initialization_after_metadata_lookup() {
-        if std::env::var_os("ROSEMARY_SDL_VULKAN_TEARDOWN_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "video::destroyed_window_cannot_requeue_vulkan_initialization_after_metadata_lookup",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_SDL_VULKAN_TEARDOWN_CHILD", "1")
-                .output()
-                .expect("start isolated SDL Vulkan lifetime test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "SDL Vulkan lifetime: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !crate::isolated::run_here() {
             return;
         }
         let window = create_window(c"late Vulkan initialization", 120, 90, 0).unwrap();
@@ -4287,23 +4257,7 @@ pub mod video {
     #[cfg(test)]
     #[test]
     fn frozen_popup_family_rejects_late_children_and_vulkan_initializers() {
-        if std::env::var_os("ROSEMARY_SDL_FAMILY_FREEZE_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "video::frozen_popup_family_rejects_late_children_and_vulkan_initializers",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_SDL_FAMILY_FREEZE_CHILD", "1")
-                .output()
-                .expect("isolated SDL destruction reservation");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !crate::isolated::run_here() {
             return;
         }
         let parent = create_window(c"SDL family reservation", 120, 90, 0).unwrap();
@@ -4342,23 +4296,7 @@ pub mod video {
     #[cfg(test)]
     #[test]
     fn parent_destruction_retires_popup_identity_and_waits_for_child_surface_token() {
-        if std::env::var_os("ROSEMARY_SDL_POPUP_TEARDOWN_CHILD").is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "video::parent_destruction_retires_popup_identity_and_waits_for_child_surface_token",
-                    "--test-threads=1",
-                ])
-                .env("ROSEMARY_SDL_POPUP_TEARDOWN_CHILD", "1")
-                .output()
-                .expect("start isolated SDL popup lifetime test");
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                "SDL popup lifetime: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !crate::isolated::run_here() {
             return;
         }
         let parent = create_window(c"popup lifetime parent", 160, 120, 0).unwrap();
@@ -5367,23 +5305,7 @@ fn failed_sdl_vulkan_surface_retains_failure_classification_and_refusal() {
 fn failed_backend_surface_creation_preserves_vulkan_window_graphics_state() {
     // SDL video ownership belongs to one OS thread per process, not the
     // moving libtest thread pool. Run the real window assertion in isolation.
-    if std::env::var_os("ROSEMARY_SDL_FAILED_CONVERSION_CHILD").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "failed_backend_surface_creation_preserves_vulkan_window_graphics_state",
-                "--test-threads=1",
-            ])
-            .env("ROSEMARY_SDL_FAILED_CONVERSION_CHILD", "1")
-            .output()
-            .expect("start isolated SDL conversion test");
-        assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "isolated SDL conversion test failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+    if !crate::isolated::run_here() {
         return;
     }
     if !video::init_video() {
