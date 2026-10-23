@@ -748,6 +748,84 @@ fn fullscreen_window_replacement_confinement_and_failures() {
     objc::arc::pool_pop(pool);
 }
 
+/// SDL takes a hidden window's request as a pending flag and reports no state
+/// change until the window is shown, and a window manager may never answer.
+/// Neither may leave `-toggleFullScreen:` ignoring every later request.
+#[test]
+#[ignore = "requires an X11/Wayland window manager; see tests/fixtures/fullscreen-native.md"]
+fn unanswered_fullscreen_requests_do_not_wedge_later_toggles() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"UnansweredFullscreenRegressionWindow",
+        0,
+    )
+    .unwrap();
+    class.add_method(
+        objc::sel::get("windowDidFailToEnterFullScreen:"),
+        did_fail_enter as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    objc::class::register_pair(class);
+    let object = objc::object::create_instance(class, 0);
+    window_of(object).delegate = object;
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 90.0, y: 110.0 },
+                size: NSSize {
+                    width: 700.0,
+                    height: 480.0,
+                },
+            },
+        )
+    });
+    let toggle = || unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let pump = || {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+    };
+
+    // Hidden: SDL records the request and answers nothing until shown.
+    toggle();
+    assert_eq!(window_of(object).fullscreen, 1);
+    toggle();
+    assert_eq!(
+        window_of(object).fullscreen,
+        0,
+        "second toggle on a hidden window was ignored"
+    );
+    assert!(!is_fullscreen(window_of(object).sdl));
+
+    // Shown, with the host's answer never delivered: a later toggle is a
+    // fresh request once the first has had longer than any transition takes.
+    sdl3::video::show_window(window_of(object).sdl);
+    window_of(object).shown = 1;
+    pump();
+    toggle();
+    assert_eq!(window_of(object).fullscreen, 1);
+    std::thread::sleep(FULLSCREEN_TRANSITION_TIMEOUT + std::time::Duration::from_millis(100));
+    toggle();
+    assert_eq!(
+        FAILED_TRANSITIONS.get(),
+        (1, 0),
+        "stale entry was not failed"
+    );
+    assert_eq!(window_of(object).fullscreen, 1, "new request was ignored");
+    objc::arc::release(object);
+    pump();
+    objc::arc::pool_pop(pool);
+}
+
 thread_local! {
     static FULLSCREEN_LIFECYCLE: std::cell::RefCell<Vec<(&'static str, NSRect, NSSize)>> = const { std::cell::RefCell::new(Vec::new()) };
     static SHORTEN_INSIDE_DID_ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

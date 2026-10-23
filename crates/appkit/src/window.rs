@@ -45,7 +45,8 @@ pub struct Window {
     fullscreen_frame: NSRect,
     /// Fullscreen size requests must not change the restored window frame.
     fullscreen_restore: NSRect,
-    /// Suppress reentrant toggles from fullscreen lifecycle callbacks.
+    /// Suppress reentrant toggles from fullscreen lifecycle callbacks: when
+    /// the pending transition began, from [`transition_stamp`], or zero.
     fullscreen_transition: usize,
     /// Expected SDL host geometry after a fullscreen transition. Some window
     /// managers queue its move/resize events after the state notification.
@@ -815,7 +816,7 @@ fn set_fullscreen_frame(object: Id, rect: NSRect) {
     let before = fullscreen_frame(object).unwrap_or(host);
     // Will-exit callbacks still expose fullscreen style, but native AppKit
     // has already lifted the settled Space's frame constraints.
-    let rect = if window_of(object).fullscreen_transition == 0 {
+    let rect = if !in_fullscreen_transition(object) {
         constrain_fullscreen_frame(rect, host)
     } else {
         rect
@@ -1622,7 +1623,7 @@ unsafe extern "C" fn set_frame_origin(
     // A standalone origin request is ignored in a settled fullscreen Space,
     // but accepted inside will-exit callbacks (before the style bit clears).
     if is_fullscreen(window_of(receiver).sdl) {
-        if window_of(receiver).fullscreen_transition != 0 {
+        if in_fullscreen_transition(receiver) {
             let mut rect = unsafe { frame(receiver, objc::sel::get("frame")) };
             rect.origin = origin;
             set_fullscreen_frame(receiver, rect);
@@ -2595,19 +2596,56 @@ fn report_fullscreen_failure(receiver: Id, entering: bool) {
     }
 }
 
+/// Longer than any compositor's fullscreen animation. A request still
+/// unanswered after this was refused or deferred, not in progress.
+const FULLSCREEN_TRANSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Milliseconds since the first transition, plus one: the nonzero value of
+/// `fullscreen_transition` is when it began.
+fn transition_stamp() -> usize {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as usize
+        + 1
+}
+
+/// Whether a fullscreen transition is still in progress. One the host never
+/// answered ends here as a failure, or every later toggle would be ignored.
+fn in_fullscreen_transition(receiver: Id) -> bool {
+    let window = window_of(receiver);
+    let began = window.fullscreen_transition;
+    if began == 0 {
+        return false;
+    }
+    if transition_stamp().saturating_sub(began) < FULLSCREEN_TRANSITION_TIMEOUT.as_millis() as usize
+    {
+        return true;
+    }
+    let entering = window.fullscreen != 0;
+    window.fullscreen_transition = 0;
+    window.fullscreen = window.reported_fullscreen;
+    if entering {
+        window.fullscreen_restore = NSRect::default();
+    }
+    report_fullscreen_failure(receiver, entering);
+    false
+}
+
 /// `-toggleFullScreen:` requests an SDL transition. Keep the window alive
 /// across its synchronous AppKit will-notification and handle host rejection.
 unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
-    let window = window_of(receiver);
-    if window.sdl.is_null() || window.fullscreen_transition != 0 {
+    if window_of(receiver).sdl.is_null() || in_fullscreen_transition(receiver) {
         return;
     }
+    let window = window_of(receiver);
     let wanted = window.fullscreen == 0;
     let was_shown = window.shown != 0;
     if wanted {
         window.fullscreen_restore = unsafe { frame(receiver, objc::sel::get("frame")) };
     }
-    window.fullscreen_transition = 1;
+    window.fullscreen_transition = transition_stamp();
     // Lifecycle observers may release the window or replace its SDL surface.
     // Retain AppKit ownership across callbacks and reacquire the live host handle.
     objc::arc::retain(receiver);
@@ -2623,6 +2661,11 @@ unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
     let cancelled = live.is_null() || (was_shown && window_of(receiver).shown == 0);
     if !cancelled && request_host_fullscreen(live, wanted) {
         window_of(receiver).fullscreen = wanted as usize;
+        // SDL only records a hidden window's request; its state event comes
+        // when the window is shown, and a toggle before then is a new request.
+        if sdl3::video::window_flags(live) & sdl3::video::flags::HIDDEN != 0 {
+            window_of(receiver).fullscreen_transition = 0;
+        }
     } else {
         window_of(receiver).fullscreen_transition = 0;
         if wanted {
