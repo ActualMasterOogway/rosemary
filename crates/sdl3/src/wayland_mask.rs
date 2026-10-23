@@ -283,13 +283,11 @@ unsafe fn black_buffer(
     // is opaque black. Paint the complement, not a moved/scaled subsurface.
     let pixels = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u32>(), bytes / 4) };
     pixels.fill(0);
-    for (x, y, w, h) in complements((width, height), clip) {
-        if w <= 0 || h <= 0 {
-            continue;
-        }
-        for row in y as usize..(y + h) as usize {
-            pixels[row * width as usize + x as usize..row * width as usize + (x + w) as usize]
-                .fill(0xff00_0000);
+    for band in clip.complements((width, height)) {
+        let (x, w) = (band.x as usize, band.w as usize);
+        for row in band.y as usize..(band.y + band.h) as usize {
+            let start = row * width as usize + x;
+            pixels[start..start + w].fill(0xff00_0000);
         }
     }
     unsafe { libc::munmap(ptr, bytes) };
@@ -327,20 +325,6 @@ unsafe fn black_buffer(
     // wl_shm_pool.destroy is opcode 1, while the new buffer retains the pool.
     unsafe { (c.marshal)(pool, 1, std::ptr::null(), 1, DESTROY) };
     (!buffer.is_null()).then_some(buffer)
-}
-
-fn complements(size: (i32, i32), clip: Rect) -> [(i32, i32, i32, i32); 4] {
-    let (w, h) = size;
-    let x0 = clip.x.clamp(0, w);
-    let y0 = clip.y.clamp(0, h);
-    let x1 = clip.x.saturating_add(clip.w).clamp(x0, w);
-    let y1 = clip.y.saturating_add(clip.h).clamp(y0, h);
-    [
-        (0, 0, x0, h),
-        (x1, 0, w - x1, h),
-        (x0, 0, x1 - x0, y0),
-        (x0, y1, x1 - x0, h - y1),
-    ]
 }
 
 unsafe fn create_mask(c: &Client, rt: &Runtime, parent: Proxy, size: (i32, i32)) -> Option<Mask> {
@@ -422,9 +406,7 @@ pub fn update(window: Window, clip: Option<Rect>) -> bool {
         w: size.0,
         h: size.1,
     });
-    let covers_whole = complements(size, clip)
-        .iter()
-        .all(|(_, _, w, h)| *w <= 0 || *h <= 0);
+    let covers_whole = clip.complements(size).next().is_none();
     let exists = state.masks.contains_key(&(window as usize));
     if !exists && covers_whole {
         return true;
@@ -821,12 +803,12 @@ mod tests {
                 h: 8,
             },
         ] {
-            let shapes = complements((10, 8), clip);
+            let shapes: Vec<Rect> = clip.complements((10, 8)).collect();
             for y in 0..8 {
                 for x in 0..10 {
                     let hits = shapes
                         .iter()
-                        .filter(|(bx, by, w, h)| x >= *bx && y >= *by && x < bx + w && y < by + h)
+                        .filter(|b| x >= b.x && y >= b.y && x < b.x + b.w && y < b.y + b.h)
                         .count();
                     let outside =
                         x < clip.x || y < clip.y || x >= clip.x + clip.w || y >= clip.y + clip.h;

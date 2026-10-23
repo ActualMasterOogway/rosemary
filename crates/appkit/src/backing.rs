@@ -1749,19 +1749,15 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
     let overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
     let mut composed: Option<Store> = None;
     let mut gpu = Vec::new();
-    let allowed = crate::window::presentation_clip(window)
-        .map(|clip| Rect {
-            x: i64::from(clip.x),
-            y: i64::from(clip.y),
-            width: i64::from(clip.w),
-            height: i64::from(clip.h),
-        })
-        .unwrap_or(Rect {
+    let allowed = logical_pixel_bounds(
+        window,
+        Rect {
             x: 0,
             y: 0,
             width: i64::from(store.width),
             height: i64::from(store.height),
-        });
+        },
+    );
     for (view, overlay) in overlays.iter() {
         let view = *view as Id;
         // SAFETY: an overlay is removed before its view is deallocated.

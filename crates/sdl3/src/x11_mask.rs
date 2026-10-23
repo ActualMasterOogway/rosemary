@@ -119,26 +119,15 @@ struct Mask {
 }
 static MASKS: Mutex<Option<HashMap<usize, Mask>>> = Mutex::new(None);
 
-fn bands((width, height): (i32, i32), clip: Rect) -> Vec<XRectangle> {
-    let x0 = clip.x.clamp(0, width);
-    let y0 = clip.y.clamp(0, height);
-    let x1 = clip.x.saturating_add(clip.w).clamp(x0, width);
-    let y1 = clip.y.saturating_add(clip.h).clamp(y0, height);
-    [
-        (0, 0, x0, height),
-        (x1, 0, width - x1, height),
-        (x0, 0, x1 - x0, y0),
-        (x0, y1, x1 - x0, height - y1),
-    ]
-    .into_iter()
-    .filter(|(_, _, w, h)| *w > 0 && *h > 0)
-    .map(|(x, y, w, h)| XRectangle {
-        x: x as i16,
-        y: y as i16,
-        width: w as u16,
-        height: h as u16,
-    })
-    .collect()
+fn bands(size: (i32, i32), clip: Rect) -> Vec<XRectangle> {
+    clip.complements(size)
+        .map(|band| XRectangle {
+            x: band.x as i16,
+            y: band.y as i16,
+            width: band.w as u16,
+            height: band.h as u16,
+        })
+        .collect()
 }
 
 /// Set or clear the visual mask without touching the guest's OpenGL context.

@@ -81,6 +81,29 @@ pub struct Rect {
     pub h: c_int,
 }
 
+impl Rect {
+    /// The parts of a `width` by `height` surface outside this rectangle:
+    /// full-height columns left and right, then the strips above and below
+    /// between them. Every mask and blackout uses these, so they agree on
+    /// each edge pixel; empty bands are left out.
+    pub fn complements(self, (width, height): (c_int, c_int)) -> impl Iterator<Item = Rect> {
+        let (width, height) = (width.max(0), height.max(0));
+        let x0 = self.x.clamp(0, width);
+        let y0 = self.y.clamp(0, height);
+        let x1 = self.x.saturating_add(self.w).clamp(x0, width);
+        let y1 = self.y.saturating_add(self.h).clamp(y0, height);
+        [
+            (0, 0, x0, height),
+            (x1, 0, width - x1, height),
+            (x0, 0, x1 - x0, y0),
+            (x0, y1, x1 - x0, height - y1),
+        ]
+        .into_iter()
+        .map(|(x, y, w, h)| Rect { x, y, w, h })
+        .filter(|band| band.w > 0 && band.h > 0)
+    }
+}
+
 /// `SDL_DisplayMode`.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]

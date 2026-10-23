@@ -739,28 +739,18 @@ fn mask_readback_surface(
     pitch: usize,
     clip: sdl3::Rect,
 ) -> bool {
-    let left = clip.x.max(0).min(width as i32) as usize;
-    let right = clip.x.saturating_add(clip.w).max(0).min(width as i32) as usize;
-    let top = clip.y.max(0).min(height as i32) as usize;
-    let bottom = clip.y.saturating_add(clip.h).max(0).min(height as i32) as usize;
-    if left == 0 && right == width && top == 0 && bottom == height {
-        return false;
-    }
-    let black = |row: &mut [u8], a: usize, b: usize| {
-        for pixel in row[a * 4..b * 4].chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[0, 0, 0, 255]);
+    let mut masked = false;
+    for band in clip.complements((width as i32, height as i32)) {
+        let (x, w) = (band.x as usize, band.w as usize);
+        for y in band.y as usize..(band.y + band.h) as usize {
+            let row = &mut pixels[y * pitch + x * 4..y * pitch + (x + w) * 4];
+            for pixel in row.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
         }
-    };
-    for y in 0..height {
-        let row = &mut pixels[y * pitch..y * pitch + width * 4];
-        if y < top || y >= bottom {
-            black(row, 0, width);
-        } else {
-            black(row, 0, left);
-            black(row, right, width);
-        }
+        masked = true;
     }
-    true
+    masked
 }
 
 /// SDL's window surface is `SDL_PIXELFORMAT_XRGB8888` on every backend this

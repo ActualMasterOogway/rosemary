@@ -2319,12 +2319,6 @@ mod chrome_blit {
         let Some(gl) = GL.get_or_init(Gl::load) else {
             return;
         };
-        let bands = [
-            (0, 0, x, pixels.1),
-            (x + w, 0, pixels.0 - x - w, pixels.1),
-            (x, 0, w, y),
-            (x, y + h, w, pixels.1 - y - h),
-        ];
         // SAFETY: all entrypoints refer to the current context. The default
         // framebuffer is bound only temporarily and all changed state restored.
         unsafe {
@@ -2348,11 +2342,11 @@ mod chrome_blit {
             (gl.Disable)(RASTERIZER_DISCARD);
             (gl.ColorMask)(1, 1, 1, 1);
             (gl.ClearColor)(0.0, 0.0, 0.0, 1.0);
-            for (bx, by, bw, bh) in bands {
-                if bw > 0 && bh > 0 {
-                    (gl.Scissor)(bx, by, bw, bh);
-                    (gl.Clear)(COLOR_BUFFER_BIT);
-                }
+            // GL counts rows from the bottom; the bands only need the same
+            // axis as the rectangle they surround.
+            for band in (sdl3::Rect { x, y, w, h }).complements(pixels) {
+                (gl.Scissor)(band.x, band.y, band.w, band.h);
+                (gl.Clear)(COLOR_BUFFER_BIT);
             }
             (gl.ClearColor)(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
             (gl.ColorMask)(
