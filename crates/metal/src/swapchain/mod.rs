@@ -109,6 +109,20 @@ struct Swapchain {
 
 /// Serialize presentations for one window while leaving swapchain state
 /// available to fence retirement during the blocking image acquisition.
+/// Dropping the permit releases the window lock before waking the Metal
+/// presenter. That ordering lets deferred staging acquire the lock immediately.
+struct PresentingGuard<'a> {
+    held: Option<std::sync::MutexGuard<'a, ()>>,
+    gpu: &'static Gpu,
+}
+
+impl Drop for PresentingGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.held.take());
+        self.gpu.presenter.notify_progress();
+    }
+}
+
 struct WindowSwapchain {
     gpu: &'static Gpu,
     presenting: Mutex<()>,
@@ -234,7 +248,10 @@ fn resize_worker(window: usize, entry: Arc<WindowSwapchain>) {
             std::thread::park();
             continue;
         }
-        let presenting = entry.presenting.lock().expect("window presentation");
+        let presenting = PresentingGuard {
+            held: Some(entry.presenting.lock().expect("window presentation")),
+            gpu: entry.gpu,
+        };
         #[cfg(test)]
         if TEST_BLOCK_RESIZE_WORKER.load(Ordering::Acquire) == window {
             TEST_RESIZE_WORKER_PAUSED.store(window, Ordering::Release);
@@ -1088,6 +1105,10 @@ fn present_impl(
             .lock()
             .expect("window presentation")
     };
+    let presenting = PresentingGuard {
+        held: Some(presenting),
+        gpu: window_swapchain.gpu,
+    };
     // The SDL window can be torn down after we cloned the entry, before
     // acquiring its per-window lock. Do not touch its retired surface.
     if !window_swapchain.alive.load(Ordering::Acquire) {
@@ -1341,6 +1362,23 @@ fn present_impl(
     }
 }
 
+/// Some Gamescope WSI versions omit a present-fence signal when
+/// vkQueuePresentKHR fails. Only trust the fence after a successful result
+/// in that opt-in WSI path. Other drivers still enqueue ordinary OUT_OF_DATE
+/// and SURFACE_LOST operations; device loss and OOM cannot be assumed queued.
+/// Mirrors DXVK Presenter::presentImage's fence-result classification.
+fn present_fence_will_signal(result: &Result<bool, vk::Result>, gamescope_wsi: bool) -> bool {
+    if gamescope_wsi {
+        return result.is_ok();
+    }
+    !matches!(
+        result,
+        Err(vk::Result::ERROR_DEVICE_LOST
+            | vk::Result::ERROR_OUT_OF_HOST_MEMORY
+            | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+    )
+}
+
 /// Both vblank-queued modes need layer coalescing. MAILBOX/IMMEDIATE do not.
 fn is_fifo_mode(mode: vk::PresentModeKHR) -> bool {
     matches!(
@@ -1414,7 +1452,10 @@ fn fifo_presentation_worker(window: usize, entry: Arc<WindowSwapchain>) {
         }
         drop(state);
 
-        let _presenting = entry.presenting.lock().expect("window presentation");
+        let _presenting = PresentingGuard {
+            held: Some(entry.presenting.lock().expect("window presentation")),
+            gpu: entry.gpu,
+        };
         if !entry.alive.load(Ordering::Acquire) || entry.gpu.lost.load(Ordering::Acquire) {
             return;
         }
@@ -1783,14 +1824,15 @@ pub(crate) fn retire_copied() {
         // Retiring copied drawables is opportunistic. A presentation may be
         // waiting for a swapchain image under this window's lock; do not make
         // drawable acquisition wait behind it merely to check a fence.
-        match swapchain.state.try_lock() {
-            Ok(mut swapchain) => {
-                swapchain.retire_copied();
-            }
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Poisoned(error)) => {
-                error.into_inner().retire_copied();
-            }
+        let retired = match swapchain.state.try_lock() {
+            Ok(mut state) => state.retire_copied(),
+            Err(TryLockError::WouldBlock) => false,
+            Err(TryLockError::Poisoned(error)) => error.into_inner().retire_copied(),
+        };
+        if retired {
+            // Source ownership has already returned to its drawable cache.
+            // Wake consumers only after releasing the swapchain state mutex.
+            swapchain.gpu.presenter.notify_progress();
         }
     }
 }
@@ -1817,6 +1859,8 @@ pub(crate) fn wait_copied(timeout: std::time::Duration) -> bool {
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
         };
         if state.retire_copied() {
+            drop(state);
+            entry.gpu.presenter.notify_progress();
             return true;
         }
         let fences = state.copying();
@@ -1829,7 +1873,11 @@ pub(crate) fn wait_copied(timeout: std::time::Duration) -> bool {
                 .device
                 .wait_for_fences(&fences, false, timeout.as_nanos() as u64)
         };
-        state.retire_copied();
+        let retired = state.retire_copied();
+        drop(state);
+        if retired {
+            entry.gpu.presenter.notify_progress();
+        }
         return matches!(waited, Ok(()) | Err(vk::Result::TIMEOUT));
     }
     false
@@ -2875,15 +2923,13 @@ impl Swapchain {
         // then replaces its result to exercise the post-acquire error path.
         #[cfg(test)]
         let result = self.injected_queue_present_error.take().map_or(result, Err);
-        // OUT_OF_DATE and the other ordinary WSI errors still enqueue the
-        // semaphore wait. Only allocation failure is specified to leave all
-        // synchronization objects untouched.
-        if present_fence.is_some()
-            && !matches!(
-                result,
-                Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
-            )
-        {
+        // Exclude device loss and allocation failures from present-fence
+        // waits. The Gamescope WSI opt-in can also omit a signal on ordinary
+        // failed presents; keep that driver quirk out of normal WSI paths.
+        static GAMESCOPE_WSI: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var("ENABLE_GAMESCOPE_WSI").as_deref() == Ok("1")
+        });
+        if present_fence.is_some() && present_fence_will_signal(&result, *GAMESCOPE_WSI) {
             self.presented[index as usize].pending = true;
         }
         match result {

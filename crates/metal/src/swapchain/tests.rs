@@ -70,6 +70,28 @@ fn vulkan_graphical_test_prerequisites_are_available() {
 }
 
 #[test]
+fn present_fences_are_not_awaited_after_unqueued_errors() {
+    use vk::Result as R;
+    for gamescope in [false, true] {
+        for error in [
+            R::ERROR_DEVICE_LOST,
+            R::ERROR_OUT_OF_HOST_MEMORY,
+            R::ERROR_OUT_OF_DEVICE_MEMORY,
+        ] {
+            assert!(!present_fence_will_signal(&Err(error), gamescope));
+        }
+        assert!(present_fence_will_signal(&Ok(false), gamescope));
+        assert!(present_fence_will_signal(&Ok(true), gamescope));
+    }
+    // The specification queues semaphore/fence work for these results, but
+    // Gamescope's alternate WSI path has a known missing-signal behavior.
+    for error in [R::ERROR_OUT_OF_DATE_KHR, R::ERROR_SURFACE_LOST_KHR] {
+        assert!(present_fence_will_signal(&Err(error), false));
+        assert!(!present_fence_will_signal(&Err(error), true));
+    }
+}
+
+#[test]
 fn fifo_limits_wsi_images_without_changing_mailbox_capacity() {
     assert_eq!(desired_image_count(vk::PresentModeKHR::FIFO, 3, 8), 4);
     assert_eq!(desired_image_count(vk::PresentModeKHR::FIFO, 3, 0), 4);

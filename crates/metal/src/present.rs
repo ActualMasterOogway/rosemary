@@ -20,6 +20,8 @@ pub(crate) struct Presenter {
     pending: std::sync::Mutex<std::collections::VecDeque<usize>>,
     ready: std::sync::Condvar,
     worker: std::sync::Once,
+    /// Resource-completion notifications observed across detached batches.
+    progress: std::sync::atomic::AtomicU64,
 }
 
 impl Presenter {
@@ -28,6 +30,7 @@ impl Presenter {
             pending: std::sync::Mutex::new(std::collections::VecDeque::new()),
             ready: std::sync::Condvar::new(),
             worker: std::sync::Once::new(),
+            progress: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -37,19 +40,33 @@ impl Presenter {
         &self,
         deferred: std::collections::VecDeque<usize>,
         delay: std::time::Duration,
+        observed_progress: u64,
     ) -> bool {
         let mut pending = self.pending.lock().expect("presentation queue");
         let new_work = !pending.is_empty();
         prepend_deferred(&mut pending, deferred);
-        if !new_work {
-            // Checking the queue under this same mutex makes an enqueue
-            // after the check wake this wait, rather than lose its notify.
+        if !new_work
+            && self.progress.load(std::sync::atomic::Ordering::Acquire) == observed_progress
+        {
+            // Queue insertion and completion both take this mutex before
+            // notifying. A completion during dispatch changes the generation,
+            // so it cannot be lost before the wait starts.
             let _wait = self
                 .ready
                 .wait_timeout(pending, delay)
                 .expect("deferred presentation wait");
         }
         new_work
+    }
+
+    /// DXVK signals resource waiters on submission completion. The fallback
+    /// timer remains bounded, but an unlocked presentation permit can advance
+    /// a deferred drawable without waiting for the next 1 ms timeout.
+    pub(crate) fn notify_progress(&self) {
+        let _pending = self.pending.lock().expect("presentation queue");
+        self.progress
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.ready.notify_one();
     }
 }
 
@@ -628,12 +645,17 @@ fn present_worker(gpu: &'static Gpu) {
     loop {
         // Remove an entire batch under one lock: concurrent enqueue goes
         // after this batch, preserving ordering even when items are deferred.
-        let batch = {
+        let (batch, observed_progress) = {
             let mut pending = presenter.pending.lock().expect("presentation queue");
             while pending.is_empty() {
                 pending = presenter.ready.wait(pending).expect("presentation queue");
             }
-            std::mem::take(&mut *pending)
+            (
+                std::mem::take(&mut *pending),
+                presenter
+                    .progress
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
         };
         let submitted = batch.len();
         let mut has_busy_deferral = false;
@@ -665,6 +687,7 @@ fn present_worker(gpu: &'static Gpu) {
             presenter.requeue_deferred(
                 deferred,
                 presenter_retry_delay(deferred_streak, has_busy_deferral),
+                observed_progress,
             );
         } else {
             deferred_streak = 0;
@@ -735,7 +758,13 @@ fn deferred_window_does_not_delay_another_window_enqueued_during_dispatch() {
 
     let start = Instant::now();
     assert!(
-        presenter.requeue_deferred(deferred, Duration::from_millis(250)),
+        presenter.requeue_deferred(
+            deferred,
+            Duration::from_millis(250),
+            presenter
+                .progress
+                .load(std::sync::atomic::Ordering::Acquire),
+        ),
         "new B frame must bypass deferred A's 250ms backoff"
     );
     assert!(
@@ -765,6 +794,52 @@ fn deferred_window_does_not_delay_another_window_enqueued_during_dispatch() {
     );
     assert_eq!(completed, [20], "healthy B must dispatch in the next batch");
     assert_eq!(still_deferred, VecDeque::from([10, 11, 12]));
+}
+
+#[cfg(test)]
+#[test]
+fn progress_during_dispatch_skips_the_busy_wait() {
+    let presenter = Presenter::new();
+    let observed = presenter
+        .progress
+        .load(std::sync::atomic::Ordering::Acquire);
+    presenter.notify_progress();
+    let start = std::time::Instant::now();
+    assert!(!presenter.requeue_deferred(
+        std::collections::VecDeque::from([7]),
+        std::time::Duration::from_millis(250),
+        observed,
+    ));
+    assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    assert_eq!(presenter.pending.lock().unwrap().pop_front(), Some(7));
+}
+
+#[cfg(test)]
+#[test]
+fn progress_after_requeue_wakes_its_condvar() {
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+    let presenter = Arc::new(Presenter::new());
+    let observed = presenter
+        .progress
+        .load(std::sync::atomic::Ordering::Acquire);
+    let (started, receiver) = mpsc::channel();
+    let waiting = Arc::clone(&presenter);
+    let worker = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        let at = Instant::now();
+        waiting.requeue_deferred(
+            std::collections::VecDeque::from([9]),
+            Duration::from_secs(1),
+            observed,
+        );
+        at.elapsed()
+    });
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    presenter.notify_progress();
+    assert!(worker.join().unwrap() < Duration::from_millis(500));
+    assert_eq!(presenter.pending.lock().unwrap().pop_front(), Some(9));
 }
 
 #[cfg(test)]
