@@ -48,6 +48,7 @@ pub mod launch;
 pub mod launchservices;
 mod props;
 pub(crate) mod quartz;
+mod view_controller;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
@@ -97,6 +98,7 @@ pub fn bootstrap() {
         classes::install();
         accessibility::install();
         ctline::install();
+        view_controller::install();
         alert::install();
         panel::install();
         appearance::install();
