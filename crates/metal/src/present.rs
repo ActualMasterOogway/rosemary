@@ -1644,16 +1644,7 @@ fn store_upload_worker(
             }
             TEST_STORE_UPLOAD_PAUSED.store(0, std::sync::atomic::Ordering::Release);
         }
-        let outcome = if !worker.state.lock().expect("store uploads").closed {
-            present_store_synchronous(
-                job.window as sdl3::Window,
-                &job.store,
-                &job.holes,
-                &job.overlays,
-            )
-        } else {
-            appkit::backing::PresentOutcome::Deferred
-        };
+        let outcome = present_store_in_turn(&worker, &job);
         let mut state = worker.state.lock().expect("store uploads");
         state.busy = false;
         if !state.closed {
@@ -1676,6 +1667,45 @@ fn store_upload_worker(
     retired.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(test)]
     TEST_ACTIVE_STORE_UPLOADS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// How long a store upload waits for a window's other presenters before
+/// handing the store back to the event pump.
+const STORE_TURN_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Present `job`, waiting out a window's other presenters.
+///
+/// A window with a `CAMetalLayer` drawing every frame holds its presentation
+/// lock nearly all the time. Giving up whenever it is held leaves the store -
+/// and a web view's page over it - on screen only when a pump happens to
+/// fall in a gap. This worker is off the event thread, so it can wait.
+fn present_store_in_turn(
+    worker: &StoreUploadWorker,
+    job: &StoreUpload,
+) -> appkit::backing::PresentOutcome {
+    use appkit::backing::PresentOutcome::Deferred;
+    let window = job.window as sdl3::Window;
+    let deadline = std::time::Instant::now() + STORE_TURN_LIMIT;
+    loop {
+        if worker.state.lock().expect("store uploads").closed {
+            return Deferred;
+        }
+        let waiting = std::time::Instant::now() < deadline;
+        // Checked before uploading, so that waiting does not copy the store
+        // to the GPU again on every try.
+        if waiting && crate::swapchain::window_presenting_busy(window) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        let outcome = present_store_synchronous(window, &job.store, &job.holes, &job.overlays);
+        // Only a live swapchain makes a deferral a matter of contention; one
+        // still initializing is the event pump's to retry.
+        if outcome == Deferred && waiting && crate::swapchain::window_has_active_swapchain(window) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        return outcome;
+    }
 }
 
 /// Images replaced by a resize, with how many more presentations to keep them
@@ -1830,9 +1860,8 @@ pub(crate) fn present_store(
     if let Some(converted) = crate::swapchain::window_refused(window) {
         return if converted { Displayed } else { Fallback };
     }
-    if crate::swapchain::window_presenting_busy(window)
-        || crate::swapchain::window_initialization_pending(window)
-    {
+    // A busy presentation lock is left to the upload worker to wait out.
+    if crate::swapchain::window_initialization_pending(window) {
         return Deferred;
     }
     let device = unsafe { crate::MTLCreateSystemDefaultDevice() };
@@ -1921,8 +1950,8 @@ fn present_store_synchronous(
     if forced_readback() {
         return store_failure_outcome(window);
     }
-    // Before GPU uploads or allocations, leave a contended FIFO window to
-    // the next event turn rather than stalling input for other windows.
+    // Before GPU uploads or allocations, hand a contended window back to
+    // `present_store_in_turn` to wait for.
     if let Some(converted) = crate::swapchain::window_refused(window) {
         return if converted { Displayed } else { Fallback };
     }
