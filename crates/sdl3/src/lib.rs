@@ -4466,6 +4466,30 @@ pub mod video {
 
     #[cfg(test)]
     #[test]
+    fn a_hidden_windows_resize_reaches_its_presentation_snapshot() {
+        if !crate::isolated::run_here() {
+            return;
+        }
+        let Some(window) = create_window(c"hidden resize", 140, 90, flags::HIDDEN) else {
+            return;
+        };
+        assert_eq!(presentation_window(window).unwrap().logical_size, (140, 90));
+        assert!(set_window_size(window, 200, 120));
+        let live = window_size(window).unwrap();
+        let key = window as usize;
+        let seen = std::thread::spawn(move || presentation_window(key as Window))
+            .join()
+            .unwrap()
+            .expect("a published snapshot");
+        assert_eq!(
+            seen.logical_size, live,
+            "a worker saw a size SDL no longer has"
+        );
+        destroy_window(window);
+    }
+
+    #[cfg(test)]
+    #[test]
     fn uncached_video_queries_are_rejected_on_non_owner_threads() {
         if !super::may_pump() {
             return;
