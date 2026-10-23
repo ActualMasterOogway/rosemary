@@ -860,6 +860,11 @@ thread_local! {
 }
 
 fn mouse_inside_logical_window(id: u32, x: f32, y: f32) -> bool {
+    // A disassociated or recentred pointer's position is frozen, not where the
+    // input is: its deltas and clicks belong to the window wherever it froze.
+    if !crate::screen::mouse_is_associated() || crate::screen::recentring() {
+        return true;
+    }
     let object = object_for(id);
     !object.is_null() && window::accepts_surface_point(object, x, y)
 }

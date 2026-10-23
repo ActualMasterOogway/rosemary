@@ -831,6 +831,120 @@ thread_local! {
     static SHORTEN_INSIDE_DID_ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    static SENT_EVENTS: std::cell::RefCell<Vec<(u64, NSPoint)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+unsafe extern "C" fn record_sent_event(_receiver: Id, _sel: Sel, event: Id) {
+    let fields = crate::nsevent::fields_of(event).unwrap();
+    SENT_EVENTS.with_borrow_mut(|sent| sent.push((fields.kind, fields.delta)));
+}
+
+/// A disassociated pointer's frozen position may sit outside a shortened
+/// fullscreen frame; its motion deltas and clicks still belong to the window.
+#[test]
+#[ignore = "requires an X11/Wayland window manager; see tests/fixtures/fullscreen-native.md"]
+fn disassociated_pointer_input_ignores_the_logical_frame_edge() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"DisassociatedPointerRegressionWindow",
+        0,
+    )
+    .unwrap();
+    class.add_method(
+        objc::sel::get("sendEvent:"),
+        record_sent_event as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    objc::class::register_pair(class);
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 90.0, y: 110.0 },
+                size: NSSize {
+                    width: 700.0,
+                    height: 480.0,
+                },
+            },
+        )
+    });
+    window_of(object).accepts_mouse_moved = 1;
+    sdl3::video::show_window(window_of(object).sdl);
+    window_of(object).shown = 1;
+    let pump = || {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+    };
+    unsafe {
+        toggle_full_screen(
+            object,
+            objc::sel::get("toggleFullScreen:"),
+            std::ptr::null_mut(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).reported_fullscreen == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fullscreen did not settle"
+        );
+        pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let host = host_frame(object).unwrap();
+    let logical = NSRect {
+        origin: host.origin,
+        size: NSSize {
+            width: host.size.width,
+            height: host.size.height - 31.0,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), logical) };
+    pump();
+    SENT_EVENTS.with_borrow_mut(Vec::clear);
+
+    let id = sdl3::video::window_id(window_of(object).sdl);
+    unsafe { crate::screen::CGAssociateMouseAndMouseCursorPosition(0) };
+    // Frozen in the 31-point band above the logical frame.
+    crate::event::warp_pointer(40.0, 10.0);
+    let click = |down| sdl3::video::Event::MouseButton {
+        window: id,
+        button: sdl3::mouse::LEFT,
+        down,
+        clicks: 1,
+        x: 400.0,
+        y: 300.0,
+    };
+    crate::event::deliver(sdl3::video::Event::MouseMotion {
+        window: id,
+        x: 400.0,
+        y: 300.0,
+        dx: 5.0,
+        dy: 3.0,
+        buttons: 0,
+    });
+    crate::event::deliver(click(true));
+    crate::event::deliver(click(false));
+    unsafe { crate::screen::CGAssociateMouseAndMouseCursorPosition(1) };
+    let sent = SENT_EVENTS.take();
+    let kinds: Vec<u64> = sent.iter().map(|(kind, _)| *kind).collect();
+    // NSEventTypeMouseMoved, LeftMouseDown, LeftMouseUp.
+    assert_eq!(
+        kinds,
+        [5, 1, 2],
+        "input of a disassociated pointer was dropped"
+    );
+    assert_eq!(sent[0].1, NSPoint { x: 5.0, y: 3.0 });
+    objc::arc::release(object);
+    pump();
+    objc::arc::pool_pop(pool);
+}
+
 unsafe extern "C" fn record_fullscreen_lifecycle(receiver: Id, selector: Sel, _note: Id) {
     let name = if selector == objc::sel::get("windowWillEnterFullScreen:") {
         "willEnter"
