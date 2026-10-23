@@ -741,6 +741,25 @@ pub(crate) fn window_initialization_pending(window: sdl3::Window) -> bool {
         || sdl3::video::vulkan::surface_request_pending(window)
 }
 
+/// A live swapchain can temporarily defer staging while its presentation
+/// lock or a GPU-copy fence is occupied. Unlike missing WSI metadata, these
+/// deferred drawables must be retried before their layer's ring fills.
+pub(crate) fn window_has_active_swapchain(window: sdl3::Window) -> bool {
+    let registry = match SWAPCHAINS.try_lock() {
+        Ok(registry) => registry,
+        // Do not turn transient contention with teardown into a long delay.
+        Err(_) => return true,
+    };
+    registry
+        .as_ref()
+        .and_then(|all| all.get(&(window as usize)))
+        .is_some_and(|entry| {
+            entry.alive.load(Ordering::Acquire)
+                && !entry.gpu.lost.load(Ordering::Acquire)
+                && entry.fifo_failure.load(Ordering::Acquire) == 0
+        })
+}
+
 pub(crate) fn window_presenting_busy(window: sdl3::Window) -> bool {
     let guard = match SWAPCHAINS.try_lock() {
         Ok(guard) => guard,

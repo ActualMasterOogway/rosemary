@@ -594,7 +594,7 @@ pub(crate) fn dispatch_batch(
             continue;
         }
         match present(drawable) {
-            PresentAttempt::Deferred => {
+            PresentAttempt::Deferred | PresentAttempt::DeferredBusy => {
                 if let Some(window) = window {
                     blocked.insert(window);
                 }
@@ -611,6 +611,17 @@ fn deferred_retry_delay(streak: u32) -> std::time::Duration {
     std::time::Duration::from_millis((16u64 << streak.min(4)).min(250))
 }
 
+/// DXVK's submission completion path wakes resource waiters immediately;
+/// likewise an occupied drawable ring must not wait for an exponential idle
+/// backoff. A short bounded poll also covers races with a missed GPU/WSI wake.
+fn presenter_retry_delay(streak: u32, busy: bool) -> std::time::Duration {
+    if busy {
+        std::time::Duration::from_millis(1)
+    } else {
+        deferred_retry_delay(streak)
+    }
+}
+
 fn present_worker(gpu: &'static Gpu) {
     let presenter = &gpu.presenter;
     let mut deferred_streak = 0u32;
@@ -625,10 +636,15 @@ fn present_worker(gpu: &'static Gpu) {
             std::mem::take(&mut *pending)
         };
         let submitted = batch.len();
+        let mut has_busy_deferral = false;
         let deferred = dispatch_batch(
             batch,
             |drawable| drawable_window(drawable as Id),
-            |drawable| enqueue_swapchain(drawable as Id),
+            |drawable| {
+                let result = enqueue_swapchain(drawable as Id);
+                has_busy_deferral |= result == PresentAttempt::DeferredBusy;
+                result
+            },
             |drawable, result| {
                 let drawable = drawable as Id;
                 if matches!(result, PresentAttempt::Readback) {
@@ -646,7 +662,10 @@ fn present_worker(gpu: &'static Gpu) {
             };
             // A producer may have notified while this batch was in flight.
             // The queue check must precede the condvar wait under one lock.
-            presenter.requeue_deferred(deferred, deferred_retry_delay(deferred_streak));
+            presenter.requeue_deferred(
+                deferred,
+                presenter_retry_delay(deferred_streak, has_busy_deferral),
+            );
         } else {
             deferred_streak = 0;
         }
@@ -662,6 +681,13 @@ fn deferred_presenter_retry_backs_off_without_reordering() {
     assert_eq!(deferred_retry_delay(3).as_millis(), 128);
     assert_eq!(deferred_retry_delay(4).as_millis(), 250);
     assert_eq!(deferred_retry_delay(u32::MAX).as_millis(), 250);
+    for streak in [0, 1, 2, 3, 4, u32::MAX] {
+        assert_eq!(presenter_retry_delay(streak, true).as_millis(), 1);
+        assert_eq!(
+            presenter_retry_delay(streak, false),
+            deferred_retry_delay(streak)
+        );
+    }
     let mut pending = std::collections::VecDeque::from([3usize]);
     prepend_deferred(&mut pending, std::collections::VecDeque::from([1usize, 2]));
     assert_eq!(pending.into_iter().collect::<Vec<_>>(), [1, 2, 3]);
@@ -739,6 +765,24 @@ fn deferred_window_does_not_delay_another_window_enqueued_during_dispatch() {
     );
     assert_eq!(completed, [20], "healthy B must dispatch in the next batch");
     assert_eq!(still_deferred, VecDeque::from([10, 11, 12]));
+}
+
+#[cfg(test)]
+#[test]
+fn busy_deferred_frame_stays_ahead_of_later_frames() {
+    use std::collections::VecDeque;
+    let mut completed = Vec::new();
+    let deferred = dispatch_batch(
+        VecDeque::from([1, 2, 3]),
+        |_| Some(10),
+        |frame| match frame {
+            1 => PresentAttempt::DeferredBusy,
+            _ => panic!("do not submit a younger frame before the busy one"),
+        },
+        |frame, outcome| completed.push((frame, outcome)),
+    );
+    assert!(completed.is_empty());
+    assert_eq!(deferred, VecDeque::from([1, 2, 3]));
 }
 
 #[cfg(test)]
@@ -885,7 +929,11 @@ fn deferred_presentations_keep_per_window_order_across_concurrent_enqueue() {
 pub(crate) enum PresentAttempt {
     Handled,
     Readback,
+    /// A surface/metadata failure may need progressively longer retries.
     Deferred,
+    /// An existing swapchain is temporarily busy; do not starve its three
+    /// already-submitted drawables behind a long timer.
+    DeferredBusy,
 }
 
 pub(crate) fn enqueue_swapchain(drawable: Id) -> PresentAttempt {
@@ -908,7 +956,13 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> PresentAttempt {
         // A live window must not lose an already-submitted drawable during
         // that interval, especially once SDL has converted it to Vulkan.
         return if layer_waits_for_window_metadata(described.layer) {
-            PresentAttempt::Deferred
+            if layer_window(described.layer).is_some_and(|window| {
+                crate::swapchain::window_has_active_swapchain(window as sdl3::Window)
+            }) {
+                PresentAttempt::DeferredBusy
+            } else {
+                PresentAttempt::Deferred
+            }
         } else {
             PresentAttempt::Readback
         };
@@ -941,7 +995,13 @@ pub(crate) fn enqueue_swapchain(drawable: Id) -> PresentAttempt {
             PresentAttempt::Handled
         }
         Ok(Some(false)) => PresentAttempt::Readback,
-        Ok(None) => PresentAttempt::Deferred,
+        Ok(None) => {
+            if crate::swapchain::window_has_active_swapchain(frame.window) {
+                PresentAttempt::DeferredBusy
+            } else {
+                PresentAttempt::Deferred
+            }
+        }
         Err(reason) => {
             gpu::trace(format!("swapchain presentation failed: {reason}"));
             PresentAttempt::Readback

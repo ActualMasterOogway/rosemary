@@ -2385,7 +2385,7 @@ fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
         })
         .join()
         .unwrap(),
-        crate::present::PresentAttempt::Deferred,
+        crate::present::PresentAttempt::DeferredBusy,
         "metadata invalidation must not select CPU readback"
     );
     assert!(
@@ -2404,7 +2404,8 @@ fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
         .unwrap()
         {
             crate::present::PresentAttempt::Handled => break,
-            crate::present::PresentAttempt::Deferred => {
+            crate::present::PresentAttempt::Deferred
+            | crate::present::PresentAttempt::DeferredBusy => {
                 assert!(
                     Instant::now() < deadline,
                     "deferred drawable never presented"
@@ -2475,7 +2476,7 @@ fn a_layer_on_a_guests_own_window_is_presented_through_a_swapchain() {
         at_first
             .recv_timeout(Duration::from_secs(4))
             .expect("first drawable was examined"),
-        crate::present::PresentAttempt::Deferred,
+        crate::present::PresentAttempt::DeferredBusy,
     );
     sdl3::video::publish_presentation_windows(&[sdl]);
     assert!(crate::present::layer_frame(layer).is_some());
