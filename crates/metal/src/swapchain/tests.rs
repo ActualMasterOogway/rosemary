@@ -591,6 +591,55 @@ fn a_frame_off_the_edge_of_its_window_is_clipped_to_it() {
     assert!(clamp(&frame(10, 10, 0, 40), extent).is_none());
 }
 
+/// A swapchain whose extent lags its window's size in pixels, as one does
+/// between a resize and the rebuild, is still filled by a layer covering the
+/// window: scaled, as before logical clipping, not cropped or left unwritten.
+#[test]
+fn a_covering_layer_fills_a_swapchain_extent_that_lags_its_window() {
+    let frame = appkit::view::Frame {
+        window: std::ptr::null_mut(),
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 240,
+        window_width: 320,
+        window_height: 240,
+    };
+    for extent in [(330, 250), (300, 200)] {
+        let extent = vk::Extent2D {
+            width: extent.0,
+            height: extent.1,
+        };
+        let (from, into) = direct_blit_to(&frame, extent, None, (320, 240)).unwrap();
+        let whole = |w: u32, h: u32| {
+            [
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D {
+                    x: w as i32,
+                    y: h as i32,
+                    z: 1,
+                },
+            ]
+        };
+        assert_eq!(into, whole(extent.width, extent.height), "{extent:?}");
+        assert_eq!(from, whole(320, 240), "{extent:?}");
+    }
+    // A logical clip in window pixels scales with the frame.
+    let allowed = sdl3::Rect {
+        x: 0,
+        y: 24,
+        w: 320,
+        h: 216,
+    };
+    let extent = vk::Extent2D {
+        width: 640,
+        height: 480,
+    };
+    let (from, into) = direct_blit_to(&frame, extent, Some(allowed), (320, 240)).unwrap();
+    assert_eq!((into[0].y, into[1].y), (48, 480));
+    assert_eq!((from[0].y, from[1].y), (24, 240));
+}
+
 /// Actual WSI presentation with a shortened AppKit NSWindow inside a full-
 /// display SDL container. A pure clipping unit cannot validate Vulkan image
 /// layout changes needed for the new black-band clear and cropped transfer.

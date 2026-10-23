@@ -168,6 +168,38 @@ pub(super) fn source_of(
     [map(into[0]), map(into[1])]
 }
 
+/// Where a layer covering its window goes in an image of `extent`, and the
+/// part of a `source`-sized drawable that lands there.
+pub(super) fn direct_blit_to(
+    frame: &appkit::view::Frame,
+    extent: vk::Extent2D,
+    allowed: Option<sdl3::Rect>,
+    source: (u32, u32),
+) -> Option<([vk::Offset3D; 2], [vk::Offset3D; 2])> {
+    // The frame and clip are in window pixels; the image may not be yet.
+    let sx = f64::from(extent.width) / f64::from(frame.window_width.max(1));
+    let sy = f64::from(extent.height) / f64::from(frame.window_height.max(1));
+    let x = |v: i32| (f64::from(v) * sx).round() as i32;
+    let y = |v: i32| (f64::from(v) * sy).round() as i32;
+    let scaled = appkit::view::Frame {
+        window: frame.window,
+        x: x(frame.x),
+        y: y(frame.y),
+        width: (x(frame.x.saturating_add(frame.width as i32)) - x(frame.x)).max(0) as u32,
+        height: (y(frame.y.saturating_add(frame.height as i32)) - y(frame.y)).max(0) as u32,
+        window_width: extent.width,
+        window_height: extent.height,
+    };
+    let allowed = allowed.map(|clip| sdl3::Rect {
+        x: x(clip.x),
+        y: y(clip.y),
+        w: x(clip.x.saturating_add(clip.w)) - x(clip.x),
+        h: y(clip.y.saturating_add(clip.h)) - y(clip.y),
+    });
+    let into = clamp_to(&scaled, extent, allowed)?;
+    Some((source_of(into, &scaled, source), into))
+}
+
 /// One colour mip level, which is all any image here has.
 pub(super) fn whole_color() -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {

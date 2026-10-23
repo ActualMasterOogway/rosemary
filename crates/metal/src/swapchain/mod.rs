@@ -1003,12 +1003,17 @@ impl Swapchain {
                     }
                 }
                 None => {
-                    if let Some(into) = clamp(frame, self.extent) {
+                    if let Some((from, into)) = direct_blit_to(
+                        frame,
+                        self.extent,
+                        appkit::window::presentation_clip(frame.window),
+                        (source.width, source.height),
+                    ) {
                         blit(
                             device,
                             command_buffer,
                             source.image,
-                            source_of(into, frame, (source.width, source.height)),
+                            from,
                             target,
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                             into,
