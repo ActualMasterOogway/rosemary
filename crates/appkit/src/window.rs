@@ -504,10 +504,12 @@ fn destroy_sdl_window(sdl: sdl3::Window) {
             .retain(|window| *window != member as usize);
         crate::backing::forget_window(member);
         crate::screen::forget_relative_pointer(member);
-        crate::decor::destroyed(member);
         for hook in &hooks {
             hook(member);
         }
+        // After the hooks, which cancel a Metal swapchain initializer that
+        // would otherwise mark the window opaque once this had forgotten it.
+        crate::decor::destroyed(member);
     }
     sdl3::video::destroy_window_after_hooks(sdl);
 }
