@@ -114,14 +114,23 @@ unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     }
 }
 
-/// `-visibleFrame`: the part not under the menu bar or the Dock.
-///
-/// SDL's usable bounds is the same question, and where it cannot answer the
-/// whole frame is the honest fallback - a program using it to place a window
-/// gets one that may sit under the menu bar, rather than one placed against a
-/// margin this runtime invented.
+/// A fullscreen Space hides desktop docks, but keeps its global menu area.
+/// This backend puts menus in each window instead, so that reservation is zero.
+fn fullscreen_visible_frame(mut frame: NSRect, menu_height: CGFloat) -> NSRect {
+    frame.size.height = (frame.size.height - menu_height.max(0.0)).max(0.0);
+    frame
+}
+
+/// `-visibleFrame`: desktop panels constrain ordinary windows, not a fullscreen
+/// Space. SDL's usable bounds keep those reservations even when panels are
+/// covered; passing them to the guest can shrink its fullscreen window.
 unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
     let display = display_of(receiver);
+    if crate::window::fullscreen_on(display) {
+        // SAFETY: the receiver is this runtime's NSScreen.
+        let full = unsafe { frame(receiver, sel) };
+        return fullscreen_visible_frame(full, crate::menu::global_menu_bar_height());
+    }
     match sdl3::video::display_usable_bounds(display) {
         Some(b) => crate::geometry::rect_from_sdl(b.x, b.y, b.w, b.h),
         // SAFETY: `-frame` is `NSRect (id, SEL)`.
