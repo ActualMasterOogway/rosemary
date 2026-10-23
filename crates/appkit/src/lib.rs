@@ -11,6 +11,7 @@
 )]
 
 mod about;
+mod accessibility;
 pub mod alert;
 mod animation;
 pub mod appearance;
@@ -92,6 +93,7 @@ pub fn bootstrap() {
         foundation::bootstrap();
         decor::install();
         classes::install();
+        accessibility::install();
         alert::install();
         panel::install();
         appearance::install();
@@ -289,6 +291,13 @@ exports::exports! {
         "NSRectClip" => color::NSRectClip,
         "NSRectFillUsingOperation" => color::NSRectFillUsingOperation,
         "NSBeep" => application::NSBeep,
+        "NSAccessibilityPostNotification" => accessibility::NSAccessibilityPostNotification,
+        "NSAccessibilityPostNotificationWithUserInfo" => accessibility::NSAccessibilityPostNotificationWithUserInfo,
+        "NSAccessibilityActionDescription" => accessibility::NSAccessibilityActionDescription,
+        "NSAccessibilityRoleDescription" => accessibility::NSAccessibilityRoleDescription,
+        "NSAccessibilityRoleDescriptionForUIElement" => accessibility::NSAccessibilityRoleDescriptionForUIElement,
+        "NSAccessibilityUnignoredAncestor" => accessibility::NSAccessibilityUnignoredAncestor,
+        "NSAccessibilityFrameInView" => accessibility::NSAccessibilityFrameInView,
         // FIXME (PORTABILITY): this needs to be ported to macOS
         #[cfg(not(target_os = "macos"))]
         "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
