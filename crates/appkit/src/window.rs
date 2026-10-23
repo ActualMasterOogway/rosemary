@@ -2210,12 +2210,18 @@ unsafe extern "C" fn is_visible(receiver: Id, _sel: Sel) -> u8 {
     (window_of(receiver).shown != 0) as u8
 }
 
+/// `-screen`: the display SDL puts the window on, so per-display answers such
+/// as a fullscreen work area reach a window on a secondary monitor.
 unsafe extern "C" fn screen(receiver: Id, _sel: Sel) -> Id {
+    let sdl = window_of(receiver).sdl;
+    if let Some(display) = (!sdl.is_null())
+        .then(|| sdl3::video::display_for_window(sdl))
+        .flatten()
+    {
+        return crate::screen::screen_object(c"NSScreen", display);
+    }
     let class = objc::class::ptr(objc::class::lookup(c"NSScreen").expect("NSScreen")) as Id;
-    // SAFETY: `+mainScreen` is `id (Class, SEL)`. The display a window is
-    // actually on is a question SDL can answer and this does not ask, because
-    // nothing in this tree yet distinguishes them.
-    let _ = receiver;
+    // SAFETY: `+mainScreen` is `id (Class, SEL)`.
     unsafe {
         let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
         f(class, objc::sel::get("mainScreen"))
