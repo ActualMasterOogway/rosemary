@@ -641,16 +641,16 @@ fn host_frame(object: Id) -> Option<NSRect> {
     if sdl.is_null() {
         return None;
     }
-    // Metal presentation can resolve this frame from a worker. Read the SDL
-    // owner's published dimensions and position, never SDL window properties
-    // from the presentation thread. On the video owner keep the established
-    // popup-relative and Wayland virtual-desktop coordinate behavior.
-    let snapshot = sdl3::video::presentation_window(sdl)?;
-    let (width, height) = snapshot.logical_size;
-    let (x, y) = if sdl3::video::is_video_thread() {
-        global_position(sdl)?
+    // Metal presentation can resolve this frame from a worker, which reads
+    // the SDL owner's published snapshot, never SDL window properties. The
+    // owner asks SDL itself: -frame straight after -setFrame: must not wait
+    // for the resize event, and popup-relative and Wayland virtual-desktop
+    // positions come from global_position.
+    let ((width, height), (x, y)) = if sdl3::video::is_video_thread() {
+        (sdl3::video::window_size(sdl)?, global_position(sdl)?)
     } else {
-        snapshot.position
+        let snapshot = sdl3::video::presentation_window(sdl)?;
+        (snapshot.logical_size, snapshot.position)
     };
     Some(crate::geometry::rect_from_sdl(x, y, width, height))
 }

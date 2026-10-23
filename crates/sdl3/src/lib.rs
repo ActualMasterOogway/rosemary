@@ -3186,13 +3186,33 @@ pub mod video {
         };
     }
 
-    window_call! {
+    /// [`window_call`]s that change what [`presentation_window`] reports.
+    macro_rules! window_state_call {
+        ($($name:ident => $entry:ident),* $(,)?) => {
+            $(
+                pub fn $name(window: Window) -> bool {
+                    let Some(f) = api().and_then(|a| a.$entry) else {
+                        return false;
+                    };
+                    // SAFETY: a window this crate created.
+                    let done = unsafe { f(window) };
+                    resample_presentation_window(window);
+                    done
+                }
+            )*
+        };
+    }
+
+    window_state_call! {
         show_window => SDL_ShowWindow,
         hide_window => SDL_HideWindow,
-        raise_window => SDL_RaiseWindow,
         minimize_window => SDL_MinimizeWindow,
         maximize_window => SDL_MaximizeWindow,
         restore_window => SDL_RestoreWindow,
+    }
+
+    window_call! {
+        raise_window => SDL_RaiseWindow,
         swap_window => SDL_GL_SwapWindow,
         start_text_input => SDL_StartTextInput,
         stop_text_input => SDL_StopTextInput,
@@ -3355,7 +3375,9 @@ pub mod video {
             return false;
         };
         // SAFETY: a window this crate created.
-        unsafe { f(window, width, height) }
+        let done = unsafe { f(window, width, height) };
+        resample_presentation_window(window);
+        done
     }
 
     pub fn window_size_in_pixels(window: Window) -> Option<(i32, i32)> {
@@ -3377,7 +3399,9 @@ pub mod video {
             return false;
         };
         // SAFETY: a window this crate created.
-        unsafe { f(window, x, y) }
+        let done = unsafe { f(window, x, y) };
+        resample_presentation_window(window);
+        done
     }
 
     /// `SDL_SetWindowOpacity`, where 1.0 is opaque.
@@ -3407,7 +3431,9 @@ pub mod video {
             return false;
         };
         // SAFETY: a window this crate created.
-        unsafe { f(window, on) }
+        let done = unsafe { f(window, on) };
+        resample_presentation_window(window);
+        done
     }
 
     /// `SDL_SetWindowBordered`: whether the window system draws a frame around
@@ -3420,7 +3446,9 @@ pub mod video {
             return false;
         };
         // SAFETY: a window this crate created.
-        unsafe { f(window, on) }
+        let done = unsafe { f(window, on) };
+        resample_presentation_window(window);
+        done
     }
 
     /// `SDL_SetWindowMinimumSize`, in window coordinates.
@@ -4023,6 +4051,20 @@ pub mod video {
         {
             cache.remove(&(window as usize));
         }
+    }
+
+    /// Take the snapshot again after this process changed the window. Not
+    /// every change comes back as an event to invalidate it: a hidden window
+    /// takes a new size at once and reports no resize.
+    fn resample_presentation_window(window: Window) {
+        let Some(snapshot) = sample_presentation_window(window) else {
+            return;
+        };
+        PRESENTATION_WINDOWS
+            .lock()
+            .expect("presentation windows")
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(window as usize, snapshot);
     }
 
     /// SDL event pump publishes geometry/flags before CPU backing stores are
