@@ -351,6 +351,42 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"),
     ("_kCVPixelBufferWidthKey", "Width"),
     ("_kCVPixelBufferHeightKey", "Height"),
+    (
+        "_kCVPixelBufferBytesPerRowAlignmentKey",
+        "BytesPerRowAlignment",
+    ),
+    ("_kCVPixelBufferPlaneAlignmentKey", "PlaneAlignment"),
+    (
+        "_kCVPixelBufferIOSurfacePropertiesKey",
+        "IOSurfaceProperties",
+    ),
+    (
+        "_kCVPixelBufferOpenGLCompatibilityKey",
+        "OpenGLCompatibility",
+    ),
+    ("_kCVPixelBufferMetalCompatibilityKey", "MetalCompatibility"),
+    (
+        "_kCVPixelBufferOpenGLTextureCacheCompatibilityKey",
+        "OpenGLTextureCacheCompatibility",
+    ),
+    (
+        "_kCVPixelBufferCGBitmapContextCompatibilityKey",
+        "CGBitmapContextCompatibility",
+    ),
+    (
+        "_kCVPixelBufferCGImageCompatibilityKey",
+        "CGImageCompatibility",
+    ),
+    ("_kCVPixelBufferExtendedPixelsLeftKey", "ExtendedPixelsLeft"),
+    ("_kCVPixelBufferExtendedPixelsTopKey", "ExtendedPixelsTop"),
+    (
+        "_kCVPixelBufferExtendedPixelsRightKey",
+        "ExtendedPixelsRight",
+    ),
+    (
+        "_kCVPixelBufferExtendedPixelsBottomKey",
+        "ExtendedPixelsBottom",
+    ),
 ];
 
 fn media_constants() -> Vec<(String, u64)> {

@@ -1061,6 +1061,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CVPixelBufferGetBytesPerRow", U64, P),
     sig!("CVPixelBufferGetHeight", U64, P),
     sig!("CVPixelBufferGetWidth", U64, P),
+    sig!("CVPixelBufferGetTypeID", U64),
+    sig!("CVPixelBufferGetPlaneCount", U64, P),
+    sig!("CVPixelBufferIsPlanar", BOOL, P),
+    sig!("CVPixelBufferGetDataSize", U64, P),
+    sig!("CVPixelBufferGetIOSurface", P, P),
+    sig!("CVPixelBufferRetain", P, P),
     sig!("CVPixelBufferLockBaseAddress", I32, P, U64),
     sig!("CVPixelBufferUnlockBaseAddress", I32, P, U64),
     //

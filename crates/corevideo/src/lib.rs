@@ -1,6 +1,8 @@
 #![allow(clippy::manual_dangling_ptr, clippy::missing_safety_doc)]
 #![allow(non_snake_case)]
 
+pub mod pixel_buffer;
+
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -361,6 +363,27 @@ exports::exports! {
         "CVDisplayLinkRetain" => CVDisplayLinkRetain,
         "CVDisplayLinkRelease" => CVDisplayLinkRelease,
         "CVDisplayLinkIsRunning" => CVDisplayLinkIsRunning,
+        "CVBufferRetain" => pixel_buffer::CVBufferRetain,
+        "CVBufferRelease" => pixel_buffer::CVBufferRelease,
+        "CVPixelBufferCreate" => pixel_buffer::CVPixelBufferCreate,
+        "CVPixelBufferRetain" => pixel_buffer::CVPixelBufferRetain,
+        "CVPixelBufferRelease" => pixel_buffer::CVPixelBufferRelease,
+        "CVPixelBufferGetTypeID" => pixel_buffer::CVPixelBufferGetTypeID,
+        "CVPixelBufferGetWidth" => pixel_buffer::CVPixelBufferGetWidth,
+        "CVPixelBufferGetHeight" => pixel_buffer::CVPixelBufferGetHeight,
+        "CVPixelBufferGetPixelFormatType" => pixel_buffer::CVPixelBufferGetPixelFormatType,
+        "CVPixelBufferIsPlanar" => pixel_buffer::CVPixelBufferIsPlanar,
+        "CVPixelBufferGetPlaneCount" => pixel_buffer::CVPixelBufferGetPlaneCount,
+        "CVPixelBufferGetDataSize" => pixel_buffer::CVPixelBufferGetDataSize,
+        "CVPixelBufferGetBytesPerRow" => pixel_buffer::CVPixelBufferGetBytesPerRow,
+        "CVPixelBufferGetWidthOfPlane" => pixel_buffer::CVPixelBufferGetWidthOfPlane,
+        "CVPixelBufferGetHeightOfPlane" => pixel_buffer::CVPixelBufferGetHeightOfPlane,
+        "CVPixelBufferGetBytesPerRowOfPlane" => pixel_buffer::CVPixelBufferGetBytesPerRowOfPlane,
+        "CVPixelBufferGetBaseAddress" => pixel_buffer::CVPixelBufferGetBaseAddress,
+        "CVPixelBufferGetBaseAddressOfPlane" => pixel_buffer::CVPixelBufferGetBaseAddressOfPlane,
+        "CVPixelBufferLockBaseAddress" => pixel_buffer::CVPixelBufferLockBaseAddress,
+        "CVPixelBufferUnlockBaseAddress" => pixel_buffer::CVPixelBufferUnlockBaseAddress,
+        "CVPixelBufferGetIOSurface" => pixel_buffer::CVPixelBufferGetIOSurface,
     }
 }
 
