@@ -40,6 +40,21 @@ pub struct Window {
     /// compositor answers later and a program that counts its own transitions
     /// by these notifications must hear of every one.
     reported_fullscreen: usize,
+    /// AppKit accepts a smaller frame inside a fullscreen Space; SDL keeps
+    /// the host container at display size. Zero width means no override.
+    fullscreen_frame: NSRect,
+    /// Fullscreen size requests must not change the restored window frame.
+    fullscreen_restore: NSRect,
+    /// Suppress reentrant toggles from fullscreen lifecycle callbacks: when
+    /// the pending transition began, from [`transition_stamp`], or zero.
+    fullscreen_transition: usize,
+    /// Expected SDL host geometry after a fullscreen transition. Some window
+    /// managers queue its move/resize events after the state notification.
+    fullscreen_announced_frame: NSRect,
+    fullscreen_announced_move: usize,
+    fullscreen_announced_resize: usize,
+    /// Guest confinement is measured in AppKit coordinates, not SDL coordinates.
+    mouse_confinement: NSRect,
     miniaturized: usize,
     /// `-representedFilename`, an owned `NSString` or null for the empty
     /// string AppKit answers before one is set.
@@ -377,6 +392,10 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
 
 /// Destroy an SDL window, telling everything keyed on it first.
 fn destroy_sdl_window(sdl: sdl3::Window) {
+    #[cfg(target_os = "linux")]
+    sdl3::x11_mask::forget(sdl);
+    #[cfg(target_os = "linux")]
+    sdl3::wayland_mask::forget(sdl);
     OPENGL_WINDOWS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -509,6 +528,327 @@ fn is_fullscreen(sdl: sdl3::Window) -> bool {
     !sdl.is_null() && sdl3::video::window_flags(sdl) & sdl3::video::flags::FULLSCREEN != 0
 }
 
+fn host_frame(object: Id) -> Option<NSRect> {
+    if object.is_null() {
+        return None;
+    }
+    let sdl = window_of(object).sdl;
+    if sdl.is_null() {
+        return None;
+    }
+    let (width, height) = sdl3::video::window_size(sdl)?;
+    let (x, y) = global_position(sdl)?;
+    Some(crate::geometry::rect_from_sdl(x, y, width, height))
+}
+
+pub(crate) fn fullscreen_frame(object: Id) -> Option<NSRect> {
+    if object.is_null() {
+        return None;
+    }
+    let window = window_of(object);
+    (is_fullscreen(window.sdl) && window.fullscreen_frame.size.width > 0.0)
+        .then_some(window.fullscreen_frame)
+}
+
+/// The logical AppKit frame in host surface points, with a top-left origin.
+/// The physical surface remains display-sized even when AppKit's frame shrinks.
+pub(crate) fn surface_frame(object: Id) -> Option<NSRect> {
+    let host = host_frame(object)?;
+    let logical = fullscreen_frame(object).unwrap_or(host);
+    Some(NSRect {
+        origin: NSPoint {
+            x: logical.origin.x - host.origin.x,
+            y: host.origin.y + host.size.height - logical.origin.y - logical.size.height,
+        },
+        size: logical.size,
+    })
+}
+
+/// Pixel bounds of the guest's logical NSWindow inside its SDL host surface.
+/// The host may stay display-sized in fullscreen. Round each edge separately
+/// to preserve half-point boundaries and use the same extent for every
+/// presentation backend, including those outside AppKit.
+pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
+    let (width, height) = sdl3::video::window_size(sdl)?;
+    let (pixels_w, pixels_h) = sdl3::video::window_size_in_pixels(sdl)?;
+    if width <= 0 || height <= 0 || pixels_w <= 0 || pixels_h <= 0 {
+        return None;
+    }
+    let window = window_for(sdl);
+    let surface = (!window.is_null()).then(|| surface_frame(window)).flatten();
+    let Some(surface) = surface else {
+        return Some(sdl3::Rect {
+            x: 0,
+            y: 0,
+            w: pixels_w,
+            h: pixels_h,
+        });
+    };
+    Some(pixel_clip_from_surface(
+        surface,
+        (width, height),
+        (pixels_w, pixels_h),
+    ))
+}
+
+/// Convert a top-origin AppKit rectangle to a half-open *unclipped* pixel
+/// rectangle. Every drawable and backing presenter uses this conversion so
+/// fractional origins and extents cannot disagree about the final edge.
+///
+/// A view can extend outside the physical window. Do not clamp here: Metal
+/// needs its full destination frame to map a clipped region back to the right
+/// source texels. Only `pixel_clip_from_surface` clamps to the host surface.
+pub(crate) fn pixel_rect_from_surface(
+    surface: NSRect,
+    (width, height): (i32, i32),
+    (pixels_w, pixels_h): (i32, i32),
+) -> sdl3::Rect {
+    let sx = f64::from(pixels_w) / f64::from(width.max(1));
+    let sy = f64::from(pixels_h) / f64::from(height.max(1));
+    let x0 = (surface.origin.x * sx).round() as i32;
+    let y0 = (surface.origin.y * sy).round() as i32;
+    let x1 = ((surface.origin.x + surface.size.width) * sx).round() as i32;
+    let y1 = ((surface.origin.y + surface.size.height) * sy).round() as i32;
+    sdl3::Rect {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0).max(0),
+        h: y1.saturating_sub(y0).max(0),
+    }
+}
+
+/// The canonical host-clipped pixel rectangle: identical rounded endpoints
+/// to an unclipped drawable, intersected with SDL's physical pixel bounds.
+pub(crate) fn pixel_clip_from_surface(
+    surface: NSRect,
+    (width, height): (i32, i32),
+    (pixels_w, pixels_h): (i32, i32),
+) -> sdl3::Rect {
+    let pixels = pixel_rect_from_surface(surface, (width, height), (pixels_w, pixels_h));
+    let x0 = pixels.x.clamp(0, pixels_w);
+    let y0 = pixels.y.clamp(0, pixels_h);
+    let x1 = pixels.x.saturating_add(pixels.w).clamp(x0, pixels_w);
+    let y1 = pixels.y.saturating_add(pixels.h).clamp(y0, pixels_h);
+    sdl3::Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn physical_pixel_rects_share_independent_edge_rounding_at_one_and_two_x() {
+    let bounds = NSRect {
+        origin: NSPoint { x: 0.5, y: 0.5 },
+        size: NSSize {
+            width: 1438.5,
+            height: 898.5,
+        },
+    };
+    let uncut = pixel_rect_from_surface(bounds, (1440, 900), (1440, 900));
+    assert_eq!(
+        uncut,
+        sdl3::Rect {
+            x: 1,
+            y: 1,
+            w: 1438,
+            h: 898
+        }
+    );
+    assert_eq!(
+        pixel_clip_from_surface(bounds, (1440, 900), (1440, 900)),
+        uncut
+    );
+    let retina = pixel_rect_from_surface(bounds, (1440, 900), (2880, 1800));
+    assert_eq!(
+        retina,
+        sdl3::Rect {
+            x: 1,
+            y: 1,
+            w: 2877,
+            h: 1797
+        }
+    );
+    assert_eq!(
+        pixel_clip_from_surface(bounds, (1440, 900), (2880, 1800)),
+        retina
+    );
+    // An overhanging Metal child must keep its negative origin, even when
+    // its visible destination will subsequently be clipped to the window.
+    let outside = NSRect {
+        origin: NSPoint { x: -0.5, y: -0.5 },
+        size: NSSize {
+            width: 1441.0,
+            height: 901.0,
+        },
+    };
+    let raw = pixel_rect_from_surface(outside, (1440, 900), (1440, 900));
+    assert_eq!(
+        raw,
+        sdl3::Rect {
+            x: -1,
+            y: -1,
+            w: 1442,
+            h: 902
+        }
+    );
+    let visible = pixel_clip_from_surface(outside, (1440, 900), (1440, 900));
+    assert_eq!(
+        visible,
+        sdl3::Rect {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 900
+        }
+    );
+}
+
+/// Map a rectangle in AppKit window base coordinates onto the host surface.
+pub(crate) fn rect_to_surface(object: Id, rect: NSRect) -> Option<NSRect> {
+    let surface = surface_frame(object)?;
+    Some(NSRect {
+        origin: NSPoint {
+            x: surface.origin.x + rect.origin.x,
+            y: surface.origin.y + surface.size.height - rect.origin.y - rect.size.height,
+        },
+        size: rect.size,
+    })
+}
+
+/// Whether a host-SDL point actually belongs to the guest's logical window.
+/// SDL's fullscreen container may be larger than the NSWindow. The same
+/// half-open edges are used for hit testing at windowed and fullscreen sizes.
+pub(crate) fn accepts_surface_point(object: Id, x: f32, y: f32) -> bool {
+    if fullscreen_frame(object).is_none() {
+        return true;
+    }
+    surface_frame(object).is_some_and(|surface| {
+        let x = f64::from(x);
+        let y = f64::from(y);
+        x >= surface.origin.x
+            && y >= surface.origin.y
+            && x < surface.origin.x + surface.size.width
+            && y < surface.origin.y + surface.size.height
+    })
+}
+
+/// The reverse mapping used by mouse events and cursor tracking.
+pub(crate) fn point_from_surface(object: Id, x: f64, y: f64) -> Option<NSPoint> {
+    let surface = surface_frame(object)?;
+    Some(NSPoint {
+        x: x - surface.origin.x,
+        y: surface.size.height - (y - surface.origin.y),
+    })
+}
+
+fn constrain_fullscreen_frame(mut rect: NSRect, host: NSRect) -> NSRect {
+    rect.size.width = rect.size.width.clamp(1.0, host.size.width.max(1.0));
+    rect.size.height = rect.size.height.clamp(1.0, host.size.height.max(1.0));
+    rect.origin.x = rect.origin.x.clamp(
+        host.origin.x,
+        host.origin.x + host.size.width - rect.size.width,
+    );
+    rect.origin.y = rect.origin.y.clamp(
+        host.origin.y,
+        host.origin.y + host.size.height - rect.size.height,
+    );
+    rect
+}
+
+/// Refresh the *already displayed* OpenGL surface's host-side boundary.
+/// A guest may stop swapping immediately after changing its NSWindow frame;
+/// its GL context can be current on another thread. Never issue GL commands
+/// here. On X11 an input-transparent shaped black child above the host window
+/// obscures out-of-bounds pixels immediately, including old front buffers.
+pub(crate) fn refresh_idle_opengl_clip(sdl: sdl3::Window) {
+    if sdl.is_null() || !draws_with_opengl(sdl) {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !sdl3::video::is_x11() && !sdl3::video::is_wayland() {
+            return;
+        }
+        let logical = if is_fullscreen(sdl) {
+            let clip = presentation_clip(sdl);
+            let points = sdl3::video::window_size(sdl);
+            let pixels = sdl3::video::window_size_in_pixels(sdl);
+            match (clip, points, pixels) {
+                (Some(clip), Some((w, h)), Some((pw, ph))) if pw > 0 && ph > 0 => {
+                    // X11 child coordinates are window points. Map *edges*
+                    // from the canonical pixel clip rather than rounding
+                    // origin and size independently.
+                    let x0 = (f64::from(clip.x) * f64::from(w) / f64::from(pw)).round() as i32;
+                    let x1 =
+                        (f64::from(clip.x + clip.w) * f64::from(w) / f64::from(pw)).round() as i32;
+                    let y0 = (f64::from(clip.y) * f64::from(h) / f64::from(ph)).round() as i32;
+                    let y1 =
+                        (f64::from(clip.y + clip.h) * f64::from(h) / f64::from(ph)).round() as i32;
+                    Some(sdl3::Rect {
+                        x: x0,
+                        y: y0,
+                        w: x1 - x0,
+                        h: y1 - y0,
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // If fullscreen ended, unmap the masking child immediately; the SDL
+        // fullscreen transition restores the physical window geometry.
+        if sdl3::video::is_x11() {
+            let _ = sdl3::x11_mask::update(sdl, logical);
+        } else {
+            let _ = sdl3::wayland_mask::update(sdl, logical);
+        }
+    }
+}
+
+fn set_fullscreen_frame(object: Id, rect: NSRect) {
+    let Some(host) = host_frame(object) else {
+        return;
+    };
+    let before = fullscreen_frame(object).unwrap_or(host);
+    // Will-exit callbacks still expose fullscreen style, but native AppKit
+    // has already lifted the settled Space's frame constraints.
+    let rect = if !in_fullscreen_transition(object) {
+        constrain_fullscreen_frame(rect, host)
+    } else {
+        rect
+    };
+    let window = window_of(object);
+    window.fullscreen_frame = rect;
+    window.requested = rect;
+    window.size_pending = 0;
+    trace!("{object:p} fullscreen logical frame {rect:?}; host {host:?}");
+    // Refresh the backing even when SDL's physical fullscreen extent stays
+    // unchanged; background and view clips may have changed in place.
+    crate::backing::window_background_changed(object);
+    refresh_idle_opengl_clip(window_of(object).sdl);
+    fit_content_view(object);
+    crate::screen::confine_pointer(object);
+    apply_mouse_confinement(object);
+    let content = window_of(object).content_view;
+    unsafe {
+        crate::view::update_tracking_areas(content);
+        crate::cursor::reset_rects_in_tree(content);
+    }
+    // Native AppKit posts resize synchronously, after fitting the content.
+    if before.size != rect.size {
+        crate::event::post_for(object, DID_RESIZE);
+    }
+    if before.origin.x != rect.origin.x
+        || before.origin.y + before.size.height != rect.origin.y + rect.size.height
+    {
+        crate::event::post_for(object, DID_MOVE);
+    }
+}
+
 /// Whether a titled toplevel is in full screen, where its chrome is hidden
 /// until the pointer asks for it. Cheaper than [`facts`], for pointer motion.
 pub(crate) fn is_full_screen_titled(object: Id) -> bool {
@@ -560,10 +900,16 @@ pub(crate) fn fit_content_view(object: Id) {
     if window.sdl.is_null() || window.content_view.is_null() {
         return;
     }
-    let Some((width, height)) = sdl3::video::window_size(window.sdl) else {
+    let size = fullscreen_frame(object).map(|rect| rect.size).or_else(|| {
+        sdl3::video::window_size(window.sdl).map(|(width, height)| NSSize {
+            width: f64::from(width),
+            height: f64::from(height),
+        })
+    });
+    let Some(size) = size else {
         return;
     };
-    fit_content_view_to(object, width, height);
+    fit_content_view_to(object, size);
 }
 
 /// SDL has reported the window's size, so it is the one to answer with again.
@@ -574,7 +920,7 @@ pub(crate) fn size_settled(object: Id) {
 }
 
 /// The content view sized to a window `width` by `height`, titlebar included.
-fn fit_content_view_to(object: Id, width: i32, height: i32) {
+fn fit_content_view_to(object: Id, size: NSSize) {
     let window = window_of(object);
     if window.content_view.is_null() {
         return;
@@ -582,8 +928,8 @@ fn fit_content_view_to(object: Id, width: i32, height: i32) {
     let frame = NSRect {
         origin: NSPoint::default(),
         size: NSSize {
-            width: f64::from(width),
-            height: (f64::from(height) - content_inset(object)).max(0.0),
+            width: size.width,
+            height: (size.height - content_inset(object)).max(0.0),
         },
     };
     // Sent rather than written, so a view that tracks its own size hears
@@ -953,6 +1299,7 @@ fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
             sdl3::video::raise_window(new);
         }
     }
+    apply_mouse_confinement(receiver);
     true
 }
 
@@ -961,6 +1308,9 @@ fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
 /// A user can drag or resize a window, and a remembered rectangle would then be
 /// where the program last put it rather than where it is.
 unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
+    if let Some(rect) = fullscreen_frame(receiver) {
+        return rect;
+    }
     let window = window_of(receiver);
     if window.sdl.is_null() {
         return NSRect::default();
@@ -1159,31 +1509,39 @@ unsafe extern "C" fn content_layout_rect(receiver: Id, _sel: Sel) -> NSRect {
 ///
 /// SDL2 sends it unasked-about whenever `NSAppKitVersionNumber` says 10.13, to
 /// implement a grabbed or confined window.
+/// Recompute guest confinement whenever the AppKit frame moves within SDL's surface.
+fn mouse_confinement_in_surface(receiver: Id) -> Option<sdl3::Rect> {
+    let rect = window_of(receiver).mouse_confinement;
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return None;
+    }
+    let mapped = rect_to_surface(receiver, rect)?;
+    let points = sdl3::video::window_size(window_of(receiver).sdl)?;
+    Some(pixel_rect_from_surface(mapped, points, points))
+}
+
+fn apply_mouse_confinement(receiver: Id) {
+    let sdl = window_of(receiver).sdl;
+    if sdl.is_null() {
+        return;
+    }
+    if let Some(rect) = mouse_confinement_in_surface(receiver) {
+        crate::screen::set_pointer_confinement(sdl, Some(rect));
+    }
+}
+
+/// `-setMouseConfinementRect:` (10.13): keep guest coordinates across resizing.
 unsafe extern "C" fn set_mouse_confinement_rect(receiver: Id, _sel: Sel, rect: NSRect) {
-    // SAFETY: the receiver is a window of this crate's.
-    let sdl = unsafe { sdl_window(receiver) };
+    window_of(receiver).mouse_confinement = rect;
+    let sdl = window_of(receiver).sdl;
     if sdl.is_null() {
         return;
     }
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         crate::screen::set_pointer_confinement(sdl, None);
-        return;
+    } else {
+        apply_mouse_confinement(receiver);
     }
-    // SAFETY: as above.
-    let height = unsafe { frame(receiver, objc::sel::get("frame")) }
-        .size
-        .height;
-    // Window coordinates rise from the bottom of the frame; SDL's fall from its top.
-    let top = height - (rect.origin.y + rect.size.height);
-    crate::screen::set_pointer_confinement(
-        sdl,
-        Some(sdl3::Rect {
-            x: rect.origin.x.round() as i32,
-            y: top.round() as i32,
-            w: rect.size.width.round() as i32,
-            h: rect.size.height.round() as i32,
-        }),
-    );
 }
 
 /// The spellings that take the style explicitly, on the class and - for some
@@ -1207,6 +1565,10 @@ unsafe extern "C" fn frame_rect_for_content_style(
 }
 
 unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
+    if is_fullscreen(window_of(receiver).sdl) {
+        set_fullscreen_frame(receiver, rect);
+        return;
+    }
     let window = window_of(receiver);
     window.requested = rect;
     let sdl = window.sdl;
@@ -1227,7 +1589,13 @@ unsafe extern "C" fn set_frame(receiver: Id, _sel: Sel, rect: NSRect) {
     if sdl3::video::window_size(sdl) != Some((width.max(1), height.max(1))) {
         window.size_pending = 1;
     }
-    fit_content_view_to(receiver, width.max(1), height.max(1));
+    fit_content_view_to(
+        receiver,
+        NSSize {
+            width: f64::from(width.max(1)),
+            height: f64::from(height.max(1)),
+        },
+    );
 }
 
 unsafe extern "C" fn set_frame_display(receiver: Id, sel: Sel, rect: NSRect, _display: u8) {
@@ -1252,6 +1620,16 @@ unsafe extern "C" fn set_frame_origin(
     _sel: Sel,
     origin: foundation::geometry::NSPoint,
 ) {
+    // A standalone origin request is ignored in a settled fullscreen Space,
+    // but accepted inside will-exit callbacks (before the style bit clears).
+    if is_fullscreen(window_of(receiver).sdl) {
+        if in_fullscreen_transition(receiver) {
+            let mut rect = unsafe { frame(receiver, objc::sel::get("frame")) };
+            rect.origin = origin;
+            set_fullscreen_frame(receiver, rect);
+        }
+        return;
+    }
     let window = window_of(receiver);
     let sdl = window.sdl;
     if sdl.is_null() {
@@ -1277,6 +1655,18 @@ unsafe extern "C" fn set_frame_origin(
 
 unsafe extern "C" fn set_content_size(receiver: Id, _sel: Sel, size: NSSize) {
     let inset = content_inset(receiver);
+    if is_fullscreen(window_of(receiver).sdl) {
+        // Native content-size changes keep the top edge, unlike assigning
+        // just the size of a bottom-left-origin frame.
+        let mut rect = unsafe { frame(receiver, objc::sel::get("frame")) };
+        rect.origin.y += rect.size.height - (size.height + inset);
+        rect.size = NSSize {
+            width: size.width,
+            height: size.height + inset,
+        };
+        set_fullscreen_frame(receiver, rect);
+        return;
+    }
     let window = window_of(receiver);
     let size = NSSize {
         width: size.width,
@@ -1290,7 +1680,7 @@ unsafe extern "C" fn set_content_size(receiver: Id, _sel: Sel, size: NSSize) {
         if sdl3::video::window_size(sdl) != Some((width, height)) {
             window.size_pending = 1;
         }
-        fit_content_view_to(receiver, width, height);
+        fit_content_view_to(receiver, size);
     }
 }
 
@@ -2172,29 +2562,118 @@ unsafe extern "C" fn accepts_responder_change(_receiver: Id, _sel: Sel) -> u8 {
     1
 }
 
-/// `-toggleFullScreen:`, which SDL does have.
-///
-/// The one window operation in this file that is not bookkeeping: a game asks
-/// for it from a menu item or a keystroke, and a window that stayed the same
-/// size would look like the request was lost.
-unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
-    let window = window_of(receiver);
-    if window.sdl.is_null() {
+#[cfg(test)]
+thread_local! {
+    static REJECT_NEXT_FULLSCREEN_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn request_host_fullscreen(sdl: sdl3::Window, wanted: bool) -> bool {
+    #[cfg(test)]
+    if REJECT_NEXT_FULLSCREEN_REQUEST.with(|reject| reject.replace(false)) {
+        return false;
+    }
+    sdl3::video::set_window_fullscreen(sdl, wanted)
+}
+
+/// Failure is a delegate method taking NSWindow*, not an NSNotification.
+fn report_fullscreen_failure(receiver: Id, entering: bool) {
+    let delegate = window_of(receiver).delegate;
+    if delegate.is_null() {
         return;
     }
-    let wanted = window.fullscreen == 0;
-    if sdl3::video::set_window_fullscreen(window.sdl, wanted) {
-        window.fullscreen = wanted as usize;
-        // The matching "did" is posted from the event pump once the
-        // compositor has made the change; see `window_state_changed`.
-        crate::event::post_for(
-            receiver,
-            match wanted {
-                true => WILL_ENTER_FULL_SCREEN,
-                false => WILL_EXIT_FULL_SCREEN,
-            },
-        );
+    let sel = objc::sel::get(if entering {
+        "windowDidFailToEnterFullScreen:"
+    } else {
+        "windowDidFailToExitFullScreen:"
+    });
+    let method = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel));
+    if let Some(method) = method {
+        // SAFETY: these NSWindowDelegate callbacks take the window itself.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(method.implementation());
+            f(delegate, sel, receiver);
+        }
     }
+}
+
+/// Longer than any compositor's fullscreen animation. A request still
+/// unanswered after this was refused or deferred, not in progress.
+const FULLSCREEN_TRANSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Milliseconds since the first transition, plus one: the nonzero value of
+/// `fullscreen_transition` is when it began.
+fn transition_stamp() -> usize {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as usize
+        + 1
+}
+
+/// Whether a fullscreen transition is still in progress. One the host never
+/// answered ends here as a failure, or every later toggle would be ignored.
+fn in_fullscreen_transition(receiver: Id) -> bool {
+    let window = window_of(receiver);
+    let began = window.fullscreen_transition;
+    if began == 0 {
+        return false;
+    }
+    if transition_stamp().saturating_sub(began) < FULLSCREEN_TRANSITION_TIMEOUT.as_millis() as usize
+    {
+        return true;
+    }
+    let entering = window.fullscreen != 0;
+    window.fullscreen_transition = 0;
+    window.fullscreen = window.reported_fullscreen;
+    if entering {
+        window.fullscreen_restore = NSRect::default();
+    }
+    report_fullscreen_failure(receiver, entering);
+    false
+}
+
+/// `-toggleFullScreen:` requests an SDL transition. Keep the window alive
+/// across its synchronous AppKit will-notification and handle host rejection.
+unsafe extern "C" fn toggle_full_screen(receiver: Id, _sel: Sel, _sender: Id) {
+    if window_of(receiver).sdl.is_null() || in_fullscreen_transition(receiver) {
+        return;
+    }
+    let window = window_of(receiver);
+    let wanted = window.fullscreen == 0;
+    let was_shown = window.shown != 0;
+    if wanted {
+        window.fullscreen_restore = unsafe { frame(receiver, objc::sel::get("frame")) };
+    }
+    window.fullscreen_transition = transition_stamp();
+    // Lifecycle observers may release the window or replace its SDL surface.
+    // Retain AppKit ownership across callbacks and reacquire the live host handle.
+    objc::arc::retain(receiver);
+    crate::event::post_for(
+        receiver,
+        if wanted {
+            WILL_ENTER_FULL_SCREEN
+        } else {
+            WILL_EXIT_FULL_SCREEN
+        },
+    );
+    let live = window_of(receiver).sdl;
+    let cancelled = live.is_null() || (was_shown && window_of(receiver).shown == 0);
+    if !cancelled && request_host_fullscreen(live, wanted) {
+        window_of(receiver).fullscreen = wanted as usize;
+        // SDL only records a hidden window's request; its state event comes
+        // when the window is shown, and a toggle before then is a new request.
+        if sdl3::video::window_flags(live) & sdl3::video::flags::HIDDEN != 0 {
+            window_of(receiver).fullscreen_transition = 0;
+        }
+    } else {
+        window_of(receiver).fullscreen_transition = 0;
+        if wanted {
+            window_of(receiver).fullscreen_restore = NSRect::default();
+        }
+        report_fullscreen_failure(receiver, wanted);
+    }
+    objc::arc::release(receiver);
 }
 
 /// The `NSWindowCollectionBehavior` bits that decide full screen.
@@ -2268,6 +2747,44 @@ unsafe extern "C" fn deminiaturize(receiver: Id, sel: Sel, sender: Id) {
     unsafe { make_key_and_order_front(receiver, sel, sender) };
 }
 
+/// A host resize/move can be queued before the matching window-state event.
+/// The fullscreen transition itself posts the native-ordered geometry notices.
+pub(crate) fn fullscreen_state_pending(receiver: Id) -> bool {
+    if receiver.is_null() || window_of(receiver).sdl.is_null() {
+        return false;
+    }
+    is_fullscreen(window_of(receiver).sdl) != (window_of(receiver).reported_fullscreen != 0)
+}
+
+/// Suppress the host's redundant post-transition event, not a later real move.
+/// Keep the remembered frame while it matches: some WMs send multiple echoes.
+pub(crate) fn redundant_fullscreen_geometry(receiver: Id, resize: Option<(i32, i32)>) -> bool {
+    if receiver.is_null() {
+        return false;
+    }
+    let window = window_of(receiver);
+    let expected = window.fullscreen_announced_frame;
+    let redundant = if let Some((width, height)) = resize {
+        if window.fullscreen_announced_resize == 0 {
+            return false;
+        }
+        expected.size.width == f64::from(width) && expected.size.height == f64::from(height)
+    } else {
+        if window.fullscreen_announced_move == 0 {
+            return false;
+        }
+        host_frame(receiver).is_some_and(|host| host.origin == expected.origin)
+    };
+    if !redundant {
+        if resize.is_some() {
+            window_of(receiver).fullscreen_announced_resize = 0;
+        } else {
+            window_of(receiver).fullscreen_announced_move = 0;
+        }
+    }
+    redundant
+}
+
 /// Follow the window manager minimizing or restoring a window, from the
 /// event pump; answers the notification to post, if any.
 pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
@@ -2286,7 +2803,46 @@ pub(crate) fn window_state_changed(receiver: Id) -> Option<&'static str> {
     let minimized = flags & sdl3::video::flags::MINIMIZED != 0;
     let changed = minimized != (window.miniaturized != 0);
     window.miniaturized = minimized as usize;
+    if entered {
+        window.fullscreen_frame = NSRect::default();
+        window.fullscreen_transition = 0;
+    }
     refit_inset(receiver);
+    // SDL can report the new fullscreen state before it settles physical
+    // window geometry. Recompute after clearing stale transition geometry.
+    if entered {
+        refresh_idle_opengl_clip(window_of(receiver).sdl);
+    }
+    if entered {
+        crate::screen::confine_pointer(receiver);
+        apply_mouse_confinement(receiver);
+    }
+    let restore_target = window_of(receiver).fullscreen_restore;
+    if entered && !fullscreen && restore_target.size.width > 0.0 {
+        let restore = std::mem::take(&mut window_of(receiver).fullscreen_restore);
+        // SDL's restore state and AppKit's restore frame are separate: a
+        // request from a will-enter callback must not overwrite the latter.
+        unsafe { set_frame(receiver, objc::sel::get("setFrame:"), restore) };
+    }
+    if entered && !changed {
+        // Native AppKit settles geometry before -windowDidEnter/ExitFullScreen:.
+        // SDL can deliver its resize/move events only after its state event, so
+        // announce the settled AppKit geometry now and discard their later echoes.
+        let host_target = if !fullscreen && restore_target.size.width > 0.0 {
+            restore_target
+        } else {
+            host_frame(receiver).unwrap_or_default()
+        };
+        let window = window_of(receiver);
+        window.fullscreen_announced_frame = host_target;
+        window.fullscreen_announced_resize = 1;
+        window.fullscreen_announced_move = 1;
+        fit_content_view(receiver);
+        crate::event::post_for(receiver, DID_RESIZE);
+        if !fullscreen {
+            crate::event::post_for(receiver, DID_MOVE);
+        }
+    }
     match (changed, minimized, entered, fullscreen) {
         (true, true, ..) => Some(DID_MINIATURIZE),
         (true, false, ..) => Some(DID_DEMINIATURIZE),
@@ -2807,6 +3363,10 @@ pub(crate) fn install() {
         "discardCursorRects" => discard_cursor_rects, c"v16@0:8";
     });
 }
+
+#[cfg(test)]
+#[path = "window_fullscreen_tests.rs"]
+mod fullscreen_tests;
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,10 @@ pub mod keycodes;
 pub mod mouse;
 pub mod tray;
 pub mod wayland;
+#[cfg(target_os = "linux")]
+pub mod wayland_mask;
+#[cfg(target_os = "linux")]
+pub mod x11_mask;
 
 pub mod init {
     pub const VIDEO: u32 = 0x0000_0020;
@@ -75,6 +79,29 @@ pub struct Rect {
     pub y: c_int,
     pub w: c_int,
     pub h: c_int,
+}
+
+impl Rect {
+    /// The parts of a `width` by `height` surface outside this rectangle:
+    /// full-height columns left and right, then the strips above and below
+    /// between them. Every mask and blackout uses these, so they agree on
+    /// each edge pixel; empty bands are left out.
+    pub fn complements(self, (width, height): (c_int, c_int)) -> impl Iterator<Item = Rect> {
+        let (width, height) = (width.max(0), height.max(0));
+        let x0 = self.x.clamp(0, width);
+        let y0 = self.y.clamp(0, height);
+        let x1 = self.x.saturating_add(self.w).clamp(x0, width);
+        let y1 = self.y.saturating_add(self.h).clamp(y0, height);
+        [
+            (0, 0, x0, height),
+            (x1, 0, width - x1, height),
+            (x0, 0, x1 - x0, y0),
+            (x0, y1, x1 - x0, height - y1),
+        ]
+        .into_iter()
+        .map(|(x, y, w, h)| Rect { x, y, w, h })
+        .filter(|band| band.w > 0 && band.h > 0)
+    }
 }
 
 /// `SDL_DisplayMode`.
@@ -269,6 +296,7 @@ struct Api {
     SDL_GetSystemTheme: Option<unsafe extern "C" fn() -> c_int>,
     SDL_GetCurrentVideoDriver: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_GetWindowProperties: Option<unsafe extern "C" fn(Window) -> PropertiesId>,
+    SDL_GetNumberProperty: Option<unsafe extern "C" fn(PropertiesId, *const c_char, i64) -> i64>,
     SDL_GetPointerProperty:
         Option<unsafe extern "C" fn(PropertiesId, *const c_char, *mut c_void) -> *mut c_void>,
 
@@ -501,6 +529,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetSystemTheme,
             SDL_GetCurrentVideoDriver,
             SDL_GetWindowProperties,
+            SDL_GetNumberProperty,
             SDL_GetPointerProperty,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
@@ -3374,6 +3403,31 @@ pub mod video {
         let name = unsafe { f() };
         // SAFETY: a NUL-terminated string SDL keeps for the process.
         !name.is_null() && unsafe { CStr::from_ptr(name) } == expected
+    }
+
+    /// X11's live display and native window handle. Borrowed from SDL; do
+    /// not close the display, and finish host requests before destroying SDL.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn x11_native_window(window: Window) -> Option<(*mut c_void, u64)> {
+        if !is_x11() {
+            return None;
+        }
+        let api = api()?;
+        let (props, pointer, number) = (
+            api.SDL_GetWindowProperties?,
+            api.SDL_GetPointerProperty?,
+            api.SDL_GetNumberProperty?,
+        );
+        let properties = unsafe { props(window) };
+        let display = unsafe {
+            pointer(
+                properties,
+                c"SDL.window.x11.display".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        let handle = unsafe { number(properties, c"SDL.window.x11.window".as_ptr(), 0) };
+        (!display.is_null() && handle != 0).then_some((display, handle as u64))
     }
 
     /// A window's `wl_display` and `wl_surface`, on Wayland.

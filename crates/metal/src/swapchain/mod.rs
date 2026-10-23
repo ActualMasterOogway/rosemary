@@ -884,6 +884,43 @@ impl Swapchain {
                     z: 1,
                 },
             ];
+            // The swapchain image is display-sized even if its NSWindow is
+            // not. Clear it before copying the *clipped* accumulator or layer:
+            // an overlay blended on the GPU can otherwise escape the frame.
+            // Transfer clear is guaranteed to cover stale pixels from prior
+            // presents; the compositor's excluded region is opaque black.
+            let logical = logical_image_clip(frame.window, self.extent);
+            let restricted = logical != Some(whole);
+            transition_to_transfer_dst(device, command_buffer, target);
+            if restricted {
+                let black = vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                };
+                device.cmd_clear_color_image(
+                    command_buffer,
+                    target,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &black,
+                    &[vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }],
+                );
+                // Transfer write -> transfer write/read within this command
+                // buffer is ordered, but the barrier expresses the dependency.
+                barrier(
+                    device,
+                    command_buffer,
+                    target,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                );
+            }
             match composite {
                 // The layer's own rectangle of the accumulator, then the
                 // whole accumulator into the image being presented.
@@ -920,7 +957,7 @@ impl Swapchain {
                                     device,
                                     command_buffer,
                                     source.image,
-                                    extent_of(source),
+                                    source_of(into, frame, (source.width, source.height)),
                                     composite,
                                     vk::ImageLayout::GENERAL,
                                     into,
@@ -953,28 +990,35 @@ impl Swapchain {
                             composite
                         }
                     };
-                    transition_to_transfer_dst(device, command_buffer, target);
-                    blit(
-                        device,
-                        command_buffer,
-                        shown,
-                        whole,
-                        target,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        whole,
-                    );
+                    if let Some(clipped) = logical {
+                        blit(
+                            device,
+                            command_buffer,
+                            shown,
+                            clipped,
+                            target,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            clipped,
+                        );
+                    }
                 }
                 None => {
-                    transition_to_transfer_dst(device, command_buffer, target);
-                    blit(
-                        device,
-                        command_buffer,
-                        source.image,
-                        extent_of(source),
-                        target,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        whole,
-                    );
+                    if let Some((from, into)) = direct_blit_to(
+                        frame,
+                        self.extent,
+                        appkit::window::presentation_clip(frame.window),
+                        (source.width, source.height),
+                    ) {
+                        blit(
+                            device,
+                            command_buffer,
+                            source.image,
+                            from,
+                            target,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            into,
+                        );
+                    }
                 }
             }
             transition_to_present(device, command_buffer, target);

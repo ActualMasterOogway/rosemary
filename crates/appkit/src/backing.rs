@@ -1028,6 +1028,21 @@ struct Placed {
     alpha: f64,
 }
 
+/// The single rounded rectangle accepted by backing, software overlay,
+/// OpenGL and Metal presentation. Avoid using point-density to reconstruct
+/// widths: physical X/Y scales and half-point edge rounding can differ.
+fn logical_pixel_bounds(sdl: sdl3::Window, whole: Rect) -> Rect {
+    crate::window::presentation_clip(sdl)
+        .map(|clip| Rect {
+            x: i64::from(clip.x),
+            y: i64::from(clip.y),
+            width: i64::from(clip.w),
+            height: i64::from(clip.h),
+        })
+        .unwrap_or(whole)
+        .intersection(&whole)
+}
+
 /// The shown views of a window, back to front, placed.
 fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
     let mut out = Vec::new();
@@ -1038,10 +1053,6 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
         return out;
     };
     let (points_wide, pixel_width, pixel_height) = pixels;
-    let density = match points_wide > 0 {
-        true => f64::from(pixel_width) / f64::from(points_wide),
-        false => 1.0,
-    };
     let whole = Rect {
         x: 0,
         y: 0,
@@ -1049,29 +1060,49 @@ fn place_tree(window: Id, sdl: sdl3::Window) -> Vec<Placed> {
         height: i64::from(pixel_height),
     };
     let content = crate::window::content_view_of(window);
+    let Some(surface) = crate::window::surface_frame(window) else {
+        return out;
+    };
+    // Use the exact edge rounding of every presentation backend. Rounding
+    // an origin and a size independently can admit one pixel past the logical
+    // right/bottom edge when the origin is fractional.
+    let logical_clip = logical_pixel_bounds(sdl, whole);
     // The window's base coordinates: not flipped, origin at the bottom, and
     // taller than the content by the chrome above it.
     let base = NSRect {
-        origin: NSPoint::default(),
+        origin: NSPoint {
+            x: surface.origin.x,
+            y: f64::from(points_high) - surface.origin.y - surface.size.height,
+        },
         size: NSSize {
-            width: f64::from(points_wide),
-            height: (f64::from(points_high) - crate::window::content_inset(window)).max(0.0),
+            width: surface.size.width,
+            height: (surface.size.height - crate::window::content_inset(window)).max(0.0),
         },
     };
     let geometry = Geometry {
         window_height: f64::from(points_high),
-        density,
+        host_points: (points_wide, points_high),
+        host_pixels: (pixel_width, pixel_height),
     };
-    place_view(content, base, false, whole, geometry, 0, &mut out);
+    place_view(content, base, false, logical_clip, geometry, 0, &mut out);
     out
+}
+
+#[cfg(test)]
+pub(crate) fn placed_rect_for_tests(window: Id, view: Id) -> Option<Rect> {
+    let sdl = unsafe { crate::window::sdl_window(window) };
+    place_tree(window, sdl)
+        .into_iter()
+        .find(|placed| placed.view == view)
+        .map(|placed| placed.rect)
 }
 
 #[derive(Clone, Copy)]
 struct Geometry {
     /// The window's height in points, which base coordinates count up from.
     window_height: f64,
-    /// Window pixels per point.
-    density: f64,
+    host_points: (i32, i32),
+    host_pixels: (i32, i32),
 }
 
 /// Place `view`, whose superview's rectangle in window base coordinates is
@@ -1100,12 +1131,22 @@ fn place_view(
         },
         size: frame.size,
     };
-    let density = geometry.density;
+    let pixels = crate::window::pixel_rect_from_surface(
+        NSRect {
+            origin: NSPoint {
+                x: in_window.origin.x,
+                y: geometry.window_height - (y + frame.size.height),
+            },
+            size: frame.size,
+        },
+        geometry.host_points,
+        geometry.host_pixels,
+    );
     let rect = Rect {
-        x: (in_window.origin.x * density).round() as i64,
-        y: ((geometry.window_height - (y + frame.size.height)) * density).round() as i64,
-        width: (frame.size.width * density).round() as i64,
-        height: (frame.size.height * density).round() as i64,
+        x: i64::from(pixels.x),
+        y: i64::from(pixels.y),
+        width: i64::from(pixels.w),
+        height: i64::from(pixels.h),
     };
     let clip = clip.intersection(&rect);
     let alpha = crate::view::effective_alpha(view);
@@ -1296,13 +1337,23 @@ fn compose_window(window: Id) {
     // With none set it is `windowBackgroundColor`, AppKit's default; a layer
     // view's hole is the layer's either way.
     let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let logical = logical_pixel_bounds(sdl, whole);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
-        for pixel in store.pixels[base..base + region.width as usize * 4]
+        let pixels = store.pixels[base..base + region.width as usize * 4]
             .as_chunks_mut::<4>()
-            .0
-        {
-            *pixel = background;
+            .0;
+        // Outside AppKit's logical window is the fullscreen container,
+        // not more of the window's default background.
+        // FIXME (ACCURACY): the native probe did not measure this area's color.
+        if row < logical.y || row >= logical.y + logical.height {
+            pixels.fill([0, 0, 0, 255]);
+        } else {
+            let left = (logical.x - region.x).clamp(0, region.width) as usize;
+            let right = (logical.x + logical.width - region.x).clamp(0, region.width) as usize;
+            pixels[..left].fill([0, 0, 0, 255]);
+            pixels[left..right].fill(background);
+            pixels[right..].fill([0, 0, 0, 255]);
         }
     }
     let views = VIEW_STORES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1446,6 +1497,42 @@ fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect, 
     }
 }
 
+/// The part of the surface to keep when a logical frame excludes the rest, or
+/// `None` for a window without one: a windowed surface that outgrew its store
+/// during a resize is left as it was, not painted black.
+fn software_exterior(clip: Rect, whole: Rect, shown: Rect) -> Option<Rect> {
+    (clip != whole).then(|| clip.intersection(&shown))
+}
+
+/// Black out obsolete host pixels outside the logical AppKit bounds without
+/// changing content/Metal layers within it. `pitch` includes SDL row padding.
+fn blackout_software_exterior(
+    pixels: &mut [u8],
+    pitch: usize,
+    width: usize,
+    height: usize,
+    allowed: Rect,
+) {
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: width as i64,
+        height: height as i64,
+    };
+    let allowed = whole.intersection(&allowed);
+    for band in whole.subtract(&[allowed]) {
+        for y in band.y as usize..(band.y + band.height) as usize {
+            let start = y * pitch + band.x as usize * 4;
+            for pixel in pixels[start..start + band.width as usize * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+}
+
 fn present_dirty() {
     let presenter = *PRESENTER.lock().unwrap_or_else(|e| e.into_inner());
     let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1503,7 +1590,31 @@ fn present_dirty() {
                 width: columns as i64,
                 height: rows as i64,
             };
-            for piece in shown.subtract(&kept) {
+            let whole = Rect {
+                x: 0,
+                y: 0,
+                width: i64::from(surface.width.max(0)),
+                height: i64::from(surface.height.max(0)),
+            };
+            let clip = logical_pixel_bounds(window, whole);
+            let logical = clip.intersection(&shown);
+            if let Some(allowed) = software_exterior(clip, whole, shown) {
+                // SAFETY: SDL owns pitch * height bytes during this callback.
+                let pixels = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        surface.pixels,
+                        surface.pitch as usize * surface.height.max(0) as usize,
+                    )
+                };
+                blackout_software_exterior(
+                    pixels,
+                    surface.pitch as usize,
+                    surface.width.max(0) as usize,
+                    surface.height.max(0) as usize,
+                    allowed,
+                );
+            }
+            for piece in logical.subtract(&kept) {
                 let (left, width) = (piece.x as usize, piece.width as usize);
                 for row in piece.y as usize..(piece.y + piece.height) as usize {
                     let from = (row * store.width as usize + left) * 4;
@@ -1638,6 +1749,15 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
     let overlays = OVERLAYS.lock().unwrap_or_else(|e| e.into_inner());
     let mut composed: Option<Store> = None;
     let mut gpu = Vec::new();
+    let allowed = logical_pixel_bounds(
+        window,
+        Rect {
+            x: 0,
+            y: 0,
+            width: i64::from(store.width),
+            height: i64::from(store.height),
+        },
+    );
     for (view, overlay) in overlays.iter() {
         let view = *view as Id;
         // SAFETY: an overlay is removed before its view is deallocated.
@@ -1651,15 +1771,21 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
         if frame.window != window {
             continue;
         }
+        let original = Rect {
+            x: i64::from(frame.x),
+            y: i64::from(frame.y),
+            width: i64::from(frame.width),
+            height: i64::from(frame.height),
+        };
+        if original.intersection(&allowed).is_empty() {
+            continue;
+        }
         if let Picture::Dmabuf(picture) = &overlay.picture {
             gpu.push(GpuOverlay {
                 picture: picture.clone(),
-                rect: Rect {
-                    x: i64::from(frame.x),
-                    y: i64::from(frame.y),
-                    width: i64::from(frame.width),
-                    height: i64::from(frame.height),
-                },
+                // Keep original placement for texture sampling; the final
+                // Vulkan presentation masks pixels beyond the logical window.
+                rect: original,
             });
             continue;
         }
@@ -1669,13 +1795,22 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
             pixels: store.pixels.clone(),
             dirty: false,
         });
-        blend_overlay(target, overlay, frame.x, frame.y, frame.width, frame.height);
+        blend_overlay_clipped(
+            target,
+            overlay,
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            allowed,
+        );
     }
     (composed, gpu)
 }
 
 /// Draw `overlay` scaled into the rectangle at `left`, `top` of `store`,
 /// source-over, nearest-neighbour.
+#[cfg(test)]
 fn blend_overlay(
     store: &mut Store,
     overlay: &Overlay,
@@ -1683,6 +1818,31 @@ fn blend_overlay(
     top: i32,
     width: u32,
     height: u32,
+) {
+    blend_overlay_clipped(
+        store,
+        overlay,
+        left,
+        top,
+        width,
+        height,
+        Rect {
+            x: 0,
+            y: 0,
+            width: i64::from(store.width),
+            height: i64::from(store.height),
+        },
+    );
+}
+
+fn blend_overlay_clipped(
+    store: &mut Store,
+    overlay: &Overlay,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    allowed: Rect,
 ) {
     let Picture::Pixels(pixels) = &overlay.picture else {
         return;
@@ -1696,10 +1856,23 @@ fn blend_overlay(
     {
         return;
     }
-    let x0 = left.max(0) as usize;
-    let y0 = top.max(0) as usize;
-    let x1 = (i64::from(left) + i64::from(width)).clamp(0, i64::from(store.width)) as usize;
-    let y1 = (i64::from(top) + i64::from(height)).clamp(0, i64::from(store.height)) as usize;
+    let clipped = Rect {
+        x: i64::from(left),
+        y: i64::from(top),
+        width: i64::from(width),
+        height: i64::from(height),
+    }
+    .intersection(&allowed)
+    .intersection(&Rect {
+        x: 0,
+        y: 0,
+        width: i64::from(store.width),
+        height: i64::from(store.height),
+    });
+    let x0 = clipped.x as usize;
+    let y0 = clipped.y as usize;
+    let x1 = (clipped.x + clipped.width) as usize;
+    let y1 = (clipped.y + clipped.height) as usize;
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -2221,7 +2394,8 @@ mod tests {
             whole,
             Geometry {
                 window_height: 100.0,
-                density: 1.0,
+                host_points: (200, 100),
+                host_pixels: (200, 100),
             },
             0,
             &mut placed,
@@ -2285,7 +2459,8 @@ mod tests {
             },
             Geometry {
                 window_height: 10.0,
-                density: 1.0,
+                host_points: (10, 10),
+                host_pixels: (10, 10),
             },
             0,
             &mut placed,
@@ -2388,6 +2563,101 @@ mod tests {
     }
 
     #[test]
+    fn fractional_backing_fallback_uses_the_same_right_and_bottom_pixel_edges() {
+        let clip = crate::window::pixel_clip_from_surface(
+            NSRect {
+                origin: NSPoint { x: 0.5, y: 0.5 },
+                size: NSSize {
+                    width: 1438.5,
+                    height: 868.5,
+                },
+            },
+            (1440, 900),
+            (1440, 900),
+        );
+        assert_eq!(
+            clip,
+            sdl3::Rect {
+                x: 1,
+                y: 1,
+                w: 1438,
+                h: 868
+            }
+        );
+        let allowed = Rect {
+            x: clip.x.into(),
+            y: clip.y.into(),
+            width: clip.w.into(),
+            height: clip.h.into(),
+        };
+        let mut pixels = vec![0u8; 1440 * 900 * 4];
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[0, 0, 255, 255]);
+        }
+        blackout_software_exterior(&mut pixels, 1440 * 4, 1440, 900, allowed);
+        let at = |x: usize, y: usize| &pixels[(y * 1440 + x) * 4..(y * 1440 + x + 1) * 4];
+        assert_eq!(at(1, 1), &[0, 0, 255, 255]);
+        assert_eq!(at(1438, 868), &[0, 0, 255, 255]);
+        assert_eq!(at(1439, 868), &[0, 0, 0, 255], "rightmost pixel escaped");
+        assert_eq!(at(1438, 869), &[0, 0, 0, 255], "bottom pixel escaped");
+        assert_eq!(at(0, 1), &[0, 0, 0, 255]);
+        assert_eq!(at(1, 0), &[0, 0, 0, 255]);
+        let retina = crate::window::pixel_clip_from_surface(
+            NSRect {
+                origin: NSPoint { x: 0.25, y: 0.25 },
+                size: NSSize {
+                    width: 99.25,
+                    height: 79.25,
+                },
+            },
+            (100, 80),
+            (200, 160),
+        );
+        assert_eq!(
+            retina,
+            sdl3::Rect {
+                x: 1,
+                y: 1,
+                w: 198,
+                h: 158
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_logical_frame_blacks_out_the_software_surface() {
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        // A windowed store lagging a grow-resize.
+        let shown = Rect {
+            x: 0,
+            y: 0,
+            width: 700,
+            height: 500,
+        };
+        assert_eq!(software_exterior(whole, whole, shown), None);
+        let clip = Rect {
+            x: 0,
+            y: 31,
+            width: 800,
+            height: 569,
+        };
+        assert_eq!(
+            software_exterior(clip, whole, shown),
+            Some(Rect {
+                x: 0,
+                y: 31,
+                width: 700,
+                height: 469,
+            })
+        );
+    }
+
+    #[test]
     fn an_overlay_is_scaled_into_its_rectangle_over_the_store() {
         let mut store = store_of(4, 2);
         store.pixels = vec![9; 4 * 2 * 4];
@@ -2404,6 +2674,39 @@ mod tests {
             &store.pixels[16..],
             &[1, 2, 3, 255, 1, 2, 3, 255, 9, 9, 9, 9, 9, 9, 9, 9]
         );
+    }
+
+    #[test]
+    fn an_oversized_overlay_is_clipped_without_rescaling_its_source() {
+        let mut store = store_of(6, 3);
+        let mut source = Vec::new();
+        for row in 0..3u8 {
+            for column in 0..6u8 {
+                source.extend_from_slice(&[column + 10, row + 20, 37, 255]);
+            }
+        }
+        let overlay = Overlay {
+            width: 6,
+            height: 3,
+            picture: Picture::Pixels(source),
+        };
+        let allowed = Rect {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 1,
+        };
+        blend_overlay_clipped(&mut store, &overlay, 0, 0, 6, 3, allowed);
+        for y in 0..3 {
+            for x in 0..6 {
+                let pixel = &store.pixels[(y * 6 + x) * 4..(y * 6 + x + 1) * 4];
+                if (2..5).contains(&x) && y == 1 {
+                    assert_eq!(pixel, &[(x as u8) + 10, 21, 37, 255]);
+                } else {
+                    assert_eq!(pixel, &[0, 0, 0, 0]);
+                }
+            }
+        }
     }
 
     #[test]

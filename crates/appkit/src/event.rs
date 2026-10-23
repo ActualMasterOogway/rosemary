@@ -254,6 +254,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // delegate may refuse and `-close` does the rest.
         Event::WindowClosed { window } => {
             crate::screen::release_relative_pointer(window);
+            LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+                captures.remove(&window);
+            });
             if crate::decor::window_closed(window) {
                 return;
             }
@@ -271,10 +274,13 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         Event::WindowHitTest { window } => crate::decor::hit_test_pressed(window),
         Event::WindowState { window } => {
             let object = object_for(window);
-            if !object.is_null()
-                && let Some(name) = window::window_state_changed(object)
-            {
-                post(window, name);
+            if !object.is_null() {
+                // Synchronous resize/move delegates may release their window.
+                objc::arc::retain(object);
+                if let Some(name) = window::window_state_changed(object) {
+                    post_for(object, name);
+                }
+                objc::arc::release(object);
             }
         }
         // A program that keeps its own copy of where its window is - a Win32
@@ -285,10 +291,19 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // mapping the pointer against the origin it asked for.
         Event::WindowMoved { window } => {
             crate::screen::refresh_relative_pointer(window);
-            post(window, window::DID_MOVE);
+            let object = object_for(window);
+            if !window::fullscreen_state_pending(object)
+                && !window::redundant_fullscreen_geometry(object, None)
+            {
+                post(window, window::DID_MOVE);
+            }
         }
         Event::WindowDisplayChanged { window } => post(window, window::DID_CHANGE_SCREEN),
-        Event::WindowResized { window, .. } => {
+        Event::WindowResized {
+            window,
+            width,
+            height,
+        } => {
             // The content view follows the window, as it does on
             // `-setContentView:` and for the same reason: a view that kept its
             // old size after a resize would draw into part of the window and
@@ -297,6 +312,8 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             let content = window::content_view_of(object);
             if !object.is_null() {
                 window::size_settled(object);
+                // SAFETY: object resolves this SDL window's live NSWindow.
+                window::refresh_idle_opengl_clip(unsafe { window::sdl_window(object) });
                 window::fit_content_view(object);
                 crate::screen::confine_pointer(object);
                 crate::screen::refresh_relative_pointer(window);
@@ -310,7 +327,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // before the next cursor hit test chooses the wrong cursor.
             // SAFETY: null or the content view of a window this crate made.
             unsafe { crate::cursor::reset_rects_in_tree(content) };
-            post(window, window::DID_RESIZE);
+            if !window::fullscreen_state_pending(object)
+                && !window::redundant_fullscreen_geometry(object, Some((width, height)))
+            {
+                post(window, window::DID_RESIZE);
+            }
         }
         // The frame remains in points when a window crosses onto a display at
         // another scale, but its backing store does not. AppKit tells guests to
@@ -352,6 +373,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // Control may be let go where this pump never hears of it.
             if !gained {
                 leave_edit_chord(0);
+                LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+                    captures.remove(&window);
+                });
             }
             let object = object_for(window);
             if !gained {
@@ -516,6 +540,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // when it broke the link, which is what CoreGraphics does and what
             // SDL, still tracking a position inside the window, does not.
             let (x, y) = track_pointer(id, x, y);
+            if !mouse_inside_logical_window(id, x, y) && !capture_allows_drag(id, buttons) {
+                crate::cursor::forget_tracking(object_for(id));
+                return;
+            }
             // Before the drop below: a cursor rectangle applies whether or not
             // anything asked for `-mouseMoved:`, and AppKit re-decides the
             // pointer on every move rather than only when a rectangle changes.
@@ -574,6 +602,11 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // where its cursor froze, not where SDL's integrated position is.
             let (cx, cy) = track_pointer(id, x, y);
             if crate::decor::pointer_button(id, button, down, clicks, cx, cy) {
+                // A release consumed by chrome must still end any previous
+                // guest capture; otherwise later motion could leak past the edge.
+                if !down {
+                    capture_mouse_button(id, button, false, false);
+                }
                 return;
             }
             let kind = crate::button::event_kind(button, down);
@@ -585,6 +618,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
                 crate::window::end_drag();
             }
             let (x, y) = track_pointer(id, x, y);
+            if !capture_mouse_button(id, button, down, mouse_inside_logical_window(id, x, y)) {
+                return;
+            }
             // A Control-click during an editing chord is a Control-click.
             if down {
                 leave_edit_chord(sdl3::video::keyboard_modifiers());
@@ -607,6 +643,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         // was last over - which is where the wheel turned.
         Event::MouseWheel { window: id, x, y } => {
             let at = *POINTER.lock().unwrap_or_else(|e| e.into_inner());
+            if !mouse_inside_logical_window(id, at.0, at.1) {
+                return;
+            }
             send(id, Some(at), |window, location| Fields {
                 kind: kind::SCROLL_WHEEL,
                 modifiers: current_modifiers(),
@@ -645,7 +684,8 @@ pub fn window_geometry_changed(object: Id) {
     // taking it on the thread that runs this - and a context handed back and
     // forth is the one thing the GL under this runtime cannot do. A window that
     // came back the size it asked for has nothing to say.
-    if let Some((width, height)) = sdl3::video::window_size(sdl)
+    if window::fullscreen_frame(object).is_none()
+        && let Some((width, height)) = sdl3::video::window_size(sdl)
         && window::requested_size(object) != Some((width, height))
     {
         deliver(sdl3::video::Event::WindowResized {
@@ -810,12 +850,62 @@ fn key_equivalent(window: Id, fields: Fields, text: &str) -> bool {
     offer(window, event) || offer(menu, event)
 }
 
+// Only the physical SDL container receives host mouse input. Mouse-downs
+// within the logical AppKit window establish capture: subsequent drags and
+// their matching mouse-up must still reach the guest across its boundary.
+// Store capture per SDL window and per button (SDL button masks).
+thread_local! {
+    static LOGICAL_MOUSE_CAPTURE: std::cell::RefCell<std::collections::HashMap<u32, u32>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn mouse_inside_logical_window(id: u32, x: f32, y: f32) -> bool {
+    // A disassociated or recentred pointer's position is frozen, not where the
+    // input is: its deltas and clicks belong to the window wherever it froze.
+    if !crate::screen::mouse_is_associated() || crate::screen::recentring() {
+        return true;
+    }
+    let object = object_for(id);
+    !object.is_null() && window::accepts_surface_point(object, x, y)
+}
+
+fn capture_mouse_button(id: u32, button: u8, down: bool, inside: bool) -> bool {
+    LOGICAL_MOUSE_CAPTURE.with_borrow_mut(|captures| {
+        let held = captures.entry(id).or_default();
+        let mask = sdl3::mouse::mask(button);
+        let delivery = inside || (!down && *held & mask != 0);
+        if down {
+            if inside {
+                *held |= mask;
+            }
+        } else {
+            *held &= !mask;
+        }
+        if *held == 0 {
+            captures.remove(&id);
+        }
+        delivery
+    })
+}
+
+fn capture_allows_drag(id: u32, buttons: u32) -> bool {
+    LOGICAL_MOUSE_CAPTURE
+        .with_borrow(|captures| captures.get(&id).is_some_and(|held| *held & buttons != 0))
+}
+
 /// A pointer position SDL reports against the window's top-left, in the
 /// bottom-left frame `-locationInWindow` promises.
 ///
 /// The base coordinate system is the whole frame, so a titlebar this runtime
 /// draws is above the content view's top.
 fn location(window: Id, x: f32, y: f32) -> NSPoint {
+    // Only a fullscreen logical frame is placed by the host surface: a
+    // windowed frame follows `-setFrame:` before SDL's resize lands.
+    if window::fullscreen_frame(window).is_some()
+        && let Some(point) = window::point_from_surface(window, f64::from(x), f64::from(y))
+    {
+        return point;
+    }
     let content = window::content_view_of(window);
     let height = match content.is_null() {
         true => 0.0,
@@ -1523,6 +1613,22 @@ fn delegate_selector(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_window_capture_keeps_drag_and_matching_release_but_not_stray_input() {
+        let window = 0x8675309;
+        let left = sdl3::mouse::LEFT;
+        let right = sdl3::mouse::RIGHT;
+        assert!(!capture_mouse_button(window, left, true, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(capture_mouse_button(window, left, true, true));
+        assert!(capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(right)));
+        assert!(!capture_mouse_button(window, right, false, false));
+        assert!(capture_mouse_button(window, left, false, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_mouse_button(window, left, false, false));
+    }
 
     #[test]
     fn a_programmatic_warp_updates_the_reported_pointer() {

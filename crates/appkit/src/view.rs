@@ -832,41 +832,41 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
         return None;
     }
     let rect = rect_in_window(view);
-    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
-    let (_, window_height) = sdl3::video::window_size(sdl)?;
-    let (pixel_width, pixel_height) = sdl3::video::window_size_in_pixels(sdl)?;
-    let density = sdl3::video::window_pixel_density(sdl) as f64;
-    let density = if density > 0.0 { density } else { 1.0 };
-    // AppKit counts up from the bottom of the window's content rect; a
-    // swapchain image counts down from the top of it.
-    let top = f64::from(window_height) - (y + size.height);
+    let mapped = crate::window::rect_to_surface(window, rect)?;
+    let host_points = sdl3::video::window_size(sdl)?;
+    let host_pixels = sdl3::video::window_size_in_pixels(sdl)?;
+    let mut rounded = crate::window::pixel_rect_from_surface(mapped, host_points, host_pixels);
+    // A view's source extent uses exactly the same separately rounded pixel
+    // edges as the destination clip; the *unclipped* rectangle is needed for
+    // Metal's destination-to-source mapping when views overhang the window.
+    if rounded.w == 0 || rounded.h == 0 {
+        let surface = crate::window::surface_frame(window)?;
+        let inset = crate::window::content_inset(window).min(surface.size.height);
+        rounded = crate::window::pixel_rect_from_surface(
+            NSRect {
+                origin: NSPoint {
+                    x: surface.origin.x,
+                    y: surface.origin.y + inset,
+                },
+                size: NSSize {
+                    width: surface.size.width,
+                    height: (surface.size.height - inset).max(0.0),
+                },
+            },
+            host_points,
+            host_pixels,
+        );
+    }
     let frame = Frame {
         window: sdl,
-        x: (x * density).round() as i32,
-        y: (top * density).round() as i32,
-        width: (size.width * density).round().max(0.0) as u32,
-        height: (size.height * density).round().max(0.0) as u32,
-        window_width: pixel_width.max(0) as u32,
-        window_height: pixel_height.max(0) as u32,
+        x: rounded.x,
+        y: rounded.y,
+        width: rounded.w as u32,
+        height: rounded.h as u32,
+        window_width: host_pixels.0.max(0) as u32,
+        window_height: host_pixels.1.max(0) as u32,
     };
-    // A view with no frame of its own - one a guest made with
-    // `-initWithFrame:` of a zero rect and then never sized - covers its
-    // window's content rather than nothing, which is what AppKit's own
-    // autoresizing would have made of it.
-    match frame.width == 0 || frame.height == 0 {
-        true => {
-            let inset = (crate::window::content_inset(window) * density).round() as u32;
-            let inset = inset.min(frame.window_height);
-            Some(Frame {
-                x: 0,
-                y: inset as i32,
-                width: frame.window_width,
-                height: frame.window_height - inset,
-                ..frame
-            })
-        }
-        false => Some(frame),
-    }
+    Some(frame)
 }
 
 /// The view's rectangle in SDL's logical window coordinates.
@@ -890,17 +890,13 @@ pub unsafe fn input_frame(view: Id) -> Option<(sdl3::Window, sdl3::Rect)> {
         return None;
     }
     let rect = rect_in_window(view);
-    let (x, y, size) = (rect.origin.x, rect.origin.y, rect.size);
-    let (_, window_height) = sdl3::video::window_size(sdl)?;
-    let top = f64::from(window_height) - (y + size.height);
+    let mapped = crate::window::rect_to_surface(window, rect)?;
+    let points = sdl3::video::window_size(sdl)?;
+    // SDL text-input areas use window points rather than physical pixels,
+    // but their half-open edges must follow the same rounding convention.
     Some((
         sdl,
-        sdl3::Rect {
-            x: x.round() as i32,
-            y: top.round() as i32,
-            w: size.width.round().max(0.0) as i32,
-            h: size.height.round().max(0.0) as i32,
-        },
+        crate::window::pixel_rect_from_surface(mapped, points, points),
     ))
 }
 
@@ -2473,6 +2469,48 @@ mod tests {
         // SAFETY: a view of this crate's.
         let frame = unsafe { presentation_frame(whole) }.expect("the view is in a window");
         assert!(frame.covers_window());
+    }
+
+    /// A zero-sized view is fitted to its window's drawable with exactly the
+    /// canonical rounded edges, including the content inset. No alternative
+    /// origin/width rounding is permitted in the fallback.
+    #[test]
+    fn zero_sized_presentation_fallback_preserves_fractional_surface_edges() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSWindow").unwrap();
+        let window = objc::object::create_instance(class, 0);
+        let made = unsafe {
+            crate::window::init_with_content_rect_for_tests(window, rect(0.0, 0.0, 320.0, 240.0))
+        };
+        if !made {
+            return;
+        }
+        let child = view(rect(0.0, 0.0, 0.0, 0.0));
+        unsafe { set_window(child, window) };
+        let sdl = unsafe { crate::window::sdl_window(window) };
+        let rounded = unsafe { presentation_frame(child) }.unwrap();
+        let surface = crate::window::surface_frame(window).unwrap();
+        let inset = crate::window::content_inset(window).min(surface.size.height);
+        let expected = crate::window::pixel_rect_from_surface(
+            NSRect {
+                origin: NSPoint {
+                    x: surface.origin.x,
+                    y: surface.origin.y + inset,
+                },
+                size: NSSize {
+                    width: surface.size.width,
+                    height: (surface.size.height - inset).max(0.0),
+                },
+            },
+            sdl3::video::window_size(sdl).unwrap(),
+            sdl3::video::window_size_in_pixels(sdl).unwrap(),
+        );
+        assert_eq!(
+            (rounded.x, rounded.y, rounded.width, rounded.height),
+            (expected.x, expected.y, expected.w as u32, expected.h as u32)
+        );
+        objc::arc::release(child);
+        objc::arc::release(window);
     }
 
     /// A view with no window has nowhere to be presented, which is what
