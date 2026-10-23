@@ -2804,7 +2804,7 @@ fn a_shrunken_guest_fullscreen_is_presented_through_the_vulkan_swapchain() {
             .unwrap()
             .as_ref()
             .and_then(|all| all.get(&(sdl as usize)))
-            .is_some_and(|chain| chain.composite.is_some())
+            .is_some_and(|chain| chain.state.lock().unwrap().composite.is_some())
     );
     // Optional pixel oracle for real X11 Vulkan hosts with ImageMagick.
     // The test otherwise still executes Vulkan's recorded clear/blit/present.

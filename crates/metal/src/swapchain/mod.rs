@@ -1695,7 +1695,7 @@ impl Swapchain {
                             device,
                             command_buffer,
                             source.image,
-                            extent_of(source),
+                            source_of(into, frame, (source.width, source.height)),
                             composite,
                             vk::ImageLayout::GENERAL,
                             into,

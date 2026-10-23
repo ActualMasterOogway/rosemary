@@ -339,6 +339,9 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
         }
         Event::WindowHitTest { window } => crate::decor::hit_test_pressed(window),
         Event::WindowState { window } => {
+            // Fullscreen may change without a preceding resize event. A
+            // presentation worker must not keep the previous fullscreen flag.
+            sdl3::video::invalidate_presentation_window(window, &window::sdl_windows());
             let object = object_for(window);
             if !object.is_null() {
                 // Synchronous resize/move delegates may release their window.
@@ -1691,22 +1694,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_window_capture_keeps_drag_and_matching_release_but_not_stray_input() {
-        let window = 0x8675309;
-        let left = sdl3::mouse::LEFT;
-        let right = sdl3::mouse::RIGHT;
-        assert!(!capture_mouse_button(window, left, true, false));
-        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
-        assert!(capture_mouse_button(window, left, true, true));
-        assert!(capture_allows_drag(window, sdl3::mouse::mask(left)));
-        assert!(!capture_allows_drag(window, sdl3::mouse::mask(right)));
-        assert!(!capture_mouse_button(window, right, false, false));
-        assert!(capture_mouse_button(window, left, false, false));
-        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
-        assert!(!capture_mouse_button(window, left, false, false));
-    }
-
-    #[test]
     fn reentrant_event_pump_hook_returns_before_refresh_deadlines() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NESTED: AtomicUsize = AtomicUsize::new(0);
@@ -1757,6 +1744,22 @@ mod tests {
             );
         }
         nested(&refresh, &mode, 3);
+    }
+
+    #[test]
+    fn logical_window_capture_keeps_drag_and_matching_release_but_not_stray_input() {
+        let window = 0x8675309;
+        let left = sdl3::mouse::LEFT;
+        let right = sdl3::mouse::RIGHT;
+        assert!(!capture_mouse_button(window, left, true, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(capture_mouse_button(window, left, true, true));
+        assert!(capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(right)));
+        assert!(!capture_mouse_button(window, right, false, false));
+        assert!(capture_mouse_button(window, left, false, false));
+        assert!(!capture_allows_drag(window, sdl3::mouse::mask(left)));
+        assert!(!capture_mouse_button(window, left, false, false));
     }
 
     #[test]

@@ -3942,6 +3942,8 @@ pub mod video {
     pub struct PresentationWindow {
         pub id: u32,
         pub logical_size: (i32, i32),
+        /// SDL host-window position, sampled by the video owner for workers.
+        pub position: (i32, i32),
         pub pixel_size: (i32, i32),
         pub density: f32,
         pub flags: u64,
@@ -3969,6 +3971,7 @@ pub mod video {
         Some(PresentationWindow {
             id: window_id(window),
             logical_size: window_size(window)?,
+            position: window_position(window)?,
             pixel_size: window_size_in_pixels(window)?,
             density: window_pixel_density(window),
             flags: window_flags(window),

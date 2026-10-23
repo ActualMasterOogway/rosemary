@@ -833,6 +833,8 @@ pub unsafe fn presentation_frame(view: Id) -> Option<Frame> {
     }
     let rect = rect_in_window(view);
     let mapped = crate::window::rect_to_surface(window, rect)?;
+    // The SDL video thread publishes these dimensions. No native SDL
+    // query is permitted from a renderer resolving a Metal view frame.
     let snapshot = sdl3::video::presentation_window(sdl)?;
     let host_points = snapshot.logical_size;
     let host_pixels = snapshot.pixel_size;

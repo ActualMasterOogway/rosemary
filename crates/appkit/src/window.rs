@@ -469,6 +469,8 @@ fn destroy_sdl_window(sdl: sdl3::Window) {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     for member in family.into_iter().rev() {
+        // Remove fullscreen native overlays before retiring each member,
+        // including SDL popups which SDL otherwise destroys recursively.
         #[cfg(target_os = "linux")]
         sdl3::x11_mask::forget(member);
         #[cfg(target_os = "linux")]
@@ -609,7 +611,13 @@ pub(crate) fn content_inset(object: Id) -> CGFloat {
         return 0.0;
     }
     let window = window_of(object);
-    inset_of(object, window.style_mask, is_fullscreen(window.sdl))
+    let fullscreen = if sdl3::video::is_video_thread() {
+        is_fullscreen(window.sdl)
+    } else {
+        sdl3::video::presentation_window(window.sdl)
+            .is_some_and(|snapshot| snapshot.flags & sdl3::video::flags::FULLSCREEN != 0)
+    };
+    inset_of(object, window.style_mask, fullscreen)
 }
 
 fn inset_of(object: Id, style_mask: usize, fullscreen: bool) -> CGFloat {
@@ -633,8 +641,17 @@ fn host_frame(object: Id) -> Option<NSRect> {
     if sdl.is_null() {
         return None;
     }
-    let (width, height) = sdl3::video::window_size(sdl)?;
-    let (x, y) = global_position(sdl)?;
+    // Metal presentation can resolve this frame from a worker. Read the SDL
+    // owner's published dimensions and position, never SDL window properties
+    // from the presentation thread. On the video owner keep the established
+    // popup-relative and Wayland virtual-desktop coordinate behavior.
+    let snapshot = sdl3::video::presentation_window(sdl)?;
+    let (width, height) = snapshot.logical_size;
+    let (x, y) = if sdl3::video::is_video_thread() {
+        global_position(sdl)?
+    } else {
+        snapshot.position
+    };
     Some(crate::geometry::rect_from_sdl(x, y, width, height))
 }
 
@@ -643,7 +660,12 @@ pub(crate) fn fullscreen_frame(object: Id) -> Option<NSRect> {
         return None;
     }
     let window = window_of(object);
-    (is_fullscreen(window.sdl) && window.fullscreen_frame.size.width > 0.0)
+    let flags = if sdl3::video::is_video_thread() {
+        sdl3::video::window_flags(window.sdl)
+    } else {
+        sdl3::video::presentation_window(window.sdl)?.flags
+    };
+    (flags & sdl3::video::flags::FULLSCREEN != 0 && window.fullscreen_frame.size.width > 0.0)
         .then_some(window.fullscreen_frame)
 }
 
@@ -666,8 +688,11 @@ pub(crate) fn surface_frame(object: Id) -> Option<NSRect> {
 /// to preserve half-point boundaries and use the same extent for every
 /// presentation backend, including those outside AppKit.
 pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
-    let (width, height) = sdl3::video::window_size(sdl)?;
-    let (pixels_w, pixels_h) = sdl3::video::window_size_in_pixels(sdl)?;
+    // The clip is consumed by Metal's FIFO worker. Use dimensions already
+    // published by the SDL video owner, never query the native SDL window.
+    let snapshot = sdl3::video::presentation_window(sdl)?;
+    let (width, height) = snapshot.logical_size;
+    let (pixels_w, pixels_h) = snapshot.pixel_size;
     if width <= 0 || height <= 0 || pixels_w <= 0 || pixels_h <= 0 {
         return None;
     }
