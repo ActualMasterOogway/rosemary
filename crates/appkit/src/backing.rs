@@ -15,6 +15,9 @@ pub struct Store {
     /// Premultiplied B, G, R, A, top row first.
     pub pixels: Vec<u8>,
     dirty: bool,
+    /// Bumped by every change to what the store shows, so that a presenter
+    /// can tell whether a copy it took is still current without comparing it.
+    generation: u64,
 }
 
 impl Store {
@@ -23,13 +26,25 @@ impl Store {
         Store::new(width, height)
     }
 
-    fn new(width: u32, height: u32) -> Self {
+    /// Allocate an initially clean premultiplied-BGRA backing store.
+    pub fn new(width: u32, height: u32) -> Self {
         Store {
             width,
             height,
             pixels: vec![0; width as usize * height as usize * 4],
             dirty: false,
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// What the store shows changed, and has to be presented again.
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Change the size, keeping what the top-left corner held.
@@ -49,6 +64,7 @@ impl Store {
             height,
             pixels,
             dirty: true,
+            generation: self.generation.wrapping_add(1),
         };
     }
 }
@@ -185,10 +201,20 @@ static NEEDS_DISPLAY: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// can run a nested event loop that pumps again. Zero marks a forgotten entry.
 static DRAWING: Mutex<Vec<Vec<usize>>> = Mutex::new(Vec::new());
 
-/// Presents a window's store, leaving `holes` to the layers named in them,
-/// with `overlays` drawn over it; `false` where it cannot, so that SDL's
-/// window surface is used instead.
-pub type Presenter = fn(sdl3::Window, &Store, &[Hole], &[GpuOverlay]) -> bool;
+/// Distinguish an unavailable GPU presenter from a busy window. The latter
+/// must not force a CPU fallback over content still being presented through
+/// Vulkan: retain the backing store's dirty state for the next event pump.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentOutcome {
+    Displayed,
+    /// An earlier copy of the store reached the screen through the GPU, and
+    /// this one is still on its way there: keep the store dirty.
+    DisplayedEarlier,
+    Fallback,
+    Deferred,
+}
+
+pub type Presenter = fn(sdl3::Window, &Store, &[Hole], &[GpuOverlay]) -> PresentOutcome;
 
 static PRESENTER: Mutex<Option<Presenter>> = Mutex::new(None);
 
@@ -485,7 +511,7 @@ pub(crate) fn paint_coverage(left: i64, top: i64, width: usize, coverage: &[f32]
                 }
             }
         }
-        store.dirty = true;
+        store.touch();
         Rect {
             x: x0,
             y: y0,
@@ -610,7 +636,7 @@ pub(crate) fn draw_focused(draw: impl FnOnce(&mut [u8], u32, u32) -> Option<Rect
         store.resize(width, height);
         let drawn = draw(&mut store.pixels, store.width, store.height);
         if drawn.is_some_and(|r| !r.is_empty()) {
-            store.dirty = true;
+            store.touch();
         }
         drawn
     };
@@ -729,7 +755,7 @@ fn draw_into(
             }
         }
     }
-    store.dirty = true;
+    store.touch();
     Rect {
         x: x0,
         y: y0,
@@ -899,7 +925,7 @@ fn clear_focused_store() {
         .and_then(|stores| stores.get_mut(&(focus.view as usize)))
         .map(|store| {
             store.pixels.fill(0);
-            store.dirty = true;
+            store.touch();
             Rect {
                 x: focus.x as i64,
                 y: focus.y as i64,
@@ -1324,10 +1350,10 @@ fn compose_window(window: Id) {
     if region.is_empty() {
         if let Some(chrome) = chrome.as_ref().filter(|_| chrome_changed || resized) {
             copy_chrome(store, chrome);
-            store.dirty = true;
+            store.touch();
         }
         if holes_changed {
-            store.dirty = true;
+            store.touch();
         }
         return;
     }
@@ -1384,7 +1410,7 @@ fn compose_window(window: Id) {
     if let Some(chrome) = &chrome {
         copy_chrome(store, chrome);
     }
-    store.dirty = true;
+    store.touch();
 }
 
 /// Put a window's chrome over the top rows of its store.
@@ -1406,7 +1432,7 @@ pub fn present_again(sdl: sdl3::Window) {
         .as_mut()
         .and_then(|stores| stores.get_mut(&(sdl as usize)))
     {
-        store.dirty = true;
+        store.touch();
     }
 }
 
@@ -1497,6 +1523,40 @@ fn blend_at(store: &mut Store, source: &Store, left: i64, top: i64, clip: Rect, 
     }
 }
 
+#[cfg(test)]
+static TEST_CPU_SURFACE_FALLBACKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn cpu_fallback_calls_for_tests(window: sdl3::Window) -> usize {
+    TEST_CPU_SURFACE_FALLBACKS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|&&key| key == window as usize)
+        .count()
+}
+
+#[cfg(test)]
+pub(crate) fn queue_dirty_store_for_tests(window: sdl3::Window) {
+    let (width, height) = sdl3::video::window_size_in_pixels(window).unwrap();
+    let mut store = Store::new(width.max(1) as u32, height.max(1) as u32);
+    store.touch();
+    STORES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(window as usize, store);
+}
+
+#[cfg(test)]
+pub(crate) fn has_store_for_tests(window: sdl3::Window) -> bool {
+    STORES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|stores| stores.contains_key(&(window as usize)))
+}
+
 /// The part of the surface to keep when a logical frame excludes the rest, or
 /// `None` for a window without one: a windowed surface that outgrew its store
 /// during a resize is left as it was, not painted black.
@@ -1545,8 +1605,9 @@ fn present_dirty() {
     {
         let window = window as sdl3::Window;
         store.dirty = false;
-        let (composed, gpu_overlays) = compose(window, store);
-        let store = composed.as_ref().unwrap_or(store);
+        let backing = store;
+        let (composed, gpu_overlays) = compose(window, backing);
+        let store = composed.as_ref().unwrap_or(backing);
         dump(window, store);
         let holes = WINDOWS
             .lock()
@@ -1555,8 +1616,21 @@ fn present_dirty() {
             .and_then(|windows| windows.get(&(window as usize)))
             .map(|state| state.holes.clone())
             .unwrap_or_default();
-        let presented =
-            presenter.is_some_and(|present| present(window, store, &holes, &gpu_overlays));
+        let outcome = presenter.map_or(PresentOutcome::Fallback, |present| {
+            present(window, store, &holes, &gpu_overlays)
+        });
+        if outcome == PresentOutcome::Deferred {
+            // Preserve the original store and its overlays for a later turn;
+            // a slow FIFO acquisition must not hold up input for other windows.
+            backing.dirty = true;
+            continue;
+        }
+        if outcome == PresentOutcome::DisplayedEarlier {
+            presented_through_gpu(window, true);
+            backing.dirty = true;
+            continue;
+        }
+        let presented = outcome == PresentOutcome::Displayed;
         presented_through_gpu(window, presented);
         if presented {
             continue;
@@ -1581,6 +1655,11 @@ fn present_dirty() {
                 .map(|hole| hole.rect)
                 .collect()
         };
+        #[cfg(test)]
+        TEST_CPU_SURFACE_FALLBACKS
+            .lock()
+            .unwrap()
+            .push(window as usize);
         sdl3::video::present_window(window, |surface| {
             let rows = store.height.min(surface.height.max(0) as u32) as usize;
             let columns = store.width.min(surface.width.max(0) as u32) as usize;
@@ -1794,6 +1873,8 @@ fn compose(window: sdl3::Window, store: &Store) -> (Option<Store>, Vec<GpuOverla
             height: store.height,
             pixels: store.pixels.clone(),
             dirty: false,
+            // An overlay that changes damages the store under it.
+            generation: store.generation,
         });
         blend_overlay_clipped(
             target,
@@ -2238,6 +2319,67 @@ pub(crate) fn install() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn deferred_backing_store_survives_the_pump_while_another_window_progresses() {
+        fn presenter(
+            window: sdl3::Window,
+            _: &Store,
+            _: &[Hole],
+            _: &[GpuOverlay],
+        ) -> PresentOutcome {
+            match window as usize {
+                0x71a1 => PresentOutcome::Deferred,
+                0x71c3 => PresentOutcome::DisplayedEarlier,
+                _ => PresentOutcome::Displayed,
+            }
+        }
+        let before_presenter = PRESENTER.lock().expect("presenter").replace(presenter);
+        let mut deferred = Store::new(2, 2);
+        deferred.dirty = true;
+        let mut independent = Store::new(2, 2);
+        independent.dirty = true;
+        let mut uploading = Store::new(2, 2);
+        uploading.dirty = true;
+        let before_stores = {
+            let mut stores = STORES.lock().expect("stores");
+            std::mem::replace(
+                &mut *stores,
+                Some(HashMap::from([
+                    (0x71a1usize, deferred),
+                    (0x71b2usize, independent),
+                    (0x71c3usize, uploading),
+                ])),
+            )
+        };
+        present_dirty();
+        {
+            let stores = STORES.lock().expect("stores");
+            let stores = stores.as_ref().expect("stores");
+            assert!(
+                stores[&0x71a1].dirty,
+                "busy A must stay dirty for another event turn"
+            );
+            assert!(
+                !stores[&0x71b2].dirty,
+                "ready B must be presented on this turn"
+            );
+            assert!(
+                stores[&0x71c3].dirty,
+                "C's current store has not reached the screen yet"
+            );
+        }
+        assert!(
+            shows_dmabufs(0x71c3 as sdl3::Window),
+            "C's earlier store was shown through the GPU"
+        );
+        *STORES.lock().expect("stores") = before_stores;
+        *PRESENTER.lock().expect("presenter") = before_presenter;
+        GPU_WINDOWS
+            .lock()
+            .expect("gpu windows")
+            .retain(|(key, _)| *key != 0x71b2 && *key != 0x71c3);
+    }
+
     fn set_thread_context_from_class(context: Id) {
         let class = objc::class::lookup(c"NSGraphicsContext").expect("declared");
         // SAFETY: `msg::entry` has the registered class-method ABI below.
@@ -2515,6 +2657,7 @@ mod tests {
             height,
             pixels: vec![0; width as usize * height as usize * 4],
             dirty: false,
+            generation: 0,
         }
     }
 

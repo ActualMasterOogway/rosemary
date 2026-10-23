@@ -390,27 +390,128 @@ pub fn add_destroy_hook(hook: fn(sdl3::Window)) {
     }
 }
 
+/// Preserve guest NSWindow popup objects when their SDL parent is remade.
+/// SDL attaches native popups to a particular parent allocation, so they
+/// cannot outlive that parent without being recreated themselves.
+fn rehome_popup_descendants(old: sdl3::Window, replacement: sdl3::Window) {
+    let mut replacements = std::collections::HashMap::from([(old as usize, replacement)]);
+    for child in sdl3::video::window_family(old).into_iter().skip(1) {
+        if sdl3::video::live_window_id(child).is_none() {
+            continue;
+        }
+        let parent = sdl3::video::window_parent(child);
+        let Some(&new_parent) = replacements.get(&(parent as usize)) else {
+            continue;
+        };
+        let Some(popup) = presentation_of_sdl(child).popup_flags() else {
+            continue;
+        };
+        let Some(object) = (!window_for(child).is_null()).then(|| window_for(child)) else {
+            continue;
+        };
+        // SDL makes a new popup visible when its parent is shown, even if
+        // the old popup was explicitly ordered out by the guest.
+        let shown = window_of(object).shown != 0;
+        let (x, y) = sdl3::video::window_position(child).unwrap_or((0, 0));
+        let (width, height) = sdl3::video::window_size(child).unwrap_or((1, 1));
+        let api = if draws_with_opengl(child) {
+            Api::OpenGl
+        } else {
+            Api::Undecided
+        };
+        let flags = (creation_flags(window_of(object).style_mask, api)
+            & !sdl3::video::flags::BORDERLESS)
+            | popup;
+        let Some(new) =
+            sdl3::video::create_popup_window(new_parent, x, y, width.max(1), height.max(1), flags)
+        else {
+            continue; // old mapping is invalidated by the destroy path.
+        };
+        // Hide before the replacement parent is shown so SDL does not
+        // resurrect a popup that AppKit still considers ordered out.
+        if !shown {
+            sdl3::video::hide_window(new);
+        }
+        // SDL's GL flag is not enough: AppKit separately tracks which window
+        // surface belongs to a guest context. Transfer that ownership before
+        // the original popup's teardown hook removes the old registration.
+        if api == Api::OpenGl {
+            OPENGL_WINDOWS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(new as usize);
+        }
+        window_of(object).sdl = new;
+        // Rebind before SDL recursively destroys the old popup. Never try
+        // to move a context that belongs to another rendering thread.
+        crate::opengl::popup_rehomed(child, new);
+        WINDOWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+            .filter(|entry| entry.0 == child as usize)
+            .for_each(|entry| entry.0 = new as usize);
+        replacements.insert(child as usize, new);
+        let content = window_of(object).content_view;
+        if !content.is_null() {
+            crate::backing::needs_display(content);
+        }
+    }
+}
+
 /// Destroy an SDL window, telling everything keyed on it first.
 fn destroy_sdl_window(sdl: sdl3::Window) {
-    #[cfg(target_os = "linux")]
-    sdl3::x11_mask::forget(sdl);
-    #[cfg(target_os = "linux")]
-    sdl3::wayland_mask::forget(sdl);
-    OPENGL_WINDOWS
+    // SDL_DestroyWindow recursively frees popups. Reconcile every descendant
+    // NSWindow and retire every Metal/CPU owner *before* native destruction.
+    let family = sdl3::video::begin_window_family_destroy(sdl);
+    let hooks = DESTROY_HOOKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|window| *window != sdl as usize);
-    crate::backing::forget_window(sdl);
-    crate::screen::forget_relative_pointer(sdl);
-    crate::decor::destroyed(sdl);
-    for hook in DESTROY_HOOKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        hook(sdl);
+        .clone();
+    for member in family.into_iter().rev() {
+        // Remove fullscreen native overlays before retiring each member,
+        // including SDL popups which SDL otherwise destroys recursively.
+        #[cfg(target_os = "linux")]
+        sdl3::x11_mask::forget(member);
+        #[cfg(target_os = "linux")]
+        sdl3::wayland_mask::forget(member);
+        // A separately retired child has already received its own cleanup.
+        if sdl3::video::live_window_id(member).is_none() {
+            continue;
+        }
+        if member != sdl {
+            let owned = {
+                let mut windows = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+                windows
+                    .iter()
+                    .position(|(key, _)| *key == member as usize)
+                    .map(|at| windows.remove(at).1 as Id)
+            };
+            if let Some(object) = owned {
+                let child = window_of(object);
+                child.sdl = std::ptr::null_mut();
+                child.shown = 0;
+                if KEY.load(std::sync::atomic::Ordering::Acquire) == object as usize {
+                    KEY.store(0, std::sync::atomic::Ordering::Release);
+                    crate::event::announce_resign(object);
+                }
+                crate::event::forget_announced(object);
+            }
+        }
+        OPENGL_WINDOWS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|window| *window != member as usize);
+        crate::backing::forget_window(member);
+        crate::screen::forget_relative_pointer(member);
+        for hook in &hooks {
+            hook(member);
+        }
+        // After the hooks, which cancel a Metal swapchain initializer that
+        // would otherwise mark the window opaque once this had forgotten it.
+        crate::decor::destroyed(member);
     }
-    sdl3::video::destroy_window(sdl);
+    sdl3::video::destroy_window_after_hooks(sdl);
 }
 
 /// Every live window, so an SDL event's window id can find the object it belongs
@@ -512,7 +613,13 @@ pub(crate) fn content_inset(object: Id) -> CGFloat {
         return 0.0;
     }
     let window = window_of(object);
-    inset_of(object, window.style_mask, is_fullscreen(window.sdl))
+    let fullscreen = if sdl3::video::is_video_thread() {
+        is_fullscreen(window.sdl)
+    } else {
+        sdl3::video::presentation_window(window.sdl)
+            .is_some_and(|snapshot| snapshot.flags & sdl3::video::flags::FULLSCREEN != 0)
+    };
+    inset_of(object, window.style_mask, fullscreen)
 }
 
 fn inset_of(object: Id, style_mask: usize, fullscreen: bool) -> CGFloat {
@@ -552,8 +659,17 @@ fn host_frame(object: Id) -> Option<NSRect> {
     if sdl.is_null() {
         return None;
     }
-    let (width, height) = sdl3::video::window_size(sdl)?;
-    let (x, y) = global_position(sdl)?;
+    // Metal presentation can resolve this frame from a worker, which reads
+    // the SDL owner's published snapshot, never SDL window properties. The
+    // owner asks SDL itself: -frame straight after -setFrame: must not wait
+    // for the resize event, and popup-relative and Wayland virtual-desktop
+    // positions come from global_position.
+    let ((width, height), (x, y)) = if sdl3::video::is_video_thread() {
+        (sdl3::video::window_size(sdl)?, global_position(sdl)?)
+    } else {
+        let snapshot = sdl3::video::presentation_window(sdl)?;
+        (snapshot.logical_size, snapshot.position)
+    };
     Some(crate::geometry::rect_from_sdl(x, y, width, height))
 }
 
@@ -562,7 +678,12 @@ pub(crate) fn fullscreen_frame(object: Id) -> Option<NSRect> {
         return None;
     }
     let window = window_of(object);
-    (is_fullscreen(window.sdl) && window.fullscreen_frame.size.width > 0.0)
+    let flags = if sdl3::video::is_video_thread() {
+        sdl3::video::window_flags(window.sdl)
+    } else {
+        sdl3::video::presentation_window(window.sdl)?.flags
+    };
+    (flags & sdl3::video::flags::FULLSCREEN != 0 && window.fullscreen_frame.size.width > 0.0)
         .then_some(window.fullscreen_frame)
 }
 
@@ -585,8 +706,11 @@ pub(crate) fn surface_frame(object: Id) -> Option<NSRect> {
 /// to preserve half-point boundaries and use the same extent for every
 /// presentation backend, including those outside AppKit.
 pub fn presentation_clip(sdl: sdl3::Window) -> Option<sdl3::Rect> {
-    let (width, height) = sdl3::video::window_size(sdl)?;
-    let (pixels_w, pixels_h) = sdl3::video::window_size_in_pixels(sdl)?;
+    // The clip is consumed by Metal's FIFO worker. Use dimensions already
+    // published by the SDL video owner, never query the native SDL window.
+    let snapshot = sdl3::video::presentation_window(sdl)?;
+    let (width, height) = snapshot.logical_size;
+    let (pixels_w, pixels_h) = snapshot.pixel_size;
     if width <= 0 || height <= 0 || pixels_w <= 0 || pixels_h <= 0 {
         return None;
     }
@@ -1306,6 +1430,11 @@ fn remake(receiver: Id, api: Api, want: Presentation) -> bool {
     // those are resolved through. Its backing store goes with it - SDL reuses
     // addresses, and a store left behind would be the next window's, at the
     // wrong size.
+    // Native GL contexts on render threads may remain current across raw GL
+    // calls. Retain the old parent and its popup family until those threads
+    // unbind or bind their replacement drawables.
+    crate::opengl::protect_remade_family(old);
+    rehome_popup_descendants(old, new);
     destroy_sdl_window(old);
     update_text_input(receiver);
     trace!("{receiver:p} remade as {want:?} ({api:?})");
@@ -3800,6 +3929,562 @@ mod tests {
         // Asking twice is not two rebuilds.
         assert!(rebuild_for_opengl(object));
         assert_eq!(unsafe { sdl_window(object) }, after);
+    }
+
+    /// An explicitly ordered-out popup must not reappear when its parent is
+    /// remade, even though SDL shows native child popups with their parent.
+    #[test]
+    fn hidden_popup_stays_hidden_across_parent_remake_until_order_front() {
+        if !sdl3::isolated::run_here() {
+            return;
+        }
+
+        crate::bootstrap();
+        let Some(probe) = sdl3::video::create_window(c"hidden popup preflight", 32, 32, 0) else {
+            return; // no graphical SDL display available
+        };
+        sdl3::video::destroy_window(probe);
+        let rect = NSRect {
+            origin: NSPoint { x: 20.0, y: 20.0 },
+            size: NSSize {
+                width: 180.0,
+                height: 120.0,
+            },
+        };
+        let class = objc::class::lookup(c"NSWindow").unwrap();
+        let make = || {
+            let object = objc::object::create_instance(class, 0);
+            unsafe {
+                init_with_content_rect(
+                    object,
+                    objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+                    rect,
+                    0,
+                    0,
+                    0,
+                )
+            }
+        };
+        // Both undecided (potential Vulkan) and OpenGL-owned popup paths
+        // must retain the guest's ordered-out state.
+        for gl_child in [false, true] {
+            let parent = make();
+            let child = make();
+            order_front(parent, true);
+            unsafe { set_level(child, objc::sel::get("setLevel:"), window_level::POPUP_MENU) };
+            order_front(child, false);
+            if gl_child {
+                assert!(rebuild_for_opengl(child), "convert child to OpenGL");
+            }
+            let original_parent = unsafe { sdl_window(parent) };
+            let original_child = unsafe { sdl_window(child) };
+            assert_eq!(sdl3::video::window_parent(original_child), original_parent);
+            assert!(is_shown(child));
+            assert_eq!(
+                sdl3::video::window_flags(original_child) & sdl3::video::flags::HIDDEN,
+                0
+            );
+
+            // Exercise the public Objective-C guest operation, not simply
+            // mutate AppKit's visibility marker.
+            unsafe {
+                let order: unsafe extern "C" fn(Id, Sel, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                order(child, objc::sel::get("orderOut:"), std::ptr::null_mut());
+            }
+            assert!(!is_shown(child));
+            assert_ne!(
+                sdl3::video::window_flags(original_child) & sdl3::video::flags::HIDDEN,
+                0
+            );
+
+            assert!(rebuild_for_opengl(parent), "parent remake");
+            let replacement_parent = unsafe { sdl_window(parent) };
+            let replacement_child = unsafe { sdl_window(child) };
+            assert_ne!(replacement_parent, original_parent);
+            assert_ne!(replacement_child, original_child);
+            assert_eq!(
+                sdl3::video::window_parent(replacement_child),
+                replacement_parent
+            );
+            assert_eq!(window_for(replacement_child), child);
+            assert!(is_shown(parent));
+            assert!(!is_shown(child), "AppKit resurrected the ordered-out popup");
+            assert_ne!(
+                sdl3::video::window_flags(replacement_child) & sdl3::video::flags::HIDDEN,
+                0,
+                "SDL resurrected the ordered-out popup when its parent was shown"
+            );
+            assert_eq!(draws_with_opengl(replacement_child), gl_child);
+
+            unsafe {
+                let order: unsafe extern "C" fn(Id, Sel, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                order(child, objc::sel::get("orderFront:"), std::ptr::null_mut());
+            }
+            assert!(is_shown(child));
+            assert_eq!(
+                sdl3::video::window_flags(replacement_child) & sdl3::video::flags::HIDDEN,
+                0,
+                "orderFront did not restore the popup's native visibility"
+            );
+            assert_eq!(
+                unsafe { sdl_window(child) },
+                replacement_child,
+                "orderFront unnecessarily remade the popup"
+            );
+        }
+    }
+
+    /// A guest NSOpenGLContext must keep its native context when its SDL popup
+    /// is reparented by an unrelated parent window recreation.
+    #[test]
+    fn gl_popup_rehome_preserves_guest_context_and_surface_ownership() {
+        if !sdl3::isolated::run_here() {
+            return;
+        }
+
+        crate::bootstrap();
+        let Some(probe) = sdl3::video::create_window(c"GL test preflight", 32, 32, 0) else {
+            return; // graphical display unavailable
+        };
+        sdl3::video::destroy_window(probe);
+        let rect = NSRect {
+            origin: NSPoint { x: 20.0, y: 20.0 },
+            size: NSSize {
+                width: 180.0,
+                height: 120.0,
+            },
+        };
+        let class = objc::class::lookup(c"NSWindow").unwrap();
+        let make = || {
+            let object = objc::object::create_instance(class, 0);
+            // SAFETY: normal designated NSWindow initializer and a fresh object.
+            unsafe {
+                init_with_content_rect(
+                    object,
+                    objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+                    rect,
+                    0,
+                    0,
+                    0,
+                )
+            }
+        };
+        let parent = make();
+        let child = make();
+        order_front(parent, true);
+        unsafe { set_level(child, objc::sel::get("setLevel:"), window_level::POPUP_MENU) };
+        order_front(child, false);
+        let original_parent = unsafe { sdl_window(parent) };
+        assert!(!original_parent.is_null());
+        assert!(rebuild_for_opengl(child));
+        let original_popup = unsafe { sdl_window(child) };
+        assert_eq!(sdl3::video::window_parent(original_popup), original_parent);
+        assert!(draws_with_opengl(original_popup));
+
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        unsafe {
+            crate::view::init_with_frame(view, objc::sel::get("initWithFrame:"), rect);
+            set_content_view(child, objc::sel::get("setContentView:"), view);
+        }
+        let context =
+            objc::object::create_instance(objc::class::lookup(c"NSOpenGLContext").unwrap(), 0);
+        // Real Objective-C entrypoints of the guest NSOpenGLContext.
+        unsafe {
+            let init: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(
+                init(
+                    context,
+                    objc::sel::get("initWithFormat:shareContext:"),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                context
+            );
+            let set_view: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(objc::msg::entry());
+            set_view(context, objc::sel::get("setView:"), view);
+            let make_current: unsafe extern "C" fn(Id, Sel) =
+                std::mem::transmute(objc::msg::entry());
+            make_current(context, objc::sel::get("makeCurrentContext"));
+        }
+        let native = sdl3::video::gl_current_context();
+        assert!(!native.is_null(), "guest created no native GL context");
+        assert_eq!(sdl3::video::gl_current_window(), original_popup);
+
+        assert!(rebuild_for_opengl(parent));
+        let new_parent = unsafe { sdl_window(parent) };
+        let new_popup = unsafe { sdl_window(child) };
+        assert_ne!(new_popup, original_popup);
+        assert_eq!(sdl3::video::window_parent(new_popup), new_parent);
+        assert_ne!(
+            sdl3::video::window_flags(new_popup) & sdl3::video::flags::OPENGL,
+            0
+        );
+        assert!(
+            draws_with_opengl(new_popup),
+            "GL popup lost OPENGL_WINDOWS ownership"
+        );
+        assert!(
+            !draws_with_opengl(original_popup),
+            "old popup ownership was not retired"
+        );
+        assert_eq!(window_for(new_popup), child);
+        assert!(window_for(original_popup).is_null());
+
+        // The guest kept its NSOpenGLContext current throughout the parent
+        // remake. No second makeCurrentContext call is allowed here.
+        assert_eq!(
+            sdl3::video::gl_current_context(),
+            native,
+            "parent remake detached the guest's original GL context"
+        );
+        assert_eq!(
+            sdl3::video::gl_current_window(),
+            new_popup,
+            "parent remake failed to rebind the already-current context"
+        );
+        // Exercise real driver drawing and readback against the replacement
+        // drawable before the guest flushes it, not merely an SDL identity.
+        unsafe {
+            let clear_color: unsafe extern "C" fn(f32, f32, f32, f32) =
+                std::mem::transmute(sdl3::video::gl_proc_address(c"glClearColor").unwrap());
+            let clear: unsafe extern "C" fn(u32) =
+                std::mem::transmute(sdl3::video::gl_proc_address(c"glClear").unwrap());
+            let read: unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8) =
+                std::mem::transmute(sdl3::video::gl_proc_address(c"glReadPixels").unwrap());
+            clear_color(0.1, 0.75, 0.25, 1.0);
+            clear(0x4000); // GL_COLOR_BUFFER_BIT
+            let mut pixel = [0_u8; 4];
+            read(8, 8, 1, 1, 0x1908, 0x1401, pixel.as_mut_ptr()); // RGBA, UNSIGNED_BYTE
+            assert!(
+                pixel[1] > 160 && pixel[0] < 90 && pixel[2] < 130,
+                "GL drew to the wrong or an invalid popup drawable: {pixel:?}"
+            );
+            let flush: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+            flush(context, objc::sel::get("flushBuffer"));
+        }
+        assert_eq!(sdl3::video::gl_current_context(), native);
+        assert_eq!(sdl3::video::gl_current_window(), new_popup);
+
+        // Exercise the actual backing-store pump: this child gets a composed
+        // dirty store but must never try SDL_GetWindowSurface on the GL window.
+        crate::backing::queue_dirty_store_for_tests(new_popup);
+        crate::backing::pump();
+        assert!(crate::backing::has_store_for_tests(new_popup));
+        crate::backing::present_again(new_popup);
+        crate::backing::pump();
+        assert_eq!(
+            crate::backing::cpu_fallback_calls_for_tests(new_popup),
+            0,
+            "backing store attempted to replace the guest's OpenGL surface"
+        );
+        assert_eq!(sdl3::video::gl_current_context(), native);
+        assert_eq!(sdl3::video::gl_current_window(), new_popup);
+        assert!(
+            rebuild_for_opengl(child),
+            "existing GL popup needlessly rebuilt"
+        );
+        assert_eq!(unsafe { sdl_window(child) }, new_popup);
+    }
+
+    /// Parent remake must observe a binding still between native make-current
+    /// and its publication to the cross-thread drawable registry.
+    #[test]
+    fn gl_popup_rehome_waits_for_inflight_native_binding() {
+        if !sdl3::isolated::run_here() {
+            return;
+        }
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        crate::bootstrap();
+        let rect = NSRect {
+            origin: NSPoint { x: 10.0, y: 10.0 },
+            size: NSSize {
+                width: 150.0,
+                height: 100.0,
+            },
+        };
+        let class = objc::class::lookup(c"NSWindow").unwrap();
+        let make = || {
+            let object = objc::object::create_instance(class, 0);
+            unsafe {
+                init_with_content_rect(
+                    object,
+                    objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+                    rect,
+                    0,
+                    0,
+                    0,
+                )
+            }
+        };
+        let parent = make();
+        let child = make();
+        order_front(parent, true);
+        unsafe { set_level(child, objc::sel::get("setLevel:"), window_level::POPUP_MENU) };
+        order_front(child, false);
+        assert!(rebuild_for_opengl(child));
+        let old = unsafe { sdl_window(child) };
+        let old_id = sdl3::video::window_id(old);
+        let old_addr = old as usize;
+        assert_ne!(old_id, 0);
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        unsafe {
+            crate::view::init_with_frame(view, objc::sel::get("initWithFrame:"), rect);
+            set_content_view(child, objc::sel::get("setContentView:"), view);
+        }
+        let context =
+            objc::object::create_instance(objc::class::lookup(c"NSOpenGLContext").unwrap(), 0);
+        unsafe {
+            let init: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(
+                init(
+                    context,
+                    objc::sel::get("initWithFormat:shareContext:"),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                context
+            );
+            let set_view: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(objc::msg::entry());
+            set_view(context, objc::sel::get("setView:"), view);
+        }
+
+        crate::opengl::test_pause_binding(old);
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let context_addr = context as usize;
+        let worker = std::thread::spawn(move || {
+            let context = context_addr as Id;
+            unsafe {
+                let make_current: unsafe extern "C" fn(Id, Sel) =
+                    std::mem::transmute(objc::msg::entry());
+                make_current(context, objc::sel::get("makeCurrentContext"));
+            }
+            resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            unsafe {
+                let flush: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+                flush(context, objc::sel::get("flushBuffer"));
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::opengl::test_binding_paused() {
+            assert!(
+                Instant::now() < deadline,
+                "GL binding never reached test barrier"
+            );
+            std::thread::yield_now();
+        }
+        // The main thread tries to recreate the parent while the worker holds
+        // the binding gate after the real SDL_GL_MakeCurrent succeeded.
+        let protected = std::sync::Arc::new(AtomicBool::new(false));
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&protected);
+        let release_flag = std::sync::Arc::clone(&released);
+        let releaser = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !crate::opengl::test_protection_waiting() {
+                if Instant::now() >= until {
+                    crate::opengl::test_resume_binding();
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            flag.store(true, Ordering::Release);
+            // The old drawable must still exist while registration is pending.
+            assert_eq!(
+                sdl3::video::live_window_id(old_addr as sdl3::Window),
+                Some(old_id)
+            );
+            release_flag.store(true, Ordering::Release);
+            crate::opengl::test_resume_binding();
+        });
+
+        assert!(rebuild_for_opengl(parent));
+        releaser.join().unwrap();
+        assert!(
+            protected.load(Ordering::Acquire),
+            "retirement missed binding gate"
+        );
+        assert!(
+            released.load(Ordering::Acquire),
+            "bind wasn't released at protection"
+        );
+        let new = unsafe { sdl_window(child) };
+        assert_ne!(old, new);
+        sdl3::video::vulkan::service_surface_requests();
+        assert_eq!(
+            sdl3::video::window_from_id(old_id),
+            old,
+            "native popup freed even though render thread has not rebound"
+        );
+        assert_eq!(crate::opengl::retired_drawable_count_for_tests(), 1);
+
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(crate::opengl::retired_drawable_count_for_tests(), 0);
+        sdl3::video::vulkan::service_surface_requests();
+        assert!(sdl3::video::window_from_id(old_id).is_null());
+    }
+
+    /// A context bound on the guest render thread cannot be made current on
+    /// the SDL event thread. The owning thread repairs its binding at the
+    /// first AppKit GL boundary, with no guest makeCurrentContext call.
+    #[test]
+    fn gl_popup_rehome_restores_render_thread_before_flush() {
+        if !sdl3::isolated::run_here() {
+            return;
+        }
+        crate::bootstrap();
+        let rect = NSRect {
+            origin: NSPoint { x: 12.0, y: 12.0 },
+            size: NSSize {
+                width: 160.0,
+                height: 100.0,
+            },
+        };
+        let class = objc::class::lookup(c"NSWindow").unwrap();
+        let make = || {
+            let object = objc::object::create_instance(class, 0);
+            unsafe {
+                init_with_content_rect(
+                    object,
+                    objc::sel::get("initWithContentRect:styleMask:backing:defer:"),
+                    rect,
+                    0,
+                    0,
+                    0,
+                )
+            }
+        };
+        let parent = make();
+        let child = make();
+        order_front(parent, true);
+        unsafe { set_level(child, objc::sel::get("setLevel:"), window_level::POPUP_MENU) };
+        order_front(child, false);
+        assert!(rebuild_for_opengl(child));
+        let old = unsafe { sdl_window(child) };
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        unsafe {
+            crate::view::init_with_frame(view, objc::sel::get("initWithFrame:"), rect);
+            set_content_view(child, objc::sel::get("setContentView:"), view);
+        }
+        let context =
+            objc::object::create_instance(objc::class::lookup(c"NSOpenGLContext").unwrap(), 0);
+        unsafe {
+            let init: unsafe extern "C" fn(Id, Sel, Id, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            assert_eq!(
+                init(
+                    context,
+                    objc::sel::get("initWithFormat:shareContext:"),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                context
+            );
+            let set_view: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(objc::msg::entry());
+            set_view(context, objc::sel::get("setView:"), view);
+        }
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let (raw_done_tx, raw_done_rx) = std::sync::mpsc::channel();
+        let (flush_tx, flush_rx) = std::sync::mpsc::channel();
+        let context_addr = context as usize;
+        let old_addr = old as usize;
+        let worker = std::thread::spawn(move || {
+            let context = context_addr as Id;
+            unsafe {
+                let make_current: unsafe extern "C" fn(Id, Sel) =
+                    std::mem::transmute(objc::msg::entry());
+                make_current(context, objc::sel::get("makeCurrentContext"));
+            }
+            let native = sdl3::video::gl_current_context();
+            assert!(!native.is_null());
+            assert_eq!(sdl3::video::gl_current_window() as usize, old_addr);
+            ready_tx.send(native as usize).unwrap();
+            let replacement = continue_rx.recv().unwrap() as sdl3::Window;
+            // No AppKit/CGL call or makeCurrent occurs here. The old popup
+            // MUST still be a valid native drawable during raw driver work.
+            assert_eq!(sdl3::video::gl_current_window() as usize, old_addr);
+            unsafe {
+                let color: unsafe extern "C" fn(f32, f32, f32, f32) =
+                    std::mem::transmute(sdl3::video::gl_proc_address(c"glClearColor").unwrap());
+                let clear: unsafe extern "C" fn(u32) =
+                    std::mem::transmute(sdl3::video::gl_proc_address(c"glClear").unwrap());
+                let read: unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8) =
+                    std::mem::transmute(sdl3::video::gl_proc_address(c"glReadPixels").unwrap());
+                color(0.125, 0.75, 0.25, 1.0);
+                clear(0x4000);
+                let mut pixels = [0u8; 4];
+                read(8, 8, 1, 1, 0x1908, 0x1401, pixels.as_mut_ptr());
+                assert!(
+                    pixels[1] > 160 && pixels[0] < 90,
+                    "raw GL calls before flush rendered through invalid drawable: {pixels:?}"
+                );
+            }
+            raw_done_tx.send(()).unwrap();
+            flush_rx.recv().unwrap();
+            // Only now is the guest entering an AppKit boundary. The owner
+            // rebinds and acknowledges the native retirement barrier.
+            unsafe {
+                let flush: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+                flush(context, objc::sel::get("flushBuffer"));
+            }
+            assert_eq!(sdl3::video::gl_current_context() as usize, native as usize);
+            assert_eq!(sdl3::video::gl_current_window(), replacement);
+            unsafe {
+                let clear: unsafe extern "C" fn(u32) =
+                    std::mem::transmute(sdl3::video::gl_proc_address(c"glClear").unwrap());
+                clear(0x4000);
+                let flush: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+                flush(context, objc::sel::get("flushBuffer"));
+            }
+            assert_eq!(sdl3::video::gl_current_window(), replacement);
+        });
+        let native = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let original_id = sdl3::video::window_id(old);
+        assert_ne!(original_id, 0);
+        assert!(rebuild_for_opengl(parent));
+        let new = unsafe { sdl_window(child) };
+        assert_ne!(new, old);
+        assert!(
+            sdl3::video::gl_current_context().is_null(),
+            "SDL video thread incorrectly stole the render thread's GL context"
+        );
+        assert_eq!(crate::opengl::retired_drawable_count_for_tests(), 1);
+        // Servicing SDL retirement BEFORE the render thread acknowledges
+        // must leave the old popup's native SDL allocation intact.
+        sdl3::video::vulkan::service_surface_requests();
+        assert_eq!(sdl3::video::window_from_id(original_id), old);
+        continue_tx.send(new as usize).unwrap();
+        raw_done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        sdl3::video::vulkan::service_surface_requests();
+        assert_eq!(
+            sdl3::video::window_from_id(original_id),
+            old,
+            "old native GL drawable freed while raw rendering was in flight"
+        );
+        assert_eq!(crate::opengl::retired_drawable_count_for_tests(), 1);
+        flush_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(crate::opengl::retired_drawable_count_for_tests(), 0);
+        sdl3::video::vulkan::service_surface_requests();
+        assert!(
+            sdl3::video::window_from_id(original_id).is_null(),
+            "old SDL popup did not retire after its GL owner rebound"
+        );
+        assert_ne!(native, 0);
     }
 
     /// Under this runtime's own titlebar the SDL window is the frame, and the

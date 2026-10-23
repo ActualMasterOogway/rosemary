@@ -8,7 +8,7 @@ mod submit;
 mod trace;
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, atomic::AtomicBool};
 
 use ash::{Device, Instance, vk};
 use static_init::dynamic;
@@ -77,6 +77,10 @@ pub struct Gpu {
     /// Vulkan requires external synchronization on a queue, and Metal lets any
     /// thread commit a command buffer.
     queue: Mutex<vk::Queue>,
+    /// Serialize driver WSI construction with presentation on the same GPU.
+    /// Some ICDs do not tolerate concurrent VkSwapchain/semaphore creation
+    /// and vkQueuePresentKHR for different windows on a shared device.
+    pub(crate) wsi: Mutex<()>,
     /// Commits hold this across the guest submit and every presentation
     /// submit attached to it. Queue calls themselves keep using `queue` for
     /// Vulkan's external-synchronization rule.
@@ -90,6 +94,8 @@ pub struct Gpu {
     /// The thread drawables are presented on, so presentation never holds
     /// up a commit.
     pub(crate) presenter: crate::present::Presenter,
+    /// VK_ERROR_DEVICE_LOST invalidates the logical device, not one window.
+    pub(crate) lost: AtomicBool,
     memory: vk::PhysicalDeviceMemoryProperties,
     pub limits: vk::PhysicalDeviceLimits,
     /// One layout per distinct set of Metal binding indices, so pipelines
@@ -703,10 +709,12 @@ impl Gpu {
             physical,
             queue_family,
             queue: Mutex::new(queue),
+            wsi: Mutex::new(()),
             submission_boundary: Mutex::new(()),
             submissions: crate::submission::Tracker::new(),
             deferred: deferred::Deferred::default(),
             presenter: crate::present::Presenter::new(),
+            lost: AtomicBool::new(false),
             memory,
             limits: properties.limits,
             layouts: Mutex::new(HashMap::new()),
