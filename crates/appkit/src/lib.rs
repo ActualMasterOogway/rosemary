@@ -46,6 +46,7 @@ mod font;
 pub mod hitheme;
 pub mod launch;
 pub mod launchservices;
+mod props;
 pub(crate) mod quartz;
 pub use chrome::fonts;
 pub mod geometry;
