@@ -60,9 +60,17 @@ static REGISTRY_LISTENER: RegistryListener = RegistryListener {
 struct Client {
     marshal: unsafe extern "C" fn(Proxy, u32, *const c_void, u32, u32, ...) -> Proxy,
     add_listener: unsafe extern "C" fn(Proxy, *const c_void, *mut c_void) -> c_int,
+    #[cfg(test)]
     roundtrip: unsafe extern "C" fn(Proxy) -> c_int,
     flush: unsafe extern "C" fn(Proxy) -> c_int,
     proxy_destroy: unsafe extern "C" fn(Proxy),
+    create_queue: unsafe extern "C" fn(Proxy) -> *mut c_void,
+    queue_destroy: unsafe extern "C" fn(*mut c_void),
+    create_wrapper: unsafe extern "C" fn(Proxy) -> Proxy,
+    wrapper_destroy: unsafe extern "C" fn(Proxy),
+    set_queue: unsafe extern "C" fn(Proxy, *mut c_void),
+    roundtrip_queue: unsafe extern "C" fn(Proxy, *mut c_void) -> c_int,
+    dispatch_queue_pending: unsafe extern "C" fn(Proxy, *mut c_void) -> c_int,
     registry: usize,
     compositor: usize,
     surface: usize,
@@ -100,9 +108,17 @@ fn client() -> Option<&'static Client> {
             Some(Client {
                 marshal: symbol(handle, c"wl_proxy_marshal_flags")?,
                 add_listener: symbol(handle, c"wl_proxy_add_listener")?,
+                #[cfg(test)]
                 roundtrip: symbol(handle, c"wl_display_roundtrip")?,
                 flush: symbol(handle, c"wl_display_flush")?,
                 proxy_destroy: symbol(handle, c"wl_proxy_destroy")?,
+                create_queue: symbol(handle, c"wl_display_create_queue")?,
+                queue_destroy: symbol(handle, c"wl_event_queue_destroy")?,
+                create_wrapper: symbol(handle, c"wl_proxy_create_wrapper")?,
+                wrapper_destroy: symbol(handle, c"wl_proxy_wrapper_destroy")?,
+                set_queue: symbol(handle, c"wl_proxy_set_queue")?,
+                roundtrip_queue: symbol(handle, c"wl_display_roundtrip_queue")?,
+                dispatch_queue_pending: symbol(handle, c"wl_display_dispatch_queue_pending")?,
                 registry: symbol::<*mut c_void>(handle, c"wl_registry_interface")? as usize,
                 compositor: symbol::<*mut c_void>(handle, c"wl_compositor_interface")? as usize,
                 surface: symbol::<*mut c_void>(handle, c"wl_surface_interface")? as usize,
@@ -125,15 +141,30 @@ const DESTROY: u32 = 1;
 // extension or version-specific interface layout is required.
 struct Runtime {
     display: usize,
+    // Every proxy here is on this queue, never SDL's default one: dispatching
+    // that would run SDL's listeners outside SDL's pump, on any thread.
+    queue: usize,
     compositor: usize,
     shm: usize,
     subcompositor: usize,
 }
 impl Runtime {
     unsafe fn initialize(c: &Client, display: Proxy) -> Option<Self> {
+        let queue = unsafe { (c.create_queue)(display) };
+        if queue.is_null() {
+            return None;
+        }
+        // The registry inherits the wrapper's queue, and the globals bound
+        // from it inherit the registry's.
+        let wrapper = unsafe { (c.create_wrapper)(display) };
+        if wrapper.is_null() {
+            unsafe { (c.queue_destroy)(queue) };
+            return None;
+        }
+        unsafe { (c.set_queue)(wrapper, queue) };
         let registry = unsafe {
             (c.marshal)(
-                display,
+                wrapper,
                 1,
                 c.registry as *const c_void,
                 1,
@@ -141,7 +172,9 @@ impl Runtime {
                 std::ptr::null_mut::<c_void>(),
             )
         };
+        unsafe { (c.wrapper_destroy)(wrapper) };
         if registry.is_null() {
+            unsafe { (c.queue_destroy)(queue) };
             return None;
         }
         let mut ids = RegistryIds::default();
@@ -152,9 +185,10 @@ impl Runtime {
                 (&raw mut ids).cast(),
             )
         } == 0;
-        let roundtrip = listened && unsafe { (c.roundtrip)(display) } >= 0;
+        let roundtrip = listened && unsafe { (c.roundtrip_queue)(display, queue) } >= 0;
         if !roundtrip || ids.compositor == 0 || ids.shm == 0 || ids.subcompositor == 0 {
             unsafe { (c.proxy_destroy)(registry) };
+            unsafe { (c.queue_destroy)(queue) };
             return None;
         }
         unsafe fn bind(c: &Client, registry: Proxy, name: u32, interface: usize) -> Proxy {
@@ -183,6 +217,7 @@ impl Runtime {
         }
         Some(Self {
             display: display as usize,
+            queue: queue as usize,
             compositor: compositor as usize,
             shm: shm as usize,
             subcompositor: subcompositor as usize,
@@ -461,6 +496,8 @@ pub fn update(window: Window, clip: Option<Rect>) -> bool {
     mask.buffer = next as usize;
     mask.clip = clip;
     mask.size = size;
+    // Drop the shm formats and buffer releases nothing here listens for.
+    unsafe { (c.dispatch_queue_pending)(display, rt.queue as *mut c_void) };
     unsafe { (c.flush)(display) >= 0 }
 }
 
@@ -684,6 +721,75 @@ mod tests {
             video::gl_make_current(window, std::ptr::null_mut());
             video::gl_destroy_context(gl);
         }
+        video::destroy_window(window);
+    }
+
+    static SDL_QUEUE_DISPATCHED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    unsafe extern "C" fn sync_done(_: *mut c_void, _: Proxy, _: u32) {
+        SDL_QUEUE_DISPATCHED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The mask binds its globals without dispatching SDL's default queue:
+    /// SDL's listeners run only from SDL's own pump, on SDL's thread.
+    #[test]
+    #[ignore = "requires Weston with SDL_VIDEODRIVER=wayland"]
+    fn binding_the_mask_globals_leaves_sdl_events_queued() {
+        assert!(video::init_video());
+        assert!(video::is_wayland(), "required Wayland video driver");
+        let window = video::create_window(c"Wayland mask queue", 400, 300, video::flags::OPENGL)
+            .expect("SDL window");
+        video::show_window(window);
+        for _ in 0..30 {
+            while video::poll().is_some() {}
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (display, _) = video::wayland_surface(window).expect("native wl_surface");
+        let c = client().expect("Wayland client");
+        // A wl_display.sync on the default queue stands in for SDL's events.
+        static LISTENER: [unsafe extern "C" fn(*mut c_void, Proxy, u32); 1] = [sync_done];
+        let callback_interface = unsafe {
+            let handle = libc::dlopen(
+                c"libwayland-client.so.0".as_ptr(),
+                libc::RTLD_NOW | libc::RTLD_NOLOAD,
+            );
+            libc::dlsym(handle, c"wl_callback_interface".as_ptr())
+        };
+        assert!(!callback_interface.is_null());
+        let callback = unsafe {
+            (c.marshal)(
+                display,
+                0,
+                callback_interface,
+                1,
+                0,
+                std::ptr::null_mut::<c_void>(),
+            )
+        };
+        assert!(!callback.is_null());
+        assert_eq!(
+            unsafe { (c.add_listener)(callback, LISTENER.as_ptr().cast(), std::ptr::null_mut()) },
+            0
+        );
+        let (sw, sh) = video::window_size(window).unwrap();
+        assert!(update(
+            window,
+            Some(Rect {
+                x: 0,
+                y: 31,
+                w: sw,
+                h: sh - 31,
+            })
+        ));
+        assert!(
+            !SDL_QUEUE_DISPATCHED.load(std::sync::atomic::Ordering::SeqCst),
+            "the mask dispatched SDL's default queue"
+        );
+        forget(window);
+        unsafe { (c.roundtrip)(display) };
+        assert!(SDL_QUEUE_DISPATCHED.load(std::sync::atomic::Ordering::SeqCst));
+        unsafe { (c.proxy_destroy)(callback) };
         video::destroy_window(window);
     }
 
