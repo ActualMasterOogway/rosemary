@@ -2109,6 +2109,8 @@ mod chrome_blit {
         window: usize,
         // Last viewport applied by AppKit, not a guest-supplied viewport.
         applied: (i32, i32, i32, i32),
+        // Whether `applied` was the whole drawable, which a resize leaves be.
+        applied_whole: bool,
         guest_owned: bool,
     }
 
@@ -2230,24 +2232,37 @@ mod chrome_blit {
             pixels,
             crate::window::content_inset(object),
         );
-        let (Some(get), Some(set)) = (
-            sdl3::video::gl_proc_address(c"glGetIntegerv"),
-            sdl3::video::gl_proc_address(c"glViewport"),
-        ) else {
-            return;
-        };
-        // SAFETY: both GL entrypoints have stable C signatures and the context
-        // supplied to this function is bound on the calling thread.
-        let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(get) };
-        let set: unsafe extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(set) };
-        let mut actual = [0i32; 4];
-        unsafe { get(VIEWPORT, actual.as_mut_ptr()) };
-        let current = (actual[0], actual[1], actual[2], actual[3]);
+        let whole = target == (0, 0, pixels.0, pixels.1);
         let mut fitted = FITTED.lock().unwrap_or_else(|e| e.into_inner());
         // A viewport belongs to the context and survives SDL window rebinding.
         let item = fitted
             .iter_mut()
             .find(|item| item.context == context as usize);
+        // Nothing to fit, so nothing to ask the driver: a guest's viewport,
+        // or a whole-drawable one that macOS does not change on a resize.
+        if let Some(item) = &item
+            && (item.guest_owned || (whole && item.applied_whole))
+        {
+            return;
+        }
+        type Viewport = (
+            unsafe extern "C" fn(u32, *mut i32),
+            unsafe extern "C" fn(i32, i32, i32, i32),
+        );
+        static ENTRY: std::sync::OnceLock<Option<Viewport>> = std::sync::OnceLock::new();
+        let Some((get, set)) = *ENTRY.get_or_init(|| {
+            let get = sdl3::video::gl_proc_address(c"glGetIntegerv")?;
+            let set = sdl3::video::gl_proc_address(c"glViewport")?;
+            // SAFETY: both GL entrypoints have stable C signatures.
+            Some(unsafe { (std::mem::transmute(get), std::mem::transmute(set)) })
+        }) else {
+            return;
+        };
+        // SAFETY: the context supplied to this function is bound on the
+        // calling thread.
+        let mut actual = [0i32; 4];
+        unsafe { get(VIEWPORT, actual.as_mut_ptr()) };
+        let current = (actual[0], actual[1], actual[2], actual[3]);
         if let Some(item) = item {
             let inherited_ours = !item.guest_owned && current == item.applied;
             if !inherited_ours {
@@ -2262,20 +2277,20 @@ mod chrome_blit {
             }
             unsafe { set(target.0, target.1, target.2, target.3) };
             item.applied = target;
+            item.applied_whole = whole;
         } else {
             // On a new context the GL default viewport is the entire surface.
             // It is not a guest custom viewport unless it differs already.
-            if current != (0, 0, pixels.0, pixels.1) {
-                return;
-            }
-            if current != target {
+            let guest_owned = current != (0, 0, pixels.0, pixels.1);
+            if !guest_owned && current != target {
                 unsafe { set(target.0, target.1, target.2, target.3) };
             }
             fitted.push(ViewportFit {
                 context: context as usize,
                 window: window as usize,
                 applied: target,
-                guest_owned: false,
+                applied_whole: whole,
+                guest_owned,
             });
         }
     }

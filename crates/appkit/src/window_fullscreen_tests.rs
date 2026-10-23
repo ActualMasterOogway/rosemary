@@ -1676,6 +1676,75 @@ fn wayland_idle_fullscreen_opengl_frame_is_masked_from_nswindow_resize() {
     objc::arc::pool_pop(pool);
 }
 
+/// A context's viewport is not changed by resizing its window on macOS: only
+/// a titlebar inset or a logical fullscreen frame calls for a fit here.
+#[test]
+#[ignore = "requires Xvfb/xfwm4 and Mesa OpenGL"]
+fn opengl_viewport_is_left_alone_by_a_plain_windowed_resize() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::lookup(c"NSWindow").unwrap();
+    let object = objc::object::create_instance(class, 0);
+    assert!(unsafe {
+        init_with_content_rect_for_tests(
+            object,
+            NSRect {
+                origin: NSPoint { x: 80.0, y: 100.0 },
+                size: NSSize {
+                    width: 720.0,
+                    height: 460.0,
+                },
+            },
+        )
+    });
+    unsafe { set_style_mask(object, objc::sel::get("setStyleMask:"), 0) };
+    assert!(rebuild_for_opengl(object));
+    let sdl = window_of(object).sdl;
+    sdl3::video::show_window(sdl);
+    window_of(object).shown = 1;
+    let pump = || {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+    };
+    let gl = sdl3::video::gl_create_context(sdl).expect("OpenGL context");
+    assert!(sdl3::video::gl_make_current(sdl, gl));
+    let get = sdl3::video::gl_proc_address(c"glGetIntegerv").unwrap();
+    let get: unsafe extern "C" fn(u32, *mut i32) = unsafe { std::mem::transmute(get) };
+    let viewport = || {
+        let mut actual = [0; 4];
+        unsafe { get(0x0BA2, actual.as_mut_ptr()) };
+        actual
+    };
+    assert_eq!(crate::window::content_inset(object), 0.0);
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    let first = viewport();
+    let mut grown = unsafe { frame(object, objc::sel::get("frame")) };
+    grown.size.width += 100.0;
+    grown.size.height += 60.0;
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), grown) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while window_of(object).size_pending != 0 {
+        assert!(std::time::Instant::now() < deadline, "resize timed out");
+        pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    crate::opengl::fit_viewport_for_test(object, sdl, gl);
+    assert_eq!(
+        viewport(),
+        first,
+        "a windowed resize changed the GL viewport"
+    );
+    assert!(sdl3::video::gl_make_current(
+        std::ptr::null_mut(),
+        std::ptr::null_mut()
+    ));
+    sdl3::video::gl_destroy_context(gl);
+    objc::arc::release(object);
+    pump();
+    objc::arc::pool_pop(pool);
+}
+
 #[test]
 #[ignore = "requires Xvfb/xfwm4 and Mesa OpenGL"]
 fn opengl_viewport_tracks_fullscreen_logical_frame_and_respects_guest_viewport() {
