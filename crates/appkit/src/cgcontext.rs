@@ -1370,6 +1370,24 @@ pub unsafe extern "C" fn CGColorRelease(color: CFTypeRef) {
     }
 }
 
+pub unsafe extern "C" fn CGColorRetain(color: CFTypeRef) -> CFTypeRef {
+    if !color.is_null() {
+        unsafe { corefoundation::api::CFRetain(color) };
+    }
+    color
+}
+
+/// `CGColorCreateCopyWithAlpha`: the same colour at another alpha.
+pub unsafe extern "C" fn CGColorCreateCopyWithAlpha(color: CFTypeRef, alpha: f64) -> CFTypeRef {
+    match color_of(color) {
+        Some(color) => {
+            let [r, g, b, _] = color.components;
+            new_color([r, g, b, alpha])
+        }
+        None => std::ptr::null(),
+    }
+}
+
 pub unsafe extern "C" fn CGColorGetComponents(color: CFTypeRef) -> *const f64 {
     color_of(color).map_or(std::ptr::null(), |color| color.components.as_ptr())
 }
@@ -1558,6 +1576,8 @@ exports::exports! {
         "CGColorCreateGenericRGB" => CGColorCreateGenericRGB,
         "CGColorCreateGenericGray" => CGColorCreateGenericGray,
         "CGColorRelease" => CGColorRelease,
+        "CGColorRetain" => CGColorRetain,
+        "CGColorCreateCopyWithAlpha" => CGColorCreateCopyWithAlpha,
         "CGColorGetComponents" => CGColorGetComponents,
         "CGColorGetNumberOfComponents" => CGColorGetNumberOfComponents,
         "CGColorGetAlpha" => CGColorGetAlpha,
