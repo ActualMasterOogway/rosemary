@@ -949,6 +949,7 @@ fn send(receiver: Id, name: &str) {
 /// Draw everything marked for display and present every window that changed.
 pub fn pump() {
     crate::decor::pump();
+    crate::layout::prepare();
     for window in crate::window::all() {
         if !crate::window::is_shown(window) {
             continue;
