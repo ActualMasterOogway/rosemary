@@ -2029,23 +2029,31 @@ fn fullscreen_screen_visible_frame_ignores_desktop_panel() {
     };
     assert_eq!(visible(screen), desktop);
     order_front(object, true);
-    let settle = |wanted| {
+    let wait_until = |done: &dyn Fn() -> bool, what: &str| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             while let Some(event) = sdl3::video::poll() {
                 crate::event::deliver(event);
             }
-            if is_fullscreen(sdl) == wanted
-                && (window_of(object).reported_fullscreen != 0) == wanted
-            {
+            if done() {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "fullscreen did not settle"
+                "{what} did not settle"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    };
+    let minimized = || sdl3::video::window_flags(sdl) & sdl3::video::flags::MINIMIZED != 0;
+    let settle = |wanted| {
+        wait_until(
+            &|| {
+                is_fullscreen(sdl) == wanted
+                    && (window_of(object).reported_fullscreen != 0) == wanted
+            },
+            "fullscreen",
+        )
     };
     unsafe {
         toggle_full_screen(
@@ -2134,34 +2142,14 @@ fn fullscreen_screen_visible_frame_ignores_desktop_panel() {
         );
     }
     assert!(sdl3::video::minimize_window(sdl));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while sdl3::video::window_flags(sdl) & sdl3::video::flags::MINIMIZED == 0 {
-        while let Some(event) = sdl3::video::poll() {
-            crate::event::deliver(event);
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "minimize did not settle"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_until(&minimized, "minimize");
     assert_eq!(
         visible(screen),
         desktop,
         "minimized windows do not cover the desktop"
     );
     assert!(sdl3::video::restore_window(sdl));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while sdl3::video::window_flags(sdl) & sdl3::video::flags::MINIMIZED != 0 {
-        while let Some(event) = sdl3::video::poll() {
-            crate::event::deliver(event);
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "restore did not settle"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_until(&|| !minimized(), "restore");
     settle(true);
     assert_eq!(visible(screen), whole);
     unsafe { order_out(object, objc::sel::get("orderOut:"), std::ptr::null_mut()) };
