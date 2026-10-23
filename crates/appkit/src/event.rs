@@ -899,7 +899,11 @@ fn capture_allows_drag(id: u32, buttons: u32) -> bool {
 /// The base coordinate system is the whole frame, so a titlebar this runtime
 /// draws is above the content view's top.
 fn location(window: Id, x: f32, y: f32) -> NSPoint {
-    if let Some(point) = window::point_from_surface(window, f64::from(x), f64::from(y)) {
+    // Only a fullscreen logical frame is placed by the host surface: a
+    // windowed frame follows `-setFrame:` before SDL's resize lands.
+    if window::fullscreen_frame(window).is_some()
+        && let Some(point) = window::point_from_surface(window, f64::from(x), f64::from(y))
+    {
         return point;
     }
     let content = window::content_view_of(window);

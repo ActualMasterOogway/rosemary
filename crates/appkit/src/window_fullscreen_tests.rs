@@ -832,12 +832,12 @@ thread_local! {
 }
 
 thread_local! {
-    static SENT_EVENTS: std::cell::RefCell<Vec<(u64, NSPoint)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SENT_EVENTS: std::cell::RefCell<Vec<(u64, NSPoint, NSPoint)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 unsafe extern "C" fn record_sent_event(_receiver: Id, _sel: Sel, event: Id) {
     let fields = crate::nsevent::fields_of(event).unwrap();
-    SENT_EVENTS.with_borrow_mut(|sent| sent.push((fields.kind, fields.delta)));
+    SENT_EVENTS.with_borrow_mut(|sent| sent.push((fields.kind, fields.delta, fields.location)));
 }
 
 /// A disassociated pointer's frozen position may sit outside a shortened
@@ -932,7 +932,7 @@ fn disassociated_pointer_input_ignores_the_logical_frame_edge() {
     crate::event::deliver(click(false));
     unsafe { crate::screen::CGAssociateMouseAndMouseCursorPosition(1) };
     let sent = SENT_EVENTS.take();
-    let kinds: Vec<u64> = sent.iter().map(|(kind, _)| *kind).collect();
+    let kinds: Vec<u64> = sent.iter().map(|(kind, _, _)| *kind).collect();
     // NSEventTypeMouseMoved, LeftMouseDown, LeftMouseUp.
     assert_eq!(
         kinds,
@@ -940,6 +940,84 @@ fn disassociated_pointer_input_ignores_the_logical_frame_edge() {
         "input of a disassociated pointer was dropped"
     );
     assert_eq!(sent[0].1, NSPoint { x: 5.0, y: 3.0 });
+    objc::arc::release(object);
+    pump();
+    objc::arc::pool_pop(pool);
+}
+
+/// A windowed `-setFrame:` is answered at once by `-frame` and the content
+/// view, before SDL resizes; a click in between is placed in that frame.
+#[test]
+#[ignore = "requires an X11/Wayland window manager; see tests/fixtures/fullscreen-native.md"]
+fn click_location_follows_a_pending_windowed_resize() {
+    crate::bootstrap();
+    let pool = objc::arc::pool_push();
+    let class = objc::class::allocate_pair(
+        objc::class::lookup(c"NSWindow"),
+        c"PendingResizeLocationRegressionWindow",
+        0,
+    )
+    .unwrap();
+    class.add_method(
+        objc::sel::get("sendEvent:"),
+        record_sent_event as objc::class::Imp,
+        c"v24@0:8@16",
+    );
+    objc::class::register_pair(class);
+    let object = objc::object::create_instance(class, 0);
+    let first = NSRect {
+        origin: NSPoint { x: 90.0, y: 110.0 },
+        size: NSSize {
+            width: 700.0,
+            height: 480.0,
+        },
+    };
+    assert!(unsafe { init_with_content_rect_for_tests(object, first) });
+    sdl3::video::show_window(window_of(object).sdl);
+    window_of(object).shown = 1;
+    let pump = || {
+        while let Some(event) = sdl3::video::poll() {
+            crate::event::deliver(event);
+        }
+    };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    pump();
+    let before = unsafe { frame(object, objc::sel::get("frame")) };
+    let taller = NSRect {
+        origin: before.origin,
+        size: NSSize {
+            width: before.size.width,
+            height: before.size.height + 120.0,
+        },
+    };
+    unsafe { set_frame(object, objc::sel::get("setFrame:"), taller) };
+    assert_ne!(
+        window_of(object).size_pending,
+        0,
+        "SDL resized synchronously"
+    );
+    SENT_EVENTS.with_borrow_mut(Vec::clear);
+    let id = sdl3::video::window_id(window_of(object).sdl);
+    crate::event::deliver(sdl3::video::Event::MouseButton {
+        window: id,
+        button: sdl3::mouse::LEFT,
+        down: true,
+        clicks: 1,
+        x: 100.0,
+        y: 50.0,
+    });
+    let height = unsafe { frame(object, objc::sel::get("frame")) }
+        .size
+        .height;
+    let sent = SENT_EVENTS.take();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].2,
+        NSPoint {
+            x: 100.0,
+            y: height - 50.0
+        }
+    );
     objc::arc::release(object);
     pump();
     objc::arc::pool_pop(pool);
