@@ -121,29 +121,12 @@ fn fullscreen_visible_frame(mut frame: NSRect, menu_height: CGFloat) -> NSRect {
     frame
 }
 
-fn fullscreen_on_display(display: u32) -> bool {
-    crate::window::all().into_iter().any(|window| {
-        if !crate::window::is_shown(window) {
-            return false;
-        }
-        // SAFETY: all() contains only windows allocated by this runtime.
-        let sdl = unsafe { crate::window::sdl_window(window) };
-        if sdl.is_null() {
-            return false;
-        }
-        let flags = sdl3::video::window_flags(sdl);
-        flags & sdl3::video::flags::FULLSCREEN != 0
-            && flags & (sdl3::video::flags::HIDDEN | sdl3::video::flags::MINIMIZED) == 0
-            && sdl3::video::display_for_window(sdl) == Some(display)
-    })
-}
-
 /// `-visibleFrame`: desktop panels constrain ordinary windows, not a fullscreen
 /// Space. SDL's usable bounds keep those reservations even when panels are
 /// covered; passing them to the guest can shrink its fullscreen window.
 unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
     let display = display_of(receiver);
-    if fullscreen_on_display(display) {
+    if crate::window::fullscreen_on(display) {
         // SAFETY: the receiver is this runtime's NSScreen.
         let full = unsafe { frame(receiver, sel) };
         return fullscreen_visible_frame(full, crate::menu::global_menu_bar_height());
