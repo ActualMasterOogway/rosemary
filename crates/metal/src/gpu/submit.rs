@@ -199,6 +199,7 @@ impl Gpu {
             fence_info = vk::SwapchainPresentFenceInfoEXT::default().fences(&fences);
             info = info.push_next(&mut fence_info);
         }
+        let _commits = sdl3::video::vulkan::surface_commit_guard();
         let _wsi = self.wsi.lock().expect("Vulkan WSI");
         let queue = self.queue.lock().expect("Vulkan queue");
         // SAFETY: the queue is held exclusively, every borrowed slice lives

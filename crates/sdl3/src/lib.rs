@@ -2581,6 +2581,18 @@ pub mod video {
             }
         }
 
+        /// A WSI present and SDL's own show or hide commit the same
+        /// wl_surface from different threads. Under explicit sync a present
+        /// sets its acquire point before it attaches, and an SDL commit in
+        /// between commits that point with no buffer - a protocol error that
+        /// closes the display connection.
+        static SURFACE_COMMITS: Mutex<()> = Mutex::new(());
+
+        /// Hold across a `vkQueuePresentKHR` to a surface of an SDL window.
+        pub fn surface_commit_guard() -> std::sync::MutexGuard<'static, ()> {
+            SURFACE_COMMITS.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
         /// Hold SDL_Window alive while a Metal swapchain and its worker
         /// threads retire. The video thread observes this token at the same
         /// destruction barrier used for asynchronous Vulkan initializers.
@@ -3180,8 +3192,11 @@ pub mod video {
                     let Some(f) = api().and_then(|a| a.$entry) else {
                         return false;
                     };
+                    // Showing and hiding commit the window's surface.
+                    let commits = vulkan::surface_commit_guard();
                     // SAFETY: a window this crate created.
                     let done = unsafe { f(window) };
+                    drop(commits);
                     resample_presentation_window(window);
                     done
                 }
