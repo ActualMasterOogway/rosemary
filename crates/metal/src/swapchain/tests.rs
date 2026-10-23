@@ -660,7 +660,7 @@ fn slow_window_initialization_does_not_block_other_windows_or_teardown() {
     TEST_SLOW_INITIALIZER_STARTED.store(false, Ordering::Release);
     TEST_SLOW_INITIALIZER.store(a.0 as usize, Ordering::Release);
     assert_eq!(
-        present_impl(gpu, a.0 as usize, &a.2, &a.1, &[], None, true),
+        present_impl(gpu, a.0 as usize, &a.2, &a.1, &[], None),
         Ok(None)
     );
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -887,7 +887,7 @@ fn device_loss_before_swapchain_create_cleans_pending_initializer() {
             Instant::now() < deadline,
             "initializer did not reach pre-create checkpoint"
         );
-        let _ = present_impl(gpu, key, &frame, &source, &[], None, true);
+        let _ = present_impl(gpu, key, &frame, &source, &[], None);
         sdl3::video::vulkan::service_surface_requests();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1035,7 +1035,7 @@ fn minimized_window_retries_transient_initialization_after_restore() {
             Instant::now() < deadline,
             "transient failure did not schedule retry"
         );
-        let _ = present_impl(gpu, 42, &frame, &source, &[], None, true);
+        let _ = present_impl(gpu, 42, &frame, &source, &[], None);
         sdl3::video::vulkan::service_surface_requests();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1086,7 +1086,7 @@ fn minimized_window_retries_transient_initialization_after_restore() {
             Instant::now() < until,
             "restored window never recovered Vulkan presentation"
         );
-        let _ = present_impl(gpu, 42, &frame, &source, &[], None, true);
+        let _ = present_impl(gpu, 42, &frame, &source, &[], None);
         sdl3::video::vulkan::service_surface_requests();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1832,7 +1832,7 @@ fn device_loss_during_swapchain_initialization_does_not_relock_registry() {
             Instant::now() < deadline,
             "initializer device loss deadlocked the registry"
         );
-        let _ = present_impl(gpu, window as usize, &frame, &source, &[], None, true);
+        let _ = present_impl(gpu, window as usize, &frame, &source, &[], None);
         sdl3::video::vulkan::service_surface_requests();
         std::thread::sleep(Duration::from_millis(2));
     }

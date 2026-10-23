@@ -688,7 +688,7 @@ pub(crate) fn present(
 ) -> Result<bool, String> {
     let limit = Instant::now() + Duration::from_secs(3);
     loop {
-        match present_impl(gpu, layer, frame, source, holes, None, true)? {
+        match present_impl(gpu, layer, frame, source, holes, None)? {
             Some(shown) => return Ok(shown),
             None if Instant::now() < limit => {
                 // These tests do not run an AppKit event pump.
@@ -782,7 +782,7 @@ pub(crate) fn present_nonblocking(
     source: &GpuImage,
     holes: &[(usize, Region)],
 ) -> Result<Option<bool>, String> {
-    present_impl(gpu, layer, frame, source, holes, None, true)
+    present_impl(gpu, layer, frame, source, holes, None)
 }
 
 /// Present a command buffer's drawable, consuming its retained `owner` on
@@ -795,7 +795,7 @@ pub(crate) fn present_owned(
     holes: &[(usize, Region)],
     owner: usize,
 ) -> Result<Option<bool>, String> {
-    present_impl(gpu, layer, frame, source, holes, Some(owner), true)
+    present_impl(gpu, layer, frame, source, holes, Some(owner))
 }
 
 fn present_impl(
@@ -805,7 +805,6 @@ fn present_impl(
     source: &GpuImage,
     holes: &[(usize, Region)],
     owner: Option<usize>,
-    nonblocking: bool,
 ) -> Result<Option<bool>, String> {
     let mut owner = SourceOwner(owner);
     if gpu.lost.load(Ordering::Acquire) {
@@ -819,7 +818,7 @@ fn present_impl(
     // Missing main-thread metadata is transient, not a permanently refused
     // surface. Defer the drawable or backing store until AppKit publishes it.
     if sdl3::video::presentation_window(frame.window).is_none() {
-        return Ok(if nonblocking { None } else { Some(false) });
+        return Ok(None);
     }
     if REFUSED
         .lock()
@@ -840,13 +839,9 @@ fn present_impl(
         // This mutex covers only map operations. Never run Vulkan or SDL
         // initialization while holding it. In particular AppKit may not wait
         // for another window's VkSurface or swapchain creation.
-        let guard = if nonblocking {
-            match SWAPCHAINS.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => return Ok(None),
-            }
-        } else {
-            SWAPCHAINS.lock().expect("window swapchains")
+        let guard = match SWAPCHAINS.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(None),
         };
         guard.as_ref().and_then(|all| all.get(&window)).cloned()
     };
@@ -1080,17 +1075,10 @@ fn present_impl(
     // Presentations must reserve frame slots in order, but waiting for an
     // image must not hold the state lock: nextDrawable uses that time to
     // retire completed drawables and release their ring slots.
-    let presenting = if nonblocking {
-        match window_swapchain.presenting.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-        }
-    } else {
-        window_swapchain
-            .presenting
-            .lock()
-            .expect("window presentation")
+    let presenting = match window_swapchain.presenting.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
     };
     let presenting = PresentingGuard {
         held: Some(presenting),
@@ -1129,18 +1117,11 @@ fn present_impl(
     // Defer all potentially unbounded VkQueueWaitIdle/vkWaitForFences calls
     // to the window-local worker, including a previously retired swapchain.
     // No new layer is registered before recreation completes.
-    if nonblocking
-        && (swapchain.pending_rebuild.is_some()
-            || swapchain.retired
-            || swapchain.requested != extent)
-    {
+    if swapchain.pending_rebuild.is_some() || swapchain.retired || swapchain.requested != extent {
         swapchain.pending_rebuild = Some(extent);
         ensure_resize_worker(window, &window_swapchain);
         wake_resize_worker(&window_swapchain);
         return Ok(None);
-    }
-    if swapchain.retired || swapchain.requested != extent {
-        swapchain.rebuild(extent)?;
     }
     let joined = !swapchain.layers.contains(&layer);
     if joined {
@@ -1186,8 +1167,7 @@ fn present_impl(
         // Keep the submitted drawable's additional retained reference until
         // staging actually transfers it to a GPU fence. Error paths must not
         // release the ring slot before the dispatcher decides to retry.
-        let staged =
-            swapchain.stage_fifo(frame, source, regions.as_deref(), &mut owner, nonblocking);
+        let staged = swapchain.stage_fifo(frame, source, regions.as_deref(), &mut owner, true);
         let typed_device_loss =
             swapchain.last_wsi_error.take() == Some(vk::Result::ERROR_DEVICE_LOST);
         let refresh_store = fifo_first_stage_needs_store(joined, &staged, layer, window);
@@ -1225,7 +1205,7 @@ fn present_impl(
             Err(reason) => Err(reason),
         };
     }
-    let prepared = swapchain.prepare_present(frame, regions.as_deref(), nonblocking);
+    let prepared = swapchain.prepare_present(frame, regions.as_deref(), true);
     if joined && !matches!(prepared, Ok(Some(_))) {
         swapchain.layers.retain(|&known| known != layer);
     }
@@ -1247,10 +1227,10 @@ fn present_impl(
         Some(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(None),
         Some(error) => Err(error),
         None => crate::stats::timed(crate::stats::Counter::PresentAcquireMicros, || {
-            acquire_image(gpu, request, nonblocking)
+            acquire_image(gpu, request, true)
         }),
     };
-    if nonblocking && matches!(acquired, Err(vk::Result::TIMEOUT | vk::Result::NOT_READY)) {
+    if matches!(acquired, Err(vk::Result::TIMEOUT | vk::Result::NOT_READY)) {
         // The acquire semaphore was never signaled. Do not block AppKit on a
         // window whose presentation engine has no image ready.
         if joined {
@@ -1273,12 +1253,12 @@ fn present_impl(
         owner.take(),
         prepared,
         acquired,
-        nonblocking,
+        true,
     );
     // A compositor can invalidate WSI without changing requested geometry.
     // Never let either acquired-image or queue-present recovery rebuild on
     // AppKit's nonblocking backing-store path.
-    if nonblocking && swapchain.pending_rebuild.is_some() {
+    if swapchain.pending_rebuild.is_some() {
         let retry_owned = std::mem::take(&mut swapchain.deferred_owned);
         if joined && swapchain.frame == frame_before {
             // No frame from this newly joined layer was staged.
@@ -1298,29 +1278,12 @@ fn present_impl(
     }
     if swapchain.acquired_unsubmitted.is_some() {
         // Consuming an unsubmitted WSI acquisition and retiring its image can
-        // block on the GPU. Defer that too for nonblocking AppKit callers.
-        if nonblocking {
-            swapchain.pending_rebuild = Some(swapchain.requested);
-            ensure_resize_worker(window, &window_swapchain);
-            wake_resize_worker(&window_swapchain);
-            drop(swapchain);
-            drop(presenting);
-            return Ok(if owned_drawable { Some(true) } else { None });
-        }
-        let recovered = swapchain.recover_unsubmitted_acquire();
-        if let Err(reason) = recovered {
-            gpu::trace(format!("unable to recover acquired WSI image: {reason}"));
-            window_swapchain.fifo_failure.store(2, Ordering::Release);
-        }
+        // block on the GPU. Leave that to the resize worker too.
+        swapchain.pending_rebuild = Some(swapchain.requested);
+        ensure_resize_worker(window, &window_swapchain);
+        wake_resize_worker(&window_swapchain);
         drop(swapchain);
         drop(presenting);
-        if let Err(reason) = presented {
-            gpu::trace(format!(
-                "acquired image discarded after submit failure: {reason}"
-            ));
-        }
-        // AcquiredSource completed the failed drawable; the backing store
-        // instead remains dirty until a successful subsequent presentation.
         return Ok(if owned_drawable { Some(true) } else { None });
     }
     drop(swapchain);
