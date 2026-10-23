@@ -52,6 +52,7 @@ pub(crate) mod quartz;
 mod table_views;
 mod view_controller;
 mod visual_effect;
+mod visual_format;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
