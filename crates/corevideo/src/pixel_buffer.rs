@@ -515,19 +515,19 @@ pub unsafe extern "C" fn CVPixelBufferGetDataSize(buffer: CFTypeRef) -> usize {
 
 pub unsafe extern "C" fn CVPixelBufferGetWidthOfPlane(buffer: CFTypeRef, i: usize) -> usize {
     state(buffer)
-        .and_then(|s| (s.planes.len() > 1).then(|| s.planes.get(i)).flatten())
+        .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.width)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetHeightOfPlane(buffer: CFTypeRef, i: usize) -> usize {
     state(buffer)
-        .and_then(|s| (s.planes.len() > 1).then(|| s.planes.get(i)).flatten())
+        .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.height)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetBytesPerRowOfPlane(buffer: CFTypeRef, i: usize) -> usize {
     state(buffer)
-        .and_then(|s| (s.planes.len() > 1).then(|| s.planes.get(i)).flatten())
+        .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.row_bytes)
 }
 
@@ -535,17 +535,22 @@ fn base_address(buffer: CFTypeRef, plane: Option<usize>) -> *mut c_void {
     let Some(state) = state(buffer) else {
         return std::ptr::null_mut();
     };
-    // The storage pointer is stable; callers must synchronize pixel access.
+    // Storage itself is stable, but CoreVideo only exposes an address while
+    // at least one base-address lock is outstanding. The same mutex guards
+    // changes to that count and this visibility check.
+    let locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
+    if locks.count == 0 {
+        return std::ptr::null_mut();
+    }
     let ptr = state.data.ptr.as_ptr();
     match plane {
         None => ptr.cast(),
-        Some(i) if state.planes.len() > 1 => state
+        Some(i) => state
             .planes
             .get(i)
             .map_or(std::ptr::null_mut(), |p| unsafe {
                 ptr.add(p.offset).cast()
             }),
-        Some(_) => std::ptr::null_mut(),
     }
 }
 
@@ -624,19 +629,27 @@ mod tests {
             assert_eq!(CVPixelBufferGetDataSize(b), 320);
             assert_eq!(CVPixelBufferGetPlaneCount(b), 0);
             assert_eq!(CVPixelBufferIsPlanar(b), 0);
-            assert_eq!(
-                CVPixelBufferGetBaseAddressOfPlane(b, 0),
-                std::ptr::null_mut()
-            );
+            assert_eq!(CVPixelBufferGetWidthOfPlane(b, 0), 7);
+            assert_eq!(CVPixelBufferGetHeightOfPlane(b, 0), 5);
+            assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(b, 0), 64);
+            assert!(CVPixelBufferGetBaseAddress(b).is_null());
+            assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
+            assert_eq!(CVPixelBufferGetWidthOfPlane(b, 1), 0);
+            assert_eq!(CVPixelBufferGetHeightOfPlane(b, 1), 0);
+            assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(b, 1), 0);
             assert_eq!(
                 corefoundation::api::CFGetTypeID(b),
                 CVPixelBufferGetTypeID()
             );
             assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
             let ptr = CVPixelBufferGetBaseAddress(b).cast::<u8>();
+            assert!(!ptr.is_null());
+            assert_eq!(CVPixelBufferGetBaseAddressOfPlane(b, 0), ptr.cast());
+            assert!(CVPixelBufferGetBaseAddressOfPlane(b, 1).is_null());
             *ptr = 37;
             assert_eq!(CVPixelBufferUnlockBaseAddress(b, 1), SUCCESS);
-            assert_eq!(*ptr, 37);
+            assert!(CVPixelBufferGetBaseAddress(b).is_null());
+            assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
             assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
             assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
             assert_eq!(CVPixelBufferLockBaseAddress(b, 2), INVALID_ARGUMENT);
@@ -645,6 +658,59 @@ mod tests {
             CVPixelBufferRelease(b);
             assert_eq!(CVPixelBufferGetWidth(retained), 7);
             CVBufferRelease(retained);
+        }
+    }
+
+    #[test]
+    fn plane_zero_and_lock_visibility_match_native_corevideo() {
+        for (format, count) in [
+            (BGRA, 0),
+            (NV12_VIDEO, 2),
+            (NV12_FULL, 2),
+            (I420_VIDEO, 3),
+            (I420_FULL, 3),
+        ] {
+            let b = create(7, 5, format);
+            unsafe {
+                // Packed BGRA reports zero planes but still exposes index 0.
+                assert_eq!(CVPixelBufferGetPlaneCount(b), count);
+                assert_eq!(CVPixelBufferGetWidthOfPlane(b, 0), 7);
+                assert_eq!(CVPixelBufferGetHeightOfPlane(b, 0), 5);
+                assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(b, 0), 64);
+                let missing = if count == 0 { 1 } else { count };
+                assert_eq!(CVPixelBufferGetWidthOfPlane(b, missing), 0);
+                assert_eq!(CVPixelBufferGetHeightOfPlane(b, missing), 0);
+                assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(b, missing), 0);
+                assert!(CVPixelBufferGetBaseAddress(b).is_null());
+                assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
+                assert!(CVPixelBufferGetBaseAddressOfPlane(b, missing).is_null());
+                assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                let base = CVPixelBufferGetBaseAddress(b);
+                let plane = CVPixelBufferGetBaseAddressOfPlane(b, 0);
+                assert!(!base.is_null());
+                assert!(!plane.is_null());
+                if count == 0 {
+                    assert_eq!(base, plane);
+                }
+                assert!(CVPixelBufferGetBaseAddressOfPlane(b, missing).is_null());
+                assert_eq!(CVPixelBufferLockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferGetBaseAddress(b), base);
+                assert_eq!(CVPixelBufferGetBaseAddressOfPlane(b, 0), plane);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferGetBaseAddress(b), base);
+                assert_eq!(CVPixelBufferGetBaseAddressOfPlane(b, 0), plane);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                assert!(CVPixelBufferGetBaseAddress(b).is_null());
+                assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
+                // Lock count does not hide metadata or permanently invalidate storage.
+                assert_eq!(CVPixelBufferGetWidthOfPlane(b, 0), 7);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferGetBaseAddress(b), base);
+                assert_eq!(CVPixelBufferGetBaseAddressOfPlane(b, 0), plane);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
+                CVPixelBufferRelease(b);
+            }
         }
     }
 
@@ -714,9 +780,10 @@ mod tests {
                     let envelope = row_bytes.checked_mul(height).unwrap();
                     let data_size = CVPixelBufferGetDataSize(b);
                     assert_eq!(data_size, envelope, "format={format:#x} {width}x{height}");
+                    assert!(CVPixelBufferGetBaseAddress(b).is_null());
+                    assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
                     let ptr = CVPixelBufferGetBaseAddress(b).cast::<u8>();
                     assert!(!ptr.is_null());
-                    assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
                     // The final advertised byte must be writable and owned by
                     // the pixel buffer, not the heap's alignment overrun.
                     let last = ptr.add(envelope - 1);
@@ -852,7 +919,10 @@ mod tests {
                 SUCCESS
             );
             assert_eq!(CVPixelBufferGetBytesPerRow(out), 128);
+            assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
             assert_eq!((CVPixelBufferGetBaseAddress(out) as usize) % 128, 0);
+            assert!(!CVPixelBufferGetBaseAddress(out).is_null());
+            assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
             CVPixelBufferRelease(out);
             corefoundation::api::CFRelease(dictionary);
             corefoundation::api::CFRelease(number);
@@ -868,12 +938,15 @@ mod tests {
                 CVPixelBufferCreate(std::ptr::null(), 7, 5, NV12_VIDEO, dictionary, &mut out),
                 SUCCESS
             );
+            assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
             for i in 0..2 {
+                assert!(!CVPixelBufferGetBaseAddressOfPlane(out, i).is_null());
                 assert_eq!(
                     (CVPixelBufferGetBaseAddressOfPlane(out, i) as usize) % 256,
                     0
                 );
             }
+            assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
             CVPixelBufferRelease(out);
             corefoundation::api::CFRelease(dictionary);
             corefoundation::api::CFRelease(number);
@@ -1247,6 +1320,7 @@ mod tests {
                     SUCCESS,
                     "{name}={multiple}"
                 );
+                assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
                 let base = CVPixelBufferGetBaseAddress(out) as usize;
                 for i in 0..3 {
                     let plane = CVPixelBufferGetBaseAddressOfPlane(out, i) as usize;
@@ -1262,6 +1336,7 @@ mod tests {
                             <= CVPixelBufferGetDataSize(out)
                     );
                 }
+                assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
                 CVPixelBufferRelease(out);
                 corefoundation::api::CFRelease(attrs);
                 corefoundation::api::CFRelease(number);
