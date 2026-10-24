@@ -131,6 +131,16 @@ static FRAMEWORKS: &[Framework] = &[
         data: None,
         symbol: Some(audiotoolbox::symbol),
     },
+    // CoreGraphics is provided by the AppKit/Quartz shim. Its own install
+    // name must resolve two-level imports, not only flat AppKit symbols.
+    Framework {
+        leaf: "CoreGraphics",
+        version: 'A',
+        umbrellas: &[],
+        provide: None,
+        data: None,
+        symbol: Some(appkit::symbol),
+    },
     Framework {
         leaf: "CoreVideo",
         version: 'A',

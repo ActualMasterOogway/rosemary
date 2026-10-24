@@ -35,6 +35,49 @@ pub unsafe extern "C" fn CFAllocatorGetDefault() -> CFAllocatorRef {
     std::ptr::null()
 }
 
+/// Distinguished singleton allocators exported as CFAllocatorRef globals.
+/// Unlike the default (NULL), these must remain distinguishable from custom
+/// allocators and from kCFAllocatorNull, which cannot allocate memory.
+#[derive(Clone, Copy)]
+pub enum StandardAllocator {
+    SystemDefault,
+    Malloc,
+    MallocZone,
+    Null,
+}
+
+pub fn standard_allocator(kind: StandardAllocator) -> CFAllocatorRef {
+    use std::sync::OnceLock;
+    static SYSTEM: OnceLock<usize> = OnceLock::new();
+    static MALLOC: OnceLock<usize> = OnceLock::new();
+    static ZONE: OnceLock<usize> = OnceLock::new();
+    static NULL: OnceLock<usize> = OnceLock::new();
+    let cell = match kind {
+        StandardAllocator::SystemDefault => &SYSTEM,
+        StandardAllocator::Malloc => &MALLOC,
+        StandardAllocator::MallocZone => &ZONE,
+        StandardAllocator::Null => &NULL,
+    };
+    *cell.get_or_init(|| {
+        let object = objc::object::create_instance(allocator_class(), 0);
+        // Standard allocator globals are process-lifetime singletons; a
+        // client's CFRelease must never invalidate their exported pointers.
+        objc::arc::make_immortal(object);
+        object as usize
+    }) as CFAllocatorRef
+}
+
+pub fn supports_malloc_allocator(allocator: CFAllocatorRef) -> bool {
+    allocator.is_null()
+        || [
+            StandardAllocator::SystemDefault,
+            StandardAllocator::Malloc,
+            StandardAllocator::MallocZone,
+        ]
+        .into_iter()
+        .any(|kind| allocator == standard_allocator(kind))
+}
+
 pub unsafe extern "C" fn CFAllocatorCreate(
     _allocator: CFAllocatorRef,
     _context: *const c_void,

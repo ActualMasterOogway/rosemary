@@ -267,10 +267,9 @@ exports::exports! {
 /// **variable**: the guest loads the symbol's address and then loads the object
 /// out of it, so those go through [`base::global_cell`].
 ///
-/// `kCFAllocatorDefault` and its relatives are cells holding null. Null *is* the
-/// default allocator in Apple's CoreFoundation, and this runtime has only the
-/// one - so a guest comparing against it, or passing it along, gets the right
-/// answer.
+/// `kCFAllocatorDefault` is NULL. Other standard allocator globals are
+/// distinct immortal CF objects, allowing callers to distinguish malloc-backed
+/// choices from custom allocator callbacks and kCFAllocatorNull.
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     static EMPTY_ARRAY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -333,14 +332,26 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_kCFAbsoluteTimeIntervalSince1970".to_string(),
         &INTERVAL_SINCE_1970 as *const f64 as usize as u64,
     ));
-    for name in [
-        "_kCFAllocatorDefault",
-        "_kCFAllocatorSystemDefault",
-        "_kCFAllocatorMalloc",
-        "_kCFAllocatorMallocZone",
-        "_kCFAllocatorNull",
+    out.push((
+        "_kCFAllocatorDefault".to_string(),
+        base::global_cell("_kCFAllocatorDefault", 0),
+    ));
+    for (name, kind) in [
+        (
+            "_kCFAllocatorSystemDefault",
+            api::StandardAllocator::SystemDefault,
+        ),
+        ("_kCFAllocatorMalloc", api::StandardAllocator::Malloc),
+        (
+            "_kCFAllocatorMallocZone",
+            api::StandardAllocator::MallocZone,
+        ),
+        ("_kCFAllocatorNull", api::StandardAllocator::Null),
     ] {
-        out.push((name.to_string(), base::global_cell(name, 0)));
+        out.push((
+            name.to_string(),
+            base::global_cell(name, api::standard_allocator(kind) as usize as u64),
+        ));
     }
     // The run loop's mode names, which a guest passes straight back in and
     // which `CFRunLoopAddSource` compares as strings.
@@ -489,6 +500,37 @@ mod tests {
     // `c_char` is signed on Darwin and unsigned on aarch64 Linux; a buffer
     // spelled `[i8; N]` compiles on one host and not the other.
     use std::ffi::c_char;
+
+    #[test]
+    fn exported_standard_allocators_keep_distinct_identities() {
+        bootstrap();
+        let names = data_symbols();
+        let get = |name: &str| -> api::CFAllocatorRef {
+            let address = names.iter().find(|(n, _)| n == name).unwrap().1;
+            // SAFETY: these globals are stable, pointer-sized cells.
+            unsafe { *(address as *const api::CFAllocatorRef) }
+        };
+        assert!(get("_kCFAllocatorDefault").is_null());
+        let system = get("_kCFAllocatorSystemDefault");
+        let malloc = get("_kCFAllocatorMalloc");
+        let zone = get("_kCFAllocatorMallocZone");
+        let null = get("_kCFAllocatorNull");
+        assert!(!system.is_null());
+        assert_ne!(system, malloc);
+        assert_ne!(system, zone);
+        assert_ne!(malloc, null);
+        assert!(api::supports_malloc_allocator(system));
+        assert!(api::supports_malloc_allocator(malloc));
+        assert!(api::supports_malloc_allocator(zone));
+        assert!(!api::supports_malloc_allocator(null));
+        // SAFETY: exported allocator objects are immortal CFAllocators.
+        unsafe {
+            assert_eq!(api::CFGetTypeID(system), api::CFAllocatorGetTypeID());
+            api::CFRelease(system);
+            api::CFRelease(system);
+            assert_eq!(api::CFGetTypeID(system), api::CFAllocatorGetTypeID());
+        }
+    }
 
     #[test]
     fn custom_allocator_has_identity_but_default_is_null() {

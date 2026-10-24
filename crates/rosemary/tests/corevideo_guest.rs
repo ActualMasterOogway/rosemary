@@ -207,3 +207,90 @@ fn x86_64_guest_registers_marshal_pixel_buffer_create_and_boolean_returns() {
     assert_eq!(regs.rax & 0xff, 1);
     unsafe { corevideo::pixel_buffer::CVPixelBufferRelease(buffer) };
 }
+
+const COREGRAPHICS_GUEST: &str = include_str!("fixtures/corevideo_coregraphics.c");
+
+#[test]
+fn native_apple_coregraphics_consumes_cpu_pixel_buffers() {
+    let Some(path) = build_native_with(
+        "corevideo_coregraphics_native",
+        COREGRAPHICS_GUEST,
+        &[
+            "-framework",
+            "CoreVideo",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "CoreFoundation",
+        ],
+    ) else {
+        skip!("cannot compile native CoreGraphics pixel-buffer fixture");
+    };
+    let Some((status, out)) = run_native(&path) else {
+        skip!("native Mach-O execution unavailable");
+    };
+    assert_eq!(status, Some(0), "stdout: {out}");
+    assert_eq!(out, "coregraphics consumer ok\n");
+}
+
+#[test]
+fn emulated_x86_64_guest_uses_coregraphics_consumers() {
+    let Some(path) = build_x86_64(
+        "corevideo_coregraphics_emulated",
+        COREGRAPHICS_GUEST,
+        &[
+            "-framework",
+            "CoreVideo",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "CoreFoundation",
+        ],
+    ) else {
+        skip!("cannot build x86_64 Mach-O CoreGraphics fixture");
+    };
+    let prefix = format!("{}-corevideo-x86_64", common::test_prefix());
+    let (status, out, err) = run_guest_env(
+        &[("ROSEMARY_OBJC", "builtin"), ("ROSEMARY_PREFIX", &prefix)],
+        &path,
+        &[],
+    );
+    assert_eq!(status, Some(0), "stdout: {out}\nstderr: {err}");
+    assert_eq!(out, "coregraphics consumer ok\n", "stderr: {err}");
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn native_arm64_guest_uses_coregraphics_consumers() {
+    let Some(path) = build_native_with(
+        "corevideo_coregraphics_arm64",
+        COREGRAPHICS_GUEST,
+        &[
+            "-framework",
+            "CoreVideo",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "CoreFoundation",
+        ],
+    ) else {
+        skip!("cannot build native arm64 CoreGraphics fixture");
+    };
+    let prefix = format!("{}-corevideo-arm64", common::test_prefix());
+    let output = common::driver_command()
+        .env("ROSEMARY_OBJC", "builtin")
+        .env("ROSEMARY_PREFIX", prefix)
+        .arg("run")
+        .arg("--native")
+        .arg(&path)
+        .output()
+        .expect("launch Rosemary ARM64 guest");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {out}\nstderr: {err}"
+    );
+    assert_eq!(out, "coregraphics consumer ok\n", "stderr: {err}");
+}

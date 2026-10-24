@@ -29,7 +29,6 @@ const I420_VIDEO: u32 = u32::from_be_bytes(*b"y420");
 const I420_FULL: u32 = u32::from_be_bytes(*b"f420");
 const READ_ONLY: u64 = 1;
 const DEFAULT_ALIGNMENT: usize = 64;
-const MAX_EXTENT: usize = 16384;
 const MAX_STORAGE: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -210,8 +209,6 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
         "MetalCompatibility",
         "OpenGLTextureCacheCompatibility",
         "OpenGLESTextureCacheCompatibility",
-        "CGBitmapContextCompatibility",
-        "CGImageCompatibility",
         "IOSurfaceCoreAnimationCompatibility",
         "IOSurfaceOpenGLFBOCompatibility",
         "IOSurfaceOpenGLESFBOCompatibility",
@@ -231,6 +228,17 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
             if unsafe { corefoundation::api::CFBooleanGetValue(value) } != 0 {
                 return Ok(true);
             }
+        }
+    }
+    // CPU-backed BGRA and YCbCr planes can be used by software CoreGraphics
+    // consumers; these flags are not a request for GPU/IOSurface storage.
+    for name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
+        let value = attribute(attrs, name);
+        if !value.is_null()
+            && unsafe { corefoundation::api::CFGetTypeID(value) }
+                != unsafe { corefoundation::api::CFBooleanGetTypeID() }
+        {
+            return Err(INVALID_ATTRIBUTES);
         }
     }
     for name in [
@@ -256,8 +264,9 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
         }
     }
     let allocator = attribute(attrs, "MemoryAllocator");
-    if !allocator.is_null() {
-        // The CoreFoundation shim does not call custom allocator callbacks.
+    if !allocator.is_null() && !corefoundation::api::supports_malloc_allocator(allocator.cast()) {
+        // Nonstandard callback allocators are represented by CF objects, but
+        // their allocation callbacks are not implemented in CoreFoundation.
         if unsafe { corefoundation::api::CFGetTypeID(allocator) }
             != unsafe { corefoundation::api::CFAllocatorGetTypeID() }
         {
@@ -274,7 +283,7 @@ fn layout(
     format: u32,
     attrs: CFTypeRef,
 ) -> Result<(Vec<Plane>, usize, usize, usize), i32> {
-    if width == 0 || height == 0 || width > MAX_EXTENT || height > MAX_EXTENT {
+    if width == 0 || height == 0 {
         return Err(INVALID_SIZE);
     }
     if !matches!(
@@ -360,8 +369,7 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
     }
     // SAFETY: caller supplied a writable pointer.
     unsafe { *out = std::ptr::null() };
-    // A non-default CFAllocator cannot be honored by the current CF shim.
-    if !allocator.is_null() {
+    if !corefoundation::api::supports_malloc_allocator(allocator.cast()) {
         return UNSUPPORTED;
     }
     if !attrs.is_null() && unsafe { corefoundation::collections::dictionary(attrs) }.is_none() {
@@ -828,6 +836,137 @@ mod tests {
     }
 
     #[test]
+    fn narrow_large_dimensions_are_not_artificially_rejected() {
+        unsafe {
+            for (width, height) in [
+                (16_384, 1),
+                (16_385, 1),
+                (20_000, 1),
+                (1, 20_000),
+                (1, 32_768),
+            ] {
+                let mut out = std::ptr::null();
+                assert_eq!(
+                    CVPixelBufferCreate(
+                        std::ptr::null(),
+                        width,
+                        height,
+                        BGRA,
+                        std::ptr::null(),
+                        &mut out
+                    ),
+                    SUCCESS,
+                    "{width}x{height}"
+                );
+                assert_eq!(CVPixelBufferGetWidth(out), width);
+                assert_eq!(CVPixelBufferGetHeight(out), height);
+                CVPixelBufferRelease(out);
+            }
+            let mut out = std::ptr::null();
+            assert_eq!(
+                CVPixelBufferCreate(
+                    std::ptr::null(),
+                    0,
+                    20_000,
+                    BGRA,
+                    std::ptr::null(),
+                    &mut out
+                ),
+                INVALID_SIZE
+            );
+            assert!(out.is_null());
+        }
+    }
+
+    #[test]
+    fn standard_malloc_allocators_and_software_graphics_flags_are_accepted() {
+        use corefoundation::callbacks::Policy;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            for kind in [
+                corefoundation::api::StandardAllocator::SystemDefault,
+                corefoundation::api::StandardAllocator::Malloc,
+                corefoundation::api::StandardAllocator::MallocZone,
+            ] {
+                let allocator = corefoundation::api::standard_allocator(kind);
+                assert!(!allocator.is_null());
+                let mut out = std::ptr::null();
+                assert_eq!(
+                    CVPixelBufferCreate(allocator, 7, 5, BGRA, std::ptr::null(), &mut out),
+                    SUCCESS
+                );
+                CVPixelBufferRelease(out);
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key("MemoryAllocator"), allocator.cast())],
+                    policy,
+                    policy,
+                    false,
+                );
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, attrs, &mut out),
+                    SUCCESS
+                );
+                CVPixelBufferRelease(out);
+                corefoundation::api::CFRelease(attrs);
+            }
+            let mut out = std::ptr::null();
+            assert_eq!(
+                CVPixelBufferCreate(
+                    corefoundation::api::standard_allocator(
+                        corefoundation::api::StandardAllocator::Null
+                    ),
+                    7,
+                    5,
+                    BGRA,
+                    std::ptr::null(),
+                    &mut out
+                ),
+                UNSUPPORTED
+            );
+            assert!(out.is_null());
+            let invalid_number: i64 = 1;
+            let wrong_type = corefoundation::api::CFNumberCreate(
+                std::ptr::null(),
+                corefoundation::collections::number_type::SINT64,
+                (&invalid_number as *const i64).cast(),
+            );
+            for name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
+                let malformed = corefoundation::collections::new_dictionary(
+                    &[(key(name), wrong_type)],
+                    policy,
+                    policy,
+                    false,
+                );
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, malformed, &mut out,),
+                    INVALID_ATTRIBUTES,
+                    "{name} malformed type"
+                );
+                assert!(out.is_null());
+                corefoundation::api::CFRelease(malformed);
+            }
+            corefoundation::api::CFRelease(wrong_type);
+            for key_name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key(key_name), corefoundation::collections::boolean(true))],
+                    policy,
+                    policy,
+                    false,
+                );
+                for format in [BGRA, NV12_VIDEO, NV12_FULL, I420_VIDEO, I420_FULL] {
+                    assert_eq!(
+                        CVPixelBufferCreate(std::ptr::null(), 7, 5, format, attrs, &mut out),
+                        SUCCESS,
+                        "{key_name} {format:#x}"
+                    );
+                    CVPixelBufferRelease(out);
+                }
+                corefoundation::api::CFRelease(attrs);
+            }
+        }
+    }
+
+    #[test]
     fn malformed_attributes_and_allocation_limit_fail_without_publishing() {
         use corefoundation::callbacks::Policy;
         use corefoundation::collections::number_type;
@@ -838,8 +977,8 @@ mod tests {
             assert_eq!(
                 CVPixelBufferCreate(
                     std::ptr::null(),
-                    MAX_EXTENT,
-                    MAX_EXTENT,
+                    20_000,
+                    20_000,
                     BGRA,
                     std::ptr::null(),
                     &mut out,
@@ -908,8 +1047,6 @@ mod tests {
                 "MetalCompatibility",
                 "OpenGLTextureCacheCompatibility",
                 "OpenGLESTextureCacheCompatibility",
-                "CGBitmapContextCompatibility",
-                "CGImageCompatibility",
                 "IOSurfaceCoreAnimationCompatibility",
                 "IOSurfaceOpenGLFBOCompatibility",
                 "IOSurfaceOpenGLESFBOCompatibility",

@@ -747,6 +747,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // the file's bytes produces a `CGImage`, a bitmap context is created over
     // a buffer the *guest* allocated, and the image is drawn into it.
     sig!("CGBitmapContextCreate", P, P, U64, U64, U64, U64, P, U32),
+    sig!("CGBitmapContextGetData", P, P),
+    sig!("CGBitmapContextCreateImage", P, P),
     //
     // The whole-desktop forms take nothing and the per-display ones a
     // `CGDirectDisplayID`; every one returns a `CGError`.
@@ -755,6 +757,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDisplayCapture", I32, U32),
     sig!("CGDisplayRelease", I32, U32),
     sig!("CGColorSpaceCreateDeviceRGB", P),
+    sig!("CGColorSpaceCreateDeviceGray", P),
     sig!("CGColorSpaceRelease", V, P),
     // `CGFloat` is `double` on both architectures, so the CTM translation is
     // two ordinary vector arguments.
