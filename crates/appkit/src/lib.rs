@@ -75,6 +75,7 @@ pub mod panel;
 mod paragraph;
 pub mod pasteboard;
 mod pasteboard_manager;
+mod pdf;
 mod popup;
 pub mod raster;
 mod responder;
