@@ -179,6 +179,37 @@ pub(crate) fn focus_context() -> CFTypeRef {
     context as CFTypeRef
 }
 
+// On a Mac `NSGraphicsContext` and its `CGContext` share one graphics state;
+// here AppKit's drawing keeps its own (`crate::bezier`), and these carry the
+// parts of it a program mixes with Quartz calls across to the focus context.
+
+/// `-[NSGraphicsContext saveGraphicsState]`, on the Quartz side.
+pub(crate) fn focus_save() {
+    let context = focus_context();
+    // SAFETY: null or the focus context.
+    unsafe { CGContextSaveGState(context) };
+}
+
+/// `-[NSGraphicsContext restoreGraphicsState]`, on the Quartz side.
+pub(crate) fn focus_restore() {
+    let context = focus_context();
+    // SAFETY: null or the focus context.
+    unsafe { CGContextRestoreGState(context) };
+}
+
+/// A change AppKit made to its transform, made to the focus context's too.
+pub(crate) fn focus_update_ctm(update: impl FnOnce(CGAffineTransform) -> CGAffineTransform) {
+    if let Some(state) = gstate(focus_context()) {
+        state.ctm = update(state.ctm);
+    }
+}
+
+/// Run `body` with the focus context's clip, one coverage byte per device
+/// pixel, when Quartz calls have clipped it.
+pub(crate) fn with_focus_clip<R>(body: impl FnOnce(&[u8], u32) -> R) -> Option<R> {
+    quartz::with_clip(focus_context(), body)
+}
+
 pub unsafe extern "C" fn CGBitmapContextGetData(context: CFTypeRef) -> *mut c_void {
     context_of(context).map_or(std::ptr::null_mut(), |context| context.data.cast())
 }
