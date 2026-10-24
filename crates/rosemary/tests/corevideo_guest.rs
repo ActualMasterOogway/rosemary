@@ -87,8 +87,51 @@ static int check_attribute_parity(void) {
     return 0;
 }
 
+static int check_plane_alignment_minimum(void) {
+    const OSType formats[] = {
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        kCVPixelFormatType_420YpCbCr8Planar,
+    };
+    const int64_t values[] = {0, 1, 3, 24, 65, 4097};
+    for (size_t f = 0; f < 2; ++f) {
+        for (size_t i = 0; i < 6; ++i) {
+            CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt64Type, &values[i]);
+            CHECK(number != NULL);
+            const void *key = kCVPixelBufferPlaneAlignmentKey;
+            const void *value = number;
+            CFDictionaryRef attrs = CFDictionaryCreate(NULL, &key, &value,
+                1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            CHECK(attrs != NULL);
+            CVPixelBufferRef b = NULL;
+            CHECK(CVPixelBufferCreate(NULL, 7, 5, formats[f], attrs, &b) == kCVReturnSuccess);
+            CHECK(b != NULL);
+            CHECK(CVPixelBufferLockBaseAddress(b, 0) == kCVReturnSuccess);
+            uintptr_t base = (uintptr_t)CVPixelBufferGetBaseAddress(b);
+            CHECK(base != 0 && base % 64 == 0);
+            for (size_t plane = 0; plane < CVPixelBufferGetPlaneCount(b); ++plane) {
+                uintptr_t address = (uintptr_t)CVPixelBufferGetBaseAddressOfPlane(b, plane);
+                CHECK(address >= base && address % 64 == 0);
+#ifdef ROSEMARY_GUEST
+                // This CPU allocation also preserves the requested multiple.
+                if (values[i] > 0) CHECK(address % (uint64_t)values[i] == 0);
+#endif
+                size_t stride = CVPixelBufferGetBytesPerRowOfPlane(b, plane);
+                size_t height = CVPixelBufferGetHeightOfPlane(b, plane);
+                CHECK(stride <= SIZE_MAX / height);
+                CHECK(address - base + stride * height <= CVPixelBufferGetDataSize(b));
+            }
+            CHECK(CVPixelBufferUnlockBaseAddress(b, 0) == kCVReturnSuccess);
+            CVPixelBufferRelease(b);
+            CFRelease(attrs);
+            CFRelease(number);
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     CHECK(check_attribute_parity() == 0);
+    CHECK(check_plane_alignment_minimum() == 0);
     CVPixelBufferRef packed = NULL;
     CHECK(CVPixelBufferCreate(NULL, 7, 5, kCVPixelFormatType_32BGRA,
                               NULL, &packed) == kCVReturnSuccess);

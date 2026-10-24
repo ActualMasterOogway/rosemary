@@ -317,10 +317,17 @@ fn layout(
         alignment_attribute(attrs, "BytesPerRowAlignment")?,
     )
     .ok_or(ALLOCATION_FAILED)?;
+    // Preserve the CPU-friendly 64-byte minimum at *each plane*, not only
+    // at the overall base. A non-power-of-two attribute is an additional
+    // multiple, so round offsets to the checked LCM of both requirements.
     let plane_alignment = if format == BGRA {
         DEFAULT_ALIGNMENT
     } else {
-        alignment_attribute(attrs, "PlaneAlignment")?
+        lcm(
+            DEFAULT_ALIGNMENT,
+            alignment_attribute(attrs, "PlaneAlignment")?,
+        )
+        .ok_or(ALLOCATION_FAILED)?
     };
     let chroma_width = width.div_ceil(2);
     let chroma_height = height.div_ceil(2);
@@ -1270,6 +1277,61 @@ mod tests {
     }
 
     #[test]
+    fn requested_plane_alignments_preserve_the_64_byte_cpu_minimum() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            for format in [NV12_VIDEO, NV12_FULL, I420_VIDEO, I420_FULL] {
+                for multiple in [0_i64, 1, 3, 24, 65, 4097] {
+                    let number = corefoundation::api::CFNumberCreate(
+                        std::ptr::null(),
+                        number_type::SINT64,
+                        (&multiple as *const i64).cast(),
+                    );
+                    let attrs = corefoundation::collections::new_dictionary(
+                        &[(key("PlaneAlignment"), number)],
+                        policy,
+                        policy,
+                        false,
+                    );
+                    let b = {
+                        let mut b = std::ptr::null();
+                        assert_eq!(
+                            CVPixelBufferCreate(std::ptr::null(), 7, 5, format, attrs, &mut b),
+                            SUCCESS,
+                            "format={format:#x} alignment={multiple}"
+                        );
+                        b
+                    };
+                    assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                    let base = CVPixelBufferGetBaseAddress(b) as usize;
+                    let size = CVPixelBufferGetDataSize(b);
+                    assert_eq!(base % DEFAULT_ALIGNMENT, 0);
+                    for i in 0..CVPixelBufferGetPlaneCount(b) {
+                        let address = CVPixelBufferGetBaseAddressOfPlane(b, i) as usize;
+                        assert_ne!(address, 0);
+                        assert_eq!(address % DEFAULT_ALIGNMENT, 0);
+                        if multiple > 0 {
+                            assert_eq!(address % multiple as usize, 0);
+                        }
+                        let offset = address - base;
+                        let len = CVPixelBufferGetBytesPerRowOfPlane(b, i)
+                            .checked_mul(CVPixelBufferGetHeightOfPlane(b, i))
+                            .unwrap();
+                        assert!(offset.checked_add(len).unwrap() <= size);
+                    }
+                    assert!(CVPixelBufferGetBytesPerRow(b).checked_mul(5).unwrap() <= size);
+                    assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                    CVPixelBufferRelease(b);
+                    corefoundation::api::CFRelease(attrs);
+                    corefoundation::api::CFRelease(number);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unknown_lock_flag_bits_are_ignored_without_unbalancing_locks() {
         let b = create(7, 5, BGRA);
         unsafe {
@@ -1475,8 +1537,11 @@ mod tests {
                 ("BytesPerRowAlignment", 3_i64),
                 ("BytesPerRowAlignment", 24_i64),
                 ("BytesPerRowAlignment", 8192_i64),
+                ("PlaneAlignment", 1_i64),
                 ("PlaneAlignment", 3_i64),
                 ("PlaneAlignment", 24_i64),
+                ("PlaneAlignment", 65_i64),
+                ("PlaneAlignment", 4097_i64),
                 ("PlaneAlignment", 8192_i64),
             ] {
                 let number = corefoundation::api::CFNumberCreate(
@@ -1502,6 +1567,7 @@ mod tests {
                     let plane = CVPixelBufferGetBaseAddressOfPlane(out, i) as usize;
                     let row_bytes = CVPixelBufferGetBytesPerRowOfPlane(out, i);
                     assert!(plane > base);
+                    assert_eq!(plane % DEFAULT_ALIGNMENT, 0);
                     if name == "PlaneAlignment" {
                         assert_eq!(plane % multiple as usize, 0);
                     } else {
