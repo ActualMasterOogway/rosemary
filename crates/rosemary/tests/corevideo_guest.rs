@@ -32,6 +32,18 @@ int main(void) {
     CHECK(((uint8_t *)CVPixelBufferGetBaseAddress(packed))[0] == 0x35);
     CHECK(((uint8_t *)CVPixelBufferGetBaseAddress(packed))[CVPixelBufferGetBytesPerRow(packed) * 4 + 27] == 0x79);
     CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 0) == kCVReturnError);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnError);
+    CHECK(CVPixelBufferLockBaseAddress(packed, 0) == kCVReturnSuccess);
+    CHECK(CVPixelBufferLockBaseAddress(packed, 0) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 0) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 0) == kCVReturnError);
+    CHECK(CVPixelBufferLockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
+    CHECK(CVPixelBufferLockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 0) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnError);
     CVPixelBufferRef retained = CVPixelBufferRetain(packed);
     CHECK(retained == packed);
     CVPixelBufferRelease(packed);
@@ -72,6 +84,32 @@ int main(void) {
     CVPixelBufferRelease(planar);
     CHECK(CVPixelBufferGetPlaneCount(planar) == 2);
     CFRelease(planar);
+    // A buffer-wide planar stride must describe accessible storage even for
+    // tall, narrow buffers where rounding exceeds the final plane offset.
+    const OSType planar_types[] = {
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        kCVPixelFormatType_420YpCbCr8Planar,
+    };
+    const size_t heights[] = {5, 1000, 1001};
+    for (size_t f = 0; f < 2; ++f) {
+        for (size_t h = 0; h < 3; ++h) {
+            CVPixelBufferRef tall = NULL;
+            CHECK(CVPixelBufferCreate(NULL, 7, heights[h], planar_types[f], NULL,
+                                      &tall) == kCVReturnSuccess);
+            CHECK(tall != NULL);
+            size_t global_stride = CVPixelBufferGetBytesPerRow(tall);
+            CHECK(global_stride <= SIZE_MAX / heights[h]);
+            size_t envelope = global_stride * heights[h];
+            CHECK(CVPixelBufferGetDataSize(tall) >= envelope);
+            CHECK(CVPixelBufferLockBaseAddress(tall, 0) == kCVReturnSuccess);
+            uint8_t *whole = CVPixelBufferGetBaseAddress(tall);
+            CHECK(whole != NULL);
+            whole[envelope - 1] = 0xA5;
+            CHECK(whole[envelope - 1] == 0xA5);
+            CHECK(CVPixelBufferUnlockBaseAddress(tall, 0) == kCVReturnSuccess);
+            CVPixelBufferRelease(tall);
+        }
+    }
     puts("corevideo pixel buffer abi ok");
     return 0;
 }

@@ -15,6 +15,7 @@ use objc::class::Class;
 use objc::object::Id;
 
 const SUCCESS: i32 = 0;
+const ERROR: i32 = -6660;
 const INVALID_ARGUMENT: i32 = -6661;
 const ALLOCATION_FAILED: i32 = -6662;
 const UNSUPPORTED: i32 = -6663;
@@ -41,8 +42,7 @@ struct Plane {
 
 #[derive(Default)]
 struct Locks {
-    readers: usize,
-    writers: usize,
+    count: usize,
 }
 
 struct Storage {
@@ -348,24 +348,28 @@ fn layout(
         });
         offset = offset.checked_add(len).ok_or(INVALID_SIZE)?;
     }
-    if offset > MAX_STORAGE {
+    // The planar rowBytes is a buffer-wide envelope. The rounded-up stride
+    // times the image height may exceed the last plane's end offset; the
+    // entire advertised envelope must be safe to access from BaseAddress.
+    let (row_bytes, size) = if planar {
+        let row_bytes = offset.div_ceil(height);
+        let envelope = row_bytes.checked_mul(height).ok_or(INVALID_SIZE)?;
+        (row_bytes, envelope)
+    } else {
+        (planes[0].row_bytes, offset)
+    };
+    if size > MAX_STORAGE {
         // Valid dimensions may exceed this implementation's allocation cap.
         // Report memory exhaustion, not malformed dimensions.
         return Err(ALLOCATION_FAILED);
     }
-    // For planar buffers Apple's rowBytes is an envelope covering all planes.
-    let row_bytes = if planar {
-        offset.div_ceil(height)
-    } else {
-        planes[0].row_bytes
-    };
     // Pointer alignment and row-byte divisibility are different contracts.
     // The base must align to each requested plane multiple while retaining
     // the runtime's minimum 64-byte backing alignment.
     let address_alignment = lcm(DEFAULT_ALIGNMENT, row_alignment)
         .and_then(|a| lcm(a, plane_alignment))
         .ok_or(ALLOCATION_FAILED)?;
-    Ok((planes, row_bytes, offset, address_alignment))
+    Ok((planes, row_bytes, size, address_alignment))
 }
 
 /// CVReturn CVPixelBufferCreate(CFAllocatorRef, size_t, size_t, OSType,
@@ -556,7 +560,8 @@ pub unsafe extern "C" fn CVPixelBufferGetBaseAddressOfPlane(
     base_address(buffer, Some(i))
 }
 
-/// Lock flags: 0 means CPU writing, 1 means read only; unlock must match.
+/// Lock flags: 0 allows CPU writes; 1 requests read-only access.
+/// Apple permits unlocking with either documented flag regardless of lock mode.
 pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32 {
     if flags & !READ_ONLY != 0 {
         return INVALID_ARGUMENT;
@@ -565,17 +570,10 @@ pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: 
         return INVALID_ARGUMENT;
     };
     let mut locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
-    if flags == READ_ONLY {
-        let Some(n) = locks.readers.checked_add(1) else {
-            return INVALID_ARGUMENT;
-        };
-        locks.readers = n;
-    } else {
-        let Some(n) = locks.writers.checked_add(1) else {
-            return INVALID_ARGUMENT;
-        };
-        locks.writers = n;
-    }
+    let Some(n) = locks.count.checked_add(1) else {
+        return ERROR;
+    };
+    locks.count = n;
     SUCCESS
 }
 
@@ -587,15 +585,10 @@ pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, flags
         return INVALID_ARGUMENT;
     };
     let mut locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
-    let count = if flags == READ_ONLY {
-        &mut locks.readers
-    } else {
-        &mut locks.writers
-    };
-    if *count == 0 {
-        return INVALID_ARGUMENT;
+    if locks.count == 0 {
+        return ERROR;
     }
-    *count -= 1;
+    locks.count -= 1;
     SUCCESS
 }
 
@@ -642,10 +635,10 @@ mod tests {
             assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
             let ptr = CVPixelBufferGetBaseAddress(b).cast::<u8>();
             *ptr = 37;
-            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 1), INVALID_ARGUMENT);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 1), SUCCESS);
             assert_eq!(*ptr, 37);
-            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
-            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), INVALID_ARGUMENT);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
             assert_eq!(CVPixelBufferLockBaseAddress(b, 2), INVALID_ARGUMENT);
             let retained = CVBufferRetain(b);
             assert_eq!(retained, b);
@@ -702,8 +695,80 @@ mod tests {
                     CVPixelBufferGetBaseAddressOfPlane(b, expected),
                     std::ptr::null_mut()
                 );
-                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), INVALID_ARGUMENT);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), ERROR);
+                CVPixelBufferRelease(b);
+            }
+        }
+    }
+
+    #[test]
+    fn planar_stride_envelope_is_entirely_backed_and_bounded() {
+        // A tall, narrow buffer can have fewer plane bytes than its rounded
+        // buffer-wide row stride implies. Test the entire public envelope.
+        for format in [NV12_VIDEO, NV12_FULL, I420_VIDEO, I420_FULL] {
+            for (width, height) in [(7, 1), (7, 5), (7, 1000), (7, 1001), (1, 32_768)] {
+                let b = create(width, height, format);
+                unsafe {
+                    let row_bytes = CVPixelBufferGetBytesPerRow(b);
+                    let envelope = row_bytes.checked_mul(height).unwrap();
+                    let data_size = CVPixelBufferGetDataSize(b);
+                    assert_eq!(data_size, envelope, "format={format:#x} {width}x{height}");
+                    let ptr = CVPixelBufferGetBaseAddress(b).cast::<u8>();
+                    assert!(!ptr.is_null());
+                    assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                    // The final advertised byte must be writable and owned by
+                    // the pixel buffer, not the heap's alignment overrun.
+                    let last = ptr.add(envelope - 1);
+                    *last = 0xA5;
+                    assert_eq!(*last, 0xA5);
+                    for i in 0..CVPixelBufferGetPlaneCount(b) {
+                        let plane = CVPixelBufferGetBaseAddressOfPlane(b, i).cast::<u8>();
+                        let start = plane.offset_from(ptr) as usize;
+                        let plane_size = CVPixelBufferGetBytesPerRowOfPlane(b, i)
+                            .checked_mul(CVPixelBufferGetHeightOfPlane(b, i))
+                            .unwrap();
+                        assert!(start.checked_add(plane_size).unwrap() <= data_size);
+                    }
+                    assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                    CVPixelBufferRelease(b);
+                }
+            }
+        }
+        // The advertised envelope, not just the sum of plane storage, is
+        // subject to the existing allocation limit before allocating memory.
+        for format in [NV12_VIDEO, I420_VIDEO] {
+            assert!(matches!(
+                layout(1, MAX_STORAGE / DEFAULT_ALIGNMENT, format, std::ptr::null()),
+                Err(ALLOCATION_FAILED)
+            ));
+        }
+    }
+
+    #[test]
+    fn unbalanced_and_nested_unlocks_match_native_corevideo() {
+        for format in [BGRA, NV12_VIDEO, I420_VIDEO] {
+            let b = create(7, 5, format);
+            unsafe {
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), ERROR);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                // Native CoreVideo counts outstanding locks regardless of
+                // the read-only flag given to an individual unlock.
                 assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), ERROR);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 2), INVALID_ARGUMENT);
+                assert_eq!(
+                    CVPixelBufferUnlockBaseAddress(std::ptr::null(), 0),
+                    INVALID_ARGUMENT
+                );
                 CVPixelBufferRelease(b);
             }
         }
