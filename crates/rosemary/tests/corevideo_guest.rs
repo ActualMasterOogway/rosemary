@@ -92,7 +92,12 @@ fn emulated_x86_64_corevideo_pixel_buffers_cross_the_guest_abi() {
     ) else {
         skip!("cannot build x86_64 Mach-O CoreVideo fixture");
     };
-    let (status, out, err) = run_guest_env(&[("ROSEMARY_OBJC", "builtin")], &path, &[]);
+    let prefix = format!("{}-corevideo-x86_64", common::test_prefix());
+    let (status, out, err) = run_guest_env(
+        &[("ROSEMARY_OBJC", "builtin"), ("ROSEMARY_PREFIX", &prefix)],
+        &path,
+        &[],
+    );
     assert_eq!(status, Some(0), "stdout: {out}\nstderr: {err}");
     assert_eq!(out, "corevideo pixel buffer abi ok\n", "stderr: {err}");
 }
@@ -129,8 +134,10 @@ fn native_aarch64_rosemary_corevideo_pixel_buffers_cross_the_guest_abi() {
     ) else {
         skip!("cannot build native arm64 Mach-O CoreVideo fixture");
     };
+    let prefix = format!("{}-corevideo-arm64", common::test_prefix());
     let output = common::driver_command()
         .env("ROSEMARY_OBJC", "builtin")
+        .env("ROSEMARY_PREFIX", prefix)
         .arg("run")
         .arg("--native")
         .arg(&path)

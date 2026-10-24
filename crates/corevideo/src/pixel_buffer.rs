@@ -283,7 +283,11 @@ fn layout(
     ) {
         return Err(INVALID_PIXEL_FORMAT);
     }
-    let row_alignment = alignment_attribute(attrs, "BytesPerRowAlignment")?;
+    let row_alignment = lcm(
+        DEFAULT_ALIGNMENT,
+        alignment_attribute(attrs, "BytesPerRowAlignment")?,
+    )
+    .ok_or(ALLOCATION_FAILED)?;
     let plane_alignment = alignment_attribute(attrs, "PlaneAlignment")?;
     let chroma_width = width.div_ceil(2);
     let chroma_height = height.div_ceil(2);
@@ -1037,6 +1041,47 @@ mod tests {
                 CVPixelBufferRelease(out);
                 corefoundation::api::CFRelease(attrs);
                 corefoundation::api::CFRelease(number);
+            }
+        }
+    }
+
+    #[test]
+    fn row_alignment_preserves_corevideo_minimum_stride() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            for (multiple, expected) in [
+                (1_i64, 64_usize),
+                (3, 192),
+                (24, 192),
+                (8192, 8192),
+                (4097, 262208),
+            ] {
+                let n = corefoundation::api::CFNumberCreate(
+                    std::ptr::null(),
+                    number_type::SINT64,
+                    (&multiple as *const i64).cast(),
+                );
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key("BytesPerRowAlignment"), n)],
+                    policy,
+                    policy,
+                    false,
+                );
+                let mut out = std::ptr::null();
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, attrs, &mut out),
+                    SUCCESS
+                );
+                assert_eq!(
+                    CVPixelBufferGetBytesPerRow(out),
+                    expected,
+                    "multiple={multiple}"
+                );
+                CVPixelBufferRelease(out);
+                corefoundation::api::CFRelease(attrs);
+                corefoundation::api::CFRelease(n);
             }
         }
     }
