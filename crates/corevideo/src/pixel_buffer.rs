@@ -162,7 +162,13 @@ fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
 }
 
 fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
-    if !attribute(attrs, "IOSurfaceProperties").is_null() {
+    let iosurface = attribute(attrs, "IOSurfaceProperties");
+    if !iosurface.is_null() {
+        // A requested IOSurface must be described by a CFDictionary, even
+        // though this CPU-only implementation cannot provide that backing.
+        if unsafe { corefoundation::collections::dictionary(iosurface) }.is_none() {
+            return Err(INVALID_ATTRIBUTES);
+        }
         return Ok(true);
     }
     for name in [
@@ -262,7 +268,9 @@ fn layout(
         offset = offset.checked_add(len).ok_or(INVALID_SIZE)?;
     }
     if offset > MAX_STORAGE {
-        return Err(INVALID_SIZE);
+        // Valid dimensions may exceed this implementation's allocation cap.
+        // Report memory exhaustion, not malformed dimensions.
+        return Err(ALLOCATION_FAILED);
     }
     // For planar buffers Apple's rowBytes is an envelope covering all planes.
     let row_bytes = if planar {
@@ -756,6 +764,107 @@ mod tests {
                 INVALID_ATTRIBUTES
             );
             corefoundation::api::CFRelease(bogus_attrs);
+        }
+    }
+
+    #[test]
+    fn malformed_attributes_and_allocation_limit_fail_without_publishing() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+
+        unsafe {
+            let mut out = 1usize as CFTypeRef;
+            // The dimensions are legal but the allocation exceeds the CPU cap.
+            assert_eq!(
+                CVPixelBufferCreate(
+                    std::ptr::null(),
+                    MAX_EXTENT,
+                    MAX_EXTENT,
+                    BGRA,
+                    std::ptr::null(),
+                    &mut out,
+                ),
+                ALLOCATION_FAILED
+            );
+            assert!(out.is_null());
+
+            let policy = Policy::from_type_callbacks();
+            for alignment in [0_i64, -1, 3, 4097] {
+                let number = corefoundation::api::CFNumberCreate(
+                    std::ptr::null(),
+                    number_type::SINT64,
+                    (&alignment as *const i64).cast(),
+                );
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key("BytesPerRowAlignment"), number)],
+                    policy,
+                    policy,
+                    false,
+                );
+                out = 1usize as CFTypeRef;
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 4, 4, BGRA, attrs, &mut out),
+                    INVALID_ATTRIBUTES,
+                    "alignment={alignment}"
+                );
+                assert!(out.is_null());
+                corefoundation::api::CFRelease(attrs);
+                corefoundation::api::CFRelease(number);
+            }
+
+            let not_dictionary = corefoundation::api::CFNumberCreate(
+                std::ptr::null(),
+                number_type::SINT64,
+                (&1_i64 as *const i64).cast(),
+            );
+            let attrs = corefoundation::collections::new_dictionary(
+                &[(key("IOSurfaceProperties"), not_dictionary)],
+                policy,
+                policy,
+                false,
+            );
+            assert_eq!(
+                CVPixelBufferCreate(std::ptr::null(), 4, 4, BGRA, attrs, &mut out),
+                INVALID_ATTRIBUTES
+            );
+            assert!(out.is_null());
+            corefoundation::api::CFRelease(attrs);
+            corefoundation::api::CFRelease(not_dictionary);
+        }
+    }
+
+    #[test]
+    fn repeated_lifetimes_and_planar_pointer_bounds() {
+        for _ in 0..128 {
+            let b = create(1, 1, I420_VIDEO);
+            unsafe {
+                assert_eq!(CVPixelBufferGetPlaneCount(b), 3);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, 0), SUCCESS);
+                for plane in 0..3 {
+                    let ptr = CVPixelBufferGetBaseAddressOfPlane(b, plane).cast::<u8>();
+                    assert!(!ptr.is_null());
+                    assert_eq!(*ptr, 0);
+                    *ptr = (plane + 1) as u8;
+                }
+                assert_eq!(
+                    CVPixelBufferGetBaseAddressOfPlane(b, usize::MAX),
+                    std::ptr::null_mut()
+                );
+                assert_eq!(CVPixelBufferGetWidthOfPlane(b, usize::MAX), 0);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
+                assert_eq!(CVPixelBufferLockBaseAddress(b, READ_ONLY), SUCCESS);
+                for plane in 0..3 {
+                    assert_eq!(
+                        *CVPixelBufferGetBaseAddressOfPlane(b, plane).cast::<u8>(),
+                        (plane + 1) as u8
+                    );
+                }
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
+                let retain = corefoundation::api::CFRetain(b);
+                CVPixelBufferRelease(b);
+                assert_eq!(CVPixelBufferGetDataSize(retain), 256);
+                corefoundation::api::CFRelease(retain);
+            }
         }
     }
 
