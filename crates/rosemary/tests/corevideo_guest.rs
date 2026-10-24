@@ -10,7 +10,85 @@ const PIXEL_BUFFER_GUEST: &str = r#"
 
 #define CHECK(c) do { if (!(c)) { printf("corevideo check failed: %s\n", #c); return 1; } } while (0)
 
+static int check_attribute_parity(void) {
+    const OSType formats[] = {
+        kCVPixelFormatType_32BGRA,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    };
+    const CFStringRef extended[] = {
+        kCVPixelBufferExtendedPixelsLeftKey,
+        kCVPixelBufferExtendedPixelsRightKey,
+        kCVPixelBufferExtendedPixelsTopKey,
+        kCVPixelBufferExtendedPixelsBottomKey,
+    };
+    const double multiples[] = {0.0, 0.3, 0.9, -0.9, -1.0, -1.2, 1.2};
+    for (size_t f = 0; f < 2; ++f) {
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 7; ++j) {
+                CFNumberRef number = CFNumberCreate(NULL, kCFNumberFloat64Type,
+                                                    &multiples[j]);
+                CHECK(number != NULL);
+                const void *key = extended[i];
+                const void *value = number;
+                CFDictionaryRef attrs = CFDictionaryCreate(NULL, &key, &value,
+                    1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                CHECK(attrs != NULL);
+                CVPixelBufferRef buffer = NULL;
+                CVReturn result = CVPixelBufferCreate(NULL, 7, 5,
+                    formats[f], attrs, &buffer);
+                CVReturn expected = kCVReturnSuccess;
+                if (multiples[j] <= -1.0) expected = kCVReturnAllocationFailed;
+#ifdef ROSEMARY_GUEST
+                // CPU-only storage deliberately cannot honor nonzero padding.
+                if (multiples[j] >= 1.0) expected = kCVReturnUnsupported;
+#endif
+                CHECK(result == expected);
+                if (expected == kCVReturnSuccess) {
+                    CHECK(buffer != NULL);
+                    CVPixelBufferRelease(buffer);
+                } else {
+                    CHECK(buffer == NULL);
+                }
+                CFRelease(attrs);
+                CFRelease(number);
+            }
+            const void *key = extended[i];
+            const void *value = kCFBooleanTrue;
+            CFDictionaryRef attrs = CFDictionaryCreate(NULL, &key, &value,
+                1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            CHECK(attrs != NULL);
+            CVPixelBufferRef buffer = NULL;
+            CHECK(CVPixelBufferCreate(NULL, 7, 5, formats[f], attrs, &buffer)
+                  == kCVReturnSuccess);
+            CHECK(buffer != NULL);
+            CVPixelBufferRelease(buffer);
+            CFRelease(attrs);
+        }
+    }
+    const CFStringRef compatibility[] = {
+        kCVPixelBufferCGBitmapContextCompatibilityKey,
+        kCVPixelBufferCGImageCompatibilityKey,
+        kCVPixelBufferMetalCompatibilityKey,
+        kCVPixelBufferOpenGLCompatibilityKey,
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        const void *key = compatibility[i];
+        const void *value = CFSTR("non-Boolean compatibility hint");
+        CFDictionaryRef attrs = CFDictionaryCreate(NULL, &key, &value,
+            1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CHECK(attrs != NULL);
+        CVPixelBufferRef buffer = NULL;
+        CHECK(CVPixelBufferCreate(NULL, 7, 5,
+            kCVPixelFormatType_32BGRA, attrs, &buffer) == kCVReturnSuccess);
+        CHECK(buffer != NULL);
+        CVPixelBufferRelease(buffer);
+        CFRelease(attrs);
+    }
+    return 0;
+}
+
 int main(void) {
+    CHECK(check_attribute_parity() == 0);
     CVPixelBufferRef packed = NULL;
     CHECK(CVPixelBufferCreate(NULL, 7, 5, kCVPixelFormatType_32BGRA,
                               NULL, &packed) == kCVReturnSuccess);
@@ -63,6 +141,19 @@ int main(void) {
     CHECK(CVPixelBufferUnlockBaseAddress(packed, 0) == kCVReturnSuccess);
     CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess);
     CHECK(CVPixelBufferUnlockBaseAddress(packed, kCVPixelBufferLock_ReadOnly) == kCVReturnError);
+    for (CVOptionFlags flags = 2; flags <= 8; ++flags) {
+        CHECK(CVPixelBufferLockBaseAddress(packed, flags) == kCVReturnSuccess);
+        CHECK(CVPixelBufferGetBaseAddress(packed) != NULL);
+        CHECK(CVPixelBufferUnlockBaseAddress(packed, flags) == kCVReturnSuccess);
+        CHECK(CVPixelBufferGetBaseAddress(packed) == NULL);
+        CHECK(CVPixelBufferUnlockBaseAddress(packed, flags) == kCVReturnError);
+    }
+    CHECK(CVPixelBufferLockBaseAddress(packed, 2) == kCVReturnSuccess);
+    CHECK(CVPixelBufferLockBaseAddress(packed, 8) == kCVReturnSuccess);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 3) == kCVReturnSuccess);
+    CHECK(CVPixelBufferGetBaseAddress(packed) != NULL);
+    CHECK(CVPixelBufferUnlockBaseAddress(packed, 8) == kCVReturnSuccess);
+    CHECK(CVPixelBufferGetBaseAddress(packed) == NULL);
     CVPixelBufferRef retained = CVPixelBufferRetain(packed);
     CHECK(retained == packed);
     CVPixelBufferRelease(packed);

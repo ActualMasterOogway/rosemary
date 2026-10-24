@@ -28,6 +28,7 @@ const NV12_VIDEO: u32 = u32::from_be_bytes(*b"420v");
 const NV12_FULL: u32 = u32::from_be_bytes(*b"420f");
 const I420_VIDEO: u32 = u32::from_be_bytes(*b"y420");
 const I420_FULL: u32 = u32::from_be_bytes(*b"f420");
+#[cfg(test)]
 const READ_ONLY: u64 = 1;
 const DEFAULT_ALIGNMENT: usize = 64;
 const MAX_STORAGE: usize = 256 * 1024 * 1024;
@@ -231,29 +232,18 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
     ] {
         let value = attribute(attrs, name);
         if !value.is_null() {
-            // SAFETY: the guest supplied a CF object.
+            // CoreVideo ignores non-Boolean values for these flags. Only an
+            // explicit CFBoolean true requests backing this CPU buffer lacks.
             if unsafe { corefoundation::api::CFGetTypeID(value) }
-                != unsafe { corefoundation::api::CFBooleanGetTypeID() }
+                == unsafe { corefoundation::api::CFBooleanGetTypeID() }
+                && unsafe { corefoundation::api::CFBooleanGetValue(value) } != 0
             {
-                return Err(INVALID_ATTRIBUTES);
-            }
-            // SAFETY: checked for CFBoolean above.
-            if unsafe { corefoundation::api::CFBooleanGetValue(value) } != 0 {
                 return Ok(true);
             }
         }
     }
-    // CPU-backed BGRA and YCbCr planes can be used by software CoreGraphics
-    // consumers; these flags are not a request for GPU/IOSurface storage.
-    for name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
-        let value = attribute(attrs, name);
-        if !value.is_null()
-            && unsafe { corefoundation::api::CFGetTypeID(value) }
-                != unsafe { corefoundation::api::CFBooleanGetTypeID() }
-        {
-            return Err(INVALID_ATTRIBUTES);
-        }
-    }
+    // CPU-backed BGRA and YCbCr planes are already accessible to software
+    // CoreGraphics, regardless of the CF type of a compatibility hint.
     for name in [
         "ExtendedPixelsLeft",
         "ExtendedPixelsTop",
@@ -262,16 +252,33 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
     ] {
         let value = attribute(attrs, name);
         if !value.is_null() {
-            // SAFETY: the guest supplied an attribute CFNumber.
-            let n =
-                unsafe { corefoundation::collections::number(value) }.ok_or(INVALID_ATTRIBUTES)?;
-            let corefoundation::collections::Number::Integer(n) = n else {
-                return Err(INVALID_ATTRIBUTES);
+            // CoreVideo truncates CFNumber floating-point values toward zero;
+            // non-numeric values and NaN act like zero. A negative multiple or
+            // infinity fails as an allocation request, not a malformed key.
+            // CFBoolean shares a number-like representation in CoreFoundation,
+            // but native CoreVideo ignores it for extended-pixel attributes.
+            let number = if unsafe { corefoundation::api::CFGetTypeID(value) }
+                == unsafe { corefoundation::api::CFBooleanGetTypeID() }
+            {
+                None
+            } else {
+                unsafe { corefoundation::collections::number(value) }
+            };
+            let n = match number {
+                Some(corefoundation::collections::Number::Integer(n)) => n,
+                Some(corefoundation::collections::Number::Float(n)) => {
+                    if n.is_infinite() {
+                        return Err(ALLOCATION_FAILED);
+                    }
+                    n as i64
+                }
+                None => 0,
             };
             if n < 0 {
-                return Err(INVALID_ATTRIBUTES);
+                return Err(ALLOCATION_FAILED);
             }
             if n != 0 {
+                // Explicit extended pixels need storage this PR does not expose.
                 return Ok(true);
             }
         }
@@ -565,12 +572,9 @@ pub unsafe extern "C" fn CVPixelBufferGetBaseAddressOfPlane(
     base_address(buffer, Some(i))
 }
 
-/// Lock flags: 0 allows CPU writes; 1 requests read-only access.
-/// Apple permits unlocking with either documented flag regardless of lock mode.
-pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32 {
-    if flags & !READ_ONLY != 0 {
-        return INVALID_ARGUMENT;
-    }
+/// Only bit 0 is a documented mode; native CoreVideo ignores other bits.
+/// Unlocks are counted regardless of whether their flags match the lock.
+pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, _flags: u64) -> i32 {
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
@@ -582,10 +586,7 @@ pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: 
     SUCCESS
 }
 
-pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32 {
-    if flags & !READ_ONLY != 0 {
-        return INVALID_ARGUMENT;
-    }
+pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, _flags: u64) -> i32 {
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
@@ -652,7 +653,9 @@ mod tests {
             assert!(CVPixelBufferGetBaseAddressOfPlane(b, 0).is_null());
             assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
             assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), ERROR);
-            assert_eq!(CVPixelBufferLockBaseAddress(b, 2), INVALID_ARGUMENT);
+            assert_eq!(CVPixelBufferLockBaseAddress(b, 2), SUCCESS);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 2), SUCCESS);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 2), ERROR);
             let retained = CVBufferRetain(b);
             assert_eq!(retained, b);
             CVPixelBufferRelease(b);
@@ -831,7 +834,7 @@ mod tests {
                 assert_eq!(CVPixelBufferUnlockBaseAddress(b, 0), SUCCESS);
                 assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), SUCCESS);
                 assert_eq!(CVPixelBufferUnlockBaseAddress(b, READ_ONLY), ERROR);
-                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 2), INVALID_ARGUMENT);
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, 2), ERROR);
                 assert_eq!(
                     CVPixelBufferUnlockBaseAddress(std::ptr::null(), 0),
                     INVALID_ARGUMENT
@@ -1086,19 +1089,19 @@ mod tests {
                 (&invalid_number as *const i64).cast(),
             );
             for name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
-                let malformed = corefoundation::collections::new_dictionary(
+                let non_boolean = corefoundation::collections::new_dictionary(
                     &[(key(name), wrong_type)],
                     policy,
                     policy,
                     false,
                 );
                 assert_eq!(
-                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, malformed, &mut out,),
-                    INVALID_ATTRIBUTES,
-                    "{name} malformed type"
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, non_boolean, &mut out),
+                    SUCCESS,
+                    "{name} numeric hint"
                 );
-                assert!(out.is_null());
-                corefoundation::api::CFRelease(malformed);
+                CVPixelBufferRelease(out);
+                corefoundation::api::CFRelease(non_boolean);
             }
             corefoundation::api::CFRelease(wrong_type);
             for key_name in ["CGBitmapContextCompatibility", "CGImageCompatibility"] {
@@ -1118,6 +1121,172 @@ mod tests {
                 }
                 corefoundation::api::CFRelease(attrs);
             }
+        }
+    }
+
+    #[test]
+    fn extended_pixel_number_conversions_are_native_compatible() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            for name in [
+                "ExtendedPixelsLeft",
+                "ExtendedPixelsRight",
+                "ExtendedPixelsTop",
+                "ExtendedPixelsBottom",
+            ] {
+                for value in [
+                    0.0_f64,
+                    0.3,
+                    0.9,
+                    -0.9,
+                    f64::NAN,
+                    -1.0,
+                    -1.2,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    1.0,
+                    1.2,
+                ] {
+                    let number = corefoundation::api::CFNumberCreate(
+                        std::ptr::null(),
+                        number_type::FLOAT64,
+                        (&value as *const f64).cast(),
+                    );
+                    let attrs = corefoundation::collections::new_dictionary(
+                        &[(key(name), number)],
+                        policy,
+                        policy,
+                        false,
+                    );
+                    let expected = if value.is_infinite() || value <= -1.0 {
+                        ALLOCATION_FAILED
+                    } else if value >= 1.0 {
+                        // Nonzero extended pixels require storage this CPU-only
+                        // implementation intentionally does not provide.
+                        UNSUPPORTED
+                    } else {
+                        SUCCESS
+                    };
+                    for format in [BGRA, NV12_VIDEO, I420_VIDEO] {
+                        let mut out = 1usize as CFTypeRef;
+                        assert_eq!(
+                            CVPixelBufferCreate(std::ptr::null(), 7, 5, format, attrs, &mut out),
+                            expected,
+                            "{name}={value} format={format:#x}"
+                        );
+                        if expected == SUCCESS {
+                            CVPixelBufferRelease(out);
+                        } else {
+                            assert!(out.is_null());
+                        }
+                    }
+                    corefoundation::api::CFRelease(attrs);
+                    corefoundation::api::CFRelease(number);
+                }
+                for value in [
+                    key("extended-value-string"),
+                    corefoundation::collections::boolean(true),
+                ] {
+                    let attrs = corefoundation::collections::new_dictionary(
+                        &[(key(name), value)],
+                        policy,
+                        policy,
+                        false,
+                    );
+                    let mut out = std::ptr::null();
+                    assert_eq!(
+                        CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, attrs, &mut out),
+                        SUCCESS,
+                        "{name} non-CFNumber value"
+                    );
+                    CVPixelBufferRelease(out);
+                    corefoundation::api::CFRelease(attrs);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_value_types_are_hints_not_malformed_attributes() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            let one: i64 = 1;
+            let number = corefoundation::api::CFNumberCreate(
+                std::ptr::null(),
+                number_type::SINT64,
+                (&one as *const i64).cast(),
+            );
+            for name in [
+                "CGBitmapContextCompatibility",
+                "CGImageCompatibility",
+                "OpenGLCompatibility",
+                "MetalCompatibility",
+                "IOSurfaceCoreAnimationCompatibility",
+            ] {
+                for value in [key("compatibility-string"), number] {
+                    let attrs = corefoundation::collections::new_dictionary(
+                        &[(key(name), value)],
+                        policy,
+                        policy,
+                        false,
+                    );
+                    for format in [BGRA, NV12_VIDEO, I420_VIDEO] {
+                        let mut out = std::ptr::null();
+                        assert_eq!(
+                            CVPixelBufferCreate(std::ptr::null(), 7, 5, format, attrs, &mut out),
+                            SUCCESS,
+                            "{name} value={value:p} format={format:#x}"
+                        );
+                        CVPixelBufferRelease(out);
+                    }
+                    corefoundation::api::CFRelease(attrs);
+                }
+                if !matches!(
+                    name,
+                    "CGBitmapContextCompatibility" | "CGImageCompatibility"
+                ) {
+                    let required = corefoundation::collections::new_dictionary(
+                        &[(key(name), corefoundation::collections::boolean(true))],
+                        policy,
+                        policy,
+                        false,
+                    );
+                    let mut out = std::ptr::null();
+                    assert_eq!(
+                        CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, required, &mut out),
+                        UNSUPPORTED,
+                        "{name} genuine GPU request"
+                    );
+                    assert!(out.is_null());
+                    corefoundation::api::CFRelease(required);
+                }
+            }
+            corefoundation::api::CFRelease(number);
+        }
+    }
+
+    #[test]
+    fn unknown_lock_flag_bits_are_ignored_without_unbalancing_locks() {
+        let b = create(7, 5, BGRA);
+        unsafe {
+            for flags in [0, 1, 2, 3, 4, 7, 8, 16, u64::MAX] {
+                assert_eq!(CVPixelBufferLockBaseAddress(b, flags), SUCCESS);
+                assert!(!CVPixelBufferGetBaseAddress(b).is_null());
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, flags), SUCCESS);
+                assert!(CVPixelBufferGetBaseAddress(b).is_null());
+                assert_eq!(CVPixelBufferUnlockBaseAddress(b, flags), ERROR);
+            }
+            assert_eq!(CVPixelBufferLockBaseAddress(b, 2), SUCCESS);
+            assert_eq!(CVPixelBufferLockBaseAddress(b, 8), SUCCESS);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, 3), SUCCESS);
+            assert!(!CVPixelBufferGetBaseAddress(b).is_null());
+            assert_eq!(CVPixelBufferUnlockBaseAddress(b, u64::MAX), SUCCESS);
+            assert!(CVPixelBufferGetBaseAddress(b).is_null());
+            CVPixelBufferRelease(b);
         }
     }
 
@@ -1270,7 +1439,10 @@ mod tests {
                 number_type::SINT64,
                 (&wrong as *const i64).cast(),
             );
-            for name in ["MemoryAllocator", "IOSurfaceCoreAnimationCompatibility"] {
+            for (name, expected) in [
+                ("MemoryAllocator", INVALID_ATTRIBUTES),
+                ("IOSurfaceCoreAnimationCompatibility", SUCCESS),
+            ] {
                 let bad_attrs = corefoundation::collections::new_dictionary(
                     &[(key(name), number)],
                     policy,
@@ -1279,10 +1451,14 @@ mod tests {
                 );
                 assert_eq!(
                     CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, bad_attrs, &mut out),
-                    INVALID_ATTRIBUTES,
+                    expected,
                     "{name} type"
                 );
-                assert!(out.is_null());
+                if expected == SUCCESS {
+                    CVPixelBufferRelease(out);
+                } else {
+                    assert!(out.is_null());
+                }
                 corefoundation::api::CFRelease(bad_attrs);
             }
             corefoundation::api::CFRelease(number);
