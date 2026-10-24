@@ -332,6 +332,26 @@ pub trait Callbacks {
     /// while servicing `symbol`.
     fn substitute(&self, symbol: &str, va: u64) -> Result<u64>;
 
+    /// Substitute a callback with an exact host/guest ABI signature.
+    ///
+    /// A generic thunk cannot carry by-value aggregates that live on the
+    /// guest stack. Implementations without a typed trampoline must refuse
+    /// this operation instead of losing callback arguments.
+    fn substitute_typed(
+        &self,
+        symbol: &str,
+        va: u64,
+        _signature: crate::thunk::ThunkSignature,
+    ) -> Result<u64> {
+        if va == 0 {
+            return Ok(0);
+        }
+        Err(AbiError::Refused {
+            symbol: symbol.to_string(),
+            reason: "takes a typed guest callback, and this caller has no typed thunk",
+        })
+    }
+
     /// The guest address behind `va`, if `va` is a thunk this runtime handed out; `va`
     /// otherwise.
     ///
@@ -355,6 +375,28 @@ impl Callbacks for NoCallbacks {
             symbol: symbol.to_string(),
             reason: "takes a guest function pointer, and this caller has no JIT to re-enter",
         })
+    }
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::{AbiError, Callbacks, NoCallbacks};
+    use crate::thunk::ThunkSignature;
+
+    #[test]
+    fn a_null_typed_callback_needs_no_jit() {
+        let signature = ThunkSignature::new(vec![], None).unwrap();
+        assert_eq!(
+            NoCallbacks
+                .substitute_typed("test", 0, signature.clone())
+                .unwrap(),
+            0
+        );
+        assert_eq!(NoCallbacks.substitute("test", 0).unwrap(), 0);
+        assert!(matches!(
+            NoCallbacks.substitute_typed("test", 0x1234, signature),
+            Err(AbiError::Refused { .. })
+        ));
     }
 }
 
