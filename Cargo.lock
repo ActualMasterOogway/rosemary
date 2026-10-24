@@ -1198,6 +1198,7 @@ dependencies = [
  "corefoundation",
  "darwin",
  "exports",
+ "fancy-regex",
  "libc",
  "objc",
  "prefix",
