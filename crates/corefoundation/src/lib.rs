@@ -523,21 +523,31 @@ mod tests {
         assert!(api::supports_malloc_allocator(malloc));
         assert!(api::supports_malloc_allocator(zone));
         assert!(!api::supports_malloc_allocator(null));
+        // The getter is the current non-null allocator; the global default
+        // constant is a separate NULL sentinel meaning "use the current one".
+        assert_eq!(unsafe { api::CFAllocatorGetDefault() }, system);
+        assert_ne!(unsafe { api::CFAllocatorGetDefault() }, malloc);
         // SAFETY: exported allocator objects are immortal CFAllocators.
         unsafe {
             assert_eq!(api::CFGetTypeID(system), api::CFAllocatorGetTypeID());
             api::CFRelease(system);
             api::CFRelease(system);
             assert_eq!(api::CFGetTypeID(system), api::CFAllocatorGetTypeID());
+            assert_eq!(api::CFRetain(system), system);
+            api::CFRelease(system);
+            assert_eq!(api::CFAllocatorGetDefault(), system);
         }
     }
 
     #[test]
-    fn custom_allocator_has_identity_but_default_is_null() {
+    fn custom_allocator_has_identity_and_current_default_is_system() {
         bootstrap();
         // SAFETY: this implementation does not inspect the callback context.
         unsafe {
-            assert!(api::CFAllocatorGetDefault().is_null());
+            assert_eq!(
+                api::CFAllocatorGetDefault(),
+                api::standard_allocator(api::StandardAllocator::SystemDefault)
+            );
             let allocator = api::CFAllocatorCreate(std::ptr::null(), std::ptr::null());
             assert!(!allocator.is_null());
             assert_eq!(api::CFGetTypeID(allocator), api::CFAllocatorGetTypeID());

@@ -13,16 +13,14 @@ pub type Boolean = u8;
 
 /// Everything a `CFCreate` call ignores about its allocator.
 ///
-/// Apple's allocators exist so a caller can account for, or place, the memory a
-/// framework takes. Nothing in this tree does either, and a guest that passes
-/// `kCFAllocatorDefault` - which is null - is asking for the default one, which
-/// is the only one here.
+/// Apple's allocators exist so callers can account for or place framework
+/// memory. This implementation supports its standard malloc-backed allocator
+/// identities, but not arbitrary custom allocation callbacks.
 pub type CFAllocatorRef = *const c_void;
 
-/// The default allocator is represented by null, as it is by the allocator
-/// globals this crate publishes. A custom allocator still needs an object of
-/// its own: callers retain and release it, even though this CoreFoundation does
-/// not route its allocations through the callback table.
+/// `kCFAllocatorDefault` is a NULL sentinel; `CFAllocatorGetDefault()` instead
+/// returns the non-null system-default singleton. Custom allocators retain
+/// their own identity, but this CoreFoundation does not invoke their callbacks.
 fn allocator_class() -> &'static objc::class::Class {
     crate::base::register(c"__NSCFAllocator", None, std::mem::size_of::<usize>(), true)
 }
@@ -32,7 +30,7 @@ pub unsafe extern "C" fn CFAllocatorGetTypeID() -> CFTypeID {
 }
 
 pub unsafe extern "C" fn CFAllocatorGetDefault() -> CFAllocatorRef {
-    std::ptr::null()
+    standard_allocator(StandardAllocator::SystemDefault)
 }
 
 /// Distinguished singleton allocators exported as CFAllocatorRef globals.

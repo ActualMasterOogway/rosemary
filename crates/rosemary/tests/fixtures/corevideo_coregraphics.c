@@ -12,6 +12,15 @@
     } while (0)
 
 static int check_allocators(void) {
+    CFAllocatorRef current = CFAllocatorGetDefault();
+    CHECK(kCFAllocatorDefault == NULL);
+    CHECK(current != NULL);
+    CHECK(current == kCFAllocatorSystemDefault);
+    CHECK(current != kCFAllocatorMalloc);
+    CHECK(CFRetain(current) == current);
+    CFRelease(current);
+    CHECK(CFAllocatorGetDefault() == kCFAllocatorSystemDefault);
+
     const CFAllocatorRef allocators[] = {
         kCFAllocatorDefault,
         kCFAllocatorSystemDefault,
@@ -54,6 +63,55 @@ static int check_narrow_dimensions(void) {
         CHECK(CVPixelBufferGetWidth(buffer) == sizes[i][0]);
         CHECK(CVPixelBufferGetHeight(buffer) == sizes[i][1]);
         CVPixelBufferRelease(buffer);
+    }
+    return 0;
+}
+
+static int check_numeric_alignment(void) {
+    const OSType formats[] = {
+        kCVPixelFormatType_32BGRA,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    };
+    const CFStringRef keys[] = {
+        kCVPixelBufferBytesPerRowAlignmentKey,
+        kCVPixelBufferPlaneAlignmentKey,
+    };
+    const double values[] = {0, 3.5, 64, -0.5, -1};
+    for (int format_index = 0; format_index < 2; ++format_index) {
+        for (int key_index = 0; key_index < 2; ++key_index) {
+            for (int i = 0; i < 5; ++i) {
+                CFNumberRef number = CFNumberCreate(
+                    NULL, kCFNumberFloat64Type, &values[i]);
+                CHECK(number);
+                const void *key = keys[key_index];
+                const void *value = number;
+                CFDictionaryRef attrs = CFDictionaryCreate(
+                    NULL, &key, &value, 1, &kCFTypeDictionaryKeyCallBacks,
+                    &kCFTypeDictionaryValueCallBacks);
+                CHECK(attrs);
+                CVPixelBufferRef buffer = NULL;
+                CVReturn result = CVPixelBufferCreate(
+                    NULL, 7, 5, formats[format_index], attrs, &buffer);
+                // The plane alignment value is ignored on a packed BGRA image.
+                const bool negative = values[i] <= -1 &&
+                    (key_index == 0 || format_index == 1);
+                CHECK(result == (negative ? kCVReturnAllocationFailed : kCVReturnSuccess));
+                if (negative) {
+                    CHECK(buffer == NULL);
+                } else {
+                    CHECK(buffer != NULL);
+                    size_t stride = format_index
+                        ? CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+                        : CVPixelBufferGetBytesPerRow(buffer);
+                    size_t expected = key_index == 0 && values[i] == 3.5
+                        ? 192 : 64;
+                    CHECK(stride == expected);
+                    CVPixelBufferRelease(buffer);
+                }
+                CFRelease(attrs);
+                CFRelease(number);
+            }
+        }
     }
     return 0;
 }
@@ -126,6 +184,7 @@ static int check_coregraphics_consumers(void) {
 
 int main(void) {
     CHECK(check_allocators() == 0);
+    CHECK(check_numeric_alignment() == 0);
     CHECK(check_narrow_dimensions() == 0);
     CHECK(check_coregraphics_consumers() == 0);
     puts("coregraphics consumer ok");

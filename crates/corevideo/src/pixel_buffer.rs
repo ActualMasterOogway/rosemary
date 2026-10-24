@@ -178,19 +178,32 @@ fn attribute(attrs: CFTypeRef, name: &str) -> CFTypeRef {
 
 fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
     let value = attribute(attrs, name);
-    if value.is_null() {
+    // The CoreVideo allocator reads these CFNumbers as integer multiples:
+    // floating values truncate toward zero, and zero selects the default.
+    // Non-numeric CF values also select that default on macOS.
+    let number = if value.is_null() {
+        None
+    } else {
+        // SAFETY: the guest supplied a CF value from the attributes dictionary.
+        unsafe { corefoundation::collections::number(value) }
+    };
+    let multiple = match number {
+        Some(corefoundation::collections::Number::Integer(n)) => n,
+        Some(corefoundation::collections::Number::Float(n)) => {
+            if n.is_infinite() {
+                return Err(ALLOCATION_FAILED);
+            }
+            n as i64
+        }
+        None => 0,
+    };
+    if multiple < 0 {
+        return Err(ALLOCATION_FAILED);
+    }
+    if multiple == 0 {
         return Ok(DEFAULT_ALIGNMENT);
     }
-    // SAFETY: the attribute is a caller-owned CF value.
-    let number = unsafe { corefoundation::collections::number(value) }.ok_or(INVALID_ATTRIBUTES)?;
-    let corefoundation::collections::Number::Integer(n) = number else {
-        return Err(INVALID_ATTRIBUTES);
-    };
-    let alignment = usize::try_from(n).map_err(|_| INVALID_ATTRIBUTES)?;
-    if alignment == 0 {
-        return Err(INVALID_ATTRIBUTES);
-    }
-    Ok(alignment)
+    usize::try_from(multiple).map_err(|_| ALLOCATION_FAILED)
 }
 
 fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
@@ -297,7 +310,11 @@ fn layout(
         alignment_attribute(attrs, "BytesPerRowAlignment")?,
     )
     .ok_or(ALLOCATION_FAILED)?;
-    let plane_alignment = alignment_attribute(attrs, "PlaneAlignment")?;
+    let plane_alignment = if format == BGRA {
+        DEFAULT_ALIGNMENT
+    } else {
+        alignment_attribute(attrs, "PlaneAlignment")?
+    };
     let chroma_width = width.div_ceil(2);
     let chroma_height = height.div_ceil(2);
     let dimensions: Vec<(usize, usize, usize)> = match format {
@@ -988,7 +1005,7 @@ mod tests {
             assert!(out.is_null());
 
             let policy = Policy::from_type_callbacks();
-            for alignment in [0_i64, -1] {
+            for (alignment, expected) in [(0_i64, SUCCESS), (-1, ALLOCATION_FAILED)] {
                 let number = corefoundation::api::CFNumberCreate(
                     std::ptr::null(),
                     number_type::SINT64,
@@ -1003,10 +1020,15 @@ mod tests {
                 out = 1usize as CFTypeRef;
                 assert_eq!(
                     CVPixelBufferCreate(std::ptr::null(), 4, 4, BGRA, attrs, &mut out),
-                    INVALID_ATTRIBUTES,
+                    expected,
                     "alignment={alignment}"
                 );
-                assert!(out.is_null());
+                if expected == SUCCESS {
+                    assert_eq!(CVPixelBufferGetBytesPerRow(out), DEFAULT_ALIGNMENT);
+                    CVPixelBufferRelease(out);
+                } else {
+                    assert!(out.is_null());
+                }
                 corefoundation::api::CFRelease(attrs);
                 corefoundation::api::CFRelease(number);
             }
@@ -1178,6 +1200,113 @@ mod tests {
                 CVPixelBufferRelease(out);
                 corefoundation::api::CFRelease(attrs);
                 corefoundation::api::CFRelease(number);
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_alignment_attributes_match_macos_conversions() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            // Match native CoreVideo's CFNumber-to-integer truncation and its
+            // 64-byte row minimum for 7x5 packed and planar buffers.
+            for (name, format, numeric, expected_status, expected_stride) in [
+                ("BytesPerRowAlignment", BGRA, 0.0_f64, SUCCESS, 64),
+                ("BytesPerRowAlignment", BGRA, 0.5, SUCCESS, 64),
+                ("BytesPerRowAlignment", BGRA, -0.5, SUCCESS, 64),
+                ("BytesPerRowAlignment", BGRA, 1.9, SUCCESS, 64),
+                ("BytesPerRowAlignment", BGRA, 3.5, SUCCESS, 192),
+                ("BytesPerRowAlignment", BGRA, 63.9, SUCCESS, 4032),
+                ("BytesPerRowAlignment", BGRA, 64.0, SUCCESS, 64),
+                ("BytesPerRowAlignment", BGRA, 65.1, SUCCESS, 4160),
+                ("BytesPerRowAlignment", BGRA, -1.0, ALLOCATION_FAILED, 0),
+                ("BytesPerRowAlignment", BGRA, -1.5, ALLOCATION_FAILED, 0),
+                ("BytesPerRowAlignment", NV12_VIDEO, 0.0, SUCCESS, 64),
+                ("BytesPerRowAlignment", NV12_VIDEO, 3.5, SUCCESS, 192),
+                (
+                    "BytesPerRowAlignment",
+                    NV12_VIDEO,
+                    -1.0,
+                    ALLOCATION_FAILED,
+                    0,
+                ),
+                ("PlaneAlignment", NV12_VIDEO, 0.0, SUCCESS, 64),
+                ("PlaneAlignment", NV12_VIDEO, 3.5, SUCCESS, 64),
+                ("PlaneAlignment", NV12_VIDEO, -0.5, SUCCESS, 64),
+                ("PlaneAlignment", NV12_VIDEO, -1.0, ALLOCATION_FAILED, 0),
+                ("PlaneAlignment", NV12_VIDEO, -1.5, ALLOCATION_FAILED, 0),
+                // Packed formats do not have per-plane alignment requirements.
+                ("PlaneAlignment", BGRA, -1.0, SUCCESS, 64),
+            ] {
+                let value = corefoundation::api::CFNumberCreate(
+                    std::ptr::null(),
+                    number_type::FLOAT64,
+                    (&numeric as *const f64).cast(),
+                );
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key(name), value)],
+                    policy,
+                    policy,
+                    false,
+                );
+                let mut out = 1usize as CFTypeRef;
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, format, attrs, &mut out),
+                    expected_status,
+                    "{name}={numeric} format={format:#x}",
+                );
+                if expected_status == SUCCESS {
+                    let stride = if format == BGRA {
+                        CVPixelBufferGetBytesPerRow(out)
+                    } else {
+                        CVPixelBufferGetBytesPerRowOfPlane(out, 0)
+                    };
+                    assert_eq!(
+                        stride, expected_stride,
+                        "{name}={numeric} format={format:#x}"
+                    );
+                    CVPixelBufferRelease(out);
+                } else {
+                    assert!(out.is_null(), "{name}={numeric} format={format:#x}");
+                }
+                corefoundation::api::CFRelease(attrs);
+                corefoundation::api::CFRelease(value);
+            }
+            // An integer CFNumber uses the same zero and negative CVReturn
+            // rules for both alignment keys on planar buffers.
+            for (name, multiple, expected) in [
+                ("BytesPerRowAlignment", 0_i64, SUCCESS),
+                ("PlaneAlignment", 0_i64, SUCCESS),
+                ("BytesPerRowAlignment", -1_i64, ALLOCATION_FAILED),
+                ("PlaneAlignment", -1_i64, ALLOCATION_FAILED),
+            ] {
+                let value = corefoundation::api::CFNumberCreate(
+                    std::ptr::null(),
+                    number_type::SINT64,
+                    (&multiple as *const i64).cast(),
+                );
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key(name), value)],
+                    policy,
+                    policy,
+                    false,
+                );
+                let mut out = 1usize as CFTypeRef;
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, NV12_VIDEO, attrs, &mut out),
+                    expected,
+                    "{name}={multiple}"
+                );
+                if expected == SUCCESS {
+                    assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(out, 0), 64);
+                    CVPixelBufferRelease(out);
+                } else {
+                    assert!(out.is_null());
+                }
+                corefoundation::api::CFRelease(attrs);
+                corefoundation::api::CFRelease(value);
             }
         }
     }
