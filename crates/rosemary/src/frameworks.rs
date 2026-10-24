@@ -351,6 +351,7 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"),
     ("_kCVPixelBufferWidthKey", "Width"),
     ("_kCVPixelBufferHeightKey", "Height"),
+    ("_kCVPixelBufferMemoryAllocatorKey", "MemoryAllocator"),
     (
         "_kCVPixelBufferBytesPerRowAlignmentKey",
         "BytesPerRowAlignment",
@@ -365,6 +366,35 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
         "OpenGLCompatibility",
     ),
     ("_kCVPixelBufferMetalCompatibilityKey", "MetalCompatibility"),
+    (
+        "_kCVPixelBufferOpenGLESCompatibilityKey",
+        "OpenGLESCompatibility",
+    ),
+    (
+        "_kCVPixelBufferOpenGLESTextureCacheCompatibilityKey",
+        "OpenGLESTextureCacheCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey",
+        "IOSurfaceCoreAnimationCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLFBOCompatibilityKey",
+        "IOSurfaceOpenGLFBOCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLESFBOCompatibilityKey",
+        "IOSurfaceOpenGLESFBOCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey",
+        "IOSurfaceOpenGLTextureCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLESTextureCompatibilityKey",
+        "IOSurfaceOpenGLESTextureCompatibility",
+    ),
+    ("_kCVPixelBufferIOSurfacePurgeableKey", "IOSurfacePurgeable"),
     (
         "_kCVPixelBufferOpenGLTextureCacheCompatibilityKey",
         "OpenGLTextureCacheCompatibility",

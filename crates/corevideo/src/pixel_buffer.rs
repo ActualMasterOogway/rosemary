@@ -47,23 +47,45 @@ struct Locks {
 }
 
 struct Storage {
+    // The logical base may be offset into the heap allocation when an
+    // attribute requires a non-power-of-two address multiple.
     ptr: NonNull<u8>,
+    allocation: NonNull<u8>,
     layout: Layout,
 }
 
 impl Storage {
     fn new(size: usize, alignment: usize) -> Result<Self, i32> {
-        let layout = Layout::from_size_align(size, alignment).map_err(|_| INVALID_SIZE)?;
-        // SAFETY: nonzero checked length and valid alignment from Layout.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ALLOCATION_FAILED)?;
-        Ok(Self { ptr, layout })
+        let total = size.checked_add(alignment - 1).ok_or(ALLOCATION_FAILED)?;
+        if total > MAX_STORAGE {
+            return Err(ALLOCATION_FAILED);
+        }
+        let layout =
+            Layout::from_size_align(total, DEFAULT_ALIGNMENT).map_err(|_| ALLOCATION_FAILED)?;
+        // SAFETY: nonzero, checked length and valid Layout alignment.
+        let allocation = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(ALLOCATION_FAILED)?;
+        let Some(base) = aligned(allocation.as_ptr() as usize, alignment) else {
+            // SAFETY: the allocation was obtained with this exact Layout.
+            unsafe { free_storage(allocation.as_ptr(), layout) };
+            return Err(ALLOCATION_FAILED);
+        };
+        // SAFETY: overallocated by alignment - 1 bytes and the aligned region
+        // is exactly size bytes long, entirely within the heap allocation.
+        let ptr = unsafe {
+            NonNull::new_unchecked(allocation.as_ptr().add(base - allocation.as_ptr() as usize))
+        };
+        Ok(Self {
+            ptr,
+            allocation,
+            layout,
+        })
     }
 }
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: the allocation was created with precisely this Layout.
-        unsafe { free_storage(self.ptr.as_ptr(), self.layout) };
+        // SAFETY: allocation and Layout are unchanged since allocation.
+        unsafe { free_storage(self.allocation.as_ptr(), self.layout) };
     }
 }
 
@@ -124,12 +146,23 @@ fn state<'a>(buffer: CFTypeRef) -> Option<&'a State> {
 }
 
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
-    if alignment == 0 || !alignment.is_power_of_two() {
-        return None;
+    let remainder = value % alignment;
+    value.checked_add(if remainder == 0 {
+        0
+    } else {
+        alignment - remainder
+    })
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
     }
-    value
-        .checked_add(alignment - 1)
-        .map(|v| v & !(alignment - 1))
+    a
+}
+
+fn lcm(a: usize, b: usize) -> Option<usize> {
+    (a / gcd(a, b)).checked_mul(b)
 }
 
 fn key(text: &str) -> CFTypeRef {
@@ -155,7 +188,7 @@ fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
         return Err(INVALID_ATTRIBUTES);
     };
     let alignment = usize::try_from(n).map_err(|_| INVALID_ATTRIBUTES)?;
-    if alignment == 0 || !alignment.is_power_of_two() || alignment > 4096 {
+    if alignment == 0 {
         return Err(INVALID_ATTRIBUTES);
     }
     Ok(alignment)
@@ -173,10 +206,18 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
     }
     for name in [
         "OpenGLCompatibility",
+        "OpenGLESCompatibility",
         "MetalCompatibility",
         "OpenGLTextureCacheCompatibility",
+        "OpenGLESTextureCacheCompatibility",
         "CGBitmapContextCompatibility",
         "CGImageCompatibility",
+        "IOSurfaceCoreAnimationCompatibility",
+        "IOSurfaceOpenGLFBOCompatibility",
+        "IOSurfaceOpenGLESFBOCompatibility",
+        "IOSurfaceOpenGLTextureCompatibility",
+        "IOSurfaceOpenGLESTextureCompatibility",
+        "IOSurfacePurgeable",
     ] {
         let value = attribute(attrs, name);
         if !value.is_null() {
@@ -213,6 +254,16 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
                 return Ok(true);
             }
         }
+    }
+    let allocator = attribute(attrs, "MemoryAllocator");
+    if !allocator.is_null() {
+        // The CoreFoundation shim does not call custom allocator callbacks.
+        if unsafe { corefoundation::api::CFGetTypeID(allocator) }
+            != unsafe { corefoundation::api::CFAllocatorGetTypeID() }
+        {
+            return Err(INVALID_ATTRIBUTES);
+        }
+        return Ok(true);
     }
     Ok(false)
 }
@@ -278,12 +329,13 @@ fn layout(
     } else {
         planes[0].row_bytes
     };
-    Ok((
-        planes,
-        row_bytes,
-        offset,
-        DEFAULT_ALIGNMENT.max(row_alignment).max(plane_alignment),
-    ))
+    // Pointer alignment and row-byte divisibility are different contracts.
+    // The base must align to each requested plane multiple while retaining
+    // the runtime's minimum 64-byte backing alignment.
+    let address_alignment = lcm(DEFAULT_ALIGNMENT, row_alignment)
+        .and_then(|a| lcm(a, plane_alignment))
+        .ok_or(ALLOCATION_FAILED)?;
+    Ok((planes, row_bytes, offset, address_alignment))
 }
 
 /// CVReturn CVPixelBufferCreate(CFAllocatorRef, size_t, size_t, OSType,
@@ -292,7 +344,7 @@ fn layout(
 /// # Safety
 /// Attributes must be a CFDictionary or NULL; out must be writable.
 pub unsafe extern "C" fn CVPixelBufferCreate(
-    _allocator: CFTypeRef,
+    allocator: CFTypeRef,
     width: usize,
     height: usize,
     format: u32,
@@ -304,6 +356,10 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
     }
     // SAFETY: caller supplied a writable pointer.
     unsafe { *out = std::ptr::null() };
+    // A non-default CFAllocator cannot be honored by the current CF shim.
+    if !allocator.is_null() {
+        return UNSUPPORTED;
+    }
     if !attrs.is_null() && unsafe { corefoundation::collections::dictionary(attrs) }.is_none() {
         return INVALID_ATTRIBUTES;
     }
@@ -789,7 +845,7 @@ mod tests {
             assert!(out.is_null());
 
             let policy = Policy::from_type_callbacks();
-            for alignment in [0_i64, -1, 3, 4097] {
+            for alignment in [0_i64, -1] {
                 let number = corefoundation::api::CFNumberCreate(
                     std::ptr::null(),
                     number_type::SINT64,
@@ -830,6 +886,158 @@ mod tests {
             assert!(out.is_null());
             corefoundation::api::CFRelease(attrs);
             corefoundation::api::CFRelease(not_dictionary);
+        }
+    }
+
+    #[test]
+    fn capability_requirements_reject_without_compatible_backing() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        let mut out = std::ptr::null();
+        let true_value = corefoundation::collections::boolean(true);
+        let false_value = corefoundation::collections::boolean(false);
+        unsafe {
+            for name in [
+                "OpenGLCompatibility",
+                "OpenGLESCompatibility",
+                "MetalCompatibility",
+                "OpenGLTextureCacheCompatibility",
+                "OpenGLESTextureCacheCompatibility",
+                "CGBitmapContextCompatibility",
+                "CGImageCompatibility",
+                "IOSurfaceCoreAnimationCompatibility",
+                "IOSurfaceOpenGLFBOCompatibility",
+                "IOSurfaceOpenGLESFBOCompatibility",
+                "IOSurfaceOpenGLTextureCompatibility",
+                "IOSurfaceOpenGLESTextureCompatibility",
+                "IOSurfacePurgeable",
+            ] {
+                let required = corefoundation::collections::new_dictionary(
+                    &[(key(name), true_value)],
+                    policy,
+                    policy,
+                    false,
+                );
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, required, &mut out),
+                    UNSUPPORTED,
+                    "{name}"
+                );
+                assert!(out.is_null(), "{name}");
+                corefoundation::api::CFRelease(required);
+
+                let not_required = corefoundation::collections::new_dictionary(
+                    &[(key(name), false_value)],
+                    policy,
+                    policy,
+                    false,
+                );
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, not_required, &mut out),
+                    SUCCESS,
+                    "{name} false"
+                );
+                CVPixelBufferRelease(out);
+                corefoundation::api::CFRelease(not_required);
+                out = std::ptr::null();
+            }
+            let custom = corefoundation::api::CFAllocatorCreate(std::ptr::null(), std::ptr::null());
+            assert!(!custom.is_null());
+            assert_eq!(
+                CVPixelBufferCreate(custom, 7, 5, BGRA, std::ptr::null(), &mut out),
+                UNSUPPORTED
+            );
+            assert!(out.is_null());
+            let alloc_attrs = corefoundation::collections::new_dictionary(
+                &[(key("MemoryAllocator"), custom)],
+                policy,
+                policy,
+                false,
+            );
+            assert_eq!(
+                CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, alloc_attrs, &mut out),
+                UNSUPPORTED
+            );
+            assert!(out.is_null());
+            corefoundation::api::CFRelease(alloc_attrs);
+            corefoundation::api::CFRelease(custom);
+
+            let wrong: i64 = 1;
+            let number = corefoundation::api::CFNumberCreate(
+                std::ptr::null(),
+                number_type::SINT64,
+                (&wrong as *const i64).cast(),
+            );
+            for name in ["MemoryAllocator", "IOSurfaceCoreAnimationCompatibility"] {
+                let bad_attrs = corefoundation::collections::new_dictionary(
+                    &[(key(name), number)],
+                    policy,
+                    policy,
+                    false,
+                );
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, bad_attrs, &mut out),
+                    INVALID_ATTRIBUTES,
+                    "{name} type"
+                );
+                assert!(out.is_null());
+                corefoundation::api::CFRelease(bad_attrs);
+            }
+            corefoundation::api::CFRelease(number);
+        }
+    }
+
+    #[test]
+    fn arbitrary_positive_row_and_plane_multiples() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        unsafe {
+            for (name, multiple) in [
+                ("BytesPerRowAlignment", 3_i64),
+                ("BytesPerRowAlignment", 24_i64),
+                ("BytesPerRowAlignment", 8192_i64),
+                ("PlaneAlignment", 3_i64),
+                ("PlaneAlignment", 24_i64),
+                ("PlaneAlignment", 8192_i64),
+            ] {
+                let number = corefoundation::api::CFNumberCreate(
+                    std::ptr::null(),
+                    number_type::SINT64,
+                    (&multiple as *const i64).cast(),
+                );
+                let attrs = corefoundation::collections::new_dictionary(
+                    &[(key(name), number)],
+                    policy,
+                    policy,
+                    false,
+                );
+                let mut out = std::ptr::null();
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, I420_VIDEO, attrs, &mut out),
+                    SUCCESS,
+                    "{name}={multiple}"
+                );
+                let base = CVPixelBufferGetBaseAddress(out) as usize;
+                for i in 0..3 {
+                    let plane = CVPixelBufferGetBaseAddressOfPlane(out, i) as usize;
+                    let row_bytes = CVPixelBufferGetBytesPerRowOfPlane(out, i);
+                    assert!(plane > base);
+                    if name == "PlaneAlignment" {
+                        assert_eq!(plane % multiple as usize, 0);
+                    } else {
+                        assert_eq!(row_bytes % multiple as usize, 0);
+                    }
+                    assert!(
+                        plane - base + row_bytes * CVPixelBufferGetHeightOfPlane(out, i)
+                            <= CVPixelBufferGetDataSize(out)
+                    );
+                }
+                CVPixelBufferRelease(out);
+                corefoundation::api::CFRelease(attrs);
+                corefoundation::api::CFRelease(number);
+            }
         }
     }
 
