@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::sync::LazyLock;
 
 use microlift::arch::x86_64::context::RegisterContext;
@@ -159,7 +160,18 @@ fn encode_frame(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
     let f = unsafe { entry::<EncodeFrame>(symbol)? };
     let pts = time_argument(symbol, ctx, mem, 0)?;
     let duration = time_argument(symbol, ctx, mem, 1)?;
-    let status = f(ctx.rdi, ctx.rsi, pts, duration, ctx.rdx, ctx.rcx, ctx.r8);
+    // The encoder is the host's even with the builtin frameworks, and cannot
+    // read this runtime's pixel buffers; it is handed a copy the host made.
+    let copy = match crate::frameworks::using_builtin() {
+        true => corevideo::pixel_buffer::host_copy(ctx.rsi as usize as *const c_void),
+        false => None,
+    };
+    let image = copy.map_or(ctx.rsi, |copy| copy as usize as u64);
+    let status = f(ctx.rdi, image, pts, duration, ctx.rdx, ctx.rcx, ctx.r8);
+    if let Some(copy) = copy {
+        // SAFETY: the reference `host_copy` returned; the encoder took its own.
+        unsafe { corefoundation::api::CFRelease(copy) };
+    }
     super::set_int_return(ctx, status);
     Ok(())
 }

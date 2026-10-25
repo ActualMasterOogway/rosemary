@@ -1031,6 +1031,88 @@ pub unsafe extern "C" fn CVPixelBufferGetIOSurface(buffer: CFTypeRef) -> CFTypeR
     std::ptr::null()
 }
 
+/// A copy of this runtime's `buffer` made by the host CoreVideo, for a host
+/// framework that reads pixel buffers itself: VideoToolbox's encoder, on a
+/// Mac with the builtin frameworks. Retained; `None` when `buffer` is not
+/// this runtime's or the host cannot make one. Attachments stay behind, as
+/// their values are this runtime's objects.
+#[cfg(target_os = "macos")]
+pub fn host_copy(buffer: CFTypeRef) -> Option<CFTypeRef> {
+    type Create =
+        unsafe extern "C" fn(CFTypeRef, usize, usize, u32, CFTypeRef, *mut CFTypeRef) -> i32;
+    type Lock = unsafe extern "C" fn(CFTypeRef, u64) -> i32;
+    type Base = unsafe extern "C" fn(CFTypeRef) -> *mut u8;
+    type Rows = unsafe extern "C" fn(CFTypeRef) -> usize;
+    type PlaneBase = unsafe extern "C" fn(CFTypeRef, usize) -> *mut u8;
+    type PlaneRows = unsafe extern "C" fn(CFTypeRef, usize) -> usize;
+    // SAFETY: null or an object, whose first word is readable.
+    if unsafe { corefoundation::foreign::is(buffer) } {
+        return None;
+    }
+    let state = state(buffer)?;
+    let entry = corefoundation::foreign::entry;
+    // SAFETY: CoreVideo's own declarations of these entry points.
+    let (create, lock, unlock, base, rows, plane_base, plane_rows) = unsafe {
+        (
+            std::mem::transmute::<*mut c_void, Create>(entry(c"CVPixelBufferCreate")?),
+            std::mem::transmute::<*mut c_void, Lock>(entry(c"CVPixelBufferLockBaseAddress")?),
+            std::mem::transmute::<*mut c_void, Lock>(entry(c"CVPixelBufferUnlockBaseAddress")?),
+            std::mem::transmute::<*mut c_void, Base>(entry(c"CVPixelBufferGetBaseAddress")?),
+            std::mem::transmute::<*mut c_void, Rows>(entry(c"CVPixelBufferGetBytesPerRow")?),
+            std::mem::transmute::<*mut c_void, PlaneBase>(entry(
+                c"CVPixelBufferGetBaseAddressOfPlane",
+            )?),
+            std::mem::transmute::<*mut c_void, PlaneRows>(entry(
+                c"CVPixelBufferGetBytesPerRowOfPlane",
+            )?),
+        )
+    };
+    let planar = state.planes.len() > 1;
+    let mut copy = std::ptr::null();
+    // SAFETY: the host's functions, called on the buffer the host just made
+    // with this one's size and format; each row copied is no longer than
+    // either buffer's stride, and both hold `plane.height` of them.
+    unsafe {
+        if create(
+            std::ptr::null(),
+            state.width,
+            state.height,
+            state.format,
+            std::ptr::null(),
+            &mut copy,
+        ) != SUCCESS
+        {
+            return None;
+        }
+        if lock(copy, 0) != SUCCESS {
+            corefoundation::api::CFRelease(copy);
+            return None;
+        }
+        for (i, plane) in state.planes.iter().enumerate() {
+            let (to, to_rows) = match planar {
+                true => (plane_base(copy, i), plane_rows(copy, i)),
+                false => (base(copy), rows(copy)),
+            };
+            let row = plane.row_bytes.min(to_rows);
+            for y in 0..plane.height {
+                std::ptr::copy_nonoverlapping(
+                    plane.address.add(y * plane.row_bytes),
+                    to.add(y * to_rows),
+                    row,
+                );
+            }
+        }
+        unlock(copy, 0);
+    }
+    Some(copy)
+}
+
+/// Off Darwin there is no host CoreVideo.
+#[cfg(not(target_os = "macos"))]
+pub fn host_copy(_buffer: CFTypeRef) -> Option<CFTypeRef> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2440,6 +2522,49 @@ mod tests {
             assert_eq!(RELEASED.load(Ordering::Relaxed), 0);
             CVPixelBufferRelease(out);
             assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    /// What VideoToolbox's encoder is handed for one of this runtime's buffers.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_host_copy_carries_every_plane() {
+        // SAFETY: a NUL-terminated path, and a handle deliberately leaked.
+        let handle = unsafe {
+            libc::dlopen(
+                c"/System/Library/Frameworks/CoreVideo.framework/CoreVideo".as_ptr(),
+                libc::RTLD_LAZY,
+            )
+        };
+        assert!(!handle.is_null());
+        let ours = create(7, 5, NV12_VIDEO);
+        unsafe {
+            assert_eq!(CVPixelBufferLockBaseAddress(ours, 0), SUCCESS);
+            for plane in 0..2 {
+                let rows = CVPixelBufferGetBytesPerRowOfPlane(ours, plane);
+                let base = CVPixelBufferGetBaseAddressOfPlane(ours, plane).cast::<u8>();
+                for y in 0..CVPixelBufferGetHeightOfPlane(ours, plane) {
+                    *base.add(y * rows) = (plane * 16 + y) as u8;
+                }
+            }
+            assert_eq!(CVPixelBufferUnlockBaseAddress(ours, 0), SUCCESS);
+            assert!(host_copy(std::ptr::null()).is_none());
+            let copy = host_copy(ours).expect("the host CoreVideo makes a copy");
+            assert!(corefoundation::foreign::is(copy));
+            assert!(host_copy(copy).is_none());
+            // Read back through the forwarding accessors, which are the host's.
+            assert_eq!(CVPixelBufferGetHeightOfPlane(copy, 1), 3);
+            assert_eq!(CVPixelBufferLockBaseAddress(copy, 0), SUCCESS);
+            for plane in 0..2 {
+                let rows = CVPixelBufferGetBytesPerRowOfPlane(copy, plane);
+                let base = CVPixelBufferGetBaseAddressOfPlane(copy, plane).cast::<u8>();
+                for y in 0..CVPixelBufferGetHeightOfPlane(copy, plane) {
+                    assert_eq!(*base.add(y * rows), (plane * 16 + y) as u8);
+                }
+            }
+            assert_eq!(CVPixelBufferUnlockBaseAddress(copy, 0), SUCCESS);
+            CVPixelBufferRelease(copy);
+            CVPixelBufferRelease(ours);
         }
     }
 }
