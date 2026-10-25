@@ -8,7 +8,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc as free_storage};
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use corefoundation::base::CFTypeRef;
 use objc::class::Class;
@@ -38,11 +39,6 @@ struct Plane {
     width: usize,
     height: usize,
     row_bytes: usize,
-}
-
-#[derive(Default)]
-struct Locks {
-    count: usize,
 }
 
 struct Storage {
@@ -97,7 +93,7 @@ struct State {
     // Never resized: C clients retain pointers to its pixels until final release.
     data: Storage,
     data_size: usize,
-    locks: Mutex<Locks>,
+    locks: AtomicUsize,
 }
 
 fn class() -> &'static Class {
@@ -426,7 +422,7 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
             row_bytes,
             data,
             data_size: size,
-            locks: Mutex::new(Locks::default()),
+            locks: AtomicUsize::new(0),
         },
     );
     if buffer.is_null() {
@@ -522,10 +518,8 @@ fn base_address(buffer: CFTypeRef, plane: Option<usize>) -> *mut c_void {
         return std::ptr::null_mut();
     };
     // Storage itself is stable, but CoreVideo only exposes an address while
-    // at least one base-address lock is outstanding. The same mutex guards
-    // changes to that count and this visibility check.
-    let locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
-    if locks.count == 0 {
+    // at least one base-address lock is outstanding.
+    if state.locks.load(Ordering::Acquire) == 0 {
         return std::ptr::null_mut();
     }
     let ptr = state.data.ptr.as_ptr();
@@ -557,24 +551,27 @@ pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, _flags:
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
-    let mut locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(n) = locks.count.checked_add(1) else {
-        return ERROR;
-    };
-    locks.count = n;
-    SUCCESS
+    // An overflowing count is refused rather than wrapped back to unlocked.
+    match state
+        .locks
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+    {
+        Ok(_) => SUCCESS,
+        Err(_) => ERROR,
+    }
 }
 
 pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, _flags: u64) -> i32 {
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
-    let mut locks = state.locks.lock().unwrap_or_else(|e| e.into_inner());
-    if locks.count == 0 {
-        return ERROR;
+    match state
+        .locks
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+    {
+        Ok(_) => SUCCESS,
+        Err(_) => ERROR,
     }
-    locks.count -= 1;
-    SUCCESS
 }
 
 /// A CPU-allocated CVPixelBuffer has no IOSurface backing.
