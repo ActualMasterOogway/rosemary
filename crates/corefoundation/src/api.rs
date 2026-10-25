@@ -76,6 +76,37 @@ pub fn supports_malloc_allocator(allocator: CFAllocatorRef) -> bool {
         .any(|kind| allocator == standard_allocator(kind))
 }
 
+/// The allocator to hand a host framework in place of `allocator`.
+///
+/// This runtime's allocators are its own objects, which the host's
+/// CoreFoundation would read as its own `CFAllocator`. A standard one maps to
+/// the host's global of the same name, and any other to null - the host's
+/// default - since this runtime does not run custom allocator callbacks
+/// either. Null, and an allocator the host made, pass through.
+#[cfg(target_os = "macos")]
+pub fn host_allocator(allocator: CFAllocatorRef) -> CFAllocatorRef {
+    // SAFETY: null or an allocator object, whose first word is readable.
+    if allocator.is_null() || unsafe { crate::foreign::is(allocator) } {
+        return allocator;
+    }
+    [
+        (
+            StandardAllocator::SystemDefault,
+            c"kCFAllocatorSystemDefault",
+        ),
+        (StandardAllocator::Malloc, c"kCFAllocatorMalloc"),
+        (StandardAllocator::MallocZone, c"kCFAllocatorMallocZone"),
+        (StandardAllocator::Null, c"kCFAllocatorNull"),
+    ]
+    .into_iter()
+    .find(|(kind, _)| allocator == standard_allocator(*kind))
+    .and_then(|(_, name)| crate::foreign::entry(name))
+    // SAFETY: each of those names is a `CFAllocatorRef` variable.
+    .map_or(std::ptr::null(), |cell| unsafe {
+        *(cell as *const CFAllocatorRef)
+    })
+}
+
 pub unsafe extern "C" fn CFAllocatorCreate(
     _allocator: CFAllocatorRef,
     _context: *const c_void,
@@ -1751,7 +1782,7 @@ pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTyp
         return unsafe {
             let f: unsafe extern "C" fn(CFAllocatorRef, CFTypeRef) -> CFTypeRef =
                 std::mem::transmute(f);
-            f(allocator, data)
+            f(host_allocator(allocator), data)
         };
     }
     // silence clippy warning on non-macos

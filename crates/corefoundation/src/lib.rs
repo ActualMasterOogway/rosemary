@@ -540,6 +540,33 @@ mod tests {
         }
     }
 
+    /// The host's CoreFoundation reads an allocator as its own, so none of
+    /// this runtime's objects may reach it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_host_framework_is_never_handed_one_of_this_runtimes_allocators() {
+        bootstrap();
+        assert!(api::host_allocator(std::ptr::null()).is_null());
+        // SAFETY: this implementation does not inspect the callback context.
+        let custom = unsafe { api::CFAllocatorCreate(std::ptr::null(), std::ptr::null()) };
+        for allocator in [
+            unsafe { api::CFAllocatorGetDefault() },
+            api::standard_allocator(api::StandardAllocator::Malloc),
+            api::standard_allocator(api::StandardAllocator::MallocZone),
+            api::standard_allocator(api::StandardAllocator::Null),
+            custom,
+        ] {
+            let host = api::host_allocator(allocator);
+            // SAFETY: null or an allocator object.
+            assert!(
+                host.is_null() || unsafe { foreign::is(host) },
+                "{allocator:p}"
+            );
+        }
+        // SAFETY: the allocator this test created.
+        unsafe { api::CFRelease(custom) };
+    }
+
     #[test]
     fn custom_allocator_has_identity_and_current_default_is_system() {
         bootstrap();
