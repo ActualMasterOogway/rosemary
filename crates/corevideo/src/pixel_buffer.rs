@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use std::alloc::{Layout, alloc_zeroed, dealloc as free_storage};
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,6 +113,55 @@ fn state<'a>(buffer: CFTypeRef) -> Option<&'a State> {
     }
     // SAFETY: caller holds a live CF object; its class is checked first.
     unsafe { corefoundation::boxed::contents::<State>(buffer, class()) }.map(|s| &*s)
+}
+
+/// The host CoreVideo's entry point `name`, when `object` is a buffer or pool
+/// the host made rather than this runtime.
+///
+/// With the builtin frameworks on a Mac, VideoToolbox and its pools are still
+/// Apple's, so their buffers reach these entry points too. See
+/// [`corefoundation::foreign`]: the alternative is reading Apple's object as
+/// one of ours.
+#[cfg(target_os = "macos")]
+fn foreign(name: &CStr, object: CFTypeRef) -> Option<*mut c_void> {
+    // SAFETY: null or an object, whose first word is readable.
+    if !unsafe { corefoundation::foreign::is(object) } {
+        return None;
+    }
+    if !corefoundation::foreign::forwarding() {
+        objc::fail!(
+            "{}: the object is not this runtime's, and ROSEMARY_NO_FOREIGN forbids passing it \
+             to the CoreVideo that made it",
+            name.to_string_lossy()
+        );
+    }
+    let Some(f) = corefoundation::foreign::entry(name) else {
+        objc::fail!(
+            "{}: the object is not this runtime's and there is no host CoreVideo to pass it to",
+            name.to_string_lossy()
+        );
+    };
+    Some(f)
+}
+
+/// Off Darwin every buffer the guest holds is this runtime's.
+#[cfg(not(target_os = "macos"))]
+fn foreign(_name: &CStr, _object: CFTypeRef) -> Option<*mut c_void> {
+    None
+}
+
+/// Return the host CoreVideo's answer for a foreign `$object`; see [`foreign`].
+macro_rules! forward_foreign {
+    ($name:expr, $object:expr, fn($($ty:ty),*) -> $ret:ty, ($($arg:expr),*)) => {
+        if let Some(f) = foreign($name, $object) {
+            // SAFETY: CoreVideo's own declaration of this entry point, called
+            // with an object it made.
+            return unsafe {
+                let f: unsafe extern "C" fn($($ty),*) -> $ret = std::mem::transmute(f);
+                f($($arg),*)
+            };
+        }
+    };
 }
 
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
@@ -418,22 +467,52 @@ pub unsafe extern "C" fn CVPixelBufferGetTypeID() -> usize {
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetWidth(buffer: CFTypeRef) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetWidth",
+        buffer,
+        fn(CFTypeRef) -> usize,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| s.width)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetHeight(buffer: CFTypeRef) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetHeight",
+        buffer,
+        fn(CFTypeRef) -> usize,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| s.height)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetPixelFormatType(buffer: CFTypeRef) -> u32 {
+    forward_foreign!(
+        c"CVPixelBufferGetPixelFormatType",
+        buffer,
+        fn(CFTypeRef) -> u32,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| s.format)
 }
 
 pub unsafe extern "C" fn CVPixelBufferIsPlanar(buffer: CFTypeRef) -> u8 {
+    forward_foreign!(
+        c"CVPixelBufferIsPlanar",
+        buffer,
+        fn(CFTypeRef) -> u8,
+        (buffer)
+    );
     state(buffer).is_some_and(|s| s.planes.len() > 1) as u8
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetPlaneCount(buffer: CFTypeRef) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetPlaneCount",
+        buffer,
+        fn(CFTypeRef) -> usize,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| {
         if s.planes.len() > 1 {
             s.planes.len()
@@ -444,26 +523,56 @@ pub unsafe extern "C" fn CVPixelBufferGetPlaneCount(buffer: CFTypeRef) -> usize 
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetBytesPerRow(buffer: CFTypeRef) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetBytesPerRow",
+        buffer,
+        fn(CFTypeRef) -> usize,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| s.row_bytes)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetDataSize(buffer: CFTypeRef) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetDataSize",
+        buffer,
+        fn(CFTypeRef) -> usize,
+        (buffer)
+    );
     state(buffer).map_or(0, |s| s.data_size)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetWidthOfPlane(buffer: CFTypeRef, i: usize) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetWidthOfPlane",
+        buffer,
+        fn(CFTypeRef, usize) -> usize,
+        (buffer, i)
+    );
     state(buffer)
         .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.width)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetHeightOfPlane(buffer: CFTypeRef, i: usize) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetHeightOfPlane",
+        buffer,
+        fn(CFTypeRef, usize) -> usize,
+        (buffer, i)
+    );
     state(buffer)
         .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.height)
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetBytesPerRowOfPlane(buffer: CFTypeRef, i: usize) -> usize {
+    forward_foreign!(
+        c"CVPixelBufferGetBytesPerRowOfPlane",
+        buffer,
+        fn(CFTypeRef, usize) -> usize,
+        (buffer, i)
+    );
     state(buffer)
         .and_then(|s| s.planes.get(i))
         .map_or(0, |p| p.row_bytes)
@@ -491,6 +600,12 @@ fn base_address(buffer: CFTypeRef, plane: Option<usize>) -> *mut c_void {
 }
 
 pub unsafe extern "C" fn CVPixelBufferGetBaseAddress(buffer: CFTypeRef) -> *mut c_void {
+    forward_foreign!(
+        c"CVPixelBufferGetBaseAddress",
+        buffer,
+        fn(CFTypeRef) -> *mut c_void,
+        (buffer)
+    );
     base_address(buffer, None)
 }
 
@@ -498,12 +613,24 @@ pub unsafe extern "C" fn CVPixelBufferGetBaseAddressOfPlane(
     buffer: CFTypeRef,
     i: usize,
 ) -> *mut c_void {
+    forward_foreign!(
+        c"CVPixelBufferGetBaseAddressOfPlane",
+        buffer,
+        fn(CFTypeRef, usize) -> *mut c_void,
+        (buffer, i)
+    );
     base_address(buffer, Some(i))
 }
 
 /// Only bit 0 is a documented mode; native CoreVideo ignores other bits.
 /// Unlocks are counted regardless of whether their flags match the lock.
-pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, _flags: u64) -> i32 {
+pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32 {
+    forward_foreign!(
+        c"CVPixelBufferLockBaseAddress",
+        buffer,
+        fn(CFTypeRef, u64) -> i32,
+        (buffer, flags)
+    );
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
@@ -517,7 +644,13 @@ pub unsafe extern "C" fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, _flags:
     }
 }
 
-pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, _flags: u64) -> i32 {
+pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32 {
+    forward_foreign!(
+        c"CVPixelBufferUnlockBaseAddress",
+        buffer,
+        fn(CFTypeRef, u64) -> i32,
+        (buffer, flags)
+    );
     let Some(state) = state(buffer) else {
         return INVALID_ARGUMENT;
     };
@@ -535,7 +668,13 @@ pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, _flag
 /// FIXME (ACCURACY): a buffer created with kCVPixelBufferIOSurfacePropertiesKey
 /// is IOSurface-backed on macOS; here it is CPU memory and this answers NULL,
 /// which callers must already handle for buffers made without that key.
-pub unsafe extern "C" fn CVPixelBufferGetIOSurface(_buffer: CFTypeRef) -> CFTypeRef {
+pub unsafe extern "C" fn CVPixelBufferGetIOSurface(buffer: CFTypeRef) -> CFTypeRef {
+    forward_foreign!(
+        c"CVPixelBufferGetIOSurface",
+        buffer,
+        fn(CFTypeRef) -> CFTypeRef,
+        (buffer)
+    );
     std::ptr::null()
 }
 
@@ -1770,6 +1909,47 @@ mod tests {
             CVPixelBufferRelease(out);
             corefoundation::api::CFRelease(attrs);
             corefoundation::api::CFRelease(number);
+        }
+    }
+
+    /// What VideoToolbox's output callback hands a guest on a Mac: a buffer
+    /// from Apple's CoreVideo, which has to be answered by Apple's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_host_buffer_is_answered_by_the_host_corevideo() {
+        type Create =
+            unsafe extern "C" fn(CFTypeRef, usize, usize, u32, CFTypeRef, *mut CFTypeRef) -> i32;
+        // SAFETY: a NUL-terminated path, and a handle deliberately leaked.
+        let handle = unsafe {
+            libc::dlopen(
+                c"/System/Library/Frameworks/CoreVideo.framework/CoreVideo".as_ptr(),
+                libc::RTLD_LAZY,
+            )
+        };
+        assert!(!handle.is_null());
+        let create = corefoundation::foreign::entry(c"CVPixelBufferCreate").unwrap();
+        unsafe {
+            let create: Create = std::mem::transmute(create);
+            let mut host = std::ptr::null();
+            assert_eq!(
+                create(
+                    std::ptr::null(),
+                    7,
+                    5,
+                    NV12_VIDEO,
+                    std::ptr::null(),
+                    &mut host
+                ),
+                SUCCESS
+            );
+            assert!(corefoundation::foreign::is(host));
+            assert_eq!(CVPixelBufferGetWidth(host), 7);
+            assert_eq!(CVPixelBufferGetPlaneCount(host), 2);
+            assert_eq!(CVPixelBufferGetWidthOfPlane(host, 1), 4);
+            assert_eq!(CVPixelBufferLockBaseAddress(host, 0), SUCCESS);
+            assert!(!CVPixelBufferGetBaseAddressOfPlane(host, 1).is_null());
+            assert_eq!(CVPixelBufferUnlockBaseAddress(host, 0), SUCCESS);
+            CVPixelBufferRelease(host);
         }
     }
 }
