@@ -7,6 +7,7 @@
 
 #![allow(non_snake_case)]
 
+use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use corefoundation::api::CFAllocatorRef;
@@ -16,6 +17,8 @@ use corefoundation::collections::{self, Number, number_type};
 use objc::class::Class;
 
 use crate::h264;
+
+pub type CMVideoFormatDescriptionRef = *mut c_void;
 
 /// `kCMFormatDescriptionError_InvalidParameter`.
 const INVALID_PARAMETER: i32 = -12710;

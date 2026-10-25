@@ -1,7 +1,8 @@
 #![allow(clippy::missing_safety_doc)]
 
-mod format_description;
+pub mod format_description;
 mod h264;
+pub mod sample_buffer;
 
 /// The extension keys and values, as the constant strings a guest imports.
 pub fn data_symbols() -> Vec<(String, u64)> {

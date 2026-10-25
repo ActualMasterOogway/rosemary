@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 exports.workspace = true
 corefoundation.workspace = true
+coremedia.workspace = true

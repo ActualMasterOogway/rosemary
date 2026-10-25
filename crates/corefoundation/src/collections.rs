@@ -6,6 +6,8 @@ use crate::base::{CFIndex, CFTypeRef};
 use crate::boxed::{contents, make};
 use crate::callbacks::Policy;
 
+pub type CFDictionaryRef = CFTypeRef;
+
 /// Register a class whose instances hold a `T`; see [`crate::boxed`].
 ///
 /// `superclass` is the abstract Foundation class the guest binds and asks
