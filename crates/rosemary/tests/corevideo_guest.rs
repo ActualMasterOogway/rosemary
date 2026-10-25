@@ -203,19 +203,28 @@ int main(void) {
     CHECK(CVPixelBufferGetWidth(retained) == 7);
     CVBufferRelease(retained);
 
-#ifdef ROSEMARY_GUEST
-    // The CPU implementation must reject capabilities it cannot provide.
-    const void *keys[] = { kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey };
-    const void *values[] = { kCFBooleanTrue };
-    CFDictionaryRef options = CFDictionaryCreate(NULL, keys, values, 1,
+    // GPU-shareable requests still give a buffer the CPU can lock.
+    CFDictionaryRef surface = CFDictionaryCreate(NULL, NULL, NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CHECK(surface != NULL);
+    const void *keys[] = {
+        kCVPixelBufferIOSurfacePropertiesKey,
+        kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey,
+        kCVPixelBufferMetalCompatibilityKey,
+    };
+    const void *values[] = { surface, kCFBooleanTrue, kCFBooleanTrue };
+    CFDictionaryRef options = CFDictionaryCreate(NULL, keys, values, 3,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CHECK(options != NULL);
-    CVPixelBufferRef unsupported = NULL;
-    CHECK(CVPixelBufferCreate(NULL, 7, 5, kCVPixelFormatType_32BGRA,
-                              options, &unsupported) == kCVReturnUnsupported);
-    CHECK(unsupported == NULL);
+    CVPixelBufferRef shareable = NULL;
+    CHECK(CVPixelBufferCreate(NULL, 7, 5, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                              options, &shareable) == kCVReturnSuccess);
+    CHECK(CVPixelBufferLockBaseAddress(shareable, 0) == kCVReturnSuccess);
+    CHECK(CVPixelBufferGetBaseAddressOfPlane(shareable, 1) != NULL);
+    CHECK(CVPixelBufferUnlockBaseAddress(shareable, 0) == kCVReturnSuccess);
+    CVPixelBufferRelease(shareable);
     CFRelease(options);
-#endif
+    CFRelease(surface);
 
     CVPixelBufferRef planar = NULL;
     CHECK(CVPixelBufferCreate(NULL, 7, 5, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,

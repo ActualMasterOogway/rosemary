@@ -184,39 +184,15 @@ fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
 }
 
 fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
+    // IOSurface and GPU-compatibility requests are met by the same CPU
+    // memory: every consumer of these buffers here reaches the pixels
+    // through the base-address API. The IOSurface properties must still be
+    // a dictionary, as CoreVideo validates them.
     let iosurface = attribute(attrs, "IOSurfaceProperties");
-    if !iosurface.is_null() {
-        // A requested IOSurface must be described by a CFDictionary, even
-        // though this CPU-only implementation cannot provide that backing.
-        if unsafe { corefoundation::collections::dictionary(iosurface) }.is_none() {
-            return Err(INVALID_ATTRIBUTES);
-        }
-        return Ok(true);
-    }
-    for name in [
-        "OpenGLCompatibility",
-        "OpenGLESCompatibility",
-        "MetalCompatibility",
-        "OpenGLTextureCacheCompatibility",
-        "OpenGLESTextureCacheCompatibility",
-        "IOSurfaceCoreAnimationCompatibility",
-        "IOSurfaceOpenGLFBOCompatibility",
-        "IOSurfaceOpenGLESFBOCompatibility",
-        "IOSurfaceOpenGLTextureCompatibility",
-        "IOSurfaceOpenGLESTextureCompatibility",
-        "IOSurfacePurgeable",
-    ] {
-        let value = attribute(attrs, name);
-        if !value.is_null() {
-            // CoreVideo ignores non-Boolean values for these flags. Only an
-            // explicit CFBoolean true requests backing this CPU buffer lacks.
-            if unsafe { corefoundation::api::CFGetTypeID(value) }
-                == unsafe { corefoundation::api::CFBooleanGetTypeID() }
-                && unsafe { corefoundation::api::CFBooleanGetValue(value) } != 0
-            {
-                return Ok(true);
-            }
-        }
+    if !iosurface.is_null()
+        && unsafe { corefoundation::collections::dictionary(iosurface) }.is_none()
+    {
+        return Err(INVALID_ATTRIBUTES);
     }
     // CPU-backed BGRA and YCbCr planes are already accessible to software
     // CoreGraphics, regardless of the CF type of a compatibility hint.
@@ -555,6 +531,10 @@ pub unsafe extern "C" fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, _flag
 }
 
 /// A CPU-allocated CVPixelBuffer has no IOSurface backing.
+///
+/// FIXME (ACCURACY): a buffer created with kCVPixelBufferIOSurfacePropertiesKey
+/// is IOSurface-backed on macOS; here it is CPU memory and this answers NULL,
+/// which callers must already handle for buffers made without that key.
 pub unsafe extern "C" fn CVPixelBufferGetIOSurface(_buffer: CFTypeRef) -> CFTypeRef {
     std::ptr::null()
 }
@@ -850,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_alignments_and_unsupported_backings() {
+    fn requested_alignments_and_gpu_backing_requests() {
         use corefoundation::callbacks::Policy;
         use corefoundation::collections::number_type;
 
@@ -916,9 +896,9 @@ mod tests {
             );
             assert_eq!(
                 CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, dictionary, &mut out),
-                UNSUPPORTED
+                SUCCESS
             );
-            assert!(out.is_null());
+            CVPixelBufferRelease(out);
             corefoundation::api::CFRelease(dictionary);
 
             let empty = corefoundation::collections::new_dictionary(
@@ -927,11 +907,15 @@ mod tests {
                 Policy::from_type_callbacks(),
                 false,
             );
+            // The usual way to ask for a Metal- or GL-shareable buffer.
             let dictionary = attrs("IOSurfaceProperties", empty);
-            assert_eq!(
-                CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, dictionary, &mut out),
-                UNSUPPORTED
-            );
+            for format in [BGRA, NV12_VIDEO, I420_VIDEO] {
+                assert_eq!(
+                    CVPixelBufferCreate(std::ptr::null(), 7, 5, format, dictionary, &mut out),
+                    SUCCESS
+                );
+                CVPixelBufferRelease(out);
+            }
             corefoundation::api::CFRelease(dictionary);
             corefoundation::api::CFRelease(empty);
 
@@ -1214,10 +1198,10 @@ mod tests {
                     let mut out = std::ptr::null();
                     assert_eq!(
                         CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, required, &mut out),
-                        UNSUPPORTED,
+                        SUCCESS,
                         "{name} genuine GPU request"
                     );
-                    assert!(out.is_null());
+                    CVPixelBufferRelease(out);
                     corefoundation::api::CFRelease(required);
                 }
             }
@@ -1373,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_requirements_reject_without_compatible_backing() {
+    fn gpu_requests_get_cpu_backing_and_custom_allocators_are_refused() {
         use corefoundation::callbacks::Policy;
         use corefoundation::collections::number_type;
         let policy = Policy::from_type_callbacks();
@@ -1402,10 +1386,14 @@ mod tests {
                 );
                 assert_eq!(
                     CVPixelBufferCreate(std::ptr::null(), 7, 5, BGRA, required, &mut out),
-                    UNSUPPORTED,
+                    SUCCESS,
                     "{name}"
                 );
-                assert!(out.is_null(), "{name}");
+                assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
+                assert!(!CVPixelBufferGetBaseAddress(out).is_null(), "{name}");
+                assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
+                assert!(CVPixelBufferGetIOSurface(out).is_null(), "{name}");
+                CVPixelBufferRelease(out);
                 corefoundation::api::CFRelease(required);
 
                 let not_required = corefoundation::collections::new_dictionary(
