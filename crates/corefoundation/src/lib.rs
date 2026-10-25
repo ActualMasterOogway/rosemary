@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod base;
+pub mod boxed;
 pub mod calendar;
 pub mod callbacks;
 pub mod collections;

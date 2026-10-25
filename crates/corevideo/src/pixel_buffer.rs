@@ -12,7 +12,6 @@ use std::sync::{Mutex, OnceLock};
 
 use corefoundation::base::CFTypeRef;
 use objc::class::Class;
-use objc::object::Id;
 
 const SUCCESS: i32 = 0;
 const ERROR: i32 = -6660;
@@ -101,48 +100,23 @@ struct State {
     locks: Mutex<Locks>,
 }
 
-#[repr(C)]
-struct Buffer {
-    isa: *const c_void,
-    state: *mut State,
-}
-
 fn class() -> &'static Class {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let addr = *CLASS.get_or_init(|| {
         corefoundation::bootstrap();
-        let class =
-            corefoundation::base::register(c"__NSCVPixelBuffer", None, size_of::<Buffer>(), true);
-        class.replace_method(
-            objc::sel::get("dealloc"),
-            dealloc as *const c_void,
-            c"v16@0:8",
-        );
+        let class = corefoundation::boxed::register::<State>(c"__NSCVPixelBuffer", None, true);
         objc::class::ptr(class) as usize
     });
     // SAFETY: the registered class lives for the process.
     unsafe { &*(addr as *const Class) }
 }
 
-unsafe extern "C" fn dealloc(receiver: Id, _sel: objc::sel::Sel) {
-    // SAFETY: this instance has a State allocated with Box::into_raw at creation.
-    let buffer = receiver as *mut Buffer;
-    unsafe {
-        let state = std::mem::replace(&mut (*buffer).state, std::ptr::null_mut());
-        if !state.is_null() {
-            drop(Box::from_raw(state));
-        }
-        objc::arc::finalize(receiver);
-    }
-}
-
 fn state<'a>(buffer: CFTypeRef) -> Option<&'a State> {
-    // SAFETY: caller holds a live CF object; check its class before inspecting it.
-    if buffer.is_null() || !unsafe { corefoundation::base::is_kind_of(buffer, class()) } {
+    if buffer.is_null() {
         return None;
     }
-    // SAFETY: Buffer layout and State pointer are initialized by CVPixelBufferCreate.
-    unsafe { (*(buffer as *const Buffer)).state.as_ref() }
+    // SAFETY: caller holds a live CF object; its class is checked first.
+    unsafe { corefoundation::boxed::contents::<State>(buffer, class()) }.map(|s| &*s)
 }
 
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
@@ -442,26 +416,24 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
             }
         }
     }
-    // SAFETY: Buffer has the exact registered class layout, and owns its State.
-    let buffer = unsafe { corefoundation::base::allocate::<Buffer>(class()) };
+    let buffer = corefoundation::boxed::make(
+        class(),
+        State {
+            width,
+            height,
+            format,
+            planes,
+            row_bytes,
+            data,
+            data_size: size,
+            locks: Mutex::new(Locks::default()),
+        },
+    );
     if buffer.is_null() {
         return ALLOCATION_FAILED;
     }
-    let state = Box::new(State {
-        width,
-        height,
-        format,
-        planes,
-        row_bytes,
-        data,
-        data_size: size,
-        locks: Mutex::new(Locks::default()),
-    });
-    // SAFETY: fresh object, fully initialized before publication.
-    unsafe {
-        (*buffer).state = Box::into_raw(state);
-        *out = buffer as CFTypeRef;
-    }
+    // SAFETY: caller supplied a writable pointer.
+    unsafe { *out = buffer };
     SUCCESS
 }
 
