@@ -164,8 +164,9 @@ fn encode_frame(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
     Ok(())
 }
 
-/// `CGSize CVImageBufferGetEncodedSize(CVImageBufferRef imageBuffer)`
-fn encoded_size(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+/// `CGSize CVImageBufferGetEncodedSize(CVImageBufferRef imageBuffer)`, and
+/// `CVImageBufferGetDisplaySize`, which is declared the same way.
+fn image_size(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     // SAFETY: the declaration from CVImageBuffer.h; a `CGSize` is laid out as a
     // `CGPoint` is.
     let f = unsafe { entry::<extern "C" fn(u64) -> CgPoint>(symbol)? };
@@ -307,7 +308,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "VTCompressionSessionEncodeFrame" => {
             bind!("VTCompressionSessionEncodeFrame" => encode_frame)
         }
-        "CVImageBufferGetEncodedSize" => bind!("CVImageBufferGetEncodedSize" => encoded_size),
+        "CVImageBufferGetEncodedSize" => bind!("CVImageBufferGetEncodedSize" => image_size),
+        "CVImageBufferGetDisplaySize" => bind!("CVImageBufferGetDisplaySize" => image_size),
         "CAFrameRateRangeMake" => bind!("CAFrameRateRangeMake" => frame_rate_range_make),
         _ => return None,
     })
