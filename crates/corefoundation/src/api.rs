@@ -13,16 +13,14 @@ pub type Boolean = u8;
 
 /// Everything a `CFCreate` call ignores about its allocator.
 ///
-/// Apple's allocators exist so a caller can account for, or place, the memory a
-/// framework takes. Nothing in this tree does either, and a guest that passes
-/// `kCFAllocatorDefault` - which is null - is asking for the default one, which
-/// is the only one here.
+/// Apple's allocators exist so callers can account for or place framework
+/// memory. This implementation supports its standard malloc-backed allocator
+/// identities, but not arbitrary custom allocation callbacks.
 pub type CFAllocatorRef = *const c_void;
 
-/// The default allocator is represented by null, as it is by the allocator
-/// globals this crate publishes. A custom allocator still needs an object of
-/// its own: callers retain and release it, even though this CoreFoundation does
-/// not route its allocations through the callback table.
+/// `kCFAllocatorDefault` is a NULL sentinel; `CFAllocatorGetDefault()` instead
+/// returns the non-null system-default singleton. Custom allocators retain
+/// their own identity, but this CoreFoundation does not invoke their callbacks.
 fn allocator_class() -> &'static objc::class::Class {
     crate::base::register(c"__NSCFAllocator", None, std::mem::size_of::<usize>(), true)
 }
@@ -32,7 +30,87 @@ pub unsafe extern "C" fn CFAllocatorGetTypeID() -> CFTypeID {
 }
 
 pub unsafe extern "C" fn CFAllocatorGetDefault() -> CFAllocatorRef {
-    std::ptr::null()
+    standard_allocator(StandardAllocator::SystemDefault)
+}
+
+/// Distinguished singleton allocators exported as CFAllocatorRef globals.
+/// Unlike the default (NULL), these must remain distinguishable from custom
+/// allocators and from kCFAllocatorNull, which cannot allocate memory.
+#[derive(Clone, Copy)]
+pub enum StandardAllocator {
+    SystemDefault,
+    Malloc,
+    MallocZone,
+    Null,
+}
+
+pub fn standard_allocator(kind: StandardAllocator) -> CFAllocatorRef {
+    use std::sync::OnceLock;
+    static SYSTEM: OnceLock<usize> = OnceLock::new();
+    static MALLOC: OnceLock<usize> = OnceLock::new();
+    static ZONE: OnceLock<usize> = OnceLock::new();
+    static NULL: OnceLock<usize> = OnceLock::new();
+    let cell = match kind {
+        StandardAllocator::SystemDefault => &SYSTEM,
+        StandardAllocator::Malloc => &MALLOC,
+        StandardAllocator::MallocZone => &ZONE,
+        StandardAllocator::Null => &NULL,
+    };
+    *cell.get_or_init(|| {
+        let object = objc::object::create_instance(allocator_class(), 0);
+        // Standard allocator globals are process-lifetime singletons; a
+        // client's CFRelease must never invalidate their exported pointers.
+        objc::arc::make_immortal(object);
+        object as usize
+    }) as CFAllocatorRef
+}
+
+pub fn supports_malloc_allocator(allocator: CFAllocatorRef) -> bool {
+    allocator.is_null()
+        || [
+            StandardAllocator::SystemDefault,
+            StandardAllocator::Malloc,
+            StandardAllocator::MallocZone,
+        ]
+        .into_iter()
+        .any(|kind| allocator == standard_allocator(kind))
+}
+
+/// The allocator to hand a host framework in place of `allocator`.
+///
+/// This runtime's allocators are its own objects, which the host's
+/// CoreFoundation would read as its own `CFAllocator`. A standard one maps to
+/// the host's global of the same name, and any other to null - the host's
+/// default - since this runtime does not run custom allocator callbacks
+/// either. Null, and an allocator the host made, pass through.
+#[cfg(target_os = "macos")]
+pub fn host_allocator(allocator: CFAllocatorRef) -> CFAllocatorRef {
+    // SAFETY: null or an allocator object, whose first word is readable.
+    if allocator.is_null() || unsafe { crate::foreign::is(allocator) } {
+        return allocator;
+    }
+    [
+        (
+            StandardAllocator::SystemDefault,
+            c"kCFAllocatorSystemDefault",
+        ),
+        (StandardAllocator::Malloc, c"kCFAllocatorMalloc"),
+        (StandardAllocator::MallocZone, c"kCFAllocatorMallocZone"),
+        (StandardAllocator::Null, c"kCFAllocatorNull"),
+    ]
+    .into_iter()
+    .find(|(kind, _)| allocator == standard_allocator(*kind))
+    .and_then(|(_, name)| crate::foreign::entry(name))
+    // SAFETY: each of those names is a `CFAllocatorRef` variable.
+    .map_or(std::ptr::null(), |cell| unsafe {
+        *(cell as *const CFAllocatorRef)
+    })
+}
+
+/// Off Darwin there is no host CoreFoundation to hand an allocator to.
+#[cfg(not(target_os = "macos"))]
+pub fn host_allocator(allocator: CFAllocatorRef) -> CFAllocatorRef {
+    allocator
 }
 
 pub unsafe extern "C" fn CFAllocatorCreate(
@@ -1710,7 +1788,7 @@ pub unsafe extern "C" fn CFDataCreateCopy(allocator: CFAllocatorRef, data: CFTyp
         return unsafe {
             let f: unsafe extern "C" fn(CFAllocatorRef, CFTypeRef) -> CFTypeRef =
                 std::mem::transmute(f);
-            f(allocator, data)
+            f(host_allocator(allocator), data)
         };
     }
     // silence clippy warning on non-macos

@@ -657,6 +657,7 @@ dependencies = [
  "corefoundation",
  "darwin",
  "exports",
+ "libc",
  "objc",
  "sdl3",
 ]
