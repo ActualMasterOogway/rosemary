@@ -162,7 +162,7 @@ static FRAMEWORKS: &[Framework] = &[
         version: 'A',
         umbrellas: &[],
         provide: Some(videotoolbox::provide),
-        data: None,
+        data: Some(videotoolbox::data_symbols),
         symbol: Some(videotoolbox::symbol),
     },
     Framework {
