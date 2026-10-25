@@ -161,6 +161,7 @@ version = "0.4.1"
 dependencies = [
  "chrome",
  "corefoundation",
+ "coretext",
  "darwin",
  "exports",
  "foundation",
@@ -656,6 +657,18 @@ dependencies = [
  "exports",
  "foundation",
  "libc",
+ "prefix",
+]
+
+[[package]]
+name = "coretext"
+version = "0.4.1"
+dependencies = [
+ "chrome",
+ "corefoundation",
+ "exports",
+ "foundation",
+ "owned_ttf_parser",
  "prefix",
 ]
 
@@ -2604,6 +2617,7 @@ dependencies = [
  "corefoundation",
  "coremedia",
  "coreservices",
+ "coretext",
  "corevideo",
  "darwin",
  "exports",

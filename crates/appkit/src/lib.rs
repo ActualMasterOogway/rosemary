@@ -34,7 +34,7 @@ pub mod classes;
 pub mod color;
 mod controls;
 mod coreanimation;
-pub mod coretext;
+mod ctdraw;
 mod ctline;
 pub mod cursor;
 pub(crate) mod decode;
@@ -368,7 +368,7 @@ exports::exports! {
     groups {
         ctline,
         pasteboard_manager,
-        coretext,
+        ctdraw,
         cgfont,
         hitheme,
         launchservices,
@@ -392,7 +392,6 @@ static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX,
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = classes::class_data();
-    out.extend(coretext::data_symbols());
     out.extend(cgcontext::data_symbols());
     out.push(("_NSApp".to_string(), ns_app_cell()));
     out.push((

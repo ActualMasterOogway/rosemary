@@ -1089,8 +1089,7 @@ pub unsafe extern "C" fn CGContextSelectFont(
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
     let name = foundation::string::from_str(&name);
     // SAFETY: a string this call made.
-    let font =
-        unsafe { crate::coretext::CTFontCreateWithName(name as CFTypeRef, size, std::ptr::null()) };
+    let font = unsafe { coretext::CTFontCreateWithName(name as CFTypeRef, size, std::ptr::null()) };
     objc::arc::release(name);
     if let Some(state) = gstate(context) {
         state.font = Retained::new(font);
@@ -1135,7 +1134,7 @@ pub unsafe extern "C" fn CGContextSetTextDrawingMode(context: CFTypeRef, mode: i
 /// The face the state's font draws with.
 fn state_face(context: CFTypeRef) -> Option<(std::sync::Arc<crate::fonts::LoadedFace>, f64)> {
     let state = gstate(context)?;
-    let face = crate::coretext::loaded(state.font.as_ref()?.0)?;
+    let face = coretext::loaded(state.font.as_ref()?.0)?;
     Some((face, state.font_size))
 }
 

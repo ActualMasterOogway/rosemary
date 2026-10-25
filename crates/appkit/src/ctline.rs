@@ -16,8 +16,6 @@ use foundation::geometry::{NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::coretext;
-
 /// One glyph of a run: the glyph, its pen position from the line's start,
 /// its advance, and the UTF-16 index of the character it draws.
 #[derive(Clone, Copy)]
@@ -467,7 +465,7 @@ pub unsafe extern "C" fn CTLineDraw(line: CFTypeRef, context: CFTypeRef) {
         let positions: Vec<NSPoint> = shown().map(|g| NSPoint { x: g.x, y: 0.0 }).collect();
         // SAFETY: as many glyphs as positions.
         unsafe {
-            coretext::CTFontDrawGlyphs(
+            crate::ctdraw::CTFontDrawGlyphs(
                 run.font,
                 glyphs.as_ptr(),
                 positions.as_ptr(),

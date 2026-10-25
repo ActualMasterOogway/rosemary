@@ -110,6 +110,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(appkit::symbol),
     },
     Framework {
+        leaf: "CoreText",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(coretext::provide),
+        data: Some(coretext::data_symbols),
+        symbol: Some(coretext::symbol),
+    },
+    Framework {
         leaf: "ApplicationServices",
         version: 'A',
         umbrellas: &[],

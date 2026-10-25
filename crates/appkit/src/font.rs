@@ -79,8 +79,7 @@ unsafe extern "C" fn font_with_family(
 /// `NSFont` is toll-free bridged to `CTFont`, so the font is the Core Text one.
 unsafe extern "C" fn font_with_name(_class: Id, _sel: Sel, name: Id, size: f64) -> Id {
     // SAFETY: null or a string, as the selector requires.
-    let font =
-        unsafe { crate::coretext::CTFontCreateWithName(name as *const _, size, std::ptr::null()) };
+    let font = unsafe { coretext::CTFontCreateWithName(name as *const _, size, std::ptr::null()) };
     // SAFETY: a fresh object, or null.
     unsafe { autorelease(font) }
 }
@@ -89,7 +88,7 @@ unsafe extern "C" fn font_with_name(_class: Id, _sel: Sel, name: Id, size: f64) 
 /// fallback family is the only one there is to pick from.
 unsafe extern "C" fn system_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
     // SAFETY: `kCTFontUIFontSystem` with no language.
-    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
+    let font = unsafe { coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
     // SAFETY: a fresh object, or null.
     unsafe { autorelease(font) }
 }
@@ -97,7 +96,7 @@ unsafe extern "C" fn system_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id
 /// `+userFixedPitchFontOfSize:`, the monospaced `kCTFontUIFontUserFixedPitch`.
 unsafe extern "C" fn user_fixed_pitch_font_of_size(_class: Id, _sel: Sel, size: f64) -> Id {
     // SAFETY: `kCTFontUIFontUserFixedPitch` with no language.
-    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(1, size, std::ptr::null()) };
+    let font = unsafe { coretext::CTFontCreateUIFontForLanguage(1, size, std::ptr::null()) };
     // SAFETY: a fresh object, or null.
     unsafe { autorelease(font) }
 }
@@ -150,7 +149,7 @@ unsafe extern "C" fn label_font_size(_class: Id, _sel: Sel) -> f64 {
 fn ui_font(size: f64, default: f64) -> Id {
     let size = if size > 0.0 { size } else { default };
     // SAFETY: `kCTFontUIFontSystem` with no language.
-    let font = unsafe { crate::coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
+    let font = unsafe { coretext::CTFontCreateUIFontForLanguage(2, size, std::ptr::null()) };
     // SAFETY: a fresh object, or null.
     unsafe { autorelease(font) }
 }
@@ -176,7 +175,7 @@ unsafe extern "C" fn font_descriptor(receiver: Id, _sel: Sel) -> Id {
 /// `-[NSFontDescriptor symbolicTraits]`, `CTFontSymbolicTraits` bits.
 unsafe extern "C" fn symbolic_traits(receiver: Id, _sel: Sel) -> u32 {
     // SAFETY: a font or descriptor dictionary this runtime made.
-    unsafe { crate::coretext::CTFontGetSymbolicTraits(receiver as *const _) }
+    unsafe { coretext::CTFontGetSymbolicTraits(receiver as *const _) }
 }
 
 /// `-[NSFontManager availableFontFamilies]`: every family the face database
@@ -295,70 +294,66 @@ unsafe fn autoreleased(string: *const std::ffi::c_void) -> Id {
 
 unsafe extern "C" fn font_family_name(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: a font this runtime made; the copy is +1.
-    unsafe { autoreleased(crate::coretext::CTFontCopyFamilyName(receiver as *const _)) }
+    unsafe { autoreleased(coretext::CTFontCopyFamilyName(receiver as *const _)) }
 }
 
 unsafe extern "C" fn font_name(receiver: Id, _sel: Sel) -> Id {
     // SAFETY: as above.
-    unsafe {
-        autoreleased(crate::coretext::CTFontCopyPostScriptName(
-            receiver as *const _,
-        ))
-    }
+    unsafe { autoreleased(coretext::CTFontCopyPostScriptName(receiver as *const _)) }
 }
 
 unsafe extern "C" fn font_point_size(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetSize(receiver as *const _) }
+    unsafe { coretext::CTFontGetSize(receiver as *const _) }
 }
 
 /// `NSFont`'s metrics, which are CoreText's with AppKit's sign for the
 /// descender: below the baseline is negative.
 unsafe extern "C" fn ascender(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: a font dictionary this runtime made.
-    unsafe { crate::coretext::CTFontGetAscent(receiver as *const _) }
+    unsafe { coretext::CTFontGetAscent(receiver as *const _) }
 }
 
 unsafe extern "C" fn descender(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    -unsafe { crate::coretext::CTFontGetDescent(receiver as *const _) }
+    -unsafe { coretext::CTFontGetDescent(receiver as *const _) }
 }
 
 unsafe extern "C" fn leading(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetLeading(receiver as *const _) }
+    unsafe { coretext::CTFontGetLeading(receiver as *const _) }
 }
 
 unsafe extern "C" fn cap_height(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetCapHeight(receiver as *const _) }
+    unsafe { coretext::CTFontGetCapHeight(receiver as *const _) }
 }
 
 unsafe extern "C" fn x_height(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetXHeight(receiver as *const _) }
+    unsafe { coretext::CTFontGetXHeight(receiver as *const _) }
 }
 
 unsafe extern "C" fn underline_position(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetUnderlinePosition(receiver as *const _) }
+    unsafe { coretext::CTFontGetUnderlinePosition(receiver as *const _) }
 }
 
 unsafe extern "C" fn underline_thickness(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetUnderlineThickness(receiver as *const _) }
+    unsafe { coretext::CTFontGetUnderlineThickness(receiver as *const _) }
 }
 
 unsafe extern "C" fn italic_angle(receiver: Id, _sel: Sel) -> f64 {
     // SAFETY: as above.
-    unsafe { crate::coretext::CTFontGetSlantAngle(receiver as *const _) }
+    unsafe { coretext::CTFontGetSlantAngle(receiver as *const _) }
 }
 
 /// `-[NSFontDescriptor fontDescriptorByAddingAttributes:]`.
 unsafe extern "C" fn descriptor_adding(receiver: Id, _sel: Sel, attributes: Id) -> Id {
     // SAFETY: a descriptor and an attribute dictionary.
     let made = unsafe {
-        crate::coretext::CTFontDescriptorCreateCopyWithAttributes(
+        coretext::CTFontDescriptorCreateCopyWithAttributes(
             receiver as *const _,
             attributes as *const _,
         )
@@ -370,11 +365,7 @@ unsafe extern "C" fn descriptor_adding(receiver: Id, _sel: Sel, attributes: Id) 
 unsafe extern "C" fn font_with_descriptor(_class: Id, _sel: Sel, descriptor: Id, size: f64) -> Id {
     // SAFETY: a descriptor dictionary; no matrix.
     let made = unsafe {
-        crate::coretext::CTFontCreateWithFontDescriptor(
-            descriptor as *const _,
-            size,
-            std::ptr::null(),
-        )
+        coretext::CTFontCreateWithFontDescriptor(descriptor as *const _, size, std::ptr::null())
     };
     objc::arc::autorelease(made as Id)
 }
@@ -382,8 +373,7 @@ unsafe extern "C" fn font_with_descriptor(_class: Id, _sel: Sel, descriptor: Id,
 /// `+[NSFontDescriptor fontDescriptorWithFontAttributes:]`.
 unsafe extern "C" fn descriptor_with_attributes(_class: Id, _sel: Sel, attributes: Id) -> Id {
     // SAFETY: an attribute dictionary.
-    let made =
-        unsafe { crate::coretext::CTFontDescriptorCreateWithAttributes(attributes as *const _) };
+    let made = unsafe { coretext::CTFontDescriptorCreateWithAttributes(attributes as *const _) };
     objc::arc::autorelease(made as Id)
 }
 
