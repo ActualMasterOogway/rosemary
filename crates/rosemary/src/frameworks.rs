@@ -419,6 +419,73 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
         "_kCVPixelBufferExtendedPixelsBottomKey",
         "ExtendedPixelsBottom",
     ),
+    // Attachment keys and values a decoder tags a frame with, and the pool
+    // keys; the texts are Apple's, as a guest may compare against a CFSTR.
+    (
+        "_kCVBufferPropagatedAttachmentsKey",
+        "PropagatedAttachments",
+    ),
+    (
+        "_kCVBufferNonPropagatedAttachmentsKey",
+        "NonPropagatedAttachments",
+    ),
+    (
+        "_kCVImageBufferCGColorSpaceKey",
+        "CVImageBufferCGColorSpace",
+    ),
+    ("_kCVImageBufferCleanApertureKey", "CVCleanAperture"),
+    ("_kCVImageBufferPixelAspectRatioKey", "CVPixelAspectRatio"),
+    ("_kCVImageBufferFieldCountKey", "CVFieldCount"),
+    ("_kCVImageBufferFieldDetailKey", "CVFieldDetail"),
+    ("_kCVImageBufferYCbCrMatrixKey", "CVImageBufferYCbCrMatrix"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_601_4", "ITU_R_601_4"),
+    (
+        "_kCVImageBufferYCbCrMatrix_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferColorPrimariesKey",
+        "CVImageBufferColorPrimaries",
+    ),
+    ("_kCVImageBufferColorPrimaries_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferColorPrimaries_EBU_3213", "EBU_3213"),
+    ("_kCVImageBufferColorPrimaries_SMPTE_C", "SMPTE_C"),
+    ("_kCVImageBufferColorPrimaries_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferTransferFunctionKey",
+        "CVImageBufferTransferFunction",
+    ),
+    ("_kCVImageBufferTransferFunction_ITU_R_709_2", "ITU_R_709_2"),
+    (
+        "_kCVImageBufferTransferFunction_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferTransferFunction_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferChromaLocationTopFieldKey",
+        "CVImageBufferChromaLocationTopField",
+    ),
+    (
+        "_kCVImageBufferChromaLocationBottomFieldKey",
+        "CVImageBufferChromaLocationBottomField",
+    ),
+    ("_kCVImageBufferChromaLocation_Left", "Left"),
+    ("_kCVImageBufferChromaLocation_Center", "Center"),
+    ("_kCVImageBufferChromaLocation_TopLeft", "TopLeft"),
+    ("_kCVImageBufferChromaLocation_Top", "Top"),
+    ("_kCVImageBufferChromaLocation_BottomLeft", "BottomLeft"),
+    ("_kCVImageBufferChromaLocation_Bottom", "Bottom"),
+    (
+        "_kCVPixelBufferPoolMinimumBufferCountKey",
+        "MinimumBufferCount",
+    ),
+    ("_kCVPixelBufferPoolMaximumBufferAgeKey", "MaximumBufferAge"),
+    (
+        "_kCVPixelBufferPoolAllocationThresholdKey",
+        "kCVPixelBufferPoolAllocationThresholdKey",
+    ),
 ];
 
 fn media_constants() -> Vec<(String, u64)> {
