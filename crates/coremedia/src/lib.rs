@@ -1,6 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 
-pub mod format_description;
+mod format_description;
 mod h264;
 
 /// The extension keys and values, as the constant strings a guest imports.

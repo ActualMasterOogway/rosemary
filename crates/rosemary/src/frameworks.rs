@@ -150,6 +150,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(corevideo::symbol),
     },
     Framework {
+        leaf: "VideoToolbox",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(videotoolbox::provide),
+        data: None,
+        symbol: Some(videotoolbox::symbol),
+    },
+    Framework {
         leaf: "IOSurface",
         version: 'A',
         umbrellas: &[],

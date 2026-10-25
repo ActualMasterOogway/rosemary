@@ -33,6 +33,7 @@ forcefeedback.workspace = true
 network.workspace = true
 opencl.workspace = true
 metal.workspace = true
+videotoolbox.workspace = true
 gimli.workspace = true
 libc.workspace = true
 static_init.workspace = true
