@@ -327,11 +327,12 @@ fn layout(
         return Err(ALLOCATION_FAILED);
     }
     // Pointer alignment and row-byte divisibility are different contracts.
-    // The base must align to each requested plane multiple while retaining
-    // the runtime's minimum 64-byte backing alignment.
-    let address_alignment = lcm(DEFAULT_ALIGNMENT, row_alignment)
-        .and_then(|a| lcm(a, plane_alignment))
-        .ok_or(ALLOCATION_FAILED)?;
+    // Plane addresses are multiples of the plane alignment, which already
+    // includes the 64-byte minimum. Only the power-of-two part of a row
+    // multiple can align every row start, so only that part reaches the
+    // base; an odd factor would just inflate the allocation.
+    let row_address = 1 << row_alignment.trailing_zeros();
+    let address_alignment = lcm(plane_alignment, row_address).ok_or(ALLOCATION_FAILED)?;
     Ok((planes, row_bytes, size, address_alignment))
 }
 
@@ -1744,5 +1745,43 @@ mod tests {
             t.join().unwrap();
         }
         unsafe { CVPixelBufferRelease(b) };
+    }
+
+    #[test]
+    fn an_odd_row_multiple_does_not_inflate_the_allocation() {
+        use corefoundation::callbacks::Policy;
+        use corefoundation::collections::number_type;
+        let policy = Policy::from_type_callbacks();
+        // 4097 makes each row 262208 bytes; 1023 rows sit just under the cap,
+        // and aligning the base to the whole row multiple would cross it.
+        let multiple: i64 = 4097;
+        unsafe {
+            let number = corefoundation::api::CFNumberCreate(
+                std::ptr::null(),
+                number_type::SINT64,
+                (&multiple as *const i64).cast(),
+            );
+            let attrs = corefoundation::collections::new_dictionary(
+                &[(key("BytesPerRowAlignment"), number)],
+                policy,
+                policy,
+                false,
+            );
+            let mut out = std::ptr::null();
+            assert_eq!(
+                CVPixelBufferCreate(std::ptr::null(), 16384, 1023, BGRA, attrs, &mut out),
+                SUCCESS
+            );
+            assert_eq!(CVPixelBufferGetBytesPerRow(out), 262208);
+            assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
+            assert_eq!(
+                CVPixelBufferGetBaseAddress(out) as usize % DEFAULT_ALIGNMENT,
+                0
+            );
+            assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
+            CVPixelBufferRelease(out);
+            corefoundation::api::CFRelease(attrs);
+            corefoundation::api::CFRelease(number);
+        }
     }
 }
