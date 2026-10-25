@@ -102,7 +102,9 @@ static FRAMEWORKS: &[Framework] = &[
     Framework {
         leaf: "AppKit",
         version: 'C',
-        umbrellas: &["Cocoa"],
+        // AppKit's crate also implements Quartz, so a `dlopen` of
+        // CoreGraphics by path has to find these too.
+        umbrellas: &["Cocoa", "CoreGraphics"],
         provide: Some(appkit::provide),
         data: Some(appkit::data_symbols),
         symbol: Some(appkit::symbol),
@@ -130,16 +132,6 @@ static FRAMEWORKS: &[Framework] = &[
         provide: Some(audiotoolbox::provide),
         data: None,
         symbol: Some(audiotoolbox::symbol),
-    },
-    // CoreGraphics is provided by the AppKit/Quartz shim. Its own install
-    // name must resolve two-level imports, not only flat AppKit symbols.
-    Framework {
-        leaf: "CoreGraphics",
-        version: 'A',
-        umbrellas: &[],
-        provide: None,
-        data: None,
-        symbol: Some(appkit::symbol),
     },
     Framework {
         leaf: "CoreVideo",
