@@ -571,6 +571,8 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
         "_kCGImageSourceTypeIdentifierHint",
         "kCGImageSourceTypeIdentifierHint",
     ),
+    ("_kUTTypeImage", "public.image"),
+    ("_kUTTypeMovie", "public.movie"),
     ("_kUTTypePNG", "public.png"),
     ("_kUTTypeURL", "public.url"),
     ("_kUTTypePlainText", "public.plain-text"),
