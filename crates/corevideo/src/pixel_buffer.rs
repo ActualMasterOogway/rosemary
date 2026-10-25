@@ -147,34 +147,40 @@ fn attribute(attrs: CFTypeRef, name: &str) -> CFTypeRef {
     unsafe { corefoundation::api::CFDictionaryGetValue(attrs, key(name)) }
 }
 
-fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
+/// A numeric attribute as the CoreVideo allocator reads it: floating values
+/// truncate toward zero, and absent or non-numeric values and NaN act like
+/// zero. A negative value or an infinity fails as an allocation request, not
+/// as a malformed key. CFBoolean shares a number-like representation in
+/// CoreFoundation; `booleans` says whether this attribute reads it as one.
+fn numeric_attribute(attrs: CFTypeRef, name: &str, booleans: bool) -> Result<usize, i32> {
     let value = attribute(attrs, name);
-    // The CoreVideo allocator reads these CFNumbers as integer multiples:
-    // floating values truncate toward zero, and zero selects the default.
-    // Non-numeric CF values also select that default on macOS.
-    let number = if value.is_null() {
+    let number = if value.is_null()
+        || (!booleans
+            && unsafe { corefoundation::api::CFGetTypeID(value) }
+                == unsafe { corefoundation::api::CFBooleanGetTypeID() })
+    {
         None
     } else {
         // SAFETY: the guest supplied a CF value from the attributes dictionary.
         unsafe { corefoundation::collections::number(value) }
     };
-    let multiple = match number {
+    let n = match number {
         Some(corefoundation::collections::Number::Integer(n)) => n,
-        Some(corefoundation::collections::Number::Float(n)) => {
-            if n.is_infinite() {
-                return Err(ALLOCATION_FAILED);
-            }
-            n as i64
+        Some(corefoundation::collections::Number::Float(n)) if n.is_infinite() => {
+            return Err(ALLOCATION_FAILED);
         }
+        Some(corefoundation::collections::Number::Float(n)) => n as i64,
         None => 0,
     };
-    if multiple < 0 {
-        return Err(ALLOCATION_FAILED);
+    usize::try_from(n).map_err(|_| ALLOCATION_FAILED)
+}
+
+/// An alignment multiple, where zero selects the default.
+fn alignment_attribute(attrs: CFTypeRef, name: &str) -> Result<usize, i32> {
+    match numeric_attribute(attrs, name, true)? {
+        0 => Ok(DEFAULT_ALIGNMENT),
+        multiple => Ok(multiple),
     }
-    if multiple == 0 {
-        return Ok(DEFAULT_ALIGNMENT);
-    }
-    usize::try_from(multiple).map_err(|_| ALLOCATION_FAILED)
 }
 
 fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
@@ -214,43 +220,16 @@ fn requires_unsupported_backing(attrs: CFTypeRef) -> Result<bool, i32> {
     }
     // CPU-backed BGRA and YCbCr planes are already accessible to software
     // CoreGraphics, regardless of the CF type of a compatibility hint.
+    // Native CoreVideo ignores CFBoolean values for extended pixels.
     for name in [
         "ExtendedPixelsLeft",
         "ExtendedPixelsTop",
         "ExtendedPixelsRight",
         "ExtendedPixelsBottom",
     ] {
-        let value = attribute(attrs, name);
-        if !value.is_null() {
-            // CoreVideo truncates CFNumber floating-point values toward zero;
-            // non-numeric values and NaN act like zero. A negative multiple or
-            // infinity fails as an allocation request, not a malformed key.
-            // CFBoolean shares a number-like representation in CoreFoundation,
-            // but native CoreVideo ignores it for extended-pixel attributes.
-            let number = if unsafe { corefoundation::api::CFGetTypeID(value) }
-                == unsafe { corefoundation::api::CFBooleanGetTypeID() }
-            {
-                None
-            } else {
-                unsafe { corefoundation::collections::number(value) }
-            };
-            let n = match number {
-                Some(corefoundation::collections::Number::Integer(n)) => n,
-                Some(corefoundation::collections::Number::Float(n)) => {
-                    if n.is_infinite() {
-                        return Err(ALLOCATION_FAILED);
-                    }
-                    n as i64
-                }
-                None => 0,
-            };
-            if n < 0 {
-                return Err(ALLOCATION_FAILED);
-            }
-            if n != 0 {
-                // Explicit extended pixels need storage this PR does not expose.
-                return Ok(true);
-            }
+        if numeric_attribute(attrs, name, false)? != 0 {
+            // Padding around the image is not laid out here.
+            return Ok(true);
         }
     }
     let allocator = attribute(attrs, "MemoryAllocator");
