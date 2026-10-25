@@ -133,9 +133,6 @@ static FRAMEWORKS: &[Framework] = &[
         data: None,
         symbol: Some(audiotoolbox::symbol),
     },
-    // Off a Mac only: there VideoToolbox is Apple's and reads only Apple's
-    // format descriptions, so CoreMedia stays the host's too.
-    #[cfg(not(target_os = "macos"))]
     Framework {
         leaf: "CoreMedia",
         version: 'A',
