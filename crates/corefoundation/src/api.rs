@@ -107,6 +107,12 @@ pub fn host_allocator(allocator: CFAllocatorRef) -> CFAllocatorRef {
     })
 }
 
+/// Off Darwin there is no host CoreFoundation to hand an allocator to.
+#[cfg(not(target_os = "macos"))]
+pub fn host_allocator(allocator: CFAllocatorRef) -> CFAllocatorRef {
+    allocator
+}
+
 pub unsafe extern "C" fn CFAllocatorCreate(
     _allocator: CFAllocatorRef,
     _context: *const c_void,

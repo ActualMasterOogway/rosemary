@@ -35,7 +35,10 @@ const MAX_STORAGE: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Plane {
+    /// From the base address, for storage this runtime lays out.
     offset: usize,
+    /// Where the plane's pixels are, once there is memory for them.
+    address: *mut u8,
     width: usize,
     height: usize,
     row_bytes: usize,
@@ -84,16 +87,81 @@ impl Drop for Storage {
     }
 }
 
+/// What `CVPixelBufferCreateWithBytes` and its planar form hand back at
+/// final release, so the caller can free memory it lent.
+enum Release {
+    Bytes {
+        callback: BytesCallback,
+        refcon: *mut c_void,
+        base: *const c_void,
+    },
+    Planar {
+        callback: PlanarBytesCallback,
+        refcon: *mut c_void,
+        data: *const c_void,
+        size: usize,
+        planes: Vec<*const c_void>,
+    },
+}
+
+/// `CVPixelBufferReleaseBytesCallback`.
+type BytesCallback = unsafe extern "C" fn(*mut c_void, *const c_void);
+/// `CVPixelBufferReleasePlanarBytesCallback`.
+type PlanarBytesCallback =
+    unsafe extern "C" fn(*mut c_void, *const c_void, usize, usize, *const *const c_void);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        // SAFETY: the callbacks and their arguments are the creator's own.
+        unsafe {
+            match self {
+                Release::Bytes {
+                    callback,
+                    refcon,
+                    base,
+                } => callback(*refcon, *base),
+                Release::Planar {
+                    callback,
+                    refcon,
+                    data,
+                    size,
+                    planes,
+                } => callback(*refcon, *data, *size, planes.len(), planes.as_ptr()),
+            }
+        }
+    }
+}
+
+/// Where the pixels live.
+enum Memory {
+    // Never resized: C clients retain pointers to its pixels until final release.
+    Owned(Storage),
+    /// The creator's, handed back through its callback, if any.
+    Lent {
+        base: *mut u8,
+        _release: Option<Release>,
+    },
+}
+
+impl Memory {
+    fn base(&self) -> *mut u8 {
+        match self {
+            Memory::Owned(storage) => storage.ptr.as_ptr(),
+            Memory::Lent { base, .. } => *base,
+        }
+    }
+}
+
 struct State {
     width: usize,
     height: usize,
     format: u32,
     planes: Vec<Plane>,
     row_bytes: usize,
-    // Never resized: C clients retain pointers to its pixels until final release.
-    data: Storage,
+    memory: Memory,
     data_size: usize,
     locks: AtomicUsize,
+    attachments: std::sync::Mutex<attachments::Attachments>,
 }
 
 fn class() -> &'static Class {
@@ -150,6 +218,24 @@ fn foreign(_name: &CStr, _object: CFTypeRef) -> Option<*mut c_void> {
     None
 }
 
+/// Refuse a foreign `object` in a call whose CF arguments or results are this
+/// runtime's: the host CoreVideo cannot read those, and the guest could not
+/// use what it would answer. There is no answer to give, so it is a refusal
+/// by name rather than a quiet null.
+#[cfg(target_os = "macos")]
+fn refuse_foreign(name: &CStr, object: CFTypeRef) {
+    // SAFETY: null or an object, whose first word is readable.
+    if unsafe { corefoundation::foreign::is(object) } {
+        objc::fail!(
+            "{}: the object is the host CoreVideo's, and its CF arguments are this runtime's",
+            name.to_string_lossy()
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refuse_foreign(_name: &CStr, _object: CFTypeRef) {}
+
 /// Return the host CoreVideo's answer for a foreign `$object`; see [`foreign`].
 macro_rules! forward_foreign {
     ($name:expr, $object:expr, fn($($ty:ty),*) -> $ret:ty, ($($arg:expr),*)) => {
@@ -163,6 +249,12 @@ macro_rules! forward_foreign {
         }
     };
 }
+
+mod attachments;
+mod pool;
+
+pub use attachments::*;
+pub use pool::*;
 
 fn aligned(value: usize, alignment: usize) -> Option<usize> {
     let remainder = value % alignment;
@@ -330,6 +422,7 @@ fn layout(
         }
         planes.push(Plane {
             offset,
+            address: std::ptr::null_mut(),
             width: plane_width,
             height: plane_height,
             row_bytes,
@@ -374,21 +467,9 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
     attrs: CFTypeRef,
     out: *mut CFTypeRef,
 ) -> i32 {
-    if out.is_null() {
-        return INVALID_ARGUMENT;
-    }
-    // SAFETY: caller supplied a writable pointer.
-    unsafe { *out = std::ptr::null() };
-    if !corefoundation::api::supports_malloc_allocator(allocator.cast()) {
-        return UNSUPPORTED;
-    }
-    if !attrs.is_null() && unsafe { corefoundation::collections::dictionary(attrs) }.is_none() {
-        return INVALID_ATTRIBUTES;
-    }
-    match requires_unsupported_backing(attrs) {
-        Ok(true) => return UNSUPPORTED,
-        Err(error) => return error,
-        Ok(false) => {}
+    match unsafe { check_create(allocator, attrs, out) } {
+        SUCCESS => {}
+        error => return error,
     }
     let (planes, row_bytes, size, storage_alignment) = match layout(width, height, format, attrs) {
         Ok(layout) => layout,
@@ -398,44 +479,319 @@ pub unsafe extern "C" fn CVPixelBufferCreate(
         Ok(data) => data,
         Err(error) => return error,
     };
+    let base = data.ptr.as_ptr();
+    let mut planes = planes;
+    for plane in &mut planes {
+        // SAFETY: each plane is inside the checked allocation.
+        plane.address = unsafe { base.add(plane.offset) };
+    }
     if planes.len() > 1 {
         for (i, plane) in planes.iter().enumerate() {
             // CVPlanarComponentInfo is (int32_t offset, uint32_t rowBytes), BE.
-            let base = i * 8;
+            let at = i * 8;
             // SAFETY: descriptor is inside the checked allocation.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     (plane.offset as i32).to_be_bytes().as_ptr(),
-                    data.ptr.as_ptr().add(base),
+                    base.add(at),
                     4,
                 );
                 std::ptr::copy_nonoverlapping(
                     (plane.row_bytes as u32).to_be_bytes().as_ptr(),
-                    data.ptr.as_ptr().add(base + 4),
+                    base.add(at + 4),
                     4,
                 );
             }
         }
     }
-    let buffer = corefoundation::boxed::make(
-        class(),
-        State {
-            width,
-            height,
-            format,
-            planes,
-            row_bytes,
-            data,
-            data_size: size,
-            locks: AtomicUsize::new(0),
-        },
-    );
+    unsafe {
+        publish(
+            State {
+                width,
+                height,
+                format,
+                planes,
+                row_bytes,
+                memory: Memory::Owned(data),
+                data_size: size,
+                locks: AtomicUsize::new(0),
+                attachments: Default::default(),
+            },
+            out,
+        )
+    }
+}
+
+/// Make the object for `state` and store it through `out`.
+///
+/// # Safety
+/// `out` must be writable.
+unsafe fn publish(state: State, out: *mut CFTypeRef) -> i32 {
+    let buffer = corefoundation::boxed::make(class(), state);
     if buffer.is_null() {
         return ALLOCATION_FAILED;
     }
-    // SAFETY: caller supplied a writable pointer.
+    // SAFETY: the caller's obligation.
     unsafe { *out = buffer };
     SUCCESS
+}
+
+/// What every create call checks before its own arguments.
+///
+/// # Safety
+/// `out` must be null or writable; `attrs` null or a CF object.
+unsafe fn check_create(allocator: CFTypeRef, attrs: CFTypeRef, out: *mut CFTypeRef) -> i32 {
+    if out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller's obligation.
+    unsafe { *out = std::ptr::null() };
+    if !corefoundation::api::supports_malloc_allocator(allocator.cast()) {
+        return UNSUPPORTED;
+    }
+    if !attrs.is_null() && unsafe { corefoundation::collections::dictionary(attrs) }.is_none() {
+        return INVALID_ATTRIBUTES;
+    }
+    match requires_unsupported_backing(attrs) {
+        Ok(true) => UNSUPPORTED,
+        Err(error) => error,
+        Ok(false) => SUCCESS,
+    }
+}
+
+/// CVReturn CVPixelBufferCreateWithBytes(CFAllocatorRef, size_t width, size_t
+/// height, OSType, void *baseAddress, size_t bytesPerRow,
+/// CVPixelBufferReleaseBytesCallback, void *releaseRefCon, CFDictionaryRef,
+/// CVPixelBufferRef *).
+///
+/// The pixels stay the caller's; the callback hands them back at final
+/// release. It is not called when creation fails.
+///
+/// # Safety
+/// As [`CVPixelBufferCreate`]; `base` must hold `height` rows of
+/// `bytes_per_row` until the callback runs.
+pub unsafe extern "C" fn CVPixelBufferCreateWithBytes(
+    allocator: CFTypeRef,
+    width: usize,
+    height: usize,
+    format: u32,
+    base: *mut c_void,
+    bytes_per_row: usize,
+    release: Option<BytesCallback>,
+    refcon: *mut c_void,
+    attrs: CFTypeRef,
+    out: *mut CFTypeRef,
+) -> i32 {
+    match unsafe { check_create(allocator, attrs, out) } {
+        SUCCESS => {}
+        error => return error,
+    }
+    if width == 0 || height == 0 {
+        return INVALID_SIZE;
+    }
+    // The planar formats have their own entry point.
+    if format != BGRA {
+        return INVALID_PIXEL_FORMAT;
+    }
+    let Some(data_size) = bytes_per_row.checked_mul(height) else {
+        return INVALID_SIZE;
+    };
+    if base.is_null() || width.checked_mul(4).is_none_or(|row| bytes_per_row < row) {
+        return INVALID_ARGUMENT;
+    }
+    let plane = Plane {
+        offset: 0,
+        address: base.cast(),
+        width,
+        height,
+        row_bytes: bytes_per_row,
+    };
+    let release = release.map(|callback| Release::Bytes {
+        callback,
+        refcon,
+        base,
+    });
+    unsafe {
+        publish(
+            State {
+                width,
+                height,
+                format,
+                planes: vec![plane],
+                row_bytes: bytes_per_row,
+                memory: Memory::Lent {
+                    base: base.cast(),
+                    _release: release,
+                },
+                data_size,
+                locks: AtomicUsize::new(0),
+                attachments: Default::default(),
+            },
+            out,
+        )
+    }
+}
+
+/// CVReturn CVPixelBufferCreateWithPlanarBytes(CFAllocatorRef, size_t width,
+/// size_t height, OSType, void *dataPtr, size_t dataSize, size_t
+/// numberOfPlanes, void *planeBaseAddress[], size_t planeWidth[], size_t
+/// planeHeight[], size_t planeBytesPerRow[],
+/// CVPixelBufferReleasePlanarBytesCallback, void *releaseRefCon,
+/// CFDictionaryRef, CVPixelBufferRef *).
+///
+/// # Safety
+/// As [`CVPixelBufferCreateWithBytes`], for each plane; the arrays must have
+/// `plane_count` entries.
+pub unsafe extern "C" fn CVPixelBufferCreateWithPlanarBytes(
+    allocator: CFTypeRef,
+    width: usize,
+    height: usize,
+    format: u32,
+    data: *mut c_void,
+    data_size: usize,
+    plane_count: usize,
+    plane_bases: *const *mut c_void,
+    plane_widths: *const usize,
+    plane_heights: *const usize,
+    plane_rows: *const usize,
+    release: Option<PlanarBytesCallback>,
+    refcon: *mut c_void,
+    attrs: CFTypeRef,
+    out: *mut CFTypeRef,
+) -> i32 {
+    match unsafe { check_create(allocator, attrs, out) } {
+        SUCCESS => {}
+        error => return error,
+    }
+    if width == 0 || height == 0 {
+        return INVALID_SIZE;
+    }
+    let expected = match format {
+        NV12_VIDEO | NV12_FULL => 2,
+        I420_VIDEO | I420_FULL => 3,
+        _ => return INVALID_PIXEL_FORMAT,
+    };
+    if plane_count != expected
+        || [
+            plane_bases.cast::<c_void>(),
+            plane_widths.cast(),
+            plane_heights.cast(),
+            plane_rows.cast(),
+        ]
+        .iter()
+        .any(|p| p.is_null())
+    {
+        return INVALID_ARGUMENT;
+    }
+    let mut planes = Vec::with_capacity(plane_count);
+    for i in 0..plane_count {
+        // SAFETY: the caller's arrays, of `plane_count` entries each.
+        let plane = unsafe {
+            Plane {
+                offset: 0,
+                address: (*plane_bases.add(i)).cast(),
+                width: *plane_widths.add(i),
+                height: *plane_heights.add(i),
+                row_bytes: *plane_rows.add(i),
+            }
+        };
+        if plane.address.is_null() || plane.width == 0 || plane.height == 0 {
+            return INVALID_ARGUMENT;
+        }
+        planes.push(plane);
+    }
+    let release = release.map(|callback| Release::Planar {
+        callback,
+        refcon,
+        data,
+        size: data_size,
+        planes: planes
+            .iter()
+            .map(|p| p.address.cast_const().cast())
+            .collect(),
+    });
+    unsafe {
+        publish(
+            State {
+                width,
+                height,
+                format,
+                planes,
+                // Only a buffer whose base is a CVPlanarPixelBufferInfo this
+                // runtime laid out has a buffer-wide row envelope.
+                row_bytes: 0,
+                memory: Memory::Lent {
+                    base: data.cast(),
+                    _release: release,
+                },
+                data_size,
+                locks: AtomicUsize::new(0),
+                attachments: Default::default(),
+            },
+            out,
+        )
+    }
+}
+
+/// void CVPixelBufferGetExtendedPixels(CVPixelBufferRef, size_t *left,
+/// size_t *right, size_t *top, size_t *bottom): none, since a buffer that
+/// asks for any is refused.
+pub unsafe extern "C" fn CVPixelBufferGetExtendedPixels(
+    buffer: CFTypeRef,
+    left: *mut usize,
+    right: *mut usize,
+    top: *mut usize,
+    bottom: *mut usize,
+) {
+    forward_foreign!(
+        c"CVPixelBufferGetExtendedPixels",
+        buffer,
+        fn(CFTypeRef, *mut usize, *mut usize, *mut usize, *mut usize) -> (),
+        (buffer, left, right, top, bottom)
+    );
+    for out in [left, right, top, bottom] {
+        if !out.is_null() {
+            // SAFETY: the caller's out-parameter.
+            unsafe { *out = 0 };
+        }
+    }
+}
+
+/// `CGSize`, as both architectures lay it out.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CGSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// CGSize CVImageBufferGetEncodedSize(CVImageBufferRef): the full buffer.
+pub unsafe extern "C" fn CVImageBufferGetEncodedSize(buffer: CFTypeRef) -> CGSize {
+    forward_foreign!(
+        c"CVImageBufferGetEncodedSize",
+        buffer,
+        fn(CFTypeRef) -> CGSize,
+        (buffer)
+    );
+    state(buffer).map_or(CGSize::default(), |s| CGSize {
+        width: s.width as f64,
+        height: s.height as f64,
+    })
+}
+
+/// CGSize CVImageBufferGetDisplaySize(CVImageBufferRef).
+///
+/// FIXME (ACCURACY): Apple's answer is the clean aperture scaled by the pixel
+/// aspect ratio attachments; this is the encoded size, which it equals for a
+/// buffer with neither.
+pub unsafe extern "C" fn CVImageBufferGetDisplaySize(buffer: CFTypeRef) -> CGSize {
+    forward_foreign!(
+        c"CVImageBufferGetDisplaySize",
+        buffer,
+        fn(CFTypeRef) -> CGSize,
+        (buffer)
+    );
+    unsafe { CVImageBufferGetEncodedSize(buffer) }
 }
 
 /// CFTypeRef CVBufferRetain(CVBufferRef). Shares CoreFoundation ownership.
@@ -587,15 +943,12 @@ fn base_address(buffer: CFTypeRef, plane: Option<usize>) -> *mut c_void {
     if state.locks.load(Ordering::Acquire) == 0 {
         return std::ptr::null_mut();
     }
-    let ptr = state.data.ptr.as_ptr();
     match plane {
-        None => ptr.cast(),
+        None => state.memory.base().cast(),
         Some(i) => state
             .planes
             .get(i)
-            .map_or(std::ptr::null_mut(), |p| unsafe {
-                ptr.add(p.offset).cast()
-            }),
+            .map_or(std::ptr::null_mut(), |p| p.address.cast()),
     }
 }
 
@@ -1950,6 +2303,143 @@ mod tests {
             assert!(!CVPixelBufferGetBaseAddressOfPlane(host, 1).is_null());
             assert_eq!(CVPixelBufferUnlockBaseAddress(host, 0), SUCCESS);
             CVPixelBufferRelease(host);
+        }
+    }
+
+    #[test]
+    fn a_buffer_over_the_callers_bytes_hands_them_back_at_final_release() {
+        unsafe extern "C" fn release(refcon: *mut c_void, base: *const c_void) {
+            // SAFETY: the test's own counter and bytes.
+            unsafe {
+                assert_eq!(*refcon.cast::<*const c_void>(), base);
+                *refcon.cast::<*const c_void>() = std::ptr::null();
+            }
+        }
+        let mut bytes = vec![0u8; 32 * 5];
+        let base: *mut c_void = bytes.as_mut_ptr().cast();
+        let mut seen: *const c_void = base;
+        unsafe {
+            let mut out = std::ptr::null();
+            for (format, row, expected) in [
+                (NV12_VIDEO, 32, INVALID_PIXEL_FORMAT),
+                (BGRA, 27, INVALID_ARGUMENT),
+            ] {
+                assert_eq!(
+                    CVPixelBufferCreateWithBytes(
+                        std::ptr::null(),
+                        7,
+                        5,
+                        format,
+                        base,
+                        row,
+                        Some(release),
+                        (&mut seen as *mut *const c_void).cast(),
+                        std::ptr::null(),
+                        &mut out,
+                    ),
+                    expected
+                );
+            }
+            // A failed create does not call back.
+            assert_eq!(seen, base);
+            assert_eq!(
+                CVPixelBufferCreateWithBytes(
+                    std::ptr::null(),
+                    7,
+                    5,
+                    BGRA,
+                    base,
+                    32,
+                    Some(release),
+                    (&mut seen as *mut *const c_void).cast(),
+                    std::ptr::null(),
+                    &mut out,
+                ),
+                SUCCESS
+            );
+            assert_eq!(CVPixelBufferGetBytesPerRow(out), 32);
+            assert_eq!(CVPixelBufferGetDataSize(out), 160);
+            assert_eq!(
+                CVImageBufferGetEncodedSize(out),
+                CGSize {
+                    width: 7.0,
+                    height: 5.0
+                }
+            );
+            assert_eq!(
+                CVImageBufferGetDisplaySize(out),
+                CVImageBufferGetEncodedSize(out)
+            );
+            let mut extended = [9usize; 4];
+            let [l, r, t, b] = extended.each_mut().map(|e| e as *mut usize);
+            CVPixelBufferGetExtendedPixels(out, l, r, t, b);
+            assert_eq!(extended, [0; 4]);
+            assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
+            assert_eq!(CVPixelBufferGetBaseAddress(out), base);
+            assert_eq!(CVPixelBufferGetBaseAddressOfPlane(out, 0), base);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
+            let retained = CVPixelBufferRetain(out);
+            CVPixelBufferRelease(out);
+            assert_eq!(seen, base);
+            CVPixelBufferRelease(retained);
+            assert!(seen.is_null());
+        }
+    }
+
+    #[test]
+    fn a_buffer_over_the_callers_planes_reports_them_and_hands_them_back() {
+        static RELEASED: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn release(
+            _refcon: *mut c_void,
+            _data: *const c_void,
+            size: usize,
+            count: usize,
+            planes: *const *const c_void,
+        ) {
+            assert_eq!((size, count), (99, 2));
+            // SAFETY: the array the buffer keeps for this call.
+            assert!(!unsafe { *planes.add(1) }.is_null());
+            RELEASED.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut luma = vec![0u8; 8 * 5];
+        let mut chroma = vec![0u8; 8 * 3];
+        let bases: [*mut c_void; 2] = [luma.as_mut_ptr().cast(), chroma.as_mut_ptr().cast()];
+        let (widths, heights, rows) = ([7usize, 4], [5usize, 3], [8usize, 8]);
+        unsafe {
+            let mut out = std::ptr::null();
+            let create = |format, count, out: &mut CFTypeRef| {
+                CVPixelBufferCreateWithPlanarBytes(
+                    std::ptr::null(),
+                    7,
+                    5,
+                    format,
+                    std::ptr::null_mut(),
+                    99,
+                    count,
+                    bases.as_ptr(),
+                    widths.as_ptr(),
+                    heights.as_ptr(),
+                    rows.as_ptr(),
+                    Some(release),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    out,
+                )
+            };
+            assert_eq!(create(BGRA, 2, &mut out), INVALID_PIXEL_FORMAT);
+            assert_eq!(create(NV12_VIDEO, 3, &mut out), INVALID_ARGUMENT);
+            assert_eq!(create(NV12_VIDEO, 2, &mut out), SUCCESS);
+            assert_eq!(CVPixelBufferGetPlaneCount(out), 2);
+            assert_eq!(CVPixelBufferGetWidthOfPlane(out, 1), 4);
+            assert_eq!(CVPixelBufferGetBytesPerRowOfPlane(out, 1), 8);
+            assert_eq!(CVPixelBufferGetDataSize(out), 99);
+            assert_eq!(CVPixelBufferLockBaseAddress(out, 0), SUCCESS);
+            assert!(CVPixelBufferGetBaseAddress(out).is_null());
+            assert_eq!(CVPixelBufferGetBaseAddressOfPlane(out, 1), bases[1]);
+            assert_eq!(CVPixelBufferUnlockBaseAddress(out, 0), SUCCESS);
+            assert_eq!(RELEASED.load(Ordering::Relaxed), 0);
+            CVPixelBufferRelease(out);
+            assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
         }
     }
 }
