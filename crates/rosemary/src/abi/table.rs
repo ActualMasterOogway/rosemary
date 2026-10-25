@@ -3571,7 +3571,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     ),
     sig!("CMBlockBufferGetDataPointer", I32, P, U64, P, P, P),
     sig!("CMCopyDictionaryOfAttachments", P, P, P, U32),
+    sig!("CMFormatDescriptionEqual", BOOL, P, P),
+    sig!("CMFormatDescriptionGetExtension", P, P, P),
+    sig!("CMFormatDescriptionGetExtensions", P, P),
     sig!("CMFormatDescriptionGetMediaSubType", U32, P),
+    sig!("CMFormatDescriptionGetMediaType", U32, P),
+    sig!("CMFormatDescriptionGetTypeID", U64),
     // Twelve parameters, four past AAPCS64's eighth, and the fourth is guest
     // code.
     cbsig!(

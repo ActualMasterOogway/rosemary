@@ -27,6 +27,7 @@ chrome = { path = "crates/chrome" }
 applicationservices = { path = "crates/applicationservices" }
 coreservices = { path = "crates/coreservices" }
 audiotoolbox = { path = "crates/audiotoolbox" }
+coremedia = { path = "crates/coremedia" }
 corevideo = { path = "crates/corevideo" }
 iosurface = { path = "crates/iosurface" }
 coreaudio = { path = "crates/coreaudio" }

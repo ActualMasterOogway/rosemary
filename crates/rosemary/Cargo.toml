@@ -20,6 +20,7 @@ applicationservices.workspace = true
 coreservices.workspace = true
 audiotoolbox.workspace = true
 sdl3.workspace = true
+coremedia.workspace = true
 corevideo.workspace = true
 iosurface.workspace = true
 coreaudio.workspace = true
