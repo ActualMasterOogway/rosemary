@@ -850,7 +850,7 @@ pub(crate) fn bounds_origin_of(view: Id) -> NSPoint {
 
 /// Whether a rectangle of a view's holds a point, for [`crate::cursor`].
 pub fn holds(view: Id, rect: NSRect, point: NSPoint) -> bool {
-    is_view(view) && contains(rect, point)
+    is_view(view) && contains(rect, point, is_flipped(view))
 }
 
 /// Where a view's layer lands in its window, in pixels from the top left.
@@ -1020,7 +1020,8 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
 /// on `view`. This distinction matters when that override calls `super`.
 unsafe fn hit_base(view: Id, point: NSPoint, depth: usize) -> Id {
     let frame = view_of(view).frame;
-    if !contains(frame, point) {
+    let superview = view_of(view).superview;
+    if !contains(frame, point, is_flipped(superview)) {
         return std::ptr::null_mut();
     }
     let local = from_superview(view, point);
@@ -1050,14 +1051,17 @@ unsafe extern "C" fn hit_test_method(receiver: Id, _sel: Sel, point: NSPoint) ->
     unsafe { hit_base(receiver, point, 0) }
 }
 
-/// Whether a rectangle holds a point, on AppKit's half-open rule: the minimum
-/// edges are inside and the maximum ones are not, so two views that share an
-/// edge do not both claim the click.
-fn contains(rect: NSRect, point: NSPoint) -> bool {
-    point.x >= rect.origin.x
-        && point.y >= rect.origin.y
-        && point.x < rect.origin.x + rect.size.width
-        && point.y < rect.origin.y + rect.size.height
+/// Mouse regions include their visual top and left edges, excluding bottom
+/// and right. Unflipped coordinates put the top at maximum y; excluding it
+/// would lose input at SDL's y = 0.
+fn contains(rect: NSRect, point: NSPoint, flipped: bool) -> bool {
+    let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
+    let x = point.x >= rect.origin.x && point.x < rect.origin.x + rect.size.width;
+    let y = match flipped {
+        true => point.y >= min_y && point.y < max_y,
+        false => point.y > min_y && point.y <= max_y,
+    };
+    x && y
 }
 
 /// Send `-updateTrackingAreas` down a view tree.
@@ -1373,13 +1377,7 @@ unsafe extern "C" fn convert_size_to_backing(receiver: Id, _sel: Sel, size: NSSi
 /// `-mouse:inRect:`, which is `NSMouseInRect` with the view's own flippedness:
 /// the edge a point on it counts as inside is the top one either way up.
 unsafe extern "C" fn mouse_in_rect(receiver: Id, _sel: Sel, point: NSPoint, rect: NSRect) -> u8 {
-    let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
-    let x = point.x >= rect.origin.x && point.x < rect.origin.x + rect.size.width;
-    let y = match is_flipped(receiver) {
-        true => point.y >= min_y && point.y < max_y,
-        false => point.y > min_y && point.y <= max_y,
-    };
-    (x && y) as u8
+    contains(rect, point, is_flipped(receiver)) as u8
 }
 
 /// A point from `from`'s coordinates to `to`'s, through their window; `nil`
@@ -2416,6 +2414,62 @@ mod tests {
         let object = objc::object::create_instance(class, 0);
         // SAFETY: the object has `View` storage.
         unsafe { init_with_frame(object, objc::sel::get("initWithFrame:"), frame) }
+    }
+
+    #[test]
+    fn the_top_window_edge_hits_the_topmost_view_in_either_orientation() {
+        for parent_flipped in [false, true] {
+            for child_flipped in [false, true] {
+                let make = |flipped, frame| match flipped {
+                    true => flipped_view(frame),
+                    false => view(frame),
+                };
+                let content = make(parent_flipped, rect(0.0, 0.0, 200.0, 100.0));
+                let upper_y = if parent_flipped { 0.0 } else { 80.0 };
+                let lower_y = if parent_flipped { 20.0 } else { 60.0 };
+                let upper = make(child_flipped, rect(0.0, upper_y, 200.0, 20.0));
+                let lower = make(child_flipped, rect(0.0, lower_y, 200.0, 20.0));
+                // SAFETY: live views; hit-test points are in window coordinates.
+                unsafe {
+                    add_subview(content, objc::sel::get("addSubview:"), upper);
+                    add_subview(content, objc::sel::get("addSubview:"), lower);
+                    let top = crate::geometry::point_in_window(0.0, 0.0, 100.0);
+                    assert_eq!(hit_test(content, top), upper);
+                    let shared_edge = crate::geometry::point_in_window(0.0, 20.0, 100.0);
+                    assert_eq!(hit_test(content, shared_edge), lower);
+                    for (x, y) in [(200.0, 0.0), (0.0, 100.0), (0.0, -0.1)] {
+                        let outside = crate::geometry::point_in_window(x, y, 100.0);
+                        assert!(hit_test(content, outside).is_null());
+                    }
+                }
+                objc::arc::release(upper);
+                objc::arc::release(lower);
+                objc::arc::release(content);
+            }
+        }
+    }
+
+    #[test]
+    fn tracking_rectangles_include_the_visual_top_edge_in_either_orientation() {
+        for flipped in [false, true] {
+            let frame = rect(0.0, 0.0, 200.0, 100.0);
+            let content = match flipped {
+                true => flipped_view(frame),
+                false => view(frame),
+            };
+            for (x, y, expected) in [
+                (0.0, 0.0, true),
+                (100.0, 0.0, true),
+                (200.0, 0.0, false),
+                (0.0, 100.0, false),
+                (0.0, -0.1, false),
+            ] {
+                let window_point = crate::geometry::point_in_window(x, y, 100.0);
+                let local = point_from_window(content, window_point);
+                assert_eq!(holds(content, frame, local), expected);
+            }
+            objc::arc::release(content);
+        }
     }
 
     /// Qt's views are flipped, and a subview at `y = 0` of one is along its
