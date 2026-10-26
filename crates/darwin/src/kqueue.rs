@@ -901,8 +901,8 @@ pub extern "C" fn kqueue() -> c_int {
     let Ok((backend, fd)) = SelectedBackend::new() else {
         return -1;
     };
-    // Whatever this number held before is gone with the descriptor it named;
-    // see the module note on `close`.
+    // A queue still under this number lost its descriptor to a close that
+    // bypassed Darwin's `close`, so it is gone.
     queues()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

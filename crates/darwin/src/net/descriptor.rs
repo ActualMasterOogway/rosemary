@@ -1,11 +1,13 @@
 /// `int close(int fd)`
 pub(crate) unsafe extern "C" fn close(fd: i32) -> i32 {
+    // Before the host close frees the number: another thread's `kqueue` can be
+    // handed it at once, and must not lose its new queue here.
+    crate::kqueue::forget(fd);
     // SAFETY: an integer descriptor; the call touches no caller memory.
     let rc = unsafe { libc::close(fd) };
     if rc == 0 || crate::errno::get() == libc::EBADF {
         super::sockopt::forget(fd);
         crate::attrlist::forget(fd);
-        crate::kqueue::forget(fd);
     }
     rc
 }
