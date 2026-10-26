@@ -976,6 +976,18 @@ fn forget_waker(fd: c_int) {
     }
 }
 
+/// Stop waking `state` for signals once it watches none, so the table does
+/// not fill with queues that only ever watched one briefly.
+fn release_signal_waker<B: ReadinessBackend>(state: &Queue<B>) {
+    if !state
+        .registrations
+        .values()
+        .any(|registration| registration.filter == EVFILT_SIGNAL)
+    {
+        forget_waker(state.backend.wake_descriptor());
+    }
+}
+
 /// A watched signal arrived: wake every queue that watches signals, and let
 /// each decide whether it is theirs. Async-signal-safe.
 pub(crate) fn signalled() {
@@ -1026,13 +1038,7 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         state.triggered_set = triggered_set;
         if change.filter == EVFILT_SIGNAL {
             let _ = crate::signal::observe(change.ident as i32, false);
-            if !state
-                .registrations
-                .values()
-                .any(|r| r.filter == EVFILT_SIGNAL)
-            {
-                forget_waker(state.backend.wake_descriptor());
-            }
+            release_signal_waker(state);
         }
         return Ok(());
     }
@@ -1426,13 +1432,7 @@ pub unsafe extern "C" fn kevent(
         if flags & EV_ONESHOT != 0 {
             state.registrations.remove(&key);
             let _ = crate::signal::observe(ident as i32, false);
-            if !state
-                .registrations
-                .values()
-                .any(|r| r.filter == EVFILT_SIGNAL)
-            {
-                forget_waker(state.backend.wake_descriptor());
-            }
+            release_signal_waker(&state);
         } else if flags & EV_DISPATCH != 0 {
             registration.enabled = false;
         }
