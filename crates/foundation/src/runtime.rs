@@ -247,10 +247,23 @@ unsafe extern "C" fn class_name(receiver: Id, _sel: Sel) -> Id {
     unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
 }
 
+/// `-description` and `-debugDescription`, `<ClassName: 0xaddress>` as Foundation
+/// spells them. Callers send these to any object without checking first (Qt's
+/// `QDebug << id` does), so a missing one aborts the guest.
+unsafe extern "C" fn description(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: the receiver is a live object.
+    let name = unsafe { objc::object::class_of(receiver) }.map_or("nil", |c| c.name_str());
+    let string = crate::string::from_str(&format!("<{name}: {receiver:p}>"));
+    // SAFETY: a fresh object.
+    unsafe { corefoundation::api::CFAutorelease(string as corefoundation::base::CFTypeRef) as Id }
+}
+
 pub(crate) fn install() {
     let nsobject = objc::class::lookup(c"NSObject").expect("the runtime's own NSObject");
     methods!(nsobject, {
         "className" => class_name, c"@16@0:8";
+        "description" => description, c"@16@0:8";
+        "debugDescription" => description, c"@16@0:8";
     });
 }
 
@@ -265,5 +278,29 @@ mod tests {
         let encoded = unsafe { NSFileTypeForHFSTypeCode(u32::from_be_bytes(*b"APPL")) };
         // SAFETY: `encoded` is the string created immediately above.
         assert_eq!(unsafe { crate::string::bytes(encoded) }, b"'APPL'");
+    }
+
+    #[test]
+    fn description_names_the_class_unless_it_has_its_own() {
+        crate::bootstrap();
+        let base = objc::class::lookup(c"NSObject").expect("NSObject");
+        let class = objc::class::allocate_pair(Some(base), c"DescriptionTestLayer", 0)
+            .expect("a fresh class name");
+        objc::class::register_pair(class);
+        let object = objc::object::create_instance(class, 0);
+        let string = crate::string::from_str("as written");
+        // SAFETY: live objects; `-description` is `id (id, SEL)`.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+            for sel in ["description", "debugDescription"] {
+                let text = crate::string::bytes(send(object, objc::sel::get(sel)));
+                assert_eq!(
+                    text,
+                    format!("<DescriptionTestLayer: {object:p}>").as_bytes()
+                );
+            }
+            let text = crate::string::bytes(send(string, objc::sel::get("description")));
+            assert_eq!(text, b"as written");
+        }
     }
 }
