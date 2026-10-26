@@ -30,7 +30,6 @@ pub(crate) unsafe extern "C" fn dup2(from: i32, to: i32) -> i32 {
     if copied >= 0 && from != to {
         // `to` now names another file, so a listing of the old one is stale.
         crate::attrlist::forget(to);
-        crate::kqueue::forget(to);
     }
     if copied >= 0 {
         super::sockopt::inherit_sigpipe_suppression(from, copied);

@@ -910,43 +910,31 @@ pub extern "C" fn kqueue() -> c_int {
     fd
 }
 
-fn forget_queue_if_unreferenced(
-    map: &HashMap<c_int, Arc<Mutex<Queue<SelectedBackend>>>>,
-    queue: Arc<Mutex<Queue<SelectedBackend>>>,
-) {
-    let still_referenced = map.values().any(|other| Arc::ptr_eq(other, &queue));
-    if !still_referenced {
-        let state = queue.lock().unwrap_or_else(|e| e.into_inner());
-        forget_waker(state.backend.wake_descriptor());
-    }
-}
-
-/// Note that a kqueue descriptor was duplicated.
+/// A kqueue descriptor was duplicated: `to` now names the queue `from` does,
+/// and no longer whatever it named before.
 pub fn duplicate(from: c_int, to: c_int) {
-    if from == to || from < 0 || to < 0 {
+    if from == to {
         return;
     }
-    let mut map = queues().lock().unwrap_or_else(|e| e.into_inner());
-    let old_queue = match map.get(&from).cloned() {
-        Some(queue) => map.insert(to, queue),
-        None => map.remove(&to),
+    let replaced = {
+        let mut map = queues().lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(&from).cloned() {
+            Some(queue) => map.insert(to, queue),
+            None => map.remove(&to),
+        }
     };
-    if let Some(old) = old_queue {
-        forget_queue_if_unreferenced(&map, old);
-    }
+    // Outside the table lock: the last reference tears the backend down.
+    drop(replaced);
 }
 
-/// Note that a descriptor was closed, so any kqueue registered under this
-/// descriptor number is removed.
+/// `fd` is closing, so the queue it named loses that descriptor.
 pub fn forget(fd: c_int) {
-    if fd < 0 {
-        return;
-    }
-    forget_waker(fd);
-    let mut map = queues().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(queue) = map.remove(&fd) {
-        forget_queue_if_unreferenced(&map, queue);
-    }
+    let removed = queues()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&fd);
+    // Outside the table lock, as in `duplicate`.
+    drop(removed);
 }
 
 /// Wake a `kevent` blocked on `queue`.
