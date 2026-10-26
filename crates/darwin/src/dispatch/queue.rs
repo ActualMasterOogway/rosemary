@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use super::block;
@@ -108,6 +108,8 @@ struct State {
     /// Held by the one worker allowed to run this serial queue's work. Unused for a
     /// concurrent queue, which has no such restriction.
     draining: bool,
+    /// `dispatch_suspend`s not yet balanced by a resume. Work stays queued.
+    suspended: u32,
 }
 
 /// The queue a handle names, if it names a live one.
@@ -133,6 +135,7 @@ fn new(label: &str, concurrent: bool, main: bool) -> u64 {
         state: Mutex::new(State {
             pending: VecDeque::new(),
             draining: false,
+            suspended: 0,
         }),
     });
     Box::into_raw(queue) as u64
@@ -178,6 +181,30 @@ pub fn main_queue() -> u64 {
     *MAIN.get_or_init(|| global("com.apple.main-thread", false, true))
 }
 
+/// What wakes the main thread's run loop when work lands on the main queue.
+static MAIN_WAKE: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the waker for the main queue.
+///
+/// On a Mac the main queue is a port the main run loop listens on, so work sent
+/// to it from another thread ends the loop's wait at once. Without a waker it
+/// waits for whatever else ends the wait - a frame posted by a worker sat out the
+/// rest of the run loop's slice.
+pub fn set_main_wake_hook(hook: fn()) {
+    MAIN_WAKE.store(hook as usize, Ordering::Release);
+    // Anything queued before the hook existed is still owed a turn.
+    hook();
+}
+
+fn wake_main() {
+    let hook = MAIN_WAKE.load(Ordering::Acquire);
+    if hook != 0 {
+        // SAFETY: only `set_main_wake_hook` stores here, and it stores a `fn()`.
+        let hook: fn() = unsafe { std::mem::transmute(hook) };
+        hook();
+    }
+}
+
 /// Run everything the main queue is holding.
 ///
 /// Called from whatever turns the main thread's run loop. Only the work already
@@ -190,12 +217,14 @@ pub fn drain_main() {
     let Some(main) = (unsafe { queue(handle) }) else {
         return;
     };
-    let mut budget = main
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pending
-        .len();
+    let mut budget = {
+        let state = main.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.suspended > 0 {
+            0
+        } else {
+            state.pending.len()
+        }
+    };
     while budget > 0 {
         let Some(item) = main
             .state
@@ -363,7 +392,7 @@ fn run_one(handle: u64) {
         let mut state = q.state.lock().unwrap_or_else(|e| e.into_inner());
         // Another worker already owns this serial queue. It re-enqueues when it is
         // done, so the work is not lost by returning here.
-        if !q.concurrent && state.draining {
+        if (!q.concurrent && state.draining) || state.suspended > 0 {
             return;
         }
         match state.pending.pop_front() {
@@ -408,7 +437,9 @@ fn submit(handle: u64, item: Item) {
         .push_back(item);
     // The main queue is drained by the main thread alone; handing it to the pool
     // would run its work on the wrong thread, which is the one thing it promises.
-    if !q.main {
+    if q.main {
+        wake_main();
+    } else {
         schedule(handle);
     }
 }
@@ -426,6 +457,43 @@ pub unsafe extern "C" fn queue_create(label: *const c_char, attr: u64) -> u64 {
     // SAFETY: a null or NUL-terminated C string from the guest.
     let label = unsafe { label_of(label) };
     new(&label, attr == concurrent_attr(), false)
+}
+
+/// `void dispatch_suspend(dispatch_object_t)`.
+pub unsafe extern "C" fn suspend(handle: u64) {
+    if super::source::suspend(handle) {
+        return;
+    }
+    // SAFETY: the guest holds a reference for the duration of the call.
+    if let Some(q) = unsafe { queue(handle) } {
+        q.state.lock().unwrap_or_else(|e| e.into_inner()).suspended += 1;
+    }
+}
+
+/// `void dispatch_resume(dispatch_object_t)`.
+pub unsafe extern "C" fn resume(handle: u64) {
+    if super::source::resume(handle) {
+        return;
+    }
+    // SAFETY: the guest holds a reference for the duration of the call.
+    let Some(q) = (unsafe { queue(handle) }) else {
+        return;
+    };
+    let runnable = {
+        let mut state = q.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.suspended == 0 {
+            return;
+        }
+        state.suspended -= 1;
+        state.suspended == 0 && !state.pending.is_empty()
+    };
+    if runnable {
+        if q.main {
+            wake_main();
+        } else {
+            schedule(handle);
+        }
+    }
 }
 
 /// `dispatch_queue_t dispatch_queue_create_with_target(const char *,

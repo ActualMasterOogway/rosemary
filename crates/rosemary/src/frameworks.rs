@@ -102,10 +102,20 @@ static FRAMEWORKS: &[Framework] = &[
     Framework {
         leaf: "AppKit",
         version: 'C',
-        umbrellas: &["Cocoa"],
+        // AppKit's crate also implements Quartz, so a `dlopen` of
+        // CoreGraphics by path has to find these too.
+        umbrellas: &["Cocoa", "CoreGraphics"],
         provide: Some(appkit::provide),
         data: Some(appkit::data_symbols),
         symbol: Some(appkit::symbol),
+    },
+    Framework {
+        leaf: "CoreText",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(coretext::provide),
+        data: Some(coretext::data_symbols),
+        symbol: Some(coretext::symbol),
     },
     Framework {
         leaf: "ApplicationServices",
@@ -132,12 +142,28 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(audiotoolbox::symbol),
     },
     Framework {
+        leaf: "CoreMedia",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(coremedia::provide),
+        data: Some(coremedia::data_symbols),
+        symbol: Some(coremedia::symbol),
+    },
+    Framework {
         leaf: "CoreVideo",
         version: 'A',
         umbrellas: &[],
         provide: Some(corevideo::provide),
         data: None,
         symbol: Some(corevideo::symbol),
+    },
+    Framework {
+        leaf: "VideoToolbox",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(videotoolbox::provide),
+        data: Some(videotoolbox::data_symbols),
+        symbol: Some(videotoolbox::symbol),
     },
     Framework {
         leaf: "IOSurface",
@@ -351,6 +377,139 @@ const MEDIA_CONSTANTS: &[(&str, &str)] = &[
     ("_kCVPixelBufferPixelFormatTypeKey", "PixelFormatType"),
     ("_kCVPixelBufferWidthKey", "Width"),
     ("_kCVPixelBufferHeightKey", "Height"),
+    ("_kCVPixelBufferMemoryAllocatorKey", "MemoryAllocator"),
+    (
+        "_kCVPixelBufferBytesPerRowAlignmentKey",
+        "BytesPerRowAlignment",
+    ),
+    ("_kCVPixelBufferPlaneAlignmentKey", "PlaneAlignment"),
+    (
+        "_kCVPixelBufferIOSurfacePropertiesKey",
+        "IOSurfaceProperties",
+    ),
+    (
+        "_kCVPixelBufferOpenGLCompatibilityKey",
+        "OpenGLCompatibility",
+    ),
+    ("_kCVPixelBufferMetalCompatibilityKey", "MetalCompatibility"),
+    (
+        "_kCVPixelBufferOpenGLESCompatibilityKey",
+        "OpenGLESCompatibility",
+    ),
+    (
+        "_kCVPixelBufferOpenGLESTextureCacheCompatibilityKey",
+        "OpenGLESTextureCacheCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceCoreAnimationCompatibilityKey",
+        "IOSurfaceCoreAnimationCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLFBOCompatibilityKey",
+        "IOSurfaceOpenGLFBOCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLESFBOCompatibilityKey",
+        "IOSurfaceOpenGLESFBOCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLTextureCompatibilityKey",
+        "IOSurfaceOpenGLTextureCompatibility",
+    ),
+    (
+        "_kCVPixelBufferIOSurfaceOpenGLESTextureCompatibilityKey",
+        "IOSurfaceOpenGLESTextureCompatibility",
+    ),
+    ("_kCVPixelBufferIOSurfacePurgeableKey", "IOSurfacePurgeable"),
+    (
+        "_kCVPixelBufferOpenGLTextureCacheCompatibilityKey",
+        "OpenGLTextureCacheCompatibility",
+    ),
+    (
+        "_kCVPixelBufferCGBitmapContextCompatibilityKey",
+        "CGBitmapContextCompatibility",
+    ),
+    (
+        "_kCVPixelBufferCGImageCompatibilityKey",
+        "CGImageCompatibility",
+    ),
+    ("_kCVPixelBufferExtendedPixelsLeftKey", "ExtendedPixelsLeft"),
+    ("_kCVPixelBufferExtendedPixelsTopKey", "ExtendedPixelsTop"),
+    (
+        "_kCVPixelBufferExtendedPixelsRightKey",
+        "ExtendedPixelsRight",
+    ),
+    (
+        "_kCVPixelBufferExtendedPixelsBottomKey",
+        "ExtendedPixelsBottom",
+    ),
+    // Attachment keys and values a decoder tags a frame with, and the pool
+    // keys; the texts are Apple's, as a guest may compare against a CFSTR.
+    (
+        "_kCVBufferPropagatedAttachmentsKey",
+        "PropagatedAttachments",
+    ),
+    (
+        "_kCVBufferNonPropagatedAttachmentsKey",
+        "NonPropagatedAttachments",
+    ),
+    (
+        "_kCVImageBufferCGColorSpaceKey",
+        "CVImageBufferCGColorSpace",
+    ),
+    ("_kCVImageBufferCleanApertureKey", "CVCleanAperture"),
+    ("_kCVImageBufferPixelAspectRatioKey", "CVPixelAspectRatio"),
+    ("_kCVImageBufferFieldCountKey", "CVFieldCount"),
+    ("_kCVImageBufferFieldDetailKey", "CVFieldDetail"),
+    ("_kCVImageBufferYCbCrMatrixKey", "CVImageBufferYCbCrMatrix"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_601_4", "ITU_R_601_4"),
+    (
+        "_kCVImageBufferYCbCrMatrix_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferColorPrimariesKey",
+        "CVImageBufferColorPrimaries",
+    ),
+    ("_kCVImageBufferColorPrimaries_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferColorPrimaries_EBU_3213", "EBU_3213"),
+    ("_kCVImageBufferColorPrimaries_SMPTE_C", "SMPTE_C"),
+    ("_kCVImageBufferColorPrimaries_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferTransferFunctionKey",
+        "CVImageBufferTransferFunction",
+    ),
+    ("_kCVImageBufferTransferFunction_ITU_R_709_2", "ITU_R_709_2"),
+    (
+        "_kCVImageBufferTransferFunction_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferTransferFunction_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferChromaLocationTopFieldKey",
+        "CVImageBufferChromaLocationTopField",
+    ),
+    (
+        "_kCVImageBufferChromaLocationBottomFieldKey",
+        "CVImageBufferChromaLocationBottomField",
+    ),
+    ("_kCVImageBufferChromaLocation_Left", "Left"),
+    ("_kCVImageBufferChromaLocation_Center", "Center"),
+    ("_kCVImageBufferChromaLocation_TopLeft", "TopLeft"),
+    ("_kCVImageBufferChromaLocation_Top", "Top"),
+    ("_kCVImageBufferChromaLocation_BottomLeft", "BottomLeft"),
+    ("_kCVImageBufferChromaLocation_Bottom", "Bottom"),
+    (
+        "_kCVPixelBufferPoolMinimumBufferCountKey",
+        "MinimumBufferCount",
+    ),
+    ("_kCVPixelBufferPoolMaximumBufferAgeKey", "MaximumBufferAge"),
+    (
+        "_kCVPixelBufferPoolAllocationThresholdKey",
+        "kCVPixelBufferPoolAllocationThresholdKey",
+    ),
 ];
 
 fn media_constants() -> Vec<(String, u64)> {
