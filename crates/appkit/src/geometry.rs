@@ -120,28 +120,34 @@ pub unsafe extern "C" fn NSUnionRect(a: NSRect, b: NSRect) -> NSRect {
     }
 }
 
-/// `BOOL NSPointInRect(NSPoint, NSRect)`.
+/// `BOOL NSPointInRect(NSPoint, NSRect)`, which AppKit defines as
+/// `NSMouseInRect` with a flipped rectangle.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn NSPointInRect(point: NSPoint, rect: NSRect) -> u8 {
-    contains(rect, point) as u8
+    mouse_in_rect(point, rect, true) as u8
 }
 
 /// `BOOL NSMouseInRect(NSPoint, NSRect, BOOL)`.
-///
-/// Cocoa assigns a point on a shared edge to only one adjacent rectangle. The
-/// horizontal interval is always half-open. The vertical interval follows the
-/// view orientation: a flipped view owns its minimum-y edge, while an
-/// unflipped view owns its maximum-y edge.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn NSMouseInRect(point: NSPoint, rect: NSRect, flipped: u8) -> u8 {
-    let (x, y, width, height) = standardized(rect);
-    let horizontal = point.x >= x && point.x < x + width;
-    let vertical = if flipped != 0 {
-        point.y >= y && point.y < y + height
-    } else {
-        point.y > y && point.y <= y + height
+    mouse_in_rect(point, rect, flipped != 0) as u8
+}
+
+/// Whether a mouse region holds `point`, on `NSMouseInRect`'s rule.
+///
+/// Cocoa assigns a point on a shared edge to only one adjacent rectangle: the
+/// visual top and left edges are inside, the bottom and right ones are not, so
+/// an unflipped rectangle owns its maximum-y edge. Unlike `CGRectContainsPoint`,
+/// a negative extent is not standardized and holds nothing.
+pub fn mouse_in_rect(point: NSPoint, rect: NSRect, flipped: bool) -> bool {
+    let (min_x, max_x) = (rect.origin.x, rect.origin.x + rect.size.width);
+    let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
+    let horizontal = point.x >= min_x && point.x < max_x;
+    let vertical = match flipped {
+        true => point.y >= min_y && point.y < max_y,
+        false => point.y > min_y && point.y <= max_y,
     };
-    (horizontal && vertical) as u8
+    horizontal && vertical
 }
 
 /// `NSRect NSInsetRect(NSRect, CGFloat, CGFloat)`: the rectangle shrunk by `dx`
@@ -361,6 +367,29 @@ mod tests {
             assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 20.0 }, rect, 0), 0);
             assert_eq!(NSMouseInRect(NSPoint { x: 10.0, y: 60.0 }, rect, 0), 1);
             assert_eq!(NSMouseInRect(NSPoint { x: 40.0, y: 30.0 }, rect, 0), 0);
+        }
+    }
+
+    #[test]
+    fn mouse_rects_with_a_negative_extent_hold_nothing() {
+        let middle = NSPoint { x: 100.0, y: 50.0 };
+        let rects = [
+            (200.0, 100.0, -200.0, -100.0),
+            (200.0, 0.0, -200.0, 100.0),
+            (0.0, 100.0, 200.0, -100.0),
+        ];
+        for (x, y, width, height) in rects {
+            let rect = NSRect {
+                origin: NSPoint { x, y },
+                size: NSSize { width, height },
+            };
+            // SAFETY: these calls pass the functions' plain value arguments.
+            unsafe {
+                assert_eq!(NSMouseInRect(middle, rect, 0), 0);
+                assert_eq!(NSMouseInRect(middle, rect, 1), 0);
+                assert_eq!(NSPointInRect(middle, rect), 0);
+                assert_eq!(CGRectContainsPoint(rect, middle), 1);
+            }
         }
     }
 }

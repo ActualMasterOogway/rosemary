@@ -850,7 +850,7 @@ pub(crate) fn bounds_origin_of(view: Id) -> NSPoint {
 
 /// Whether a rectangle of a view's holds a point, for [`crate::cursor`].
 pub fn holds(view: Id, rect: NSRect, point: NSPoint) -> bool {
-    is_view(view) && contains(rect, point, is_flipped(view))
+    is_view(view) && crate::geometry::mouse_in_rect(point, rect, is_flipped(view))
 }
 
 /// Where a view's layer lands in its window, in pixels from the top left.
@@ -1021,7 +1021,7 @@ unsafe fn hit(view: Id, point: NSPoint, depth: usize) -> Id {
 unsafe fn hit_base(view: Id, point: NSPoint, depth: usize) -> Id {
     let frame = view_of(view).frame;
     let superview = view_of(view).superview;
-    if !contains(frame, point, is_flipped(superview)) {
+    if !crate::geometry::mouse_in_rect(point, frame, is_flipped(superview)) {
         return std::ptr::null_mut();
     }
     let local = from_superview(view, point);
@@ -1049,19 +1049,6 @@ unsafe extern "C" fn hit_test_method(receiver: Id, _sel: Sel, point: NSPoint) ->
     // SAFETY: the receiver is a live view and the point is in its superview's
     // coordinates, as expected by this module's tree walk.
     unsafe { hit_base(receiver, point, 0) }
-}
-
-/// Mouse regions include their visual top and left edges, excluding bottom
-/// and right. Unflipped coordinates put the top at maximum y; excluding it
-/// would lose input at SDL's y = 0.
-fn contains(rect: NSRect, point: NSPoint, flipped: bool) -> bool {
-    let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
-    let x = point.x >= rect.origin.x && point.x < rect.origin.x + rect.size.width;
-    let y = match flipped {
-        true => point.y >= min_y && point.y < max_y,
-        false => point.y > min_y && point.y <= max_y,
-    };
-    x && y
 }
 
 /// Send `-updateTrackingAreas` down a view tree.
@@ -1377,7 +1364,7 @@ unsafe extern "C" fn convert_size_to_backing(receiver: Id, _sel: Sel, size: NSSi
 /// `-mouse:inRect:`, which is `NSMouseInRect` with the view's own flippedness:
 /// the edge a point on it counts as inside is the top one either way up.
 unsafe extern "C" fn mouse_in_rect(receiver: Id, _sel: Sel, point: NSPoint, rect: NSRect) -> u8 {
-    contains(rect, point, is_flipped(receiver)) as u8
+    crate::geometry::mouse_in_rect(point, rect, is_flipped(receiver)) as u8
 }
 
 /// A point from `from`'s coordinates to `to`'s, through their window; `nil`
