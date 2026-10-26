@@ -276,6 +276,7 @@ struct Api {
     SDL_WaitEventTimeout: Option<unsafe extern "C" fn(*mut Event, i32) -> bool>,
     SDL_StartTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_StopTextInput: Option<unsafe extern "C" fn(Window) -> bool>,
+    SDL_TextInputActive: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetTextInputArea: Option<unsafe extern "C" fn(Window, *const Rect, c_int) -> bool>,
     SDL_HideCursor: Option<unsafe extern "C" fn() -> bool>,
     SDL_ShowCursor: Option<unsafe extern "C" fn() -> bool>,
@@ -511,6 +512,7 @@ fn api() -> Option<&'static Api> {
             SDL_WaitEventTimeout,
             SDL_StartTextInput,
             SDL_StopTextInput,
+            SDL_TextInputActive,
             SDL_SetTextInputArea,
             SDL_HideCursor,
             SDL_ShowCursor,
@@ -3217,6 +3219,7 @@ pub mod video {
         swap_window => SDL_GL_SwapWindow,
         start_text_input => SDL_StartTextInput,
         stop_text_input => SDL_StopTextInput,
+        text_input_active => SDL_TextInputActive,
     }
 
     /// Tell the host input method where the active editor and caret are.

@@ -2923,6 +2923,39 @@ fn update_text_input(receiver: Id) {
     }
 }
 
+/// Keep the host input method on only while the first responder sends its keys
+/// through the text system, once a key down has reached it.
+///
+/// AppKit's input method sees only the keys a view hands to its input context.
+/// A view may stay first responder and stop doing that - Roblox keeps a hidden
+/// text view focused and sends game keys around it - and a host input method
+/// left on would keep composing and offering accents for those keys.
+pub(crate) fn follow_key_interpretation(receiver: Id) {
+    let window = window_of(receiver);
+    if window.sdl.is_null() || !crate::text::is_input_client(window.first_responder) {
+        return;
+    }
+    let interpreting = crate::text::accepts_host_text(window.first_responder);
+    if interpreting == sdl3::video::text_input_active(window.sdl) {
+        return;
+    }
+    match interpreting {
+        true => {
+            set_text_input_area(window);
+            sdl3::video::start_text_input(window.sdl);
+        }
+        false => {
+            sdl3::video::stop_text_input(window.sdl);
+        }
+    }
+}
+
+/// Whether the host input method is resolving this window's keys into text.
+pub(crate) fn host_text_input_active(receiver: Id) -> bool {
+    let window = window_of(receiver);
+    !window.sdl.is_null() && sdl3::video::text_input_active(window.sdl)
+}
+
 fn set_text_input_area(window: &Window) {
     let area = crate::text::input_area(window.first_responder);
     // SAFETY: an input client or the text field whose editor it is; both are

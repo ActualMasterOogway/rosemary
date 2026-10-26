@@ -524,9 +524,10 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             // moved on. The text goes with the key so the responder that
             // interprets it is the one that types it.
             if down && !modifier {
-                let typed = SCRIPTED_TEXT
-                    .with(|scripted| scripted.take())
-                    .unwrap_or_else(sdl3::video::take_next_text);
+                let typed = match SCRIPTED_TEXT.with(|scripted| scripted.take()) {
+                    Some(scripted) => scripted,
+                    None => sdl3::video::take_next_text().or_else(|| layout_text(window, &text)),
+                };
                 if let Some(typed) = typed {
                     nsevent::attach_text(event, &typed);
                 }
@@ -1045,6 +1046,9 @@ fn send_to_window(window: Id, event: Id) {
             std::mem::transmute(objc::msg::entry());
         f(window, sel, event);
     }
+    if nsevent::kind_of(event) == kind::KEY_DOWN {
+        window::follow_key_interpretation(window);
+    }
 }
 
 /// `-[NSApplication sendEvent:]`: offer a key equivalent, then hand the event
@@ -1230,6 +1234,32 @@ fn focus_clicked(window: Id, view: Id) {
             std::mem::transmute(objc::msg::entry());
         f(window, objc::sel::get("makeFirstResponder:"), view);
     }
+}
+
+/// The text a key types by the keyboard layout alone, when the host input
+/// method was off for it and so resolved none.
+///
+/// It is off while the first responder keeps keys from the text system, and
+/// comes back once one is interpreted: that key still has to type.
+///
+/// FIXME (ACCURACY): the key that turns the input method back on is not
+/// composed by it, so a dead key or an IME's first keystroke types its plain
+/// character instead.
+fn layout_text(window: Id, characters: &str) -> Option<String> {
+    match window::host_text_input_active(window) {
+        true => None,
+        false => typed_characters(characters),
+    }
+}
+
+/// A key's `-characters` when they are text, and not the control character
+/// or private-use scalar AppKit gives an editing or function key.
+fn typed_characters(characters: &str) -> Option<String> {
+    let function_keys = '\u{F700}'..='\u{F8FF}';
+    let typed = characters
+        .chars()
+        .all(|c| !c.is_control() && !function_keys.contains(&c));
+    (typed && !characters.is_empty()).then(|| characters.to_owned())
 }
 
 thread_local! {
@@ -1692,6 +1722,18 @@ fn delegate_selector(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_printable_characters_are_typed_without_the_input_method() {
+        assert_eq!(typed_characters("a").as_deref(), Some("a"));
+        assert_eq!(typed_characters("?").as_deref(), Some("?"));
+        assert_eq!(typed_characters("\u{e9}").as_deref(), Some("\u{e9}"));
+        assert_eq!(typed_characters(""), None, "a modifier types nothing");
+        assert_eq!(typed_characters("\r"), None, "return is a command");
+        assert_eq!(typed_characters("\u{8}"), None, "backspace is a command");
+        assert_eq!(typed_characters("\u{F700}"), None, "up arrow");
+        assert_eq!(typed_characters("\u{F704}"), None, "F1");
+    }
 
     #[test]
     fn reentrant_event_pump_hook_returns_before_refresh_deadlines() {
