@@ -3643,7 +3643,6 @@ fn nonfifo_queue_present_out_of_date_never_rebuilds_on_appkit_thread() {
     nonfifo_out_of_date_is_deferred(false);
 }
 
-#[cfg(not(target_os = "macos"))]
 fn v17_async_window_fixture() -> Option<(
     sdl3::Window,
     &'static Gpu,
@@ -3651,6 +3650,11 @@ fn v17_async_window_fixture() -> Option<(
     appkit::view::Frame,
     Arc<WindowSwapchain>,
 )> {
+    // FIXME (TESTS): this was turned off on macOS, so i'm leaving it stubbed
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+
     if std::env::var_os("ROSEMARY_TEST_VULKAN").is_none() {
         return None;
     }
