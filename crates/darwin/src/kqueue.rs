@@ -182,6 +182,8 @@ trait ReadinessBackend: Sized {
 /// implementation on hosts with neither epoll nor a Darwin kqueue.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct PollBackend {
+    /// Private rather than the guest's descriptor: a duplicate keeps the queue
+    /// alive after the guest closes the number it was created under.
     wake: c_int,
 }
 
@@ -189,6 +191,7 @@ struct PollBackend {
 impl Drop for PollBackend {
     fn drop(&mut self) {
         forget_waker(self.wake);
+        unsafe { libc::close(self.wake) };
     }
 }
 
@@ -197,10 +200,18 @@ impl ReadinessBackend for PollBackend {
     fn new() -> Result<(Self, c_int), c_int> {
         let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if wake < 0 {
-            Err(crate::errno::get())
-        } else {
-            Ok((Self { wake }, wake))
+            return Err(crate::errno::get());
         }
+        let backend = Self { wake };
+        // FIXME (ACCURACY): the guest's descriptor only names the queue. It
+        // never polls readable, where Darwin's does while events are pending.
+        let queue = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if queue < 0 {
+            let errno = crate::errno::get();
+            drop(backend);
+            return Err(errno);
+        }
+        Ok((backend, queue))
     }
 
     fn wake(&self) {
@@ -227,13 +238,13 @@ impl ReadinessBackend for PollBackend {
 
     fn wait(
         &self,
-        queue: c_int,
+        _: c_int,
         registrations: &HashMap<(usize, i16), Registration>,
         ports: &[c_int],
         _: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int> {
-        let mut watched = poll_set(queue, registrations);
+        let mut watched = poll_set(self.wake, registrations);
         let registered = watched.len();
         watched.extend(ports.iter().map(|fd| libc::pollfd {
             fd: *fd,
@@ -252,7 +263,7 @@ impl ReadinessBackend for PollBackend {
             .map(|entry| Ready {
                 fd: entry.fd,
                 revents: entry.revents,
-                source: match entry.fd == queue {
+                source: match entry.fd == self.wake {
                     true => Source::Wake,
                     false => Source::Level,
                 },
@@ -1230,12 +1241,9 @@ fn timeout_ms(timeout: *const libc::timespec) -> Result<c_int, c_int> {
 /// The descriptors to wait on: the wakeup channel, and every enabled readiness
 /// registration folded together by descriptor.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn poll_set(
-    queue: c_int,
-    registrations: &HashMap<(usize, i16), Registration>,
-) -> Vec<libc::pollfd> {
+fn poll_set(wake: c_int, registrations: &HashMap<(usize, i16), Registration>) -> Vec<libc::pollfd> {
     let mut interest: HashMap<c_int, i16> = HashMap::new();
-    interest.insert(queue, libc::POLLIN);
+    interest.insert(wake, libc::POLLIN);
     for registration in registrations.values() {
         if !registration.enabled
             || matches!(
